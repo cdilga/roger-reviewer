@@ -1,0 +1,10 @@
+# Finder/editor noise
+.DS_Store
+
+# bv (beads viewer) local config and caches
+.bv/
+
+# Local reference clones are useful during planning, but the initial repo
+# snapshot should not vendor hundreds of MB of exploratory dependencies.
+_exploration/*
+!_exploration/README.md

@@ -1,0 +1,16 @@
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Preserved recovery and backup artefacts
+.br_recovery/
+.br_history/
+*.bak
+
+# Lock files
+*.lock
+
+# Temporary
+last-touched
+*.tmp
