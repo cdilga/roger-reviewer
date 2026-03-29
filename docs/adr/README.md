@@ -15,6 +15,7 @@ into explicit implementation contracts.
 - `006-structured-findings-contract-and-repair-loop.md` — `accepted`
 - `007-harness-native-roger-command-surface.md` — `accepted`
 - `008-tui-runtime-and-concurrency-boundary.md` — `accepted`
+- `009-prompt-preset-and-outcome-events.md` — `accepted`
 
 ## Status meanings
 

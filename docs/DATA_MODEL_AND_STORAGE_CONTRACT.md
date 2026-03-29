@@ -126,6 +126,7 @@ concurrent review activity across PRs or agents.
 ### Prompt and command activity
 
 - `PromptPreset`
+- `PromptPresetUsage`
 - `PromptInvocation`
 - `RogerCommandInvocation`
 - `RogerCommandResult`
@@ -147,6 +148,10 @@ concurrent review activity across PRs or agents.
 - `OutboundApprovalToken`
 - `PostedAction`
 - `PostedActionItem`
+
+### Outcome events
+
+- `OutcomeEvent`
 
 ### Scope, memory, and usage
 
@@ -234,19 +239,65 @@ Recommended materialized-state areas:
 
 Do not treat this as the final SQL schema. Treat it as the minimum contract.
 
+### `PromptPreset`
+
+- `id` — stable string identifier
+- `name`
+- `scope` — `global`, `project`, or `repo`
+- `scope_key` nullable — repo id or project id when scope is `repo` or `project`
+- `template_text`
+- `tags` — optional labels, stored as JSON array or normalized tag rows
+- `is_builtin` — boolean; builtin presets are not directly user-editable
+- `is_favorite` — boolean; user-marked shortcut
+- `created_at`
+- `updated_at`
+- `row_version`
+
+### `PromptPresetUsage`
+
+Append-only reuse signal rows. Do not accumulate counts as mutable columns on
+`PromptPreset`.
+
+- `id`
+- `prompt_preset_id`
+- `scope_key` nullable
+- `used_at`
+
+Reuse signals are derived from these rows:
+
+- **recent**: last N `used_at` per preset per `scope_key` (default N=10)
+- **frequent**: rolling invocation count within a window (default 90 days)
+- **last-used per repo**: single max `used_at` per preset + `scope_key`
+
 ### `PromptInvocation`
 
 - `id`
 - `review_session_id`
 - `review_run_id`
-- `prompt_preset_id`
+- `prompt_preset_id` nullable — null for fully ad hoc prompts
 - `resolved_text_digest`
-- `resolved_text_artifact_id` when large
-- `user_override_text`
-- `source_surface`
+- `resolved_text_artifact_id` nullable — cold artifact reference when resolved
+  text exceeds inline threshold (suggested 4KB); digest still stored inline
+- `user_override_text` nullable
+- `source_surface` — `cli`, `tui`, `extension`, or `direct`
 - `provider`
 - `model_id`
+- `stage` — `exploration`, `deep_review`, or `follow_up`
 - `used_at`
+
+### `OutcomeEvent`
+
+Append-only typed events for analytics capture. See
+`009-prompt-preset-and-outcome-events.md` for the full event kind taxonomy.
+
+- `id`
+- `kind` — typed enum, not a free-form string
+- `review_session_id`
+- `entity_id` — primary entity id relevant to this event kind (finding id,
+  draft id, batch id, posted action id, etc.)
+- `entity_kind` — discriminator for `entity_id`
+- `extra_json` nullable — bounded extra fields per event kind
+- `created_at`
 
 ### `Finding`
 
@@ -335,15 +386,23 @@ Do not treat this as the final SQL schema. Treat it as the minimum contract.
 Analytics should come from event history and outcome signals, not from scraping
 mutable current state later.
 
+Roger emits typed outcome events into the `OutcomeEvent` table as findings are
+created, triaged, drafted, approved, posted, and labeled. See
+`009-prompt-preset-and-outcome-events.md` for the full event kind taxonomy.
+
 Minimum outcome-ready data:
 
-- which prompt preset and resolved prompt text were used
-- which findings were accepted, ignored, resolved, or left stale
-- which findings produced drafts
-- which drafts were approved, invalidated, rejected, or posted
-- which posted actions map to remote review ids
-- PR outcome state and merge outcome when available
-- explicit human usefulness labels when provided
+- which prompt preset and resolved prompt text were used (from `PromptInvocation`)
+- which findings were accepted, ignored, resolved, or left stale (from `OutcomeEvent` + `Finding`)
+- which findings produced drafts (from `OutcomeEvent` `finding_draft_created`)
+- which drafts were approved, invalidated, rejected, or posted (from `OutcomeEvent`)
+- which posted actions map to remote review ids (from `OutcomeEvent` `draft_posted`)
+- PR outcome state and merge outcome when available (from `OutcomeEvent` `pr_merged` / `pr_closed_unmerged`)
+- explicit human usefulness labels when provided (from `OutcomeEvent` `usefulness_labeled`)
+
+These queries must be answerable from `PromptInvocation` + `OutcomeEvent` rows
+plus the existing `Finding` and `OutboundDraft` state rows without requiring more
+than two additional joins.
 
 This is enough to derive later usefulness scoring without turning `0.1.0` into
 an analytics product.
