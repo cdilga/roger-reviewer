@@ -187,10 +187,21 @@ tables are required in `0.1.0`.
 - Should `PromptPresetUsage` accumulate globally or be strictly per-profile
   when Roger later supports multiple profiles?
 
+## Companion Document
+
+`docs/PROMPT_PRESET_AND_OUTCOME_CONTRACT.md` is an implementation-facing support
+contract that elaborates the decisions in this ADR. It contains richer event
+payload schemas, additional optional fields for `PromptInvocation`, and detailed
+rules for each reuse projection. It does not supersede this ADR; it narrows the
+implementation-facing shape within the decisions recorded here.
+
+Where this ADR and the companion contract differ, the decisions recorded here
+take precedence unless the canonical plan is updated.
+
 ## Follow-up
 
-- Add `PromptPreset` and `PromptPresetUsage` minimal relational fields to
-  `DATA_MODEL_AND_STORAGE_CONTRACT.md`
+- Confirm `PromptPreset` and `PromptPresetUsage` minimal relational fields in
+  `DATA_MODEL_AND_STORAGE_CONTRACT.md` (done)
 - Implement `PromptPreset` registry and reuse signals as part of rr-016
 - Implement `OutcomeEvent` table and emission as part of rr-016 and rr-017
 - Add smoke tests for reuse-signal accumulation and outcome-event completeness
