@@ -32,6 +32,8 @@ On a correctly onboarded machine:
 
 - `codex` works and is logged in
 - this repo is cloned locally
+- the Agent Mail repo is available as a separate sibling checkout, for example
+  `/Users/cdilga/Documents/dev/mcp_agent_mail`
 - Codex can see Agent Mail in this repo from a normal session
 - the `planning-workflow` skill is available to Codex
 - the Roger Reviewer planning docs and critique artifacts are present in-repo
@@ -40,7 +42,7 @@ On a correctly onboarded machine:
 
 ## Current Planning Assets in This Repo
 
-These repo-local files are the source of truth for the adversarial review
+These repo-local files are the planning asset set for the adversarial review
 process:
 
 - [`docs/PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md)
@@ -48,11 +50,22 @@ process:
 - [`docs/CRITIQUE_ROUND_02_FOR_ROGER_REVIEWER.md`](docs/CRITIQUE_ROUND_02_FOR_ROGER_REVIEWER.md)
 - [`docs/CRITIQUE_ROUND_03_FOR_ROGER_REVIEWER.md`](docs/CRITIQUE_ROUND_03_FOR_ROGER_REVIEWER.md)
 - [`docs/PLANNING_WORKFLOW_PROMPTS.md`](docs/PLANNING_WORKFLOW_PROMPTS.md)
+- [`docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md`](docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md)
 - [`docs/ALIEN_ARTEFACTS_FOR_ROGER_REVIEWER.md`](docs/ALIEN_ARTEFACTS_FOR_ROGER_REVIEWER.md)
 - [`AGENTS.md`](../AGENTS.md)
 
 The machine does not need a special installer for these. Cloning the repo is
 enough.
+
+Authority note:
+
+- `AGENTS.md` is the operational contract for agents
+- `docs/PLAN_FOR_ROGER_REVIEWER.md` is the canonical current spec
+- `CRITIQUE_ROUND_*` files are historical critique/integration artifacts
+- `docs/PLANNING_WORKFLOW_PROMPTS.md` defines the repo-local review procedure
+- `docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md` defines the reusable
+  pre-planning discovery workflow
+- `roger-reviewer-brain-dump.md` is raw intent, not the current spec
 
 ## Current Skill Availability
 
@@ -68,11 +81,17 @@ Observed on the current machine on 2026-03-29:
 
 - Codex skill present: `planning-workflow`
 - Repo prompt pack present: [`docs/PLANNING_WORKFLOW_PROMPTS.md`](docs/PLANNING_WORKFLOW_PROMPTS.md)
+- Repo discovery prompt pack present: [`docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md`](docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md)
 
 Practical implication:
 
 - the general planning methodology comes from the Codex skill
 - the Roger-specific prompts and critique history come from this repo
+- repeatable repo onboarding/discovery now has its own reusable prompt pack in
+  this repo
+- there is no separate required `/adversarial-review` installer here; the
+  workflow is the `planning-workflow` skill plus the repo-local prompt pack and
+  planning artifacts
 
 ## Codex Setup
 
@@ -176,6 +195,16 @@ Expected result should mention Agent Mail tools such as:
 
 ## Notes About `mcp_agent_mail`
 
+Recommended local shape on the current machine:
+
+- Roger Reviewer checkout:
+  `/Users/cdilga/Documents/dev/roger-reviewer`
+- Agent Mail checkout:
+  `/Users/cdilga/Documents/dev/mcp_agent_mail`
+
+Keep Agent Mail outside this repo. It is a separate project used to support the
+development environment, not part of Roger Reviewer's source tree.
+
 The Agent Mail repo currently has a known Codex integration issue in
 `scripts/integrate_codex_cli.sh` on upstream `origin/main` as last checked on
 2026-03-29.
@@ -201,7 +230,7 @@ If this fails, do not trust the Codex integration script as-is.
 ## Recommended Onboarding Sequence for `ssh devbox`
 
 1. Install Codex and log in until `~/.codex/auth.json` exists.
-2. Clone `mcp_agent_mail`.
+2. Clone `mcp_agent_mail` as a sibling checkout, for example to `/Users/cdilga/Documents/dev/mcp_agent_mail`.
 3. Verify whether upstream `scripts/integrate_codex_cli.sh` passes `bash -n`.
 4. Start the local Agent Mail server.
 5. Register Agent Mail with Codex using `codex mcp add mcp-agent-mail --url http://127.0.0.1:8765/api/`.
