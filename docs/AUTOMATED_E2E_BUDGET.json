@@ -1,0 +1,23 @@
+{
+  "policy_version": 1,
+  "release_line": "0.1.x",
+  "blessed_automated_e2e_budget": 1,
+  "current_planned_blessed_automated_e2e_count": 1,
+  "warning_mode": "warn_on_unjustified_growth",
+  "future_ci_mode": "fail_on_unjustified_growth",
+  "blessed_e2e_ids": [
+    {
+      "id": "E2E-01",
+      "name": "Core review happy path",
+      "status": "planned",
+      "notes": "CLI launch, blessed provider path, findings normalization, local approval, GitHub adapter double, audit persistence"
+    }
+  ],
+  "required_justification_fields_for_growth": [
+    "product_promise_defended",
+    "why_lower_layer_is_insufficient",
+    "boundaries_crossed",
+    "estimated_maintenance_cost",
+    "why_not_acceptance_or_release_smoke"
+  ]
+}
