@@ -1,5 +1,10 @@
 # Roger Reviewer
 
+Status: raw intent source document. This file captures early product thoughts and
+terminology, including ideas that may later be rejected or narrowed. It is not
+the current spec. If anything here conflicts with `AGENTS.md` or
+`docs/PLAN_FOR_ROGER_REVIEWER.md`, those canonical documents win.
+
 TUI with FrankenTUI for the default view. Backend should be a drop-in layer over an OpenCode session.
 
 UX: Chrome/Brave extension injects a rich button into GitHub. Click opens actions plus a dropdown. Prompts can be added there directly. Add GitHub-specific keybinds in Chrome as well.

@@ -17,3 +17,7 @@ Rules:
 - treat these repos as references, not dependencies
 - do not import code from them directly into Roger Reviewer
 - document any decisions they drive in `docs/` or ADR-style notes
+- use `/tmp/roger-reference-projects/` for larger or more temporary spike
+  clones that are worth reviewing locally but do not belong in the repo
+- keep the current approved external-source and exploration-target list in
+  `docs/REFERENCE_SOURCES_AND_EXPLORATION_TARGETS.md`

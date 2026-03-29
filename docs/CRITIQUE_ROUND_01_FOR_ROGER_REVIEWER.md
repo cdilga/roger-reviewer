@@ -1,5 +1,9 @@
 # Critique Round 01 for Roger Reviewer
 
+Status: historical critique artifact. This document records what changed and
+why during Round 01. It is not the current spec. If anything here conflicts
+with `AGENTS.md` or `PLAN_FOR_ROGER_REVIEWER.md`, those canonical documents win.
+
 This is the first explicit critique-and-integration artifact after the initial
 plan draft.
 

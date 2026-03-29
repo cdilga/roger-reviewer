@@ -1,5 +1,9 @@
 # Critique Round 02 for Roger Reviewer
 
+Status: historical critique artifact. This document records what changed and
+why during Round 02. It is not the current spec. If anything here conflicts
+with `AGENTS.md` or `PLAN_FOR_ROGER_REVIEWER.md`, those canonical documents win.
+
 This round focuses on the places where the current plan is still too soft for
 implementation: the daemonless claim, extension realism, OpenCode durability,
 storage and instance design, rollout order, GitHub write semantics, safety, and

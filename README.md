@@ -7,8 +7,8 @@
 | --- | --- |
 | Product maturity | Planning and bead-polishing |
 | Release status | In development, not a release |
-| Current versioning | `0.0.x` development builds |
-| Planned versioning | CalVer once the project is shipping real releases |
+| First implementation release target | `0.1.0` |
+| Planned versioning | `0.1.x` early Roger releases, then CalVer once the product is shipping mature releases |
 | Default mode | Review-only, not auto-fix |
 | Source of truth | Local state |
 | Primary surfaces | CLI, TUI, GitHub launch surface |
@@ -82,10 +82,41 @@ artifacts rather than implementation packages.
 | [`docs/CRITIQUE_ROUND_01_FOR_ROGER_REVIEWER.md`](docs/CRITIQUE_ROUND_01_FOR_ROGER_REVIEWER.md) | First critique and integration round |
 | [`docs/CRITIQUE_ROUND_02_FOR_ROGER_REVIEWER.md`](docs/CRITIQUE_ROUND_02_FOR_ROGER_REVIEWER.md) | Second critique round focused on architecture risk |
 | [`docs/CRITIQUE_ROUND_03_FOR_ROGER_REVIEWER.md`](docs/CRITIQUE_ROUND_03_FOR_ROGER_REVIEWER.md) | Third critique round focused on Rust-first local architecture and Native Messaging |
+| [`docs/ROUND_04_ARCHITECTURE_RECONCILIATION_OUTCOME.md`](docs/ROUND_04_ARCHITECTURE_RECONCILIATION_OUTCOME.md) | Round 04 closeout artifact aligning ADR decisions, canonical docs, and remaining bounded questions |
 | [`docs/PLANNING_WORKFLOW_PROMPTS.md`](docs/PLANNING_WORKFLOW_PROMPTS.md) | Prompts for critique, integration, and readiness loops |
+| [`docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md`](docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md) | Reusable prompt pack for repo onboarding, discovery, and canonicalization |
+| [`docs/DATA_MODEL_AND_STORAGE_CONTRACT.md`](docs/DATA_MODEL_AND_STORAGE_CONTRACT.md) | Implementation-facing data, concurrency, and storage contract |
+| [`docs/RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md) | Explicit support, release, fixture, and validation matrix for `0.1.0` |
+| [`docs/REFERENCE_SOURCES_AND_EXPLORATION_TARGETS.md`](docs/REFERENCE_SOURCES_AND_EXPLORATION_TARGETS.md) | External standards, prior-art sources, and approved exploration targets for future agent review |
 | [`docs/DEV_MACHINE_ONBOARDING.md`](docs/DEV_MACHINE_ONBOARDING.md) | Practical machine setup guide for Codex, Agent Mail, and planning workflow access |
+| [`docs/adr/README.md`](docs/adr/README.md) | Architecture decision records that narrow the plan into implementable contracts |
 | [`.beads/issues.jsonl`](.beads/issues.jsonl) | Tracked planning graph in export form |
 | [`roger-reviewer-brain-dump.md`](roger-reviewer-brain-dump.md) | Raw intent source document |
+
+## Document Roles
+
+The docs are not all peers.
+
+- [`AGENTS.md`](AGENTS.md) is the operational contract for agents.
+- [`docs/PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md) is the
+  canonical product and architecture plan.
+- [`docs/BEAD_SEED_FOR_ROGER_REVIEWER.md`](docs/BEAD_SEED_FOR_ROGER_REVIEWER.md)
+  and `.beads/` are the task-decomposition layer derived from the plan.
+- [`docs/DATA_MODEL_AND_STORAGE_CONTRACT.md`](docs/DATA_MODEL_AND_STORAGE_CONTRACT.md)
+  and [`docs/RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md) are
+  implementation-facing support contracts that narrow the canonical plan.
+- [`docs/REFERENCE_SOURCES_AND_EXPLORATION_TARGETS.md`](docs/REFERENCE_SOURCES_AND_EXPLORATION_TARGETS.md)
+  is the reference index for official external standards, prior-art notes, and
+  approved exploration targets.
+- `CRITIQUE_ROUND_*` files are historical rationale and integration artifacts,
+  not the current spec.
+- [`docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md`](docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md)
+  is the reusable pre-planning discovery workflow.
+- [`roger-reviewer-brain-dump.md`](roger-reviewer-brain-dump.md) is raw intent,
+  not authority.
+
+If documents disagree, treat `AGENTS.md` and the canonical plan as current
+truth, and treat critique rounds as explanation only.
 
 ## Current Draft Architecture
 
@@ -110,15 +141,15 @@ artifacts rather than implementation packages.
 
 ## Near-Term Milestones
 
-1. Finish architecture reconciliation, bead polishing, and readiness review.
-2. Lock the harness boundary and TUI/app-core or Rust-first ownership decision.
-3. Confirm the daemonless GitHub bridge, including the Edge story.
-4. Start implementation only after the planning gate passes.
+1. Sync the live bead graph to the current planning set.
+2. Finish bead polishing and readiness review.
+3. Start implementation only after the planning gate passes.
 
 ## Read Next
 
 - [`docs/PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md)
 - [`docs/ALIEN_ARTEFACTS_FOR_ROGER_REVIEWER.md`](docs/ALIEN_ARTEFACTS_FOR_ROGER_REVIEWER.md)
+- [`docs/REFERENCE_SOURCES_AND_EXPLORATION_TARGETS.md`](docs/REFERENCE_SOURCES_AND_EXPLORATION_TARGETS.md)
 - [`docs/PLANNING_WORKFLOW_PROMPTS.md`](docs/PLANNING_WORKFLOW_PROMPTS.md)
 - [`docs/DEV_MACHINE_ONBOARDING.md`](docs/DEV_MACHINE_ONBOARDING.md)
 - [`AGENTS.md`](AGENTS.md)
