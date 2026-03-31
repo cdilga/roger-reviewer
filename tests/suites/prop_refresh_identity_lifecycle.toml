@@ -1,0 +1,12 @@
+id = "prop_refresh_identity_lifecycle"
+budget_id = "PROP-REFRESH-01"
+family = "prop"
+flow_ids = ["F06", "F13"]
+fixture_families = ["fixture_refresh_rebase_target_drift"]
+support_tier = "opencode_tier_b"
+support_status = "blessed"
+degraded = false
+bounded = false
+tier = "property"
+preserve_failure_artifacts = true
+artifact_retention = "on_failure"

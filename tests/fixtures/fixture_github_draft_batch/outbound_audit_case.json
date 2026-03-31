@@ -1,0 +1,69 @@
+{
+  "valid_batch": {
+    "id": "batch-1",
+    "review_session_id": "session-1",
+    "review_run_id": "run-1",
+    "repo_id": "owner/repo",
+    "remote_review_target_id": "pr-42",
+    "payload_digest": "payload-aaa",
+    "approval_state": "Approved",
+    "approved_at": 1700000000,
+    "invalidated_at": null,
+    "invalidation_reason_code": null,
+    "row_version": 1
+  },
+  "valid_draft": {
+    "id": "draft-1",
+    "review_session_id": "session-1",
+    "review_run_id": "run-1",
+    "finding_id": "finding-1",
+    "draft_batch_id": "batch-1",
+    "repo_id": "owner/repo",
+    "remote_review_target_id": "pr-42",
+    "payload_digest": "payload-aaa",
+    "approval_state": "Approved",
+    "anchor_digest": "anchor-1",
+    "row_version": 1
+  },
+  "invalid_draft": {
+    "id": "draft-bad",
+    "review_session_id": "session-2",
+    "review_run_id": "run-2",
+    "finding_id": null,
+    "draft_batch_id": "batch-2",
+    "repo_id": "owner/other-repo",
+    "remote_review_target_id": "pr-77",
+    "payload_digest": "payload-bbb",
+    "approval_state": "Drafted",
+    "anchor_digest": "anchor-bad",
+    "row_version": 1
+  },
+  "valid_approval": {
+    "id": "approval-1",
+    "draft_batch_id": "batch-1",
+    "payload_digest": "payload-aaa",
+    "target_tuple_json": "{}",
+    "approved_at": 1700000100,
+    "revoked_at": null
+  },
+  "invalidate_signal": {
+    "finding_id": "finding-1",
+    "kind": "invalidate",
+    "reason_code": "target_rebased"
+  },
+  "reconfirm_signal": {
+    "finding_id": "finding-1",
+    "kind": "reconfirm",
+    "reason_code": "carry_forward_requires_explicit_reconfirm"
+  },
+  "posted_action": {
+    "id": "posted-1",
+    "draft_batch_id": "batch-1",
+    "provider": "github",
+    "remote_identifier": "https://api.github.com/repos/owner/repo/pulls/comments/123",
+    "status": "Partial",
+    "posted_payload_digest": "payload-aaa",
+    "posted_at": 1700000200,
+    "failure_code": "partial_failure"
+  }
+}

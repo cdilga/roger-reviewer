@@ -1,0 +1,12 @@
+id = "accept_gemini_reseed"
+budget_id = "ACCEPT-GEMINI-01"
+family = "accept_gemini"
+flow_ids = ["F01", "F03"]
+fixture_families = ["fixture_resumebundle_stale_locator"]
+support_tier = "gemini_tier_a"
+support_status = "bounded"
+degraded = true
+bounded = true
+tier = "acceptance"
+preserve_failure_artifacts = true
+artifact_retention = "on_failure"

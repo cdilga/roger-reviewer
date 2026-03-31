@@ -1,0 +1,12 @@
+id = "int_cli_session_aware"
+budget_id = "INT-CLI-SESSION-01"
+family = "int_cli"
+flow_ids = ["F01", "F01.1", "F05", "F06", "F17"]
+fixture_families = ["fixture_resumebundle_stale_locator", "fixture_opencode_dropout_return", "fixture_cli_session_degraded_capabilities"]
+support_tier = "opencode_tier_b"
+support_status = "blessed"
+degraded = true
+bounded = false
+tier = "integration"
+preserve_failure_artifacts = true
+artifact_retention = "on_failure"

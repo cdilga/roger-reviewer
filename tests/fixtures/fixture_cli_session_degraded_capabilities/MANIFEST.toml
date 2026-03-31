@@ -1,0 +1,11 @@
+[fixture]
+family = "fixture_cli_session_degraded_capabilities"
+description = "CLI fixture for unsupported provider and bounded-provider continuity behavior in the rr-y0a smoke slice."
+
+[[fixture.allowed_consumers]]
+suite_family = "int_cli"
+notes = "Validates truthful blocked/degraded provider outputs for review, resume, refresh, return, and status."
+
+[fixture.degraded_conditions]
+unsupported_provider = "rr review with --provider gemini is blocked and points to the blessed OpenCode path."
+bounded_provider_session = "rr status remains available for bounded providers while resume/refresh/return fail closed."

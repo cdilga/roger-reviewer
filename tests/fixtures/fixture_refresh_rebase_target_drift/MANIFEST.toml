@@ -1,0 +1,15 @@
+[fixture]
+family = "fixture_refresh_rebase_target_drift"
+description = "Refresh identity fixture with carried-forward, invalid-anchor, superseded, resolved, and stale transitions plus approval-lineage signaling checks."
+
+[[fixture.allowed_consumers]]
+suite_family = "prop_"
+notes = "Primary consumer for rr-011.2 refresh identity validation."
+
+[[fixture.allowed_consumers]]
+suite_family = "int_github_"
+notes = "Follow-on invalidation and partial-post recovery validation."
+
+[fixture.degraded_conditions]
+invalid_anchor = "One finding keeps fingerprint but changes anchor digest to force invalid-anchor classification."
+superseded = "One finding loses fingerprint match but retains anchor continuity to classify as superseded."

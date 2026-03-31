@@ -1,0 +1,15 @@
+[fixture]
+family = "fixture_github_draft_batch"
+description = "Outbound draft-batch approval and posted-action audit fixture for rr-020, including refresh invalidation and reconfirmation checks."
+
+[[fixture.allowed_consumers]]
+suite_family = "int_github_"
+notes = "Primary rr-020 integration smoke coverage for outbound gate and audit lineage."
+
+[[fixture.allowed_consumers]]
+suite_family = "e2e"
+notes = "Supports e2e happy-path audit assertions when draft batch posting is exercised."
+
+[fixture.degraded_conditions]
+partial_post = "posted_action.status=Partial with failure_code captures bounded degraded posting outcomes."
+refresh_invalidation = "refresh signals can invalidate draft approvals or require explicit reconfirmation before posting."

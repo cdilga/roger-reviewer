@@ -1,0 +1,24 @@
+{
+  "review_blocked_case": {
+    "command": "rr review --pr 42 --provider gemini --robot",
+    "expected_outcome": "blocked",
+    "expected_exit_code": 3,
+    "expected_data": {
+      "provider": "gemini",
+      "supported_provider": "opencode"
+    }
+  },
+  "bounded_provider_session_case": {
+    "provider": "gemini",
+    "session_id": "session-gemini-1",
+    "pull_request": 42,
+    "expected_status_outcome": "complete",
+    "expected_status_resume_mode": "bounded_provider",
+    "expected_status_continuity_tier": "tier_a",
+    "expected_blocked_commands": [
+      "resume",
+      "refresh",
+      "return"
+    ]
+  }
+}

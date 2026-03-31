@@ -1,0 +1,12 @@
+id = "int_harness_opencode_resume"
+budget_id = "INT-HARNESS-01"
+family = "int_harness"
+flow_ids = ["F01", "F05"]
+fixture_families = ["fixture_resumebundle_stale_locator"]
+support_tier = "opencode_tier_b"
+support_status = "blessed"
+degraded = false
+bounded = false
+tier = "integration"
+preserve_failure_artifacts = true
+artifact_retention = "on_failure"

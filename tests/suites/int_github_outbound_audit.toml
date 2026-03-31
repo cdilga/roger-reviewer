@@ -1,0 +1,12 @@
+id = "int_github_outbound_audit"
+budget_id = "INT-GITHUB-OUTBOUND-01"
+family = "int_github"
+flow_ids = ["F08", "F09", "F13"]
+fixture_families = ["fixture_github_draft_batch"]
+support_tier = "opencode_tier_b"
+support_status = "blessed"
+degraded = false
+bounded = false
+tier = "integration"
+preserve_failure_artifacts = true
+artifact_retention = "on_failure"

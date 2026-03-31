@@ -1,0 +1,16 @@
+[fixture]
+family = "fixture_cli_degraded_provider"
+description = "Degraded and bounded provider-behavior fixture for session-aware CLI commands, including unsupported provider blocks and truthful bounded-support warnings."
+
+[[fixture.allowed_consumers]]
+suite_family = "int_cli_"
+notes = "Primary consumer for rr-y0a degraded CLI acceptance coverage."
+
+[[fixture.allowed_consumers]]
+suite_family = "accept_gemini_"
+notes = "Can seed bounded-support acceptance checks where Gemini remains tier-a in 0.1.0."
+
+[fixture.degraded_conditions]
+unsupported_review_provider = "rr review with --provider!=opencode must fail closed with blocked outcome and explicit supported_provider guidance."
+non_opencode_resume_return = "rr resume/refresh/return against non-opencode sessions must fail closed with bounded-support repair guidance."
+bounded_status_warning = "rr status on bounded-provider sessions remains readable but emits explicit bounded-support warnings."

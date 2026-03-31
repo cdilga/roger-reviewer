@@ -1,0 +1,55 @@
+{
+  "existing": [
+    {
+      "finding_id": "finding-carried",
+      "fingerprint": "fp-carried",
+      "primary_anchor_digest": "anchor-a",
+      "outbound_state": "Approved"
+    },
+    {
+      "finding_id": "finding-invalid-anchor",
+      "fingerprint": "fp-invalid-anchor",
+      "primary_anchor_digest": "anchor-b",
+      "outbound_state": "Approved"
+    },
+    {
+      "finding_id": "finding-superseded",
+      "fingerprint": "fp-old",
+      "primary_anchor_digest": "anchor-c",
+      "outbound_state": "Drafted"
+    },
+    {
+      "finding_id": "finding-resolved",
+      "fingerprint": "fp-resolved",
+      "primary_anchor_digest": "anchor-d",
+      "outbound_state": "Approved"
+    },
+    {
+      "finding_id": "finding-stale",
+      "fingerprint": "fp-stale",
+      "primary_anchor_digest": null,
+      "outbound_state": "Approved"
+    }
+  ],
+  "refreshed": [
+    {
+      "fingerprint": "fp-carried",
+      "primary_anchor_digest": "anchor-a"
+    },
+    {
+      "fingerprint": "fp-invalid-anchor",
+      "primary_anchor_digest": "anchor-b-new"
+    },
+    {
+      "fingerprint": "fp-new",
+      "primary_anchor_digest": "anchor-c"
+    },
+    {
+      "fingerprint": "fp-unmatched",
+      "primary_anchor_digest": "anchor-z"
+    }
+  ],
+  "expected_unmatched_new_fingerprints": [
+    "fp-unmatched"
+  ]
+}

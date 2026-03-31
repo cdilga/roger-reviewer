@@ -1,0 +1,97 @@
+{
+  "schema_id": "fixture-cli-degraded-provider.v1",
+  "cases": [
+    {
+      "id": "review_provider_gemini_blocked",
+      "command": [
+        "review",
+        "--provider",
+        "gemini",
+        "--pr",
+        "42",
+        "--robot"
+      ],
+      "expected": {
+        "exit_code": 3,
+        "outcome": "blocked",
+        "data": {
+          "provider": "gemini",
+          "supported_provider": "opencode"
+        },
+        "repair_actions_contains": [
+          "use --provider opencode for tier-b CLI continuity in 0.1.0"
+        ]
+      }
+    },
+    {
+      "id": "resume_non_opencode_session_blocked",
+      "preconditions": [
+        "session.provider=gemini",
+        "session is selected by explicit --session or unambiguous repo/pr binding"
+      ],
+      "command": [
+        "resume",
+        "--session",
+        "session-gemini-1",
+        "--robot"
+      ],
+      "expected": {
+        "exit_code": 3,
+        "outcome": "blocked",
+        "data": {
+          "provider": "gemini"
+        },
+        "repair_actions_contains": [
+          "resume/refresh from CLI is currently blessed on OpenCode only"
+        ]
+      }
+    },
+    {
+      "id": "return_non_opencode_session_blocked",
+      "preconditions": [
+        "session.provider=gemini",
+        "session is selected by explicit --session or unambiguous repo/pr binding"
+      ],
+      "command": [
+        "return",
+        "--session",
+        "session-gemini-1",
+        "--robot"
+      ],
+      "expected": {
+        "exit_code": 3,
+        "outcome": "blocked",
+        "data": {
+          "provider": "gemini"
+        },
+        "repair_actions_contains": [
+          "rr return is only blessed on OpenCode tier-b sessions"
+        ]
+      }
+    },
+    {
+      "id": "status_bounded_provider_emits_warning",
+      "preconditions": [
+        "session.provider=gemini",
+        "session has valid target and latest run context"
+      ],
+      "command": [
+        "status",
+        "--session",
+        "session-gemini-1",
+        "--robot"
+      ],
+      "expected": {
+        "exit_code": 0,
+        "outcome": "complete",
+        "warnings_contains": [
+          "bounded support"
+        ],
+        "data": {
+          "session_resume_mode": "bounded_provider",
+          "continuity_tier": "tier_a"
+        }
+      }
+    }
+  ]
+}

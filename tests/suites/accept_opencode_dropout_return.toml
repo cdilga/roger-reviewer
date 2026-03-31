@@ -1,0 +1,12 @@
+id = "accept_opencode_dropout_return"
+budget_id = "ACCEPT-OPENCODE-01"
+family = "accept_opencode"
+flow_ids = ["F17", "F17.1"]
+fixture_families = ["fixture_opencode_dropout_return"]
+support_tier = "opencode_tier_b"
+support_status = "blessed"
+degraded = false
+bounded = false
+tier = "acceptance"
+preserve_failure_artifacts = true
+artifact_retention = "always"
