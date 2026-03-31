@@ -19,6 +19,16 @@ HEARTBEAT_FILE="${STATE_ROOT}/heartbeat"
 LAST_STATUS_FILE="${STATE_ROOT}/last-status"
 LAST_OUTPUT_FILE="${STATE_ROOT}/last-output.txt"
 SLEEP_SECONDS="${SWARM_SLEEP_SECONDS:-20}"
+WORK_LANE="${SWARM_WORK_LANE:-implementation}"
+
+case "$WORK_LANE" in
+  implementation|maintenance)
+    ;;
+  *)
+    echo "Invalid SWARM_WORK_LANE '$WORK_LANE' (expected implementation or maintenance)." >&2
+    exit 1
+    ;;
+esac
 
 if [[ ! -f "$PROMPT_FILE" ]]; then
   echo "Prompt file not found: $PROMPT_FILE" >&2
@@ -32,18 +42,37 @@ BASE_PROMPT=$(cat "$PROMPT_FILE")
 
 build_prompt() {
   local cycle="$1"
+  local lane_rules
+
+  if [[ "$WORK_LANE" == "maintenance" ]]; then
+    lane_rules=$(cat <<'EOF'
+- You are in the maintenance lane. Prioritize queue-trust, bead-health, and swarm-operability repairs.
+- Do not consume ordinary implementation beads unless maintenance work is exhausted or explicit steering redirects you.
+EOF
+)
+  else
+    lane_rules=$(cat <<'EOF'
+- You are in the implementation lane. Do not treat tracker-repair and bead-health cleanup as default background work.
+- If queue-health issues appear, report blockers and continue implementation unless a maintenance bead is explicitly claimed.
+EOF
+)
+  fi
+
   cat <<EOF
 ${BASE_PROMPT}
 
 Persistent swarm identity rules:
 - Your Agent Mail identity for this swarm is exactly \`${AGENT_NAME}\`. Reuse that exact name. Do not invent a new identity.
-- Register or refresh that exact Agent Mail name at the start of the cycle before doing other coordination work.
-- Do not take a bead because a launcher hinted at one. Self-select from \`br ready\` and \`bv\`.
-- If the next safe slice is missing, you may create or split beads yourself, but keep dependency truth and add a validation contract.
-- If \`br\` reports the database is busy, wait briefly and retry before concluding the queue is empty.
+- Start each cycle with Agent Mail inbox + ack checks, then \`br ready -> br show -> claim -> reserve files\`.
+- Do not take a bead because a launcher hinted at one. Use \`br ready\` for queue truth (\`bv\` only for ranking context).
+- If \`br\` reports \`database is busy\`, back off and retry before concluding queue state.
+- Record exact validation commands on bead close and run \`br sync --flush-only\` after bead state/note changes.
 - This invocation is cycle ${cycle}. Work autonomously until you reach a durable checkpoint, then stop cleanly.
-- Before stopping, make sure bead status, file reservations, Agent Mail, and validation evidence reflect reality. If you changed bead state or found a blocker, send a short Agent Mail update.
+- Before stopping, make sure bead status, file reservations, Agent Mail, and validation evidence reflect reality.
 - When this cycle ends, exit instead of waiting at an interactive prompt. The launcher will invoke you again.
+- Full operating doctrine lives at \`docs/swarm/worker-operating-doctrine.md\`.
+- Lane assignment: \`${WORK_LANE}\`.
+${lane_rules}
 EOF
 }
 

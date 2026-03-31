@@ -1,8 +1,6 @@
 # Overnight Swarm Runbook
 
-This repo now has a repo-local tmux swarm launcher so you can run a Jeffrey-style overnight swarm without installing the full ACFS stack. It uses the agent CLIs already on this machine plus the local Agent Mail server for durable coordination.
-
-There is also a local `ntm` wrapper in `~/.local/bin/ntm` that preserves the repo-specific swarm commands and delegates any unknown command to the upstream NTM binary installed at `~/.local/lib/acfs/bin/ntm`.
+This repo now has a native-upstream NTM swarm launcher so you can run a Jeffrey-style overnight swarm without the old local wrapper. It uses the agent CLIs already on this machine plus the local Agent Mail server for durable coordination.
 
 ## What Is Already Set Up
 
@@ -11,58 +9,69 @@ There is also a local `ntm` wrapper in `~/.local/bin/ntm` that preserves the rep
 - Agent Mail is running in tmux session `mcp-agent-mail`.
 - Agent Mail readiness now passes on `http://127.0.0.1:8765/health/readiness`.
 - The Roger Reviewer project can be created and reached through the live Agent Mail MCP server.
-- `ntm` local commands (`spawn`, `send`, `status`, `grid`, `observe`, `supervise`) work against the repo tmux swarm.
-- Upstream NTM subcommands such as `list`, `activity`, `attach`, and `dashboard` are available through the same `ntm` entrypoint when they do not collide with the repo-local commands.
-- Metadata-aware upstream NTM commands still expect an adopted or natively spawned NTM session. For the current live swarm, prefer `ntm observe ...` or `wa state ...` unless you deliberately rebuild or adopt the session into upstream NTM.
+- `ntm` now points directly at the upstream binary.
+- The repo-local scripts under `scripts/swarm/` are thin Roger-specific launch/control helpers layered on top of upstream NTM.
+- The canonical native session name for this repo is `roger-reviewer`. Use `roger-reviewer--<label>` if you need a second swarm on the same repo.
+- Frankenterm / `ft` is optional. If it is installed later, the control-plane helper can start it; otherwise the swarm still runs through tmux + upstream NTM.
+- The helper now defaults to `assign` mode, which starts a persistent `ntm assign --watch --auto` lane plus a controller nudge lane so idle panes keep moving without manual typing.
 
 ## Important Roger-Specific State
 
 Roger Reviewer has passed readiness and is now in active implementation. Workers should pick their own unblocked beads from `br ready`; do not hand-assign beads unless you are deliberately steering around a blocker. The marching orders file already bakes that in:
 
 - [docs/swarm/overnight-marching-orders.md](/Users/cdilga/Documents/dev/roger-reviewer/docs/swarm/overnight-marching-orders.md)
+- The above file is the concise worker startup prompt. The long-form doctrine is:
+  [docs/swarm/worker-operating-doctrine.md](/Users/cdilga/Documents/dev/roger-reviewer/docs/swarm/worker-operating-doctrine.md)
+- Latest bounded queue-trust rehearsal record:
+  [docs/SWARM_QUEUE_TRUST_REHEARSAL_20260331.md](/Users/cdilga/Documents/dev/roger-reviewer/docs/SWARM_QUEUE_TRUST_REHEARSAL_20260331.md)
 
 ## Commands
 
 Validate the machine and repo first:
 
 ```bash
-./scripts/swarm/check_prereqs.sh --codex 4 --claude 4 --gemini 2 --opencode 2
+./scripts/swarm/preflight_swarm.sh --codex 6 --claude 0 --gemini 0 --opencode 0
 ```
+
+For a deeper diagnostic dump (after preflight passes), run:
+
+```bash
+./scripts/swarm/check_prereqs.sh --codex 6 --claude 0 --gemini 0 --opencode 0
+```
+
+Audit the next bead batch before launch (operator prep, not worker rediscovery):
+
+```bash
+./scripts/swarm/audit_bead_batch.sh --limit 20 --strict
+```
+
+If this audit reports a thin or empty `br ready` while useful open work still
+exists, run the queue-repair playbook it prints before launching a large swarm.
 
 Launch a 12-agent-style swarm in tmux:
 
 ```bash
-./scripts/swarm/launch_swarm.sh --codex 4 --claude 4 --gemini 2 --opencode 2 --delay-seconds 45
-```
-
-Or use the `ntm` shim:
-
-```bash
-ntm spawn roger-reviewer-swarm --cc=4 --cod=4 --gmi=2 --opc=2 --delay=45
+./scripts/swarm/launch_swarm.sh --session roger-reviewer --codex 6 --claude 0 --gemini 0 --opencode 0 --delay-seconds 45
 ```
 
 Current low-limit local mix:
 
 ```bash
-ntm spawn roger-reviewer-swarm --cc=1 --cod=6 --delay=45
+./scripts/swarm/launch_swarm.sh --session roger-reviewer --codex 3 --claude 1 --gemini 0 --opencode 0 --delay-seconds 45
 ```
 
-Wait about 30 to 60 seconds for the CLIs to settle, then broadcast the shared marching orders:
+If you want to launch manually with pure upstream NTM instead of the helper:
 
 ```bash
-./scripts/swarm/broadcast_marching_orders.sh
-```
-
-Or through the `ntm` shim:
-
-```bash
-ntm send roger-reviewer-swarm --file docs/swarm/overnight-marching-orders.md
+ntm spawn roger-reviewer --cod=6 --no-user --auto-restart
+ntm send roger-reviewer --broadcast --file docs/swarm/overnight-marching-orders.md --no-cass-check
+ntm assign roger-reviewer --watch --auto --strategy dependency --reserve-files
 ```
 
 Attach to the swarm session:
 
 ```bash
-tmux attach -t roger-reviewer-swarm
+tmux attach -t roger-reviewer
 ```
 
 Inspect swarm status without attaching:
@@ -71,41 +80,38 @@ Inspect swarm status without attaching:
 ./scripts/swarm/status.sh
 ```
 
-Or:
+Inspect native upstream state:
 
 ```bash
-ntm status roger-reviewer-swarm --lines 20
-```
-
-Inspect machine-readable swarm state:
-
-```bash
-ntm observe roger-reviewer-swarm --json --lines 30 --include-text
-wa state roger-reviewer-swarm --json --lines 30 --include-text
+ntm status roger-reviewer
+ntm activity roger-reviewer --watch
+ntm health roger-reviewer --watch
 ```
 
 Attach to the real live pane grid:
 
 ```bash
-ntm grid roger-reviewer-swarm
+ntm view roger-reviewer
 ```
 
 ## Session Layout
 
 - `mcp-agent-mail`: detached tmux session running the Agent Mail server
-- `roger-reviewer-swarm`: swarm session
-- `roger-reviewer-swarm:control`: operator shell in the repo root
-- `roger-reviewer-swarm:supervisor`: re-entry loop that nudges idle panes back into the backlog
-- `roger-reviewer-swarm:grid`: optional live tiled view of the real panes
-- one window per agent, named like `codex-01`, `claude-03`, `gemini-02`, `opencode-01`
+- `roger-reviewer`: native upstream NTM swarm session
+- `roger-reviewer-control-plane`: upstream `ntm assign --watch --auto` lane
+- `roger-reviewer-controller`: controller nudge lane (runs `scripts/swarm/supervise_swarm.sh`)
+- `roger-reviewer-health`: stuck-agent auto-restart lane
+- `roger-reviewer-ft`: optional Frankenterm watcher if `ft` is installed later
+- one pane per agent, titled by upstream NTM like `roger-reviewer__cod_1`
 
 ## Recommended Tonight Flow
 
 1. Run the prereq check.
-2. Launch the swarm.
-3. Broadcast the shared prompt.
-4. Detach and let it run.
-5. Periodically check `./scripts/swarm/status.sh`, `ntm observe roger-reviewer-swarm --json`, and `br list --status in_progress`.
+2. Run the bead-batch audit and address warnings that would make startup noisy.
+3. Launch the swarm.
+4. Broadcast the shared prompt.
+5. Detach and let it run.
+6. Periodically check `./scripts/swarm/status.sh`, `ntm activity roger-reviewer`, and `br list --status in_progress`.
 
 ## Monitoring Shortcuts
 
@@ -153,8 +159,7 @@ tmux attach -t mcp-agent-mail
 If the swarm session is gone, launch it again with a fresh session name:
 
 ```bash
-./scripts/swarm/launch_swarm.sh --session roger-reviewer-night2 --codex 4 --claude 4 --gemini 2 --opencode 2
-./scripts/swarm/broadcast_marching_orders.sh --session roger-reviewer-night2
+./scripts/swarm/launch_swarm.sh --session roger-reviewer--night2 --codex 6 --claude 0 --gemini 0 --opencode 0
 ```
 
 If a single agent window wedges, kill that tmux window and create a replacement window manually from the control shell. The other agents can keep going because durable state lives in beads and Agent Mail.

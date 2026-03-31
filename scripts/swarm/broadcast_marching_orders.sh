@@ -5,7 +5,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd "${SCRIPT_DIR}/../.." && pwd)
 DEFAULT_SESSION_NAME="$(basename "$PROJECT_ROOT" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//')"
 
-SESSION_NAME="${DEFAULT_SESSION_NAME}-swarm"
+SESSION_NAME="${DEFAULT_SESSION_NAME}"
 PROMPT_FILE="${PROJECT_ROOT}/docs/swarm/overnight-marching-orders.md"
 SEND_DELAY_SECONDS=2
 

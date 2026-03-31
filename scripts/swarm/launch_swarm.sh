@@ -3,54 +3,51 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd "${SCRIPT_DIR}/../.." && pwd)
+PREFLIGHT_SCRIPT="${PROJECT_ROOT}/scripts/swarm/preflight_swarm.sh"
+PROMPT_BUILDER="${PROJECT_ROOT}/scripts/swarm/build_prompt.sh"
+CONTROL_PLANE_UP="${PROJECT_ROOT}/scripts/swarm/control_plane_up.sh"
 DEFAULT_SESSION_NAME="$(basename "$PROJECT_ROOT" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//')"
+UPSTREAM_NTM="${NTM_UPSTREAM_BIN:-${HOME}/.local/lib/acfs/bin/ntm}"
 
-SESSION_NAME="${DEFAULT_SESSION_NAME}-swarm"
+SESSION_NAME="${DEFAULT_SESSION_NAME}"
 CODEX_COUNT=4
 CLAUDE_COUNT=4
 GEMINI_COUNT=2
-OPENCODE_COUNT=2
+OPENCODE_COUNT=0
 DELAY_SECONDS=45
 ATTACH=0
-SUPERVISOR=1
+PREFLIGHT=1
+CONTROL_PLANE=1
+CONTROL_MODE="assign"
+FT_WATCH="auto"
+USER_PANE=1
 PROMPT_FILE="${PROJECT_ROOT}/docs/swarm/overnight-marching-orders.md"
 PROMPT_DIR="${TMPDIR:-/tmp}/roger-reviewer-swarm-prompts"
-WORKER_NAMES=(
-  AmberFalcon
-  CobaltHarbor
-  IvoryOtter
-  PinkPeak
-  SilverBadger
-  CopperBrook
-  RedStone
-  HazySpring
-  CrimsonOtter
-  JadeRaven
-  SableCreek
-  FrostyWillow
-  LilacSummit
-  TopazGrove
-  AzureMeadow
-  BronzeBadger
-)
-NEXT_WORKER_INDEX=0
+WORK_LANE="implementation"
 
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [options]
 
 Options:
-  --session NAME      Tmux session name to create
-  --codex N           Number of Codex windows to spawn
-  --claude N          Number of Claude windows to spawn
-  --gemini N          Number of Gemini windows to spawn
-  --opencode N        Number of OpenCode windows to spawn
-  --prompt-file PATH  Prompt file used for every worker session
-  --delay-seconds N   Delay between spawned windows
-  --no-supervisor     Do not start the tmux swarm supervisor
-  --attach            Attach to the session after launch
-  --no-attach         Do not attach after launch
-  -h, --help          Show this help
+  --session NAME          NTM/tmux session name to create
+  --codex N               Number of Codex panes to spawn
+  --claude N              Number of Claude panes to spawn
+  --gemini N              Number of Gemini panes to spawn
+  --opencode N            Number of OpenCode panes to spawn (not supported in native NTM mode)
+  --prompt-file PATH      Base prompt file used to build per-pane marching orders
+  --lane NAME             Worker lane: implementation (default) or maintenance
+  --maintenance-lane      Shortcut for --lane maintenance
+  --delay-seconds N       Delay between per-pane prompt sends
+  --no-preflight          Skip swarm preflight checks
+  --no-control-plane      Do not start the control-plane watcher sessions
+  --no-supervisor         Backward-compatible alias for --no-control-plane
+  --control-mode MODE     Control-plane mode: assign (default) or nudge
+  --no-ft                 Do not start Frankenterm/WezTerm observation
+  --no-user-pane          Spawn only agent panes (no reserved operator pane)
+  --attach                Attach to the tiled NTM session after launch
+  --no-attach             Do not attach after launch
+  -h, --help              Show this help
 EOF
 }
 
@@ -62,30 +59,89 @@ require_command() {
   fi
 }
 
-spawn_windows() {
-  local tool="$1"
-  local count="$2"
-  local i
+count_for_type() {
+  case "$1" in
+    codex) printf '%s\n' "$CODEX_COUNT" ;;
+    claude) printf '%s\n' "$CLAUDE_COUNT" ;;
+    gemini) printf '%s\n' "$GEMINI_COUNT" ;;
+    *) printf '0\n' ;;
+  esac
+}
 
-  for (( i = 1; i <= count; i++ )); do
-    local agent_name
-    local worker_prompt_file
-    local window_name
+agent_type_for_title() {
+  case "$1" in
+    *__cod_*) printf 'codex\n' ;;
+    *__cc_*) printf 'claude\n' ;;
+    *__gmi_*) printf 'gemini\n' ;;
+    *) printf '\n' ;;
+  esac
+}
 
-    if (( NEXT_WORKER_INDEX >= ${#WORKER_NAMES[@]} )); then
-      echo "Not enough predefined worker names for requested swarm size." >&2
-      exit 1
+wait_for_agent_panes() {
+  local expected="$1"
+  local deadline now actual
+  deadline=$(( $(date +%s) + 90 ))
+
+  while true; do
+    actual=$(tmux list-panes -t "$SESSION_NAME" -F '#{pane_title}' 2>/dev/null | \
+      awk '/__(cod|cc|gmi)_/ { count += 1 } END { print count + 0 }')
+    if [[ "$actual" -eq "$expected" ]]; then
+      return 0
     fi
 
-    agent_name="${WORKER_NAMES[$NEXT_WORKER_INDEX]}"
-    NEXT_WORKER_INDEX=$((NEXT_WORKER_INDEX + 1))
-    window_name=$(printf "%s-%02d" "$tool" "$i")
-    worker_prompt_file="${PROMPT_DIR}/${SESSION_NAME}/${window_name}.txt"
-    bash "${PROJECT_ROOT}/scripts/swarm/build_prompt.sh" "$PROMPT_FILE" "$agent_name" "$worker_prompt_file"
-    tmux new-window -t "$SESSION_NAME:" -n "$window_name" "cd '$PROJECT_ROOT' && exec '$PROJECT_ROOT/scripts/swarm/run_agent.sh' '$tool' '$worker_prompt_file'"
-    echo "Spawned $window_name as $agent_name"
-    sleep "$DELAY_SECONDS"
+    now=$(date +%s)
+    if (( now >= deadline )); then
+      echo "Timed out waiting for $expected agent panes in $SESSION_NAME (saw $actual)." >&2
+      exit 1
+    fi
+    sleep 2
   done
+}
+
+send_initial_prompts() {
+  local pane_index pane_title agent_type prompt_out seeded_count
+  local total_agents
+  total_agents=$((CODEX_COUNT + CLAUDE_COUNT + GEMINI_COUNT))
+  seeded_count=0
+  mkdir -p "${PROMPT_DIR}/${SESSION_NAME}"
+
+  while IFS='|' read -r pane_index pane_title; do
+    [[ -n "$pane_index" ]] || continue
+    agent_type=$(agent_type_for_title "$pane_title")
+    [[ -n "$agent_type" ]] || continue
+
+    prompt_out="${PROMPT_DIR}/${SESSION_NAME}/pane-${pane_index}.txt"
+    "$PROMPT_BUILDER" "$PROMPT_FILE" "$prompt_out" "$WORK_LANE"
+
+    "$UPSTREAM_NTM" send "$SESSION_NAME" --pane="$pane_index" --file "$prompt_out" --no-cass-check >/dev/null
+    seeded_count=$((seeded_count + 1))
+    echo "Seeded pane ${pane_index} (${agent_type})"
+    sleep "$DELAY_SECONDS"
+  done < <(tmux list-panes -t "$SESSION_NAME" -F '#{pane_index}|#{pane_title}' | sort -n -t'|' -k1,1)
+
+  if (( seeded_count != total_agents )); then
+    echo "Prompt seeding mismatch: expected $total_agents agents, seeded $seeded_count." >&2
+    exit 1
+  fi
+}
+
+spawn_with_upstream_ntm() {
+  local args=("$UPSTREAM_NTM" spawn "$SESSION_NAME" --no-cass-context --no-recovery --auto-restart)
+
+  if (( USER_PANE == 0 )); then
+    args+=(--no-user)
+  fi
+  if (( CODEX_COUNT > 0 )); then
+    args+=("--cod=${CODEX_COUNT}")
+  fi
+  if (( CLAUDE_COUNT > 0 )); then
+    args+=("--cc=${CLAUDE_COUNT}")
+  fi
+  if (( GEMINI_COUNT > 0 )); then
+    args+=("--gmi=${GEMINI_COUNT}")
+  fi
+
+  "${args[@]}"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -114,12 +170,36 @@ while [[ $# -gt 0 ]]; do
       PROMPT_FILE="$2"
       shift 2
       ;;
+    --lane)
+      WORK_LANE="$2"
+      shift 2
+      ;;
+    --maintenance-lane)
+      WORK_LANE="maintenance"
+      shift
+      ;;
     --delay-seconds)
       DELAY_SECONDS="$2"
       shift 2
       ;;
-    --no-supervisor)
-      SUPERVISOR=0
+    --no-preflight)
+      PREFLIGHT=0
+      shift
+      ;;
+    --no-control-plane|--no-supervisor)
+      CONTROL_PLANE=0
+      shift
+      ;;
+    --control-mode)
+      CONTROL_MODE="$2"
+      shift 2
+      ;;
+    --no-ft)
+      FT_WATCH=0
+      shift
+      ;;
+    --no-user-pane)
+      USER_PANE=0
       shift
       ;;
     --attach)
@@ -142,11 +222,47 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+case "$WORK_LANE" in
+  implementation|maintenance)
+    ;;
+  *)
+    echo "Invalid --lane value '$WORK_LANE' (expected implementation or maintenance)." >&2
+    exit 1
+    ;;
+esac
+
+case "$CONTROL_MODE" in
+  nudge|assign)
+    ;;
+  *)
+    echo "Invalid --control-mode '$CONTROL_MODE' (expected nudge or assign)." >&2
+    exit 1
+    ;;
+esac
+
+if (( OPENCODE_COUNT > 0 )); then
+  echo "OpenCode panes are not supported by the native NTM launcher path yet." >&2
+  echo "Use Codex/Claude/Gemini here, or keep OpenCode in a separate manual session." >&2
+  exit 1
+fi
+
 require_command tmux
 require_command curl
 require_command am
-if [[ ! -f "${PROJECT_ROOT}/scripts/swarm/build_prompt.sh" ]]; then
-  echo "Missing required script: ${PROJECT_ROOT}/scripts/swarm/build_prompt.sh" >&2
+if [[ ! -x "$UPSTREAM_NTM" ]]; then
+  echo "Upstream NTM binary not found at: $UPSTREAM_NTM" >&2
+  exit 1
+fi
+if [[ ! -x "$PROMPT_BUILDER" ]]; then
+  echo "Missing required script: $PROMPT_BUILDER" >&2
+  exit 1
+fi
+if [[ ! -x "$CONTROL_PLANE_UP" ]]; then
+  echo "Missing required script: $CONTROL_PLANE_UP" >&2
+  exit 1
+fi
+if (( PREFLIGHT == 1 )) && [[ ! -x "$PREFLIGHT_SCRIPT" ]]; then
+  echo "Missing required script: $PREFLIGHT_SCRIPT" >&2
   exit 1
 fi
 
@@ -158,9 +274,6 @@ if (( CLAUDE_COUNT > 0 )); then
 fi
 if (( GEMINI_COUNT > 0 )); then
   require_command gemini
-fi
-if (( OPENCODE_COUNT > 0 )); then
-  require_command opencode
 fi
 
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
@@ -180,30 +293,45 @@ if ! curl -fsS http://127.0.0.1:8765/health/readiness >/dev/null; then
   exit 1
 fi
 
-tmux new-session -d -s "$SESSION_NAME" -n control "cd '$PROJECT_ROOT' && exec ${SHELL:-/bin/zsh} -l"
-tmux set-option -t "$SESSION_NAME" remain-on-exit on
-tmux send-keys -t "$SESSION_NAME:control" "cd '$PROJECT_ROOT'" C-m
-tmux send-keys -t "$SESSION_NAME:control" "printf 'Swarm control shell for %s\\n' '$SESSION_NAME'" C-m
+if (( PREFLIGHT == 1 )); then
+  echo "Running swarm preflight..."
+  if ! "$PREFLIGHT_SCRIPT" \
+    --session "$SESSION_NAME" \
+    --codex "$CODEX_COUNT" \
+    --claude "$CLAUDE_COUNT" \
+    --gemini "$GEMINI_COUNT" \
+    --opencode "$OPENCODE_COUNT"; then
+    status=$?
+    if [[ "$status" -eq 75 ]]; then
+      echo "Swarm preflight returned a transient retry condition. Re-run launch after lock contention clears." >&2
+    fi
+    exit "$status"
+  fi
+fi
 
-spawn_windows codex "$CODEX_COUNT"
-spawn_windows claude "$CLAUDE_COUNT"
-spawn_windows gemini "$GEMINI_COUNT"
-spawn_windows opencode "$OPENCODE_COUNT"
+spawn_with_upstream_ntm
+wait_for_agent_panes $((CODEX_COUNT + CLAUDE_COUNT + GEMINI_COUNT))
+send_initial_prompts
 
-if (( SUPERVISOR == 1 )); then
-  tmux new-window -t "$SESSION_NAME:" -n supervisor "cd '$PROJECT_ROOT' && exec '$PROJECT_ROOT/scripts/swarm/supervise_swarm.sh' --session '$SESSION_NAME'"
+if (( CONTROL_PLANE == 1 )); then
+  control_args=(--session "$SESSION_NAME" --mode "$CONTROL_MODE")
+  if [[ "$FT_WATCH" == "0" ]]; then
+    control_args+=(--no-ft)
+  fi
+  "$CONTROL_PLANE_UP" "${control_args[@]}"
 fi
 
 echo
 echo "Swarm launched in tmux session: $SESSION_NAME"
 echo "Project root: $PROJECT_ROOT"
-echo "Next step: wait for the CLIs to settle, then run:"
-echo "  ${PROJECT_ROOT}/scripts/swarm/broadcast_marching_orders.sh --session $SESSION_NAME"
+echo "Worker lane: $WORK_LANE"
+echo "Control mode: $CONTROL_MODE"
 echo
 echo "Useful commands:"
-echo "  tmux attach -t $SESSION_NAME"
+echo "  ${UPSTREAM_NTM} view $SESSION_NAME"
+echo "  ${PROJECT_ROOT}/scripts/swarm/control_plane_status.sh --session $SESSION_NAME"
 echo "  ${PROJECT_ROOT}/scripts/swarm/status.sh --session $SESSION_NAME"
 
 if (( ATTACH == 1 )); then
-  exec tmux attach -t "$SESSION_NAME"
+  exec "$UPSTREAM_NTM" view "$SESSION_NAME"
 fi

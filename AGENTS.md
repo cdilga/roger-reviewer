@@ -56,21 +56,26 @@ expected exception because it is web-native.
 | Browser extension | TypeScript/JS | WebExtension; Native Messaging is the primary v1 bridge, custom URL launch may remain as a convenience path; keep runtime deps near zero and allow only a small typed toolchain |
 | Search | Rust | Tantivy + FastEmbed hybrid targeted for the first Roger search slice |
 
-## Repo Layout (Current Draft)
+## Repo Layout (Current High-Level Shape)
 
 ```
 .
 ├── apps/
-│   ├── cli/           # session-aware rr CLI
+│   ├── cli/           # app-facing CLI crate wrapper / packaging entry
 │   ├── extension/     # Chrome/Brave GitHub extension (TypeScript/JS)
-│   └── tui/           # FrankenTUI shell (Rust)
 ├── packages/
 │   ├── app-core/      # shared domain and orchestration
 │   ├── config/        # layered config model
-│   ├── github-adapter/  # gh CLI wrapper
+│   ├── github-adapter/ # gh CLI wrapper
+│   ├── bridge/        # Native Messaging / launch bridge support
+│   ├── cli/           # primary rr CLI implementation
 │   ├── prompt-engine/ # staged review prompt pipeline
+│   ├── session-codex/ # bounded Codex harness adapter
+│   ├── session-gemini/ # bounded Gemini harness adapter
 │   ├── session-opencode/  # OpenCode / harness wrapper
 │   ├── storage/       # SQLite + Tantivy / vector search support
+│   ├── test-harness/  # shared validation harness helpers
+│   ├── validation/    # suite planning / budget tooling
 │   └── worktree-manager/
 ├── _exploration/      # reference repos (do not import as dependencies)
 │   ├── frankentui/    # FrankenTUI source — TUI architecture reference
@@ -178,9 +183,10 @@ is the current truth unless the user says otherwise.
 ## Project Stage Status
 
 The project has completed planning, bead polishing, and readiness review.
-Implementation may now begin, but no implementation work has landed yet. The
-live bead count changes as work is added and closed; use `br info` for the
-authoritative current count and see
+Implementation is now underway. Planning artifacts remain authoritative for the
+intended `0.1.0` shape, but they are no longer a substitute for reading the
+current code and live beads. The live bead count changes as work is added and
+closed; use `br info` for the authoritative current count and see
 [`docs/BEADS_WORKSPACE_STATUS.md`](docs/BEADS_WORKSPACE_STATUS.md) for the
 current repair and health notes.
 
@@ -210,9 +216,10 @@ Implementation gate status:
   implementation slice
 - keep the implementation order local-core-first and extension-last
 
-**Implementation may begin now. Do not start extension delivery or mutable
-GitHub-write work before the local core, approval surfaces, and posting safety
-beads are in place.**
+**Implementation is active. Do not assume a planning doc saying "future" or
+"not yet landed" is still true without checking the code and live beads. Do
+not start extension delivery or mutable GitHub-write work before the local
+core, approval surfaces, and posting safety beads are in place.**
 
 ---
 
@@ -234,10 +241,13 @@ br close <id>        # mark a bead complete
 br doctor            # workspace health check
 ```
 
-`br` is currently pinned to `0.1.28` in this workspace. On 2026-03-29, local
-repros showed that `0.1.29` through `0.1.34` could make a fresh beads DB fail
-native `sqlite3` integrity checks after ordinary sequential `br create`
-operations. Upstream regression report:
+`br` currently resolves to a local patched build at
+`/Users/cdilga/.local/bin/br -> /Users/cdilga/.local/bin/br-0.1.34.localfix`.
+This is not the stock upstream `0.1.34` release. Local investigation on
+2026-03-31 showed the upstream regression still reproduced on both the
+published `0.1.34` build and upstream `main`, but a narrow local source patch
+to the fresh-schema migration path restored clean `init`, `create`, `doctor`,
+and `info` behavior for Roger's workload. Upstream regression report:
 `Dicklesworthstone/beads_rust#213`.
 
 If `br doctor` reports malformed-page warnings again, repair with:
@@ -250,6 +260,18 @@ br doctor
 `wal_checkpoint(TRUNCATE)` alone was not sufficient in local repros; `VACUUM`
 was the step that cleared the integrity-check failures. Preserved recovery
 artefacts under `.beads/.br_recovery` are still only a cleanup warning.
+
+Do not assume upstream `br 0.1.34` is equivalent to this local build. If you
+need to reevaluate a future upstream version, test it explicitly against:
+
+```sh
+git init tmp && cd tmp
+br init
+br create --title "repro one"
+br create --title "repro two"
+sqlite3 .beads/beads.db "PRAGMA integrity_check;"
+br doctor
+```
 
 ### How to pick your next bead
 
@@ -380,6 +402,72 @@ First-class entities:
   while still demanding explicit contracts, bounded complexity, and hard
   evidence that each added moving part earns its cost.
 
+## Testing Philosophy
+
+Testing is part of the implementation contract, not cleanup for later. Roger
+should get more defensible with every bead that lands.
+
+Core stance:
+
+- almost every implementation bead should add or update tests
+- most beads should close with unit or parameterized tests, not heavyweight
+  user-flow tests
+- integration tests are for real boundaries: storage, migrations, adapters,
+  CLI or TUI controller seams, prompt execution edges, bridge envelopes, and
+  similar cross-component contracts
+- acceptance tests are for explicit support claims such as provider behavior or
+  other published capability promises
+- automated E2E is intentionally rare and should defend only product-defining
+  multi-boundary promises that cheaper layers cannot cover truthfully
+
+Default rule:
+
+1. identify the exact behavior that changed
+2. choose the cheapest truthful validation layer that proves that behavior
+3. add or update tests in that layer as part of the bead
+4. escalate to a heavier layer only when the lower layer would miss the real
+   failure mode
+
+Expected defaults:
+
+- domain rules, reducers, serializers, state transitions, refresh
+  classification, invalidation logic, and shaping logic should usually get unit
+  tests
+- small rule matrices should usually get parameterized or property-style tests
+  rather than bespoke integration suites
+- storage, migration, adapter, CLI routing, prompt execution, bridge envelope,
+  and similar seam work should usually get narrow integration tests
+- provider or bridge support claims should get named acceptance or smoke
+  coverage only when the governing validation docs require it
+
+E2E policy:
+
+- Roger `0.1.x` is deliberately E2E-skeptical
+- the planning and validation docs bless only a very small automated E2E
+  budget, centered on one heavyweight happy-path review loop
+- do not add a new automated E2E because it feels convenient, prestigious, or
+  "safer" by default
+- do not claim E2E coverage just because a planning doc describes a future E2E;
+  only claim the suites that actually exist in the repo and were actually run
+
+Current repo honesty rule:
+
+- if a planned E2E, acceptance suite, or smoke lane does not yet exist in the
+  repo, say so plainly
+- do not close a bead with wording that implies end-to-end coverage when only
+  unit or integration coverage exists
+- docs, planning, and bead-shaping tasks may close without code tests, but
+  implementation beads normally should not
+
+Authority:
+
+- [`docs/TEST_HARNESS_GUIDELINES.md`](docs/TEST_HARNESS_GUIDELINES.md) is the
+  canonical testing-methodology contract
+- [`docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md`](docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md)
+  is the canonical tiering and E2E-budget contract
+- [`docs/REVIEW_FLOW_MATRIX.md`](docs/REVIEW_FLOW_MATRIX.md) identifies the
+  user flows whose promises eventually deserve broader cross-boundary coverage
+
 ## Dependency Policy
 
 - Dependencies must earn their keep. Prefer a small, high-leverage set over a
@@ -464,21 +552,26 @@ The adversarial review loop:
    context.
 2. Read the bead in full with `br show <id>`.
 3. Implement exactly what the acceptance criteria require. No more.
-4. Verify the bead has an explicit validation contract. If it does not, add a
+4. Most implementation beads should add or update tests. Start with the
+   cheapest truthful validation layer and escalate only when a lighter layer
+   would miss the real risk.
+5. Verify the bead has an explicit validation contract. If it does not, add a
    note or split the missing validation work before treating the bead as
    closeable.
-5. Do not touch GitHub write paths, posting flows, or mutation-capable code
+6. Do not touch GitHub write paths, posting flows, or mutation-capable code
    without the approval model in place.
-6. Run the exact validation layer named by the bead or governing validation
+7. Run the exact validation layer named by the bead or governing validation
    contract before marking done.
-7. Record the exact validation command or suite result in the bead close reason
+8. Record the exact validation command or suite result in the bead close reason
    or bead notes. Do not imply broader coverage than what actually ran.
-8. Smoke alone is enough only when the bead explicitly calls for smoke or the
+9. Smoke alone is enough only when the bead explicitly calls for smoke or the
    lower-layer validation docs make that the correct layer.
-9. If your change increases the number of blessed automated E2E tests, stop and
+10. Do not imply automated E2E coverage unless a real `e2e_*` or explicitly
+    named heavyweight suite exists in the repo and was run in this workspace.
+11. If your change increases the number of blessed automated E2E tests, stop and
    justify why a unit, parameterized, or narrow integration test would not
    defend the same promise more cheaply.
-10. If you discover a dependency is incomplete, stop and flag it rather than
+12. If you discover a dependency is incomplete, stop and flag it rather than
    working around it.
 
 ---

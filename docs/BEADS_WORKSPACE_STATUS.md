@@ -1,15 +1,18 @@
 # Beads Workspace Status
 
-As of 2026-03-30, the Roger Reviewer beads workspace remains healthy after the
-March repair passes, and the implementation gate is open.
+As of 2026-03-31, the Roger Reviewer beads workspace is healthy again after a
+local `br` remediation pass, and the implementation gate is open.
 
 ## Current state
 
-- `br` is pinned locally to `0.1.28`
+- default automation path now resolves through
+  `/Users/cdilga/.local/bin/br -> /Users/cdilga/.local/bin/br-0.1.34.localfix`
+- `br-0.1.34.localfix` is a local patched build, not the stock upstream
+  `0.1.34` release
 - [`.beads/beads.db`](/Users/cdilga/Documents/dev/roger-reviewer/.beads/beads.db)
   passes SQLite integrity checks
 - [`.beads/issues.jsonl`](/Users/cdilga/Documents/dev/roger-reviewer/.beads/issues.jsonl)
-  and the DB are in sync with 77 issues
+  and the DB are in sync with 109 issues
 - `rr-012` is now closed in the live beads graph, matching the Round 04
   reconciliation outcome
 - `rr-025` is now closed; `VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md` is the
@@ -24,42 +27,77 @@ March repair passes, and the implementation gate is open.
   `rr-016.3`
 - `rr-003.1` is currently `in_progress`, and `br ready` currently surfaces
   `rr-003.7` and `rr-003.8` as the next unblocked implementation leaves
-- `br doctor`, `br info`, and clean-path `br sync --flush-only` complete
-  successfully from the current workspace state
-- `br 0.1.29` through `0.1.34` were repro-bad locally: a fresh temp workspace
+- fresh-workspace `br init`, repeated `br create`, `br doctor`, repo-local
+  `br info`, and repo-local `br show` all complete successfully through the
+  default `br` path
+- stock upstream `br 0.1.29` through `0.1.34` were repro-bad locally: a fresh temp workspace
   failed native `sqlite3` integrity checks after ordinary sequential
   `br create` operations
+- upstream `main` at commit `1130411b1dfa646c769b1f56735d9dd9942b8db0` was
+  still repro-bad on 2026-03-31
 - upstream regression report filed:
   `Dicklesworthstone/beads_rust#213`
-- the practical local fix was to downgrade back to `0.1.28`, then run SQLite
-  checkpoint plus `VACUUM` on this workspace DB before re-validating
+- local source investigation found the fresh-schema bootstrap was still running
+  legacy v3/v4 migrations before `PRAGMA user_version` was set, which caused
+  fresh DBs to drop and recreate `idx_issues_ready`; with current
+  `frankensqlite`, that leaked the old root page and triggered the
+  `Page 17: never used` integrity failure
+- the practical local fix was:
+  1. repair the current workspace DB with SQLite checkpoint plus `VACUUM`
+  2. install a patched local `br` build that skips legacy migrations on a
+     truly fresh DB
 
 ## Validation performed
 
-- `br --version` -> `br 0.1.28`
+- `br --version` -> `br 0.1.34`
 - `br info`
-- `br list --status open`
 - `br ready`
 - `br doctor`
+- `readlink /Users/cdilga/.local/bin/br` ->
+  `/Users/cdilga/.local/bin/br-0.1.34.localfix`
 - temp repro with `br 0.1.34`:
   `git init && br init && br create ... && sqlite3 .beads/beads.db "PRAGMA integrity_check;"`
   -> `Page 17: never used`
-- temp repro with `br 0.1.28` on the same steps
+- temp repro with upstream `main` on the same steps
+  -> `Page 17: never used`
+- temp repro with local `br-0.1.34.localfix` on the same steps
   -> `ok`
-- `br doctor`
-- `br show rr-012 rr-015 rr-025.3`
-- `br sync --flush-only -v`
+- temp repro with local `br-0.1.34.localfix` plus `br doctor`
+  -> clean doctor run except expected frankensqlite WAL-sidecar warning
+- repo-local `br show rr-001.6`
 - `sqlite3 .beads/beads.db "PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA integrity_check;"`
   -> `ok`
+
+## Canonical workspace-trust check
+
+The canonical trust report command for DB-vs-JSONL parity and open-count sanity
+is:
+
+```sh
+./scripts/swarm/check_beads_trust.sh
+```
+
+For deterministic fixture validation (without using the live workspace DB), the
+same command accepts explicit input paths:
+
+```sh
+./scripts/swarm/check_beads_trust.sh --db /tmp/beads.db --jsonl /tmp/issues.jsonl
+```
+
+When explicit DB/JSONL paths are supplied, `br doctor` is skipped automatically
+so only the direct parity and integrity checks are evaluated.
 
 ## Notes
 
 - `br doctor` still reports preserved recovery artefacts in
   [`.beads/.br_recovery`](/Users/cdilga/Documents/dev/roger-reviewer/.beads/.br_recovery).
   That is currently a cleanup warning, not a functional error.
-- The active local pin is intentional. Do not upgrade `br` past `0.1.28` in
-  this workspace until upstream issue `#213` is resolved or a newer version is
-  repro-verified locally.
+- The active local `br` path is intentional, but it is not a permanent
+  version-policy claim. Reevaluate future upstream versions explicitly rather
+  than assuming the local patch will be needed forever.
+- Do not replace the default `br` symlink with stock upstream `0.1.34` or
+  current upstream `main` unless they have been repro-verified locally against
+  the same fresh-init and doctor matrix.
 - The pre-repair database files were preserved in
   [`.beads/.manual_repair_20260328_2056`](/Users/cdilga/Documents/dev/roger-reviewer/.beads/.manual_repair_20260328_2056)
   for audit and rollback purposes.

@@ -240,6 +240,30 @@ If this fails, do not trust the Codex integration script as-is.
 9. Verify `planning-workflow` is available under `~/.codex/skills/`.
 10. Run the Roger Reviewer verification commands above.
 
+## Beads CLI Pin for This Repo
+
+This repo intentionally pins `br` to `0.1.28` while upstream regression
+`Dicklesworthstone/beads_rust#213` remains unresolved.
+
+Swarm automation resolves and repairs the default path through:
+
+- `/path/to/roger-reviewer/scripts/swarm/resolve_br.sh`
+
+Canonical expected path shape on a healthy machine:
+
+- `~/.local/bin/br -> ~/.local/bin/br-0.1.28.pinned`
+
+Minimal verification:
+
+```bash
+/path/to/roger-reviewer/scripts/swarm/resolve_br.sh --print-path
+br --version
+readlink ~/.local/bin/br
+```
+
+Do not run backup binary filenames directly (for example
+`br-0.1.28.queuebug.bak`) in automation or runbooks.
+
 ## Quick Checklist
 
 ```bash

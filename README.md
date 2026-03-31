@@ -1,161 +1,161 @@
 # Roger Reviewer
 
-> Local-first pull request review with durable sessions, structured findings,
-> and explicit human approval before anything goes back to GitHub.
+> Local-first pull request review with durable sessions and explicit approval
+> gates before any GitHub write.
 
-| Status | Stage |
-| --- | --- |
-| Product maturity | Post-readiness implementation |
-| Release status | Pre-release, active implementation |
-| First implementation release target | `0.1.0` |
-| Planned versioning | `0.1.x` early Roger releases, then CalVer once the product is shipping mature releases |
-| Default mode | Review-only, not auto-fix |
-| Source of truth | Local state |
-| Primary surfaces | CLI, TUI, GitHub launch surface |
+## Who This Is For
 
-Roger Reviewer is not at `v1.0` yet. Planning, bead polishing, and readiness
-review completed on 2026-03-30, and the repository is now in active
-implementation. Nothing here should be treated as a stable release artifact.
+Primary audience for the current `0.1.0` slice:
 
-Roger Reviewer is a local-first review system built around one core idea:
-review quality improves when findings, prompts, evidence, and follow-up survive
-beyond a single terminal run.
+- engineers who review GitHub PRs from the terminal
+- teams that want durable review continuity (not one-shot chat output)
+- users who want strict local safety defaults before posting anything remotely
 
-Instead of treating review as disposable chat output, Roger Reviewer aims to:
+This repo is still pre-release, but implementation is active and the core
+review loop is now real on the blessed OpenCode path.
 
-- keep review sessions durable and resumable
-- preserve a real fallback into plain OpenCode
-- make findings first-class objects with state and evidence
-- route any GitHub mutation through an explicit approval step
+## What Roger Is (And Is Not)
 
-## Why It Exists
+Roger Reviewer is:
 
-Most review tooling is optimized for one-shot output. Roger Reviewer is being
-designed for continuity:
+- local-first (`SQLite` state is authoritative)
+- session-aware (start, resume, refresh, and return are durable)
+- approval-gated (no silent posting path)
+- continuity-focused (OpenCode fallback stays real)
 
-- start from the shell or a GitHub PR page
-- run staged review passes instead of one monolithic prompt
-- triage findings in a TUI-first workflow
-- draft outbound comments locally
-- post only after explicit human approval
+Roger Reviewer is not:
 
-```mermaid
-flowchart LR
-    GH[GitHub PR page] --> LAUNCH[Launch Roger]
-    SH[rr review / rr resume] --> SESSION[Review session]
-    LAUNCH --> SESSION
-    SESSION --> PASSES[Explore -> Deep review -> Follow-up]
-    PASSES --> FINDINGS[Structured findings + artifacts]
-    FINDINGS --> TUI[TUI triage and approval]
-    TUI --> DRAFTS[Local outbound drafts]
-    DRAFTS --> POST[Explicit post to GitHub]
+- an auto-fix bot by default
+- an auto-posting GitHub bot
+- a daemon-centered architecture
+
+## Current `0.1.0` Support Snapshot
+
+| Surface | Status now | Notes |
+| --- | --- | --- |
+| `rr` CLI | Active, validated | Start/resume/refresh/return/sessions/findings/status/search are implemented |
+| OpenCode harness path | Blessed (`Tier B`) | Locator reopen + reseed fallback + dropout/return continuity model |
+| Browser extension | Bounded launch surface | PR-page launch panel; Native Messaging primary, `roger://` fallback |
+| Extension live status | Not in this slice | Launch-only honesty: open Roger locally for authoritative status |
+| In-extension posting controls | Not in this slice | Approval/posting remains local and explicit |
+
+Provider policy for this README:
+
+- blessed quickstart path: OpenCode
+- bounded/experimental provider paths may exist in code and tests, but are not
+  documented here as the primary supported user flow
+
+## Quickstart (Blessed Local Path)
+
+### 1. Prerequisites
+
+- Rust toolchain installed
+- Git repo with a configured GitHub `origin` remote
+- OpenCode CLI available on `PATH` (or set `RR_OPENCODE_BIN`)
+
+Optional environment overrides:
+
+```bash
+export RR_STORE_ROOT="$PWD/.roger"
+export RR_OPENCODE_BIN="opencode"
 ```
 
-## Product Shape
+### 2. Run `rr` from source
 
-| Surface | Role |
-| --- | --- |
-| `rr` CLI | Start, resume, inspect, and refresh review sessions |
-| Rust TUI | Main workflow for triage, follow-up, and approval |
-| Browser extension | GitHub-side launch surface for local review flows |
-| Local store | Durable sessions, findings, artifacts, and audit history |
+From this repo:
 
-## Non-Negotiable Constraints
+```bash
+cargo run -p roger-cli --bin rr -- help
+```
+
+If you prefer shorter commands in your shell session:
+
+```bash
+alias rr='cargo run -q -p roger-cli --bin rr --'
+```
+
+### 3. Start a review session
+
+```bash
+rr review --pr 123 --provider opencode
+```
+
+### 4. Inspect and triage from local state
+
+```bash
+rr status
+rr findings
+rr sessions
+rr search --query "null pointer"
+```
+
+### 5. Continue the same review safely
+
+```bash
+rr resume --pr 123
+rr refresh --pr 123
+rr return --pr 123
+```
+
+If multiple candidate sessions exist, Roger fails closed and asks for explicit
+selection (for example `--session <id>`).
+
+## Optional GitHub Launch Surface (Extension)
+
+The extension is optional. Roger stays usable from CLI without it.
+
+### Load unpacked extension
+
+Use:
+
+- `apps/extension/manifest.template.json`
+
+The current panel injects on GitHub PR pages and offers:
+
+- `Start`
+- `Resume`
+- `Findings`
+- `Refresh`
+
+Bridge dispatch order:
+
+1. Native Messaging (`com.roger_reviewer.bridge`)
+2. `roger://launch/...` fallback
+
+Current behavior is intentionally launch-only:
+
+- no in-extension live local status claim
+- no in-extension approval/posting controls
+
+## Safety Model (Non-Negotiable)
 
 - No automatic GitHub posting.
-- No automatic bug-fixing by default.
-- No hidden daemon at the center of the architecture.
-- No fake fallback story: every Roger session must map back to a usable
-  underlying OpenCode session.
+- No automatic bug-fixing unless explicitly enabled by the user.
+- No raw direct review writes outside Roger’s approval/posting flow model.
 - Mutation-capable flows must be explicit and visibly elevated.
 
-## Current Repo Contents
+## Known Boundaries In This Slice
 
-The repository is intentionally early. It now contains the planning corpus,
-readiness artifacts, swarm tooling, and early implementation code.
+- Extension readback/status parity is not shipped yet.
+- Dedicated polished standalone TUI app packaging is still in progress.
+- Support claims prioritize the blessed OpenCode continuity path.
+- Degraded outcomes are expected and explicit when continuity or context is
+  ambiguous.
+
+## Repo Orientation
 
 | Path | Purpose |
 | --- | --- |
-| [`AGENTS.md`](AGENTS.md) | Operating contract for coding agents in this repo |
-| [`docs/PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md) | Canonical product and architecture plan |
-| [`docs/BEAD_SEED_FOR_ROGER_REVIEWER.md`](docs/BEAD_SEED_FOR_ROGER_REVIEWER.md) | Seed structure for the bead graph |
-| [`docs/CRITIQUE_ROUND_01_FOR_ROGER_REVIEWER.md`](docs/CRITIQUE_ROUND_01_FOR_ROGER_REVIEWER.md) | First critique and integration round |
-| [`docs/CRITIQUE_ROUND_02_FOR_ROGER_REVIEWER.md`](docs/CRITIQUE_ROUND_02_FOR_ROGER_REVIEWER.md) | Second critique round focused on architecture risk |
-| [`docs/CRITIQUE_ROUND_03_FOR_ROGER_REVIEWER.md`](docs/CRITIQUE_ROUND_03_FOR_ROGER_REVIEWER.md) | Third critique round focused on Rust-first local architecture and Native Messaging |
-| [`docs/ROUND_04_ARCHITECTURE_RECONCILIATION_OUTCOME.md`](docs/ROUND_04_ARCHITECTURE_RECONCILIATION_OUTCOME.md) | Round 04 closeout artifact aligning ADR decisions, canonical docs, and remaining bounded questions |
-| [`docs/READINESS_IMPLEMENTATION_GATE_DECISION.md`](docs/READINESS_IMPLEMENTATION_GATE_DECISION.md) | Gate decision that moved Roger from planning into implementation |
-| [`docs/READINESS_REVIEW_SYNTHESIS.md`](docs/READINESS_REVIEW_SYNTHESIS.md) | Consolidated readiness review outcome and remaining bounded risks |
-| [`docs/READINESS_REVIEW_FIRST_IMPLEMENTATION_SLICE_WITHOUT_EXTENSION.md`](docs/READINESS_REVIEW_FIRST_IMPLEMENTATION_SLICE_WITHOUT_EXTENSION.md) | Proof that the first implementation slice does not depend on immediate extension delivery |
-| [`docs/PLANNING_WORKFLOW_PROMPTS.md`](docs/PLANNING_WORKFLOW_PROMPTS.md) | Prompts for critique, integration, and readiness loops |
-| [`docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md`](docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md) | Reusable prompt pack for repo onboarding, discovery, and canonicalization |
-| [`docs/DATA_MODEL_AND_STORAGE_CONTRACT.md`](docs/DATA_MODEL_AND_STORAGE_CONTRACT.md) | Implementation-facing data, concurrency, and storage contract |
-| [`docs/RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md) | Explicit support, release, fixture, and validation matrix for `0.1.0` |
-| [`docs/REFERENCE_SOURCES_AND_EXPLORATION_TARGETS.md`](docs/REFERENCE_SOURCES_AND_EXPLORATION_TARGETS.md) | External standards, prior-art sources, and approved exploration targets for future agent review |
-| [`docs/DEV_MACHINE_ONBOARDING.md`](docs/DEV_MACHINE_ONBOARDING.md) | Practical machine setup guide for Codex, Agent Mail, and planning workflow access |
-| [`docs/adr/README.md`](docs/adr/README.md) | Architecture decision records that narrow the plan into implementable contracts |
-| [`.beads/issues.jsonl`](.beads/issues.jsonl) | Live beads export for the implementation backlog |
-| [`roger-reviewer-brain-dump.md`](roger-reviewer-brain-dump.md) | Raw intent source document |
+| `packages/cli` | `rr` command implementation |
+| `packages/app-core` | Domain model, findings lifecycle, approval/posting contracts |
+| `packages/session-opencode` | OpenCode session linkage and return model |
+| `packages/bridge` | Native Messaging + URL launch bridge |
+| `apps/extension` | GitHub PR launch panel |
+| `packages/storage` | Canonical local store and retrieval |
 
-## Document Roles
+## Canonical Docs
 
-The docs are not all peers.
-
-- [`AGENTS.md`](AGENTS.md) is the operational contract for agents.
-- [`docs/PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md) is the
-  canonical product and architecture plan.
-- [`docs/BEAD_SEED_FOR_ROGER_REVIEWER.md`](docs/BEAD_SEED_FOR_ROGER_REVIEWER.md)
-  and `.beads/` are the task-decomposition layer derived from the plan.
-- [`docs/DATA_MODEL_AND_STORAGE_CONTRACT.md`](docs/DATA_MODEL_AND_STORAGE_CONTRACT.md)
-  and [`docs/RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md) are
-  implementation-facing support contracts that narrow the canonical plan.
-- [`docs/REFERENCE_SOURCES_AND_EXPLORATION_TARGETS.md`](docs/REFERENCE_SOURCES_AND_EXPLORATION_TARGETS.md)
-  is the reference index for official external standards, prior-art notes, and
-  approved exploration targets.
-- `CRITIQUE_ROUND_*` files are historical rationale and integration artifacts,
-  not the current spec.
-- [`docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md`](docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md)
-  is the reusable pre-planning discovery workflow.
-- [`roger-reviewer-brain-dump.md`](roger-reviewer-brain-dump.md) is raw intent,
-  not authority.
-
-If documents disagree, treat `AGENTS.md` and the canonical plan as current
-truth, and treat critique rounds as explanation only.
-
-## Current Draft Architecture
-
-```text
-.
-├── apps/
-│   ├── cli/
-│   ├── extension/
-│   └── tui/
-├── packages/
-│   ├── app-core/
-│   ├── config/
-│   ├── github-adapter/
-│   ├── prompt-engine/
-│   ├── session-opencode/
-│   ├── storage/
-│   └── worktree-manager/
-├── docs/
-├── _exploration/
-└── .beads/
-```
-
-## Near-Term Milestones
-
-1. Keep the live bead graph aligned with the implementation backlog.
-2. Build the first `0.1.0` local-core slices across storage, CLI, and TUI.
-3. Preserve the approval-safe GitHub model as implementation expands.
-
-## Read Next
-
-- [`docs/PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md)
-- [`docs/READINESS_IMPLEMENTATION_GATE_DECISION.md`](docs/READINESS_IMPLEMENTATION_GATE_DECISION.md)
-- [`docs/READINESS_REVIEW_FIRST_IMPLEMENTATION_SLICE_WITHOUT_EXTENSION.md`](docs/READINESS_REVIEW_FIRST_IMPLEMENTATION_SLICE_WITHOUT_EXTENSION.md)
-- [`docs/ROUND_04_ARCHITECTURE_RECONCILIATION_OUTCOME.md`](docs/ROUND_04_ARCHITECTURE_RECONCILIATION_OUTCOME.md)
-- [`docs/ALIEN_ARTEFACTS_FOR_ROGER_REVIEWER.md`](docs/ALIEN_ARTEFACTS_FOR_ROGER_REVIEWER.md)
-- [`docs/REFERENCE_SOURCES_AND_EXPLORATION_TARGETS.md`](docs/REFERENCE_SOURCES_AND_EXPLORATION_TARGETS.md)
-- [`docs/PLANNING_WORKFLOW_PROMPTS.md`](docs/PLANNING_WORKFLOW_PROMPTS.md)
-- [`docs/DEV_MACHINE_ONBOARDING.md`](docs/DEV_MACHINE_ONBOARDING.md)
-- [`AGENTS.md`](AGENTS.md)
+- [`AGENTS.md`](AGENTS.md) (operating rules)
+- [`docs/PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md) (product/architecture authority)
+- [`docs/HARNESS_SESSION_LINKAGE_CONTRACT.md`](docs/HARNESS_SESSION_LINKAGE_CONTRACT.md)
+- [`docs/RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md)

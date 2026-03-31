@@ -3,25 +3,26 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd "${SCRIPT_DIR}/../.." && pwd)
+BR_RESOLVER="${SCRIPT_DIR}/resolve_br.sh"
 DEFAULT_SESSION_NAME="$(basename "$PROJECT_ROOT" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//')"
+UPSTREAM_NTM="${NTM_UPSTREAM_BIN:-${HOME}/.local/lib/acfs/bin/ntm}"
 
-SESSION_NAME="${DEFAULT_SESSION_NAME}-swarm"
+SESSION_NAME="${DEFAULT_SESSION_NAME}"
 INTERVAL_SECONDS=15
-IDLE_SECONDS=30
-COOLDOWN_SECONDS=120
-MAX_LINES=40
+IDLE_SECONDS=45
+COOLDOWN_SECONDS=180
 STATE_ROOT="${TMPDIR:-/tmp}/roger-reviewer-swarm-supervisor"
+BR_BIN=""
 
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [options]
 
 Options:
-  --session NAME            Tmux swarm session to supervise
+  --session NAME            Swarm session name to supervise
   --interval-seconds N      Polling interval between checks
   --idle-seconds N          How long a pane must sit idle before nudging
   --cooldown-seconds N      Minimum gap between nudges for the same pane
-  --lines N                 Number of captured lines to inspect per pane
   -h, --help                Show this help
 EOF
 }
@@ -44,10 +45,6 @@ while [[ $# -gt 0 ]]; do
       COOLDOWN_SECONDS="$2"
       shift 2
       ;;
-    --lines)
-      MAX_LINES="$2"
-      shift 2
-      ;;
     -h|--help)
       usage
       exit 0
@@ -60,149 +57,161 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ ! -x "$UPSTREAM_NTM" ]]; then
+  echo "Upstream NTM binary not found at: $UPSTREAM_NTM" >&2
+  exit 1
+fi
+if [[ ! -x "$BR_RESOLVER" ]]; then
+  echo "Missing required script: $BR_RESOLVER" >&2
+  exit 1
+fi
 if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
   echo "Tmux session '$SESSION_NAME' does not exist." >&2
+  exit 1
+fi
+if ! BR_BIN="$("$BR_RESOLVER" --quiet --print-path)"; then
+  echo "Unable to resolve pinned br path for this workspace." >&2
   exit 1
 fi
 
 mkdir -p "${STATE_ROOT}/${SESSION_NAME}"
 
+state_file() {
+  local pane="$1"
+  local suffix="$2"
+  printf '%s/%s/pane-%s.%s\n' "$STATE_ROOT" "$SESSION_NAME" "$pane" "$suffix"
+}
+
+count_ready() {
+  (
+    cd "$PROJECT_ROOT"
+    "$BR_BIN" ready 2>/dev/null || true
+  ) | awk '/^[○●] / { count += 1 } END { print count + 0 }'
+}
+
+count_status() {
+  local status="$1"
+  sqlite3 "${PROJECT_ROOT}/.beads/beads.db" \
+    "select count(*) from issues where status='${status//\'/}';" 2>/dev/null || echo 0
+}
+
+agent_states_tsv() {
+  "$UPSTREAM_NTM" health "$SESSION_NAME" --json 2>/dev/null | jq -r \
+    '
+      .agents[]
+      | select(.process_status == "running")
+      | select((.rate_limited // false) | not)
+      | [.pane, (.activity // "unknown")] | @tsv
+    '
+}
+
 continuation_prompt() {
   cat <<'EOF'
-Continue autonomously from the current repo state. Because this is a persistent tmux swarm session, do not stop after a single checkpoint.
+Continue autonomously from the current repo state. This swarm is persistent, so do not stop at the current prompt.
 
 Immediately:
 1. check Agent Mail and acknowledge anything pending
-2. run `br ready`
-3. inspect the best unblocked bead with `br show <id>`
-4. claim it, reserve files, and keep working
+2. rerun `br ready`
+3. if a ready bead exists, inspect it with `br show`, claim it, reserve files, and continue working
+4. if `br` says `database is busy`, back off and retry before concluding queue state
+5. if `br ready` is still empty but useful open work remains, inspect `bv --robot-triage`, `br list --status open`, and the most adjacent blocked frontier; only create or split the next safe bead if the slice is obvious and you can attach a truthful validation contract
 
-If `br` says `database is busy`, wait briefly and retry before treating the queue as empty.
-If `br ready` is empty but the next safe slice is obvious, create or split the bead needed to continue safely, include the validation contract, and announce it in Agent Mail instead of idling silently.
+Do not ask the human for routine permission. Either claim real work, widen the graph safely, or post an explicit exhausted-queue report in Agent Mail and hold.
 EOF
 }
 
-worker_panes() {
-  tmux list-panes -a -t "$SESSION_NAME" -F '#{window_name} #{pane_id} #{pane_dead}' | while read -r window_name pane_id pane_dead; do
-    case "$window_name" in
-      control|supervisor)
-        continue
-        ;;
-    esac
-    printf '%s %s %s\n' "$window_name" "$pane_id" "$pane_dead"
-  done
-}
+frontier_prompt() {
+  cat <<'EOF'
+The shared queue currently has open work but no ready leaf beads. Take one bounded frontier-widening pass now.
 
-ready_count() {
-  (
-    cd "$PROJECT_ROOT"
-    br ready 2>/dev/null || true
-  ) | awk '/^[0-9]+\./ { count += 1 } END { print count + 0 }'
-}
+Do this in order:
+1. re-check Agent Mail for coordination state
+2. inspect `br list --status open`, `bv --robot-triage`, and the nearest blocked frontier
+3. if the next safe slice is obvious, create or split the missing bead with a truthful validation contract and announce it in Agent Mail
+4. if the graph is genuinely exhausted, send an explicit exhausted-queue note and hold
 
-pane_capture() {
-  local pane_id="$1"
-  tmux capture-pane -pJ -t "$pane_id" | tail -n "$MAX_LINES"
-}
-
-pane_is_idle_prompt() {
-  local capture="$1"
-  printf '%s\n' "$capture" | tail -n 8 | grep -Eq '^[[:space:]]*(›|❯|>) '
-}
-
-pane_is_working() {
-  local capture="$1"
-  printf '%s\n' "$capture" | tail -n 20 | grep -Eq 'Working \(|thinking|Thinking|tool call|Esc to interrupt'
-}
-
-state_file() {
-  local pane_id="$1"
-  local suffix="$2"
-  local safe_pane
-  safe_pane=$(printf '%s' "$pane_id" | tr -cd '[:alnum:]')
-  printf '%s/%s/%s.%s\n' "$STATE_ROOT" "$SESSION_NAME" "$safe_pane" "$suffix"
-}
-
-mark_active() {
-  local pane_id="$1"
-  rm -f "$(state_file "$pane_id" idle_hash)" "$(state_file "$pane_id" idle_since)" >/dev/null 2>&1 || true
+Do not do speculative product work without a bead. Either mint the missing safe bead or explain why the frontier is truly exhausted.
+EOF
 }
 
 nudge_pane() {
-  local pane_id="$1"
-  local pane_name="$2"
+  local pane="$1"
+  local kind="$2"
   local now_ts="$3"
-  tmux set-buffer -- "$(continuation_prompt)"
-  tmux paste-buffer -t "$pane_id"
-  tmux send-keys -t "$pane_id" C-m
-  printf '%s nudged %s (%s)\n' "$(date -Iseconds)" "$pane_name" "$pane_id"
-  printf '%s\n' "$now_ts" >"$(state_file "$pane_id" last_nudge)"
+  local prompt_file
+  prompt_file="$(mktemp "${TMPDIR:-/tmp}/roger-supervisor-prompt.XXXXXX")"
+  if [[ "$kind" == "frontier" ]]; then
+    frontier_prompt >"$prompt_file"
+  else
+    continuation_prompt >"$prompt_file"
+  fi
+  "$UPSTREAM_NTM" send "$SESSION_NAME" --pane="$pane" --file "$prompt_file" --no-cass-check >/dev/null
+  rm -f "$prompt_file"
+  printf '%s nudged pane %s (%s)\n' "$(date -Iseconds)" "$pane" "$kind"
+  printf '%s\n' "$now_ts" >"$(state_file "$pane" last_nudge)"
 }
 
 while true; do
-  ready=$(ready_count)
-  if [[ "$ready" -eq 0 ]]; then
+  if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+    echo "Main swarm session '$SESSION_NAME' disappeared; supervisor exiting." >&2
+    exit 0
+  fi
+
+  ready_count="$(count_ready)"
+  open_count="$(count_status open)"
+  in_progress_count="$(count_status in_progress)"
+
+  if (( ready_count == 0 && open_count == 0 && in_progress_count == 0 )); then
     sleep "$INTERVAL_SECONDS"
     continue
   fi
 
-  nudged_this_cycle=0
+  nudges_remaining="$ready_count"
+  nudged_frontier=0
+  now_ts="$(date +%s)"
 
-  while read -r pane_name pane_id pane_dead; do
-    [[ -n "$pane_id" ]] || continue
-    [[ "$pane_dead" == "0" ]] || continue
-    [[ "$nudged_this_cycle" -lt "$ready" ]] || break
-
-    capture=$(pane_capture "$pane_id")
-
-    if pane_is_working "$capture"; then
-      mark_active "$pane_id"
+  while IFS=$'\t' read -r pane activity; do
+    [[ -n "$pane" ]] || continue
+    idle_since_file="$(state_file "$pane" idle_since)"
+    if [[ "$activity" != "idle" ]]; then
+      rm -f "$idle_since_file"
       continue
     fi
-
-    if ! pane_is_idle_prompt "$capture"; then
-      mark_active "$pane_id"
-      continue
-    fi
-
-    now_ts=$(date +%s)
-    idle_hash=$(printf '%s' "$capture" | shasum | awk '{print $1}')
-    hash_file=$(state_file "$pane_id" idle_hash)
-    idle_since_file=$(state_file "$pane_id" idle_since)
-    last_nudge_file=$(state_file "$pane_id" last_nudge)
-
-    previous_hash=""
-    idle_since_ts="$now_ts"
-    last_nudge_ts=0
-
-    if [[ -f "$hash_file" ]]; then
-      previous_hash=$(cat "$hash_file")
-    fi
-    if [[ -f "$idle_since_file" ]]; then
-      idle_since_ts=$(cat "$idle_since_file")
-    fi
-    if [[ -f "$last_nudge_file" ]]; then
-      last_nudge_ts=$(cat "$last_nudge_file")
-    fi
-
-    if [[ "$idle_hash" != "$previous_hash" ]]; then
-      printf '%s\n' "$idle_hash" >"$hash_file"
+    if [[ ! -f "$idle_since_file" ]]; then
       printf '%s\n' "$now_ts" >"$idle_since_file"
       continue
     fi
-
+    idle_since_ts="$(cat "$idle_since_file")"
     if (( now_ts - idle_since_ts < IDLE_SECONDS )); then
       continue
     fi
 
+    last_nudge_file="$(state_file "$pane" last_nudge)"
+    last_nudge_ts=0
+    if [[ -f "$last_nudge_file" ]]; then
+      last_nudge_ts="$(cat "$last_nudge_file")"
+    fi
     if (( now_ts - last_nudge_ts < COOLDOWN_SECONDS )); then
       continue
     fi
 
-    nudge_pane "$pane_id" "$pane_name" "$now_ts"
-    nudged_this_cycle=$((nudged_this_cycle + 1))
-    sleep 2
-  done < <(worker_panes)
+    if (( ready_count > 0 )); then
+      if (( nudges_remaining <= 0 )); then
+        break
+      fi
+      nudge_pane "$pane" "continue" "$now_ts"
+      nudges_remaining=$((nudges_remaining - 1))
+      sleep 2
+      continue
+    fi
+
+    if (( open_count > 0 && in_progress_count == 0 && nudged_frontier == 0 )); then
+      nudge_pane "$pane" "frontier" "$now_ts"
+      nudged_frontier=1
+      sleep 2
+      break
+    fi
+  done < <(agent_states_tsv)
 
   sleep "$INTERVAL_SECONDS"
 done
