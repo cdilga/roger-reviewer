@@ -6,6 +6,8 @@
 
 # Project-local Codex state
 .codex/
+.claude/
+.roger/
 
 # Local reference clones are useful during planning, but the initial repo
 # snapshot should not vendor hundreds of MB of exploratory dependencies.
@@ -17,3 +19,10 @@ target/
 
 # Beads local backup / working state
 .beads_backup/
+
+# Local swarm/runtime state
+.ntm/logs/
+.ntm/pids/
+.ntm/summaries/
+.ntm/rate_limits.json
+__pycache__/
