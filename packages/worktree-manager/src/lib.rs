@@ -13,8 +13,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use roger_app_core::now_ts;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
@@ -36,13 +36,6 @@ pub enum WorktreeError {
 }
 
 pub type Result<T> = std::result::Result<T, WorktreeError>;
-
-fn now_ts() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}
 
 // ---------------------------------------------------------------------------
 // Preflight classification
@@ -862,8 +855,7 @@ mod tests {
         reg.register(make_instance("inst-b", 42, InstanceStatus::Active))
             .unwrap();
 
-        let result =
-            resolve_launch_routing(&reg, &routing_query(42, Some("inst-b"))).unwrap();
+        let result = resolve_launch_routing(&reg, &routing_query(42, Some("inst-b"))).unwrap();
         assert_eq!(
             result,
             LaunchRoutingOutcome::Resolved {

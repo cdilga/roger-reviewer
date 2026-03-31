@@ -1,12 +1,11 @@
 use roger_app_core::{
     AppError, ContinuityQuality, HarnessAdapter, LaunchAction, LaunchIntent,
     ProviderContinuityCapability, Result, ResumeAttemptOutcome, ResumeBundle, ResumeDecision,
-    ResumeSessionState, ResumeStrategy, ReviewTarget, SessionLocator, Timestamp,
-    decide_resume_strategy,
+    ResumeSessionState, ResumeStrategy, ReviewTarget, SessionLocator, decide_resume_strategy,
+    now_ts,
 };
 use serde::{Deserialize, Serialize};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GeminiAdapter {
@@ -228,13 +227,6 @@ fn ensure_bundle_target_matches(bundle: &ResumeBundle, target: &ReviewTarget) ->
         bundle.review_target.repository,
         bundle.review_target.pull_request_number
     )))
-}
-
-fn now_ts() -> Timestamp {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time before unix epoch")
-        .as_secs() as i64
 }
 
 #[cfg(test)]

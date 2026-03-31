@@ -17,10 +17,8 @@ fn load_refresh_identity_fixture() -> RefreshIdentityFixture {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
         "../../tests/fixtures/fixture_refresh_rebase_target_drift/refresh_identity_case.json",
     );
-    let raw = fs::read_to_string(&path)
-        .unwrap_or_else(|err| panic!("failed to read fixture {}: {err}", path.display()));
-    serde_json::from_str(&raw)
-        .unwrap_or_else(|err| panic!("failed to decode fixture {}: {err}", path.display()))
+    let raw = fs::read_to_string(&path).expect("failed to read refresh identity fixture");
+    serde_json::from_str(&raw).expect("failed to decode refresh identity fixture")
 }
 
 #[test]

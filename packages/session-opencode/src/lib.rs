@@ -1,15 +1,14 @@
 use roger_app_core::{
     AppError, ContinuityQuality, HarnessAdapter, LaunchAction, LaunchIntent,
     ProviderContinuityCapability, Result, ResumeAttemptOutcome, ResumeBundle, ResumeBundleProfile,
-    ResumeDecision, ResumeSessionState, ResumeStrategy, ReviewTarget, SessionLocator, Timestamp,
-    decide_resume_strategy,
+    ResumeDecision, ResumeSessionState, ResumeStrategy, ReviewTarget, SessionLocator,
+    decide_resume_strategy, now_ts,
 };
 use roger_storage::{
     ResolveSessionLaunchBinding, ResumeLedgerResolution, RogerStore, StorageError,
 };
 use serde::{Deserialize, Serialize};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenCodeAdapter {
@@ -432,13 +431,6 @@ fn ensure_dropout_control_bundle(bundle: &ResumeBundle) -> Result<()> {
 
 fn map_storage_error(error: StorageError) -> AppError {
     AppError::ProviderError(error.to_string())
-}
-
-fn now_ts() -> Timestamp {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time before unix epoch")
-        .as_secs() as i64
 }
 
 #[cfg(test)]

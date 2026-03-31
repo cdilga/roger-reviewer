@@ -53,7 +53,7 @@ fn storage_smoke_persists_resume_and_approval_state_across_restart() -> Result<(
 
     {
         let store = RogerStore::open(&root)?;
-        assert_eq!(store.schema_version()?, 8);
+        assert_eq!(store.schema_version()?, 9);
 
         store.put_launch_profile(CreateLaunchProfile {
             id: "profile-open-pr",
@@ -277,13 +277,14 @@ fn storage_smoke_persists_resume_and_approval_state_across_restart() -> Result<(
             ui_target: Some("tui"),
             instance_preference: Some("always_new"),
         })?;
-        match resolved {
-            SessionBindingResolution::Resolved(binding) => {
-                assert_eq!(binding.id, "binding-tui");
-                assert_eq!(binding.session_id, "session-1");
-            }
-            other => panic!("expected resolved binding, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                &resolved,
+                SessionBindingResolution::Resolved(binding)
+                    if binding.id == "binding-tui" && binding.session_id == "session-1"
+            ),
+            "expected resolved binding, got {resolved:?}"
+        );
 
         assert_eq!(
             reopened.artifact_bytes("artifact-inline")?,
@@ -381,15 +382,14 @@ fn launch_binding_resolution_fails_closed_for_ambiguous_and_mismatched_state() -
         ui_target: Some("cli"),
         instance_preference: None,
     })?;
-    match ambiguous {
-        SessionBindingResolution::Ambiguous { session_ids } => {
-            assert_eq!(
-                session_ids,
-                vec!["session-1".to_owned(), "session-2".to_owned()]
-            );
-        }
-        other => panic!("expected ambiguous resolution, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            &ambiguous,
+            SessionBindingResolution::Ambiguous { session_ids }
+                if session_ids == &vec!["session-1".to_owned(), "session-2".to_owned()]
+        ),
+        "expected ambiguous resolution, got {ambiguous:?}"
+    );
 
     let stale = store.resolve_session_launch_binding(ResolveSessionLaunchBinding {
         surface: LaunchSurface::Cli,
@@ -405,13 +405,14 @@ fn launch_binding_resolution_fails_closed_for_ambiguous_and_mismatched_state() -
         ui_target: Some("cli"),
         instance_preference: Some("reuse_if_possible"),
     })?;
-    match stale {
-        SessionBindingResolution::Stale { binding_id, reason } => {
-            assert_eq!(binding_id, "binding-1");
-            assert!(reason.contains("binding target mismatch"));
-        }
-        other => panic!("expected stale resolution, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            &stale,
+            SessionBindingResolution::Stale { binding_id, reason }
+                if binding_id == "binding-1" && reason.contains("binding target mismatch")
+        ),
+        "expected stale resolution, got {stale:?}"
+    );
 
     Ok(())
 }

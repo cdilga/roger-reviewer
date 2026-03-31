@@ -134,27 +134,25 @@ fn rr_return_rebinds_to_the_correct_session_after_restart() -> Result<()> {
         ResumeAttemptOutcome::ReopenedUsable,
     )?;
 
-    match resolution {
-        ResumeLedgerResolution::Resolved(ledger) => {
-            assert_eq!(ledger.binding.id, BINDING_ID);
-            assert_eq!(ledger.binding.session_id, SESSION_ID);
-            assert_eq!(ledger.session.id, SESSION_ID);
-            assert_eq!(ledger.session.provider, "opencode");
-            assert_eq!(ledger.decision.strategy, ResumeStrategy::ReopenExisting);
-            assert_eq!(
-                ledger.decision.reason_code,
-                ResumeDecisionReason::LocatorReopenedUsable
-            );
-            assert_eq!(
-                ledger
-                    .resume_bundle
-                    .as_ref()
-                    .map(|bundle| bundle.profile.clone()),
-                Some(ResumeBundleProfile::DropoutControl)
-            );
-        }
-        other => panic!("expected resolved rr return rebind, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            &resolution,
+            ResumeLedgerResolution::Resolved(ledger)
+                if ledger.binding.id == BINDING_ID
+                    && ledger.binding.session_id == SESSION_ID
+                    && ledger.session.id == SESSION_ID
+                    && ledger.session.provider == "opencode"
+                    && ledger.decision.strategy == ResumeStrategy::ReopenExisting
+                    && ledger.decision.reason_code
+                        == ResumeDecisionReason::LocatorReopenedUsable
+                    && ledger
+                        .resume_bundle
+                        .as_ref()
+                        .map(|bundle| bundle.profile.clone())
+                        == Some(ResumeBundleProfile::DropoutControl)
+        ),
+        "expected resolved rr return rebind, got {resolution:?}"
+    );
 
     Ok(())
 }
@@ -183,26 +181,30 @@ fn rr_return_falls_back_to_reseed_when_locator_is_unavailable() -> Result<()> {
         ResumeAttemptOutcome::ReopenUnavailable,
     )?;
 
-    match resolution {
-        ResumeLedgerResolution::Resolved(ledger) => {
-            assert_eq!(ledger.session.id, SESSION_ID);
-            assert_eq!(ledger.decision.strategy, ResumeStrategy::ReseedFromBundle);
-            assert_eq!(
-                ledger.decision.reason_code,
-                ResumeDecisionReason::ReopenUnavailableNeedsReseed
-            );
-            assert_eq!(
-                ledger.decision.continuity_quality,
-                ContinuityQuality::Degraded
-            );
-            let bundle = ledger
-                .resume_bundle
-                .expect("resume bundle must be available");
-            assert_eq!(bundle.profile, ResumeBundleProfile::DropoutControl);
-            assert_eq!(bundle.review_target, target);
-        }
-        other => panic!("expected reseed resolution for unavailable locator, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            &resolution,
+            ResumeLedgerResolution::Resolved(ledger)
+                if ledger.session.id == SESSION_ID
+                    && ledger.decision.strategy == ResumeStrategy::ReseedFromBundle
+                    && ledger.decision.reason_code
+                        == ResumeDecisionReason::ReopenUnavailableNeedsReseed
+                    && ledger.decision.continuity_quality == ContinuityQuality::Degraded
+                    && ledger
+                        .resume_bundle
+                        .as_ref()
+                        .expect("resume bundle must be available")
+                        .profile
+                        == ResumeBundleProfile::DropoutControl
+                    && ledger
+                        .resume_bundle
+                        .as_ref()
+                        .expect("resume bundle must be available")
+                        .review_target
+                        == target
+        ),
+        "expected reseed resolution for unavailable locator, got {resolution:?}"
+    );
 
     Ok(())
 }

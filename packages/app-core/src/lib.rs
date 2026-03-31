@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::from_str;
 use std::collections::{HashMap, HashSet};
+pub use crate::time::now_ts;
 
 pub mod tui_shell;
+pub mod time;
+pub mod cli_config;
 
 pub type Timestamp = i64;
 
@@ -674,6 +677,57 @@ pub struct OutboundPostGateInput<'a> {
     pub reconfirmed_finding_ids: &'a HashSet<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostingAdapterItemStatus {
+    Posted,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostingAdapterItemResult {
+    pub draft_id: String,
+    pub status: PostingAdapterItemStatus,
+    pub remote_identifier: Option<String>,
+    pub failure_code: Option<String>,
+}
+
+pub trait OutboundPostingAdapter {
+    fn post_approved_draft_batch(
+        &self,
+        batch: &OutboundDraftBatch,
+        drafts: &[OutboundDraft],
+    ) -> std::result::Result<Vec<PostingAdapterItemResult>, String>;
+}
+
+pub struct ExplicitPostingInput<'a> {
+    pub action_id: &'a str,
+    pub provider: &'a str,
+    pub batch: &'a OutboundDraftBatch,
+    pub drafts: &'a [OutboundDraft],
+    pub approval: &'a OutboundApprovalToken,
+    pub refresh_signals: &'a [DraftRefreshSignal],
+    pub reconfirmed_finding_ids: &'a HashSet<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExplicitPostingOutcome {
+    Posted,
+    Partial,
+    Failed,
+    Blocked,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExplicitPostingResult {
+    pub outcome: ExplicitPostingOutcome,
+    pub reason_code: Option<String>,
+    pub posted_action: Option<PostedAction>,
+    pub item_results: Vec<PostingAdapterItemResult>,
+    pub retry_draft_ids: Vec<String>,
+}
+
 pub fn outbound_target_tuple_json(batch: &OutboundDraftBatch) -> String {
     serde_json::json!({
         "review_session_id": batch.review_session_id,
@@ -819,6 +873,188 @@ pub fn evaluate_outbound_post_gate(input: OutboundPostGateInput<'_>) -> Outbound
     }
 
     OutboundPostGateDecision::PostAllowed
+}
+
+pub fn execute_explicit_posting_flow(
+    input: ExplicitPostingInput<'_>,
+    adapter: &dyn OutboundPostingAdapter,
+) -> ExplicitPostingResult {
+    let gate_decision = evaluate_outbound_post_gate(OutboundPostGateInput {
+        batch: input.batch,
+        drafts: input.drafts,
+        approval: input.approval,
+        refresh_signals: input.refresh_signals,
+        reconfirmed_finding_ids: input.reconfirmed_finding_ids,
+    });
+
+    if let OutboundPostGateDecision::Blocked { reason_code } = gate_decision {
+        return ExplicitPostingResult {
+            outcome: ExplicitPostingOutcome::Blocked,
+            reason_code: Some(reason_code),
+            posted_action: None,
+            item_results: Vec::new(),
+            retry_draft_ids: Vec::new(),
+        };
+    }
+
+    let retry_all_drafts = input
+        .drafts
+        .iter()
+        .map(|draft| draft.id.clone())
+        .collect::<Vec<_>>();
+
+    let item_results = match adapter.post_approved_draft_batch(input.batch, input.drafts) {
+        Ok(results) => results,
+        Err(err) => {
+            let reason_code = format!("adapter_error:{err}");
+            return ExplicitPostingResult {
+                outcome: ExplicitPostingOutcome::Failed,
+                reason_code: Some(reason_code.clone()),
+                posted_action: Some(PostedAction {
+                    id: input.action_id.to_owned(),
+                    draft_batch_id: input.batch.id.clone(),
+                    provider: input.provider.to_owned(),
+                    remote_identifier: "adapter_error".to_owned(),
+                    status: PostedActionStatus::Failed,
+                    posted_payload_digest: input.batch.payload_digest.clone(),
+                    posted_at: now_ts(),
+                    failure_code: Some(reason_code),
+                }),
+                item_results: Vec::new(),
+                retry_draft_ids: retry_all_drafts,
+            };
+        }
+    };
+
+    if let Err(reason_code) = validate_posting_adapter_results(input.drafts, &item_results) {
+        return ExplicitPostingResult {
+            outcome: ExplicitPostingOutcome::Failed,
+            reason_code: Some(reason_code.clone()),
+            posted_action: Some(PostedAction {
+                id: input.action_id.to_owned(),
+                draft_batch_id: input.batch.id.clone(),
+                provider: input.provider.to_owned(),
+                remote_identifier: "adapter_result_invalid".to_owned(),
+                status: PostedActionStatus::Failed,
+                posted_payload_digest: input.batch.payload_digest.clone(),
+                posted_at: now_ts(),
+                failure_code: Some(reason_code),
+            }),
+            item_results,
+            retry_draft_ids: retry_all_drafts,
+        };
+    }
+
+    let succeeded = item_results
+        .iter()
+        .filter(|item| item.status == PostingAdapterItemStatus::Posted)
+        .count();
+    let total = input.drafts.len();
+    let retry_draft_ids = item_results
+        .iter()
+        .filter(|item| item.status == PostingAdapterItemStatus::Failed)
+        .map(|item| item.draft_id.clone())
+        .collect::<Vec<_>>();
+
+    let (outcome, status, failure_code) = if succeeded == total {
+        (
+            ExplicitPostingOutcome::Posted,
+            PostedActionStatus::Succeeded,
+            None,
+        )
+    } else if succeeded == 0 {
+        (
+            ExplicitPostingOutcome::Failed,
+            PostedActionStatus::Failed,
+            Some(
+                item_results
+                    .iter()
+                    .find_map(|item| item.failure_code.clone())
+                    .unwrap_or_else(|| "post_failed".to_owned()),
+            ),
+        )
+    } else {
+        (
+            ExplicitPostingOutcome::Partial,
+            PostedActionStatus::Partial,
+            Some("partial_failure".to_owned()),
+        )
+    };
+
+    let posted_action = PostedAction {
+        id: input.action_id.to_owned(),
+        draft_batch_id: input.batch.id.clone(),
+        provider: input.provider.to_owned(),
+        remote_identifier: aggregate_remote_identifiers(&item_results),
+        status,
+        posted_payload_digest: input.batch.payload_digest.clone(),
+        posted_at: now_ts(),
+        failure_code: failure_code.clone(),
+    };
+
+    ExplicitPostingResult {
+        outcome,
+        reason_code: failure_code,
+        posted_action: Some(posted_action),
+        item_results,
+        retry_draft_ids,
+    }
+}
+
+fn validate_posting_adapter_results(
+    drafts: &[OutboundDraft],
+    item_results: &[PostingAdapterItemResult],
+) -> std::result::Result<(), String> {
+    let expected = drafts
+        .iter()
+        .map(|draft| draft.id.as_str())
+        .collect::<HashSet<_>>();
+    if item_results.len() != expected.len() {
+        return Err("adapter_result_invalid:missing_draft_results".to_owned());
+    }
+
+    let mut seen = HashSet::new();
+    for item in item_results {
+        if !expected.contains(item.draft_id.as_str()) {
+            return Err(format!(
+                "adapter_result_invalid:unexpected_draft:{}",
+                item.draft_id
+            ));
+        }
+        if !seen.insert(item.draft_id.as_str()) {
+            return Err(format!(
+                "adapter_result_invalid:duplicate_draft:{}",
+                item.draft_id
+            ));
+        }
+        if item.status == PostingAdapterItemStatus::Posted && item.remote_identifier.is_none() {
+            return Err(format!(
+                "adapter_result_invalid:missing_remote_identifier:{}",
+                item.draft_id
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn aggregate_remote_identifiers(item_results: &[PostingAdapterItemResult]) -> String {
+    let mut remote_ids = item_results
+        .iter()
+        .filter(|item| item.status == PostingAdapterItemStatus::Posted)
+        .filter_map(|item| item.remote_identifier.as_ref())
+        .cloned()
+        .collect::<Vec<_>>();
+    remote_ids.sort();
+    remote_ids.dedup();
+
+    if remote_ids.is_empty() {
+        "none".to_owned()
+    } else if remote_ids.len() == 1 {
+        remote_ids[0].clone()
+    } else {
+        remote_ids.join(",")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

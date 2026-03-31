@@ -1,8 +1,10 @@
 [workspace]
 members = [
   "packages/cli",
+  "packages/config",
   "packages/app-core",
   "packages/prompt-engine",
+  "packages/session-codex",
   "packages/session-gemini",
   "packages/session-opencode",
   "packages/bridge",

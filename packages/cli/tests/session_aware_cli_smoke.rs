@@ -1,13 +1,15 @@
 #![cfg(unix)]
 
 use roger_app_core::{
-    ContinuityQuality, HarnessAdapter, LaunchAction, LaunchIntent, ResumeBundle,
-    ResumeBundleProfile, ReviewTarget, RogerCommandId, Surface,
+    ContinuityQuality, HarnessAdapter, HarnessCommandBinding, LaunchAction, LaunchIntent,
+    ResumeBundle, ResumeBundleProfile, ReviewTarget, RogerCommand, RogerCommandId,
+    RogerCommandInvocationSurface, RogerCommandRouteStatus, Surface, route_harness_command,
 };
 use roger_cli::{CliRuntime, HarnessCommandInvocation, run, run_harness_command};
 use roger_session_opencode::OpenCodeAdapter;
 use roger_storage::{CreateReviewSession, CreateSessionLaunchBinding, LaunchSurface, RogerStore};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -81,6 +83,10 @@ fn run_harness(
 
 fn parse_robot_payload(stdout: &str) -> Value {
     serde_json::from_str(stdout).expect("robot payload json")
+}
+
+fn parse_toon_payload(stdout: &str) -> Value {
+    toon_format::decode_default(stdout).expect("robot payload toon")
 }
 
 fn init_repo(temp: &TempDir) -> PathBuf {
@@ -181,6 +187,36 @@ fn seed_session_with_provider(
             worktree_root: None,
         })
         .expect("create binding");
+}
+
+fn seed_session_for_finder(
+    runtime: &CliRuntime,
+    session_id: &str,
+    repository: &str,
+    pr_number: u64,
+    attention_state: &str,
+) {
+    let target = ReviewTarget {
+        repository: repository.to_owned(),
+        pull_request_number: pr_number,
+        base_ref: "main".to_owned(),
+        head_ref: format!("feature-{pr_number}"),
+        base_commit: "aaa".to_owned(),
+        head_commit: "bbb".to_owned(),
+    };
+    let store = RogerStore::open(&runtime.store_root).expect("open store");
+    store
+        .create_review_session(CreateReviewSession {
+            id: session_id,
+            review_target: &target,
+            provider: "opencode",
+            session_locator: None,
+            resume_bundle_artifact_id: None,
+            continuity_state: "awaiting_resume",
+            attention_state,
+            launch_profile_id: Some("profile-open-pr"),
+        })
+        .expect("create session");
 }
 
 #[test]
@@ -290,7 +326,7 @@ fn resume_stale_locator_falls_back_to_resumebundle_reseed() {
 }
 
 #[test]
-fn review_blocks_truthfully_for_non_blessed_provider() {
+fn review_blocks_truthfully_for_unsupported_provider() {
     let temp = tempdir().expect("tempdir");
     let repo = init_repo(&temp);
     let (_stub_dir, opencode_bin) = write_stub_binary(false);
@@ -302,15 +338,21 @@ fn review_blocks_truthfully_for_non_blessed_provider() {
     };
 
     let review = run_rr(
-        &["review", "--pr", "42", "--provider", "gemini", "--robot"],
+        &["review", "--pr", "42", "--provider", "claude", "--robot"],
         &runtime,
     );
     assert_eq!(review.exit_code, 3, "{}", review.stderr);
 
     let payload = parse_robot_payload(&review.stdout);
     assert_eq!(payload["outcome"], "blocked");
-    assert_eq!(payload["data"]["provider"], "gemini");
-    assert_eq!(payload["data"]["supported_provider"], "opencode");
+    assert_eq!(payload["data"]["provider"], "claude");
+    assert_eq!(
+        payload["data"]["supported_providers"],
+        Value::Array(vec![
+            Value::String("opencode".to_owned()),
+            Value::String("codex".to_owned())
+        ])
+    );
     assert!(
         payload["repair_actions"]
             .as_array()
@@ -321,6 +363,50 @@ fn review_blocks_truthfully_for_non_blessed_provider() {
                 .expect("repair action string")
                 .contains("--provider opencode"))
     );
+}
+
+#[test]
+fn codex_review_and_resume_are_truthful_tier_a_degraded_paths() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let review = run_rr(
+        &["review", "--pr", "42", "--provider", "codex", "--robot"],
+        &runtime,
+    );
+    assert_eq!(review.exit_code, 5, "{}", review.stderr);
+
+    let review_payload = parse_robot_payload(&review.stdout);
+    assert_eq!(review_payload["outcome"], "degraded");
+    assert_eq!(review_payload["data"]["provider"], "codex");
+    assert_eq!(review_payload["data"]["session_path"], "started_fresh");
+    assert_eq!(review_payload["data"]["continuity_quality"], "degraded");
+    assert!(
+        review_payload["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .any(|warning| warning.as_str().expect("warning text").contains("tier-a"))
+    );
+
+    let resume = run_rr(&["resume", "--pr", "42", "--robot"], &runtime);
+    assert_eq!(resume.exit_code, 5, "{}", resume.stderr);
+
+    let resume_payload = parse_robot_payload(&resume.stdout);
+    assert_eq!(resume_payload["outcome"], "degraded");
+    assert_eq!(resume_payload["data"]["provider"], "codex");
+    assert_eq!(
+        resume_payload["data"]["resume_path"],
+        "reseeded_from_bundle"
+    );
+    assert_eq!(resume_payload["data"]["continuity_quality"], "degraded");
 }
 
 #[test]
@@ -486,5 +572,353 @@ fn harness_command_falls_back_truthfully_when_provider_binding_is_absent() {
                 .as_str()
                 .expect("repair action")
                 .contains("rr return"))
+    );
+}
+
+#[test]
+fn harness_return_stale_locator_matches_cli_degraded_semantics() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_ok_stub_dir, ok_bin) = write_stub_binary(false);
+    let (_fail_stub_dir, fail_bin) = write_stub_binary(true);
+
+    let stable_runtime = CliRuntime {
+        cwd: repo.clone(),
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: ok_bin.to_string_lossy().to_string(),
+    };
+
+    let review = run_rr(&["review", "--pr", "42", "--robot"], &stable_runtime);
+    assert_eq!(review.exit_code, 0, "{}", review.stderr);
+
+    let stale_runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: fail_bin.to_string_lossy().to_string(),
+    };
+
+    let harness_return = run_harness(
+        RogerCommandId::RogerReturn,
+        "opencode",
+        &stale_runtime,
+        Some(42),
+    );
+    assert_eq!(harness_return.exit_code, 5, "{}", harness_return.stderr);
+
+    let payload = parse_robot_payload(&harness_return.stdout);
+    assert_eq!(payload["schema_id"], "rr.robot.return.v1");
+    assert_eq!(payload["outcome"], "degraded");
+    assert_eq!(payload["data"]["return_path"], "reseeded_session");
+}
+
+#[test]
+fn sessions_lists_filters_and_compacts_with_explicit_follow_on_hints() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    seed_session_for_finder(
+        &runtime,
+        "session-a",
+        "owner/repo-a",
+        101,
+        "awaiting_user_input",
+    );
+    seed_session_for_finder(
+        &runtime,
+        "session-b",
+        "owner/repo-b",
+        202,
+        "review_launched",
+    );
+    seed_session_for_finder(
+        &runtime,
+        "session-c",
+        "owner/repo-c",
+        303,
+        "awaiting_user_input",
+    );
+
+    let sessions = run_rr(&["sessions", "--robot"], &runtime);
+    assert_eq!(sessions.exit_code, 0, "{}", sessions.stderr);
+    let payload = parse_robot_payload(&sessions.stdout);
+    assert_eq!(payload["schema_id"], "rr.robot.sessions.v1");
+    assert_eq!(payload["outcome"], "complete");
+    assert_eq!(payload["data"]["count"], 3);
+    assert_eq!(payload["data"]["truncated"], false);
+    let items = payload["data"]["items"].as_array().expect("session items");
+    assert_eq!(items.len(), 3);
+    for item in items {
+        assert!(item.get("session_id").is_some());
+        assert!(item.get("repo").is_some());
+        assert!(item["target"].get("repository").is_some());
+        assert!(item["target"].get("pull_request").is_some());
+        assert!(item.get("attention_state").is_some());
+        assert!(item.get("updated_at").is_some());
+        assert_eq!(
+            item["follow_on"]["requires_explicit_session"].as_bool(),
+            Some(true)
+        );
+        assert!(
+            item["follow_on"]["resume_command"]
+                .as_str()
+                .expect("resume command")
+                .contains("--session ")
+        );
+    }
+
+    let compact_filtered = run_rr(
+        &[
+            "sessions",
+            "--attention",
+            "awaiting_user_input",
+            "--limit",
+            "1",
+            "--robot",
+            "--robot-format",
+            "compact",
+        ],
+        &runtime,
+    );
+    assert_eq!(compact_filtered.exit_code, 0, "{}", compact_filtered.stderr);
+    let compact_payload = parse_robot_payload(&compact_filtered.stdout);
+    assert_eq!(compact_payload["schema_id"], "rr.robot.sessions.v1");
+    assert_eq!(compact_payload["robot_format"], "compact");
+    assert_eq!(compact_payload["data"]["count"], 1);
+    assert_eq!(compact_payload["data"]["truncated"], true);
+    assert_eq!(
+        compact_payload["data"]["items"]
+            .as_array()
+            .expect("compact items")
+            .len(),
+        1
+    );
+    assert!(
+        compact_payload["data"]["items"][0]
+            .get("session_id")
+            .is_some()
+    );
+    assert!(compact_payload["data"]["items"][0].get("repo").is_some());
+    assert!(
+        compact_payload["data"]["items"][0]
+            .get("pull_request")
+            .is_some()
+    );
+    assert_eq!(
+        compact_payload["data"]["items"][0]["attention_state"],
+        "awaiting_user_input"
+    );
+}
+
+#[test]
+fn search_reports_truthful_degraded_mode_and_stable_robot_fields() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let search = run_rr(&["search", "--query", "stale draft", "--robot"], &runtime);
+    assert_eq!(search.exit_code, 5, "{}", search.stderr);
+    let payload = parse_robot_payload(&search.stdout);
+    assert_eq!(payload["schema_id"], "rr.robot.search.v1");
+    assert_eq!(payload["outcome"], "degraded");
+    assert_eq!(payload["data"]["query"], "stale draft");
+    assert_eq!(payload["data"]["mode"], "lexical_only");
+    assert!(payload["data"]["items"].is_array());
+    assert!(payload["data"]["count"].is_number());
+    assert!(payload["data"]["truncated"].is_boolean());
+    assert!(
+        payload["data"]["degraded_reasons"]
+            .as_array()
+            .expect("degraded reasons")
+            .iter()
+            .any(|reason| reason
+                .as_str()
+                .expect("degraded reason")
+                .contains("lexical"))
+    );
+
+    let compact = run_rr(
+        &[
+            "search",
+            "--query",
+            "stale draft",
+            "--robot",
+            "--robot-format",
+            "compact",
+        ],
+        &runtime,
+    );
+    assert_eq!(compact.exit_code, 5, "{}", compact.stderr);
+    let compact_payload = parse_robot_payload(&compact.stdout);
+    assert_eq!(compact_payload["schema_id"], "rr.robot.search.v1");
+    assert_eq!(compact_payload["robot_format"], "compact");
+    assert!(compact_payload["data"]["items"].is_array());
+}
+
+#[test]
+fn robot_docs_surfaces_schema_inventory_and_blocks_unknown_topics() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let schemas = run_rr(&["robot-docs", "schemas", "--robot"], &runtime);
+    assert_eq!(schemas.exit_code, 0, "{}", schemas.stderr);
+    let payload = parse_robot_payload(&schemas.stdout);
+    assert_eq!(payload["schema_id"], "rr.robot.robot_docs.v1");
+    assert_eq!(payload["outcome"], "complete");
+    assert_eq!(payload["data"]["topic"], "schemas");
+    assert_eq!(payload["data"]["version"], "0.1.0");
+    let items = payload["data"]["items"].as_array().expect("schema items");
+    assert!(
+        items
+            .iter()
+            .any(|item| item["schema_id"] == "rr.robot.sessions.v1")
+    );
+    assert!(
+        items
+            .iter()
+            .any(|item| item["schema_id"] == "rr.robot.search.v1")
+    );
+
+    let compact = run_rr(
+        &[
+            "robot-docs",
+            "commands",
+            "--robot",
+            "--robot-format",
+            "compact",
+        ],
+        &runtime,
+    );
+    assert_eq!(compact.exit_code, 0, "{}", compact.stderr);
+    let compact_payload = parse_robot_payload(&compact.stdout);
+    assert_eq!(compact_payload["schema_id"], "rr.robot.robot_docs.v1");
+    assert_eq!(compact_payload["robot_format"], "compact");
+    assert_eq!(compact_payload["data"]["topic"], "commands");
+
+    let blocked = run_rr(&["robot-docs", "unknown-topic", "--robot"], &runtime);
+    assert_eq!(blocked.exit_code, 3, "{}", blocked.stderr);
+    let blocked_payload = parse_robot_payload(&blocked.stdout);
+    assert_eq!(blocked_payload["schema_id"], "rr.robot.robot_docs.v1");
+    assert_eq!(blocked_payload["outcome"], "blocked");
+    assert_eq!(
+        blocked_payload["data"]["reason_code"],
+        "unknown_robot_docs_topic"
+    );
+}
+
+#[test]
+fn partial_harness_binding_fails_closed_with_rr_fallback() {
+    let bindings = vec![HarnessCommandBinding {
+        provider: "opencode".to_owned(),
+        command_id: RogerCommandId::RogerStatus,
+        provider_command_syntax: "/roger-status".to_owned(),
+        capability_requirements: vec!["supports_roger_commands".to_owned()],
+    }];
+
+    let command = RogerCommand {
+        command_id: RogerCommandId::RogerReturn,
+        review_session_id: Some("session-1".to_owned()),
+        review_run_id: None,
+        args: HashMap::new(),
+        invocation_surface: RogerCommandInvocationSurface::HarnessCommand,
+        provider: "opencode".to_owned(),
+    };
+
+    let routed = route_harness_command(&command, &bindings);
+    assert_eq!(routed.status, RogerCommandRouteStatus::FallbackRequired);
+    assert_eq!(routed.next_action.fallback_cli_command, "rr return");
+    assert!(
+        routed
+            .next_action
+            .session_finder_hint
+            .expect("session finder hint")
+            .contains("--session <id>")
+    );
+}
+
+#[test]
+fn status_and_findings_support_toon_robot_format() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let review = run_rr(&["review", "--pr", "42", "--robot"], &runtime);
+    assert_eq!(review.exit_code, 0, "{}", review.stderr);
+
+    let status = run_rr(
+        &["status", "--pr", "42", "--robot", "--robot-format", "toon"],
+        &runtime,
+    );
+    assert_eq!(status.exit_code, 0, "{}", status.stderr);
+    let status_payload = parse_toon_payload(&status.stdout);
+    assert_eq!(status_payload["schema_id"], "rr.robot.status.v1");
+    assert_eq!(status_payload["robot_format"], "toon");
+    assert_eq!(status_payload["outcome"], "complete");
+
+    let findings = run_rr(
+        &[
+            "findings",
+            "--pr",
+            "42",
+            "--robot",
+            "--robot-format",
+            "toon",
+        ],
+        &runtime,
+    );
+    assert_eq!(findings.exit_code, 0, "{}", findings.stderr);
+    let findings_payload = parse_toon_payload(&findings.stdout);
+    assert_eq!(findings_payload["schema_id"], "rr.robot.findings.v1");
+    assert_eq!(findings_payload["robot_format"], "toon");
+}
+
+#[test]
+fn toon_is_rejected_outside_status_and_findings_in_this_slice() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let review = run_rr(
+        &["review", "--pr", "42", "--robot", "--robot-format", "toon"],
+        &runtime,
+    );
+    assert_eq!(review.exit_code, 2);
+    assert!(
+        review
+            .stderr
+            .contains("toon format is only supported for status/findings in this slice"),
+        "{}",
+        review.stderr
     );
 }

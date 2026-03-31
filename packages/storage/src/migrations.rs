@@ -28,4 +28,8 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
         "0008_worktree_preflight_plans",
         include_str!("../migrations/0008_worktree_preflight_plans.sql"),
     ),
+    (
+        "0009_outcome_event_usefulness",
+        include_str!("../migrations/0009_outcome_event_usefulness.sql"),
+    ),
 ];

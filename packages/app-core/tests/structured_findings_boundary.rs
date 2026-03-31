@@ -90,6 +90,10 @@ fn partial_pack_salvages_valid_findings_and_degrades_invalid_anchors() {
     });
 
     assert_eq!(result.state, FindingsBoundaryState::Partial);
+    assert_eq!(
+        result.raw_output_artifact_id.as_deref(),
+        Some("artifact-raw-2")
+    );
     assert_eq!(result.refresh_candidates().unwrap().len(), 1);
     assert_eq!(result.draft_candidates().unwrap().len(), 1);
     assert_eq!(result.issues.len(), 2);
@@ -135,6 +139,10 @@ fn malformed_pack_enters_repair_needed_until_retry_budget_is_exhausted() {
         retry_budget: 1,
     });
     assert_eq!(first_attempt.state, FindingsBoundaryState::RepairNeeded);
+    assert_eq!(
+        first_attempt.raw_output_artifact_id.as_deref(),
+        Some("artifact-raw-3")
+    );
     assert!(first_attempt.should_retry);
     assert!(first_attempt.refresh_candidates().is_err());
     assert_eq!(
@@ -149,5 +157,9 @@ fn malformed_pack_enters_repair_needed_until_retry_budget_is_exhausted() {
         retry_budget: 1,
     });
     assert_eq!(exhausted.state, FindingsBoundaryState::Failed);
+    assert_eq!(
+        exhausted.raw_output_artifact_id.as_deref(),
+        Some("artifact-raw-3")
+    );
     assert!(!exhausted.should_retry);
 }

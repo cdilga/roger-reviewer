@@ -18,13 +18,15 @@ fn preflight_required_when_dirty_and_different_branch() {
         working_tree_dirty: true,
         existing_worktrees: vec![],
     };
-    match classify_worktree_need(&input) {
-        WorktreeNeed::Required { reason } => {
-            assert!(reason.contains("dirty"));
-            assert!(reason.contains("feat/review-target"));
-        }
-        other => panic!("expected Required, got {other:?}"),
-    }
+    let result = classify_worktree_need(&input);
+    assert!(
+        matches!(
+            &result,
+            WorktreeNeed::Required { reason }
+                if reason.contains("dirty") && reason.contains("feat/review-target")
+        ),
+        "expected Required, got {result:?}"
+    );
 }
 
 #[test]
@@ -87,13 +89,15 @@ fn instance_same_pr_ambiguity_fails_closed() {
         .unwrap();
     }
 
-    match reg.resolve_for_pr(42) {
-        Err(WorktreeError::SamePrAmbiguity { pr, instances }) => {
-            assert_eq!(pr, 42);
-            assert_eq!(instances.len(), 2);
-        }
-        other => panic!("expected SamePrAmbiguity, got {other:?}"),
-    }
+    let result = reg.resolve_for_pr(42);
+    assert!(
+        matches!(
+            &result,
+            Err(WorktreeError::SamePrAmbiguity { pr, instances })
+                if *pr == 42 && instances.len() == 2
+        ),
+        "expected SamePrAmbiguity, got {result:?}"
+    );
 }
 
 #[test]
@@ -179,7 +183,8 @@ fn launch_routing_creates_new_when_empty() {
 #[test]
 fn launch_routing_resolves_single_match() {
     let mut reg = InstanceRegistry::new();
-    reg.register(make_inst("r1", 42, InstanceStatus::Active)).unwrap();
+    reg.register(make_inst("r1", 42, InstanceStatus::Active))
+        .unwrap();
     let result = resolve_launch_routing(&reg, &make_query(42)).unwrap();
     assert_eq!(
         result,
@@ -192,27 +197,29 @@ fn launch_routing_resolves_single_match() {
 #[test]
 fn launch_routing_ambiguous_fails_closed() {
     let mut reg = InstanceRegistry::new();
-    reg.register(make_inst("r1", 42, InstanceStatus::Active)).unwrap();
-    reg.register(make_inst("r2", 42, InstanceStatus::Active)).unwrap();
+    reg.register(make_inst("r1", 42, InstanceStatus::Active))
+        .unwrap();
+    reg.register(make_inst("r2", 42, InstanceStatus::Active))
+        .unwrap();
 
     let result = resolve_launch_routing(&reg, &make_query(42)).unwrap();
-    match result {
-        LaunchRoutingOutcome::Ambiguous {
-            candidates,
-            guidance,
-        } => {
-            assert_eq!(candidates.len(), 2);
-            assert!(guidance.contains("--instance"));
-        }
-        other => panic!("expected Ambiguous, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            &result,
+            LaunchRoutingOutcome::Ambiguous { candidates, guidance }
+                if candidates.len() == 2 && guidance.contains("--instance")
+        ),
+        "expected Ambiguous, got {result:?}"
+    );
 }
 
 #[test]
 fn launch_routing_explicit_instance_overrides() {
     let mut reg = InstanceRegistry::new();
-    reg.register(make_inst("r1", 42, InstanceStatus::Active)).unwrap();
-    reg.register(make_inst("r2", 42, InstanceStatus::Active)).unwrap();
+    reg.register(make_inst("r1", 42, InstanceStatus::Active))
+        .unwrap();
+    reg.register(make_inst("r2", 42, InstanceStatus::Active))
+        .unwrap();
 
     let mut query = make_query(42);
     query.explicit_instance = Some("r2".to_owned());
@@ -228,7 +235,8 @@ fn launch_routing_explicit_instance_overrides() {
 #[test]
 fn launch_routing_recovers_idle_instance() {
     let mut reg = InstanceRegistry::new();
-    reg.register(make_inst("idle-1", 42, InstanceStatus::Idle)).unwrap();
+    reg.register(make_inst("idle-1", 42, InstanceStatus::Idle))
+        .unwrap();
 
     let mut query = make_query(42);
     query.allow_stale_recovery = true;

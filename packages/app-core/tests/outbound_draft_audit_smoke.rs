@@ -1,9 +1,12 @@
 use roger_app_core::{
-    DraftRefreshSignal, OutboundApprovalToken, OutboundDraft, OutboundDraftBatch,
-    OutboundPostGateDecision, OutboundPostGateInput, PostedAction, evaluate_outbound_post_gate,
+    DraftRefreshSignal, ExplicitPostingInput, ExplicitPostingOutcome, OutboundApprovalToken,
+    OutboundDraft, OutboundDraftBatch, OutboundPostGateDecision, OutboundPostGateInput,
+    OutboundPostingAdapter, PostedAction, PostedActionStatus, PostingAdapterItemResult,
+    PostingAdapterItemStatus, evaluate_outbound_post_gate, execute_explicit_posting_flow,
     outbound_target_tuple_json, validate_outbound_draft_batch_linkage,
 };
 use serde::Deserialize;
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
@@ -22,10 +25,41 @@ struct OutboundAuditFixture {
 fn load_fixture() -> OutboundAuditFixture {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/fixture_github_draft_batch/outbound_audit_case.json");
-    let raw = fs::read_to_string(&path)
-        .unwrap_or_else(|err| panic!("failed to read fixture {}: {err}", path.display()));
-    serde_json::from_str(&raw)
-        .unwrap_or_else(|err| panic!("failed to decode fixture {}: {err}", path.display()))
+    let raw = fs::read_to_string(&path).expect("failed to read outbound audit fixture");
+    serde_json::from_str(&raw).expect("failed to decode outbound audit fixture")
+}
+
+#[derive(Clone, Debug)]
+struct StubPostingAdapter {
+    result: std::result::Result<Vec<PostingAdapterItemResult>, String>,
+    calls: Cell<u32>,
+}
+
+impl StubPostingAdapter {
+    fn succeeds(items: Vec<PostingAdapterItemResult>) -> Self {
+        Self {
+            result: Ok(items),
+            calls: Cell::new(0),
+        }
+    }
+
+    fn fails(reason: &str) -> Self {
+        Self {
+            result: Err(reason.to_owned()),
+            calls: Cell::new(0),
+        }
+    }
+}
+
+impl OutboundPostingAdapter for StubPostingAdapter {
+    fn post_approved_draft_batch(
+        &self,
+        _batch: &OutboundDraftBatch,
+        _drafts: &[OutboundDraft],
+    ) -> std::result::Result<Vec<PostingAdapterItemResult>, String> {
+        self.calls.set(self.calls.get() + 1);
+        self.result.clone()
+    }
 }
 
 #[test]
@@ -211,6 +245,243 @@ fn post_gate_blocks_refresh_invalidation_and_enforces_reconfirmation() {
         }),
         OutboundPostGateDecision::PostAllowed
     );
+}
+
+#[test]
+fn explicit_posting_executes_only_after_gate_revalidation() {
+    let fixture = load_fixture();
+    let batch = fixture.valid_batch;
+    let draft = fixture.valid_draft;
+    let mut approval = fixture.valid_approval;
+    approval.target_tuple_json = outbound_target_tuple_json(&batch);
+
+    let adapter = StubPostingAdapter::succeeds(vec![PostingAdapterItemResult {
+        draft_id: draft.id.clone(),
+        status: PostingAdapterItemStatus::Posted,
+        remote_identifier: Some("https://api.github.com/reviews/123".to_owned()),
+        failure_code: None,
+    }]);
+
+    let result = execute_explicit_posting_flow(
+        ExplicitPostingInput {
+            action_id: "posted-action-1",
+            provider: "github",
+            batch: &batch,
+            drafts: std::slice::from_ref(&draft),
+            approval: &approval,
+            refresh_signals: &[],
+            reconfirmed_finding_ids: &HashSet::new(),
+        },
+        &adapter,
+    );
+
+    assert_eq!(adapter.calls.get(), 1);
+    assert_eq!(result.outcome, ExplicitPostingOutcome::Posted);
+    assert!(result.retry_draft_ids.is_empty());
+    let posted = result.posted_action.expect("posted action should exist");
+    assert_eq!(posted.status, PostedActionStatus::Succeeded);
+    assert_eq!(posted.posted_payload_digest, batch.payload_digest);
+    assert!(posted.remote_identifier.contains("/reviews/123"));
+}
+
+#[test]
+fn explicit_posting_fails_closed_without_adapter_call_when_gate_blocks() {
+    let fixture = load_fixture();
+    let mut batch = fixture.valid_batch;
+    batch.invalidated_at = Some(1_700_111_111);
+    batch.invalidation_reason_code = Some("refresh_target_changed".to_owned());
+    let draft = fixture.valid_draft;
+    let mut approval = fixture.valid_approval;
+    approval.target_tuple_json = outbound_target_tuple_json(&batch);
+
+    let adapter = StubPostingAdapter::succeeds(vec![PostingAdapterItemResult {
+        draft_id: draft.id.clone(),
+        status: PostingAdapterItemStatus::Posted,
+        remote_identifier: Some("https://api.github.com/reviews/123".to_owned()),
+        failure_code: None,
+    }]);
+
+    let result = execute_explicit_posting_flow(
+        ExplicitPostingInput {
+            action_id: "posted-action-blocked",
+            provider: "github",
+            batch: &batch,
+            drafts: std::slice::from_ref(&draft),
+            approval: &approval,
+            refresh_signals: &[],
+            reconfirmed_finding_ids: &HashSet::new(),
+        },
+        &adapter,
+    );
+
+    assert_eq!(adapter.calls.get(), 0);
+    assert_eq!(result.outcome, ExplicitPostingOutcome::Blocked);
+    assert!(
+        result
+            .reason_code
+            .as_deref()
+            .is_some_and(|reason| reason.contains("approval_invalidated"))
+    );
+    assert!(result.posted_action.is_none());
+}
+
+#[test]
+fn explicit_posting_fails_closed_when_local_draft_state_is_missing() {
+    let fixture = load_fixture();
+    let batch = fixture.valid_batch;
+    let mut approval = fixture.valid_approval;
+    approval.target_tuple_json = outbound_target_tuple_json(&batch);
+    let drafts: Vec<OutboundDraft> = Vec::new();
+
+    let adapter = StubPostingAdapter::succeeds(Vec::new());
+
+    let result = execute_explicit_posting_flow(
+        ExplicitPostingInput {
+            action_id: "posted-action-missing-local-state",
+            provider: "github",
+            batch: &batch,
+            drafts: &drafts,
+            approval: &approval,
+            refresh_signals: &[],
+            reconfirmed_finding_ids: &HashSet::new(),
+        },
+        &adapter,
+    );
+
+    assert_eq!(adapter.calls.get(), 0);
+    assert_eq!(result.outcome, ExplicitPostingOutcome::Blocked);
+    assert_eq!(result.reason_code.as_deref(), Some("batch_linkage_invalid"));
+    assert!(result.posted_action.is_none());
+}
+
+#[test]
+fn explicit_posting_records_partial_outcome_and_retry_candidates() {
+    let fixture = load_fixture();
+    let batch = fixture.valid_batch;
+    let draft_one = fixture.valid_draft;
+    let mut draft_two = draft_one.clone();
+    draft_two.id = "draft-2".to_owned();
+    draft_two.finding_id = Some("finding-2".to_owned());
+    draft_two.anchor_digest = "anchor-2".to_owned();
+    let drafts = vec![draft_one.clone(), draft_two.clone()];
+    let mut approval = fixture.valid_approval;
+    approval.target_tuple_json = outbound_target_tuple_json(&batch);
+
+    let adapter = StubPostingAdapter::succeeds(vec![
+        PostingAdapterItemResult {
+            draft_id: draft_one.id.clone(),
+            status: PostingAdapterItemStatus::Posted,
+            remote_identifier: Some("https://api.github.com/reviews/123".to_owned()),
+            failure_code: None,
+        },
+        PostingAdapterItemResult {
+            draft_id: draft_two.id.clone(),
+            status: PostingAdapterItemStatus::Failed,
+            remote_identifier: None,
+            failure_code: Some("thread_not_found".to_owned()),
+        },
+    ]);
+
+    let result = execute_explicit_posting_flow(
+        ExplicitPostingInput {
+            action_id: "posted-action-partial",
+            provider: "github",
+            batch: &batch,
+            drafts: &drafts,
+            approval: &approval,
+            refresh_signals: &[],
+            reconfirmed_finding_ids: &HashSet::new(),
+        },
+        &adapter,
+    );
+
+    assert_eq!(result.outcome, ExplicitPostingOutcome::Partial);
+    assert_eq!(result.retry_draft_ids, vec!["draft-2".to_owned()]);
+    let posted = result.posted_action.expect("posted action");
+    assert_eq!(posted.status, PostedActionStatus::Partial);
+    assert_eq!(posted.failure_code.as_deref(), Some("partial_failure"));
+    assert!(posted.remote_identifier.contains("/reviews/123"));
+}
+
+#[test]
+fn explicit_posting_records_failed_attempt_for_adapter_errors() {
+    let fixture = load_fixture();
+    let batch = fixture.valid_batch;
+    let draft = fixture.valid_draft;
+    let mut approval = fixture.valid_approval;
+    approval.target_tuple_json = outbound_target_tuple_json(&batch);
+
+    let adapter = StubPostingAdapter::fails("network_timeout");
+
+    let result = execute_explicit_posting_flow(
+        ExplicitPostingInput {
+            action_id: "posted-action-error",
+            provider: "github",
+            batch: &batch,
+            drafts: std::slice::from_ref(&draft),
+            approval: &approval,
+            refresh_signals: &[],
+            reconfirmed_finding_ids: &HashSet::new(),
+        },
+        &adapter,
+    );
+
+    assert_eq!(result.outcome, ExplicitPostingOutcome::Failed);
+    assert!(
+        result
+            .reason_code
+            .as_deref()
+            .is_some_and(|reason| reason.contains("adapter_error:network_timeout"))
+    );
+    assert_eq!(result.retry_draft_ids, vec![draft.id.clone()]);
+    let posted = result.posted_action.expect("failed posted action");
+    assert_eq!(posted.status, PostedActionStatus::Failed);
+}
+
+#[test]
+fn explicit_posting_fails_closed_on_invalid_adapter_result_shape() {
+    let fixture = load_fixture();
+    let batch = fixture.valid_batch;
+    let draft_one = fixture.valid_draft;
+    let mut draft_two = draft_one.clone();
+    draft_two.id = "draft-2".to_owned();
+    draft_two.finding_id = Some("finding-2".to_owned());
+    draft_two.anchor_digest = "anchor-2".to_owned();
+    let drafts = vec![draft_one.clone(), draft_two.clone()];
+    let mut approval = fixture.valid_approval;
+    approval.target_tuple_json = outbound_target_tuple_json(&batch);
+
+    // Missing result for draft-2 should fail closed.
+    let adapter = StubPostingAdapter::succeeds(vec![PostingAdapterItemResult {
+        draft_id: draft_one.id.clone(),
+        status: PostingAdapterItemStatus::Posted,
+        remote_identifier: Some("https://api.github.com/reviews/123".to_owned()),
+        failure_code: None,
+    }]);
+
+    let result = execute_explicit_posting_flow(
+        ExplicitPostingInput {
+            action_id: "posted-action-invalid",
+            provider: "github",
+            batch: &batch,
+            drafts: &drafts,
+            approval: &approval,
+            refresh_signals: &[],
+            reconfirmed_finding_ids: &HashSet::new(),
+        },
+        &adapter,
+    );
+
+    assert_eq!(result.outcome, ExplicitPostingOutcome::Failed);
+    assert!(
+        result
+            .reason_code
+            .as_deref()
+            .is_some_and(|reason| reason.contains("adapter_result_invalid"))
+    );
+    assert_eq!(result.retry_draft_ids, vec![draft_one.id, draft_two.id]);
+    let posted = result.posted_action.expect("failed posted action");
+    assert_eq!(posted.status, PostedActionStatus::Failed);
 }
 
 #[test]

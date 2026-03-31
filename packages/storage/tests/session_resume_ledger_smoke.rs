@@ -95,24 +95,23 @@ fn resume_ledger_reopens_when_locator_is_usable_after_restart() -> Result<()> {
         ResumeAttemptOutcome::ReopenedUsable,
     )?;
 
-    match resolution {
-        ResumeLedgerResolution::Resolved(record) => {
-            assert_eq!(record.binding.session_id, "session-1");
-            assert_eq!(record.decision.strategy, ResumeStrategy::ReopenExisting);
-            assert_eq!(
-                record.decision.reason_code,
-                ResumeDecisionReason::LocatorReopenedUsable
-            );
-            assert_eq!(
-                record
-                    .resume_bundle
-                    .expect("resume bundle present")
-                    .review_target,
-                sample_target()
-            );
-        }
-        other => panic!("expected resolved resume ledger, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            &resolution,
+            ResumeLedgerResolution::Resolved(record)
+                if record.binding.session_id == "session-1"
+                    && record.decision.strategy == ResumeStrategy::ReopenExisting
+                    && record.decision.reason_code
+                        == ResumeDecisionReason::LocatorReopenedUsable
+                    && record
+                        .resume_bundle
+                        .as_ref()
+                        .expect("resume bundle present")
+                        .review_target
+                        == sample_target()
+        ),
+        "expected resolved resume ledger, got {resolution:?}"
+    );
 
     Ok(())
 }
@@ -164,18 +163,22 @@ fn stale_locator_reseeds_with_target_identity_preserved() -> Result<()> {
         ResumeAttemptOutcome::ReopenUnavailable,
     )?;
 
-    match resolution {
-        ResumeLedgerResolution::Resolved(record) => {
-            assert_eq!(record.decision.strategy, ResumeStrategy::ReseedFromBundle);
-            assert_eq!(
-                record.decision.reason_code,
-                ResumeDecisionReason::ReopenUnavailableNeedsReseed
-            );
-            let bundle = record.resume_bundle.expect("resume bundle present");
-            assert_eq!(bundle.review_target, sample_target());
-        }
-        other => panic!("expected reseed decision, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            &resolution,
+            ResumeLedgerResolution::Resolved(record)
+                if record.decision.strategy == ResumeStrategy::ReseedFromBundle
+                    && record.decision.reason_code
+                        == ResumeDecisionReason::ReopenUnavailableNeedsReseed
+                    && record
+                        .resume_bundle
+                        .as_ref()
+                        .expect("resume bundle present")
+                        .review_target
+                        == sample_target()
+        ),
+        "expected reseed decision, got {resolution:?}"
+    );
 
     Ok(())
 }
@@ -226,18 +229,18 @@ fn missing_harness_state_fails_closed_without_resume_bundle() -> Result<()> {
         ResumeAttemptOutcome::MissingHarnessState,
     )?;
 
-    match resolution {
-        ResumeLedgerResolution::Resolved(record) => {
-            assert_eq!(record.decision.strategy, ResumeStrategy::FailClosed);
-            assert_eq!(
-                record.decision.reason_code,
-                ResumeDecisionReason::MissingHarnessStateWithoutBundle
-            );
-            assert!(record.resume_bundle.is_none());
-            assert_eq!(record.session.review_target, sample_target());
-        }
-        other => panic!("expected fail-closed decision, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            &resolution,
+            ResumeLedgerResolution::Resolved(record)
+                if record.decision.strategy == ResumeStrategy::FailClosed
+                    && record.decision.reason_code
+                        == ResumeDecisionReason::MissingHarnessStateWithoutBundle
+                    && record.resume_bundle.is_none()
+                    && record.session.review_target == sample_target()
+        ),
+        "expected fail-closed decision, got {resolution:?}"
+    );
 
     Ok(())
 }
@@ -311,14 +314,16 @@ fn cross_surface_bindings_resolve_to_same_durable_session_state() -> Result<()> 
             ResumeAttemptOutcome::ReopenedUsable,
         )?;
 
-        match resolution {
-            ResumeLedgerResolution::Resolved(record) => {
-                assert_eq!(record.session.id, "session-1");
-                assert_eq!(record.binding.session_id, "session-1");
-                assert_eq!(record.session.review_target, sample_target());
-            }
-            other => panic!("expected resolved binding for surface, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                &resolution,
+                ResumeLedgerResolution::Resolved(record)
+                    if record.session.id == "session-1"
+                        && record.binding.session_id == "session-1"
+                        && record.session.review_target == sample_target()
+            ),
+            "expected resolved binding for surface, got {resolution:?}"
+        );
     }
 
     Ok(())

@@ -161,7 +161,22 @@ pub struct LocalDraftReviewEntry {
     pub edited_body: Option<String>,
     pub invalidation_reason: Option<String>,
     pub pending_post: bool,
+    #[serde(default)]
+    pub post_failure_reason: Option<String>,
+    #[serde(default)]
+    pub recovery_hint: Option<String>,
     pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveSessionEntry {
+    pub session_id: String,
+    pub repository: String,
+    pub pull_request_number: u64,
+    pub provider: String,
+    pub continuity_state: String,
+    pub attention_state: String,
+    pub degraded: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +194,8 @@ pub struct ReadOnlySessionSnapshot {
     pub finding_details: Vec<FindingDetail>,
     #[serde(default)]
     pub local_draft_queue: Vec<LocalDraftReviewEntry>,
+    #[serde(default)]
+    pub active_sessions: Vec<ActiveSessionEntry>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,6 +212,8 @@ pub struct MinimalTuiShell {
     pub triage_intents: Vec<FindingTriageIntent>,
     pub clarification_intents: Vec<ClarificationIntent>,
     pub local_draft_queue: Vec<LocalDraftReviewEntry>,
+    pub active_sessions: Vec<ActiveSessionEntry>,
+    pub active_session_index: usize,
     pub posting_requested: bool,
     overview_lines: Vec<String>,
     recent_run_lines: Vec<String>,
@@ -204,6 +223,24 @@ pub struct MinimalTuiShell {
 
 impl MinimalTuiShell {
     pub fn open(snapshot: ReadOnlySessionSnapshot) -> Self {
+        let active_sessions = if snapshot.active_sessions.is_empty() {
+            vec![ActiveSessionEntry {
+                session_id: snapshot.chrome.session_id.clone(),
+                repository: snapshot.chrome.repository.clone(),
+                pull_request_number: snapshot.chrome.pull_request_number,
+                provider: snapshot.chrome.provider.clone(),
+                continuity_state: snapshot.chrome.continuity_state.clone(),
+                attention_state: snapshot.chrome.attention_state.clone(),
+                degraded: false,
+            }]
+        } else {
+            snapshot.active_sessions
+        };
+        let active_session_index = active_sessions
+            .iter()
+            .position(|entry| entry.session_id == snapshot.chrome.session_id)
+            .unwrap_or(0);
+
         let selected_finding_id = snapshot
             .finding_rows
             .first()
@@ -228,6 +265,8 @@ impl MinimalTuiShell {
             triage_intents: Vec::new(),
             clarification_intents: Vec::new(),
             local_draft_queue: snapshot.local_draft_queue,
+            active_sessions,
+            active_session_index,
             posting_requested: false,
             overview_lines: snapshot.overview_lines,
             recent_run_lines: snapshot.recent_run_lines,
@@ -250,6 +289,48 @@ impl MinimalTuiShell {
 
     pub fn active_panel(&self) -> &ReadOnlyPanelState {
         &self.panels[self.active_panel_index]
+    }
+
+    pub fn active_session(&self) -> &ActiveSessionEntry {
+        &self.active_sessions[self.active_session_index]
+    }
+
+    pub fn switch_to_next_session(&mut self) -> bool {
+        if self.active_sessions.len() < 2 {
+            return false;
+        }
+        self.active_session_index = (self.active_session_index + 1) % self.active_sessions.len();
+        self.apply_active_session_chrome();
+        self.rebuild_panels();
+        true
+    }
+
+    pub fn switch_to_previous_session(&mut self) -> bool {
+        if self.active_sessions.len() < 2 {
+            return false;
+        }
+        self.active_session_index = if self.active_session_index == 0 {
+            self.active_sessions.len() - 1
+        } else {
+            self.active_session_index - 1
+        };
+        self.apply_active_session_chrome();
+        self.rebuild_panels();
+        true
+    }
+
+    pub fn switch_to_session(&mut self, session_id: &str) -> bool {
+        let Some(index) = self
+            .active_sessions
+            .iter()
+            .position(|entry| entry.session_id == session_id)
+        else {
+            return false;
+        };
+        self.active_session_index = index;
+        self.apply_active_session_chrome();
+        self.rebuild_panels();
+        true
     }
 
     pub fn navigate_next_panel(&mut self) {
@@ -374,6 +455,32 @@ impl MinimalTuiShell {
             None
         };
         entry.pending_post = matches!(decision, DraftReviewDecision::Approved);
+        entry.post_failure_reason = None;
+        entry.recovery_hint = None;
+
+        self.rebuild_panels();
+        true
+    }
+
+    pub fn mark_draft_post_failed(
+        &mut self,
+        draft_id: &str,
+        failure_reason: &str,
+        recovery_hint: Option<&str>,
+        updated_at: i64,
+    ) -> bool {
+        let Some(entry) = self
+            .local_draft_queue
+            .iter_mut()
+            .find(|entry| entry.draft_id == draft_id)
+        else {
+            return false;
+        };
+
+        entry.pending_post = false;
+        entry.post_failure_reason = Some(failure_reason.to_owned());
+        entry.recovery_hint = recovery_hint.map(ToOwned::to_owned);
+        entry.updated_at = updated_at;
 
         self.rebuild_panels();
         true
@@ -404,7 +511,7 @@ impl MinimalTuiShell {
             ReadOnlyPanelState {
                 kind: ShellPanelKind::SessionOverview,
                 title: "Session".to_owned(),
-                lines: self.overview_lines.clone(),
+                lines: self.render_session_overview_lines(),
             },
             ReadOnlyPanelState {
                 kind: ShellPanelKind::RecentRuns,
@@ -477,6 +584,36 @@ impl MinimalTuiShell {
                 line
             })
             .collect()
+    }
+
+    fn render_session_overview_lines(&self) -> Vec<String> {
+        let mut lines = self.overview_lines.clone();
+        let active = self.active_session();
+        lines.push(format!(
+            "active_session={} · {}#{} · {}",
+            active.session_id, active.repository, active.pull_request_number, active.provider
+        ));
+        if active.degraded {
+            lines.push("active_session_degraded=true".to_owned());
+        }
+        if self.active_sessions.len() > 1 {
+            lines.push("available_sessions:".to_owned());
+            for (index, session) in self.active_sessions.iter().enumerate() {
+                let marker = if index == self.active_session_index {
+                    "*"
+                } else {
+                    "-"
+                };
+                lines.push(format!(
+                    "{marker} {} {}#{} {}",
+                    session.session_id,
+                    session.repository,
+                    session.pull_request_number,
+                    session.attention_state
+                ));
+            }
+        }
+        lines
     }
 
     fn render_active_detail_lines(&self) -> Vec<String> {
@@ -556,8 +693,24 @@ impl MinimalTuiShell {
                 if let Some(reason) = entry.invalidation_reason.as_deref() {
                     line.push_str(&format!(" · reason={reason}"));
                 }
+                if let Some(reason) = entry.post_failure_reason.as_deref() {
+                    line.push_str(&format!(" · post_failed={reason}"));
+                }
+                if let Some(hint) = entry.recovery_hint.as_deref() {
+                    line.push_str(&format!(" · recovery={hint}"));
+                }
                 line
             })
             .collect()
+    }
+
+    fn apply_active_session_chrome(&mut self) {
+        let active = self.active_session().clone();
+        self.chrome.session_id = active.session_id;
+        self.chrome.repository = active.repository;
+        self.chrome.pull_request_number = active.pull_request_number;
+        self.chrome.provider = active.provider;
+        self.chrome.continuity_state = active.continuity_state;
+        self.chrome.attention_state = active.attention_state;
     }
 }

@@ -1,9 +1,11 @@
+use std::fs;
+
 use tempfile::tempdir;
 
 use roger_app_core::ReviewTarget;
 use roger_storage::{
     CreateMaterializedFinding, CreateReviewRun, CreateReviewSession, PriorReviewLookupQuery,
-    PriorReviewRetrievalMode, Result, RogerStore, SemanticLookupCandidate,
+    PriorReviewRetrievalMode, Result, RogerStore, SemanticAssetManifest, SemanticLookupCandidate,
     SemanticLookupTargetKind, UpdateIndexState, UpsertMemoryItem,
 };
 
@@ -45,6 +47,26 @@ fn seed_session(
         session_locator_artifact_id: None,
     })?;
 
+    Ok(())
+}
+
+fn install_verified_semantic_assets(store: &RogerStore) -> Result<()> {
+    let artifact_rel_path = "fastembed/model.bin";
+    let payload = b"semantic-v1";
+    let absolute = store.layout().semantic_asset_root().join(artifact_rel_path);
+    if let Some(parent) = absolute.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&absolute, payload)?;
+    store.install_semantic_asset_manifest(&SemanticAssetManifest {
+        schema_version: 1,
+        package_id: "fastembed-mini".to_owned(),
+        revision: "2026-03-31".to_owned(),
+        artifact_rel_path: artifact_rel_path.to_owned(),
+        artifact_digest: "sha256:0d05f729f928b76c15e31e5097fb25f1f11909706e64d9c582607e5d227166c3"
+            .to_owned(),
+        installed_at: 1_743_380_000,
+    })?;
     Ok(())
 }
 
@@ -153,6 +175,7 @@ fn prior_review_lookup_fuses_semantic_candidates_when_assets_and_sidecars_are_re
 {
     let temp = tempdir()?;
     let store = RogerStore::open(temp.path().join("profile"))?;
+    install_verified_semantic_assets(&store)?;
 
     seed_session(&store, "session-owner", "run-owner", "owner/repo", 42)?;
 

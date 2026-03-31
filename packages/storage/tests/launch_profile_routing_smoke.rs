@@ -40,15 +40,17 @@ fn cli_and_extension_launches_share_daemonless_routing_contract() -> Result<()> 
         available_terminal_environments: vec!["vscode_integrated_terminal".to_owned()],
         available_multiplexer_modes: vec!["ntm".to_owned(), "none".to_owned()],
     })?;
-    match cli_resolution {
-        LaunchProfileRouteResolution::Resolved(decision) => {
-            assert!(!decision.degraded);
-            assert_eq!(decision.terminal_environment, "vscode_integrated_terminal");
-            assert_eq!(decision.multiplexer_mode, "ntm");
-            assert_eq!(decision.profile_id, "profile-cli");
-        }
-        other => panic!("expected resolved CLI route, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            &cli_resolution,
+            LaunchProfileRouteResolution::Resolved(decision)
+                if !decision.degraded
+                    && decision.terminal_environment == "vscode_integrated_terminal"
+                    && decision.multiplexer_mode == "ntm"
+                    && decision.profile_id == "profile-cli"
+        ),
+        "expected resolved CLI route, got {cli_resolution:?}"
+    );
 
     let extension_resolution = store.resolve_launch_profile_route(ResolveLaunchProfileRoute {
         source_surface: LaunchSurface::Extension,
@@ -57,21 +59,21 @@ fn cli_and_extension_launches_share_daemonless_routing_contract() -> Result<()> 
         available_terminal_environments: vec!["wezterm_window".to_owned()],
         available_multiplexer_modes: vec!["none".to_owned()],
     })?;
-    match extension_resolution {
-        LaunchProfileRouteResolution::Resolved(decision) => {
-            assert!(decision.degraded);
-            assert_eq!(decision.terminal_environment, "wezterm_window");
-            assert_eq!(decision.multiplexer_mode, "none");
-            assert!(
-                decision
-                    .reason
-                    .as_deref()
-                    .expect("degraded reason")
-                    .contains("unavailable")
-            );
-        }
-        other => panic!("expected resolved Extension route, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            &extension_resolution,
+            LaunchProfileRouteResolution::Resolved(decision)
+                if decision.degraded
+                    && decision.terminal_environment == "wezterm_window"
+                    && decision.multiplexer_mode == "none"
+                    && decision
+                        .reason
+                        .as_deref()
+                        .expect("degraded reason")
+                        .contains("unavailable")
+        ),
+        "expected resolved Extension route, got {extension_resolution:?}"
+    );
 
     Ok(())
 }
@@ -89,12 +91,14 @@ fn routing_reports_not_found_when_no_profile_matches_request() -> Result<()> {
         available_multiplexer_modes: vec!["none".to_owned()],
     })?;
 
-    match resolution {
-        LaunchProfileRouteResolution::NotFound { reason } => {
-            assert!(reason.contains("no matching launch profile"));
-        }
-        other => panic!("expected not-found route result, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            &resolution,
+            LaunchProfileRouteResolution::NotFound { reason }
+                if reason.contains("no matching launch profile")
+        ),
+        "expected not-found route result, got {resolution:?}"
+    );
 
     Ok(())
 }
@@ -135,14 +139,16 @@ fn routing_can_default_to_latest_profile_for_source_surface() -> Result<()> {
         available_multiplexer_modes: vec!["none".to_owned()],
     })?;
 
-    match resolution {
-        LaunchProfileRouteResolution::Resolved(decision) => {
-            assert_eq!(decision.profile_id, "profile-2");
-            assert_eq!(decision.ui_target, "tui");
-            assert!(!decision.degraded);
-        }
-        other => panic!("expected resolved route, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            &resolution,
+            LaunchProfileRouteResolution::Resolved(decision)
+                if decision.profile_id == "profile-2"
+                    && decision.ui_target == "tui"
+                    && !decision.degraded
+        ),
+        "expected resolved route, got {resolution:?}"
+    );
 
     Ok(())
 }

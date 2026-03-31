@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use roger_app_core::SessionLocator;
+use roger_app_core::{SessionLocator, now_ts};
 use roger_storage::{
     ArtifactBudgetClass, CreateCodeEvidenceLocation, CreateMaterializedFinding, CreateOutcomeEvent,
     CreatePromptInvocation, MaterializedFindingRecord, RogerStore, StorageError,
@@ -329,13 +329,6 @@ fn make_preview(text: &str, max_chars: usize) -> Option<String> {
 
 fn next_id(prefix: &str, run_id: &str, stage: ReviewStage, nonce: u128) -> String {
     format!("{prefix}-{run_id}-{}-{nonce:x}", stage.as_str())
-}
-
-fn now_ts() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time before unix epoch")
-        .as_secs() as i64
 }
 
 fn now_nonce() -> u128 {

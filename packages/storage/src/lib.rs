@@ -2,17 +2,16 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use roger_app_core::{
     ProviderContinuityCapability, ResumeAttemptOutcome, ResumeBundle, ResumeDecision,
-    ResumeSessionState, ReviewTarget, SessionLocator, Surface, decide_resume_strategy,
+    ResumeSessionState, ReviewTarget, SessionLocator, Surface, decide_resume_strategy, time,
 };
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const CURRENT_SCHEMA_VERSION: i64 = 8;
+const CURRENT_SCHEMA_VERSION: i64 = 9;
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_session_ledger.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_launch_binding_context.sql");
@@ -22,6 +21,7 @@ const MIGRATION_0006: &str = include_str!("../migrations/0006_finding_materializ
 const MIGRATION_0007: &str =
     include_str!("../migrations/0007_prior_review_lookup_memory_hooks.sql");
 const MIGRATION_0008: &str = include_str!("../migrations/0008_worktree_preflight_plans.sql");
+const MIGRATION_0009: &str = include_str!("../migrations/0009_outcome_event_usefulness.sql");
 
 #[derive(Debug)]
 pub enum StorageError {
@@ -164,6 +164,14 @@ impl StorageLayout {
             root,
         }
     }
+
+    pub fn semantic_asset_root(&self) -> PathBuf {
+        self.sidecar_root.join("semantic_assets")
+    }
+
+    pub fn semantic_asset_manifest_path(&self) -> PathBuf {
+        self.semantic_asset_root().join("active_manifest.json")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -284,6 +292,78 @@ pub struct OutcomeEventRecord {
     pub source_surface: String,
     pub payload_json: String,
     pub created_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateMergedResolutionLink<'a> {
+    pub id: &'a str,
+    pub prompt_invocation_id: &'a str,
+    pub review_session_id: &'a str,
+    pub review_run_id: Option<&'a str>,
+    pub source_outcome_event_id: Option<&'a str>,
+    pub resolution_kind: &'a str,
+    pub source_kind: &'a str,
+    pub source_id: &'a str,
+    pub remote_identifier: Option<&'a str>,
+    pub resolved_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergedResolutionLinkRecord {
+    pub id: String,
+    pub prompt_invocation_id: String,
+    pub review_session_id: String,
+    pub review_run_id: Option<String>,
+    pub source_outcome_event_id: Option<String>,
+    pub resolution_kind: String,
+    pub source_kind: String,
+    pub source_id: String,
+    pub remote_identifier: Option<String>,
+    pub resolved_at: i64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateUsageEventDerivationJob<'a> {
+    pub id: &'a str,
+    pub prompt_invocation_id: &'a str,
+    pub review_session_id: &'a str,
+    pub review_run_id: Option<&'a str>,
+    pub seed_outcome_event_id: Option<&'a str>,
+    pub job_kind: &'a str,
+    pub status: &'a str,
+    pub payload_json: &'a str,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub failure_reason: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageEventDerivationJobRecord {
+    pub id: String,
+    pub prompt_invocation_id: String,
+    pub review_session_id: String,
+    pub review_run_id: Option<String>,
+    pub seed_outcome_event_id: Option<String>,
+    pub job_kind: String,
+    pub status: String,
+    pub payload_json: String,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub failure_reason: Option<String>,
+    pub row_version: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateUsageEventDerivationJobStatus<'a> {
+    pub id: &'a str,
+    pub expected_row_version: i64,
+    pub status: &'a str,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub failure_reason: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -710,6 +790,23 @@ pub struct SemanticLookupCandidate {
     pub score: f32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticAssetManifest {
+    pub schema_version: u32,
+    pub package_id: String,
+    pub revision: String,
+    pub artifact_rel_path: String,
+    pub artifact_digest: String,
+    pub installed_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticAssetVerification {
+    pub verified: bool,
+    pub reason: Option<String>,
+    pub manifest: Option<SemanticAssetManifest>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PriorReviewLookupQuery<'a> {
     pub scope_key: &'a str,
@@ -844,11 +941,75 @@ impl RogerStore {
             .pragma_query_value(None, "user_version", |row| row.get(0))?)
     }
 
+    pub fn install_semantic_asset_manifest(&self, manifest: &SemanticAssetManifest) -> Result<()> {
+        let path = self.layout.semantic_asset_manifest_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, serde_json::to_vec_pretty(manifest)?)?;
+        Ok(())
+    }
+
+    pub fn semantic_asset_manifest(&self) -> Result<Option<SemanticAssetManifest>> {
+        let path = self.layout.semantic_asset_manifest_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = fs::read(path)?;
+        Ok(Some(serde_json::from_slice(&raw)?))
+    }
+
+    pub fn verify_semantic_asset_manifest(&self) -> Result<SemanticAssetVerification> {
+        let Some(manifest) = self.semantic_asset_manifest()? else {
+            return Ok(SemanticAssetVerification {
+                verified: false,
+                reason: Some(
+                    "semantic assets are missing or unverified; manifest is absent".to_owned(),
+                ),
+                manifest: None,
+            });
+        };
+
+        let asset_path = self
+            .layout
+            .semantic_asset_root()
+            .join(&manifest.artifact_rel_path);
+        if !asset_path.exists() {
+            return Ok(SemanticAssetVerification {
+                verified: false,
+                reason: Some(format!(
+                    "semantic assets are missing or unverified; artifact path not found: {}",
+                    asset_path.display()
+                )),
+                manifest: Some(manifest),
+            });
+        }
+
+        let payload = fs::read(&asset_path)?;
+        let observed_digest = sha256_prefixed(&payload);
+        if observed_digest != manifest.artifact_digest {
+            return Ok(SemanticAssetVerification {
+                verified: false,
+                reason: Some(format!(
+                    "semantic assets are missing or unverified; digest mismatch (expected {}, got {})",
+                    manifest.artifact_digest, observed_digest
+                )),
+                manifest: Some(manifest),
+            });
+        }
+
+        Ok(SemanticAssetVerification {
+            verified: true,
+            reason: None,
+            manifest: Some(manifest),
+        })
+    }
+
     pub fn create_review_session(
         &self,
         input: CreateReviewSession<'_>,
     ) -> Result<ReviewSessionRecord> {
-        let now = now_ts();
+        let now = time::now_ts();
         self.conn.execute(
             "INSERT INTO review_sessions (
                 id, review_target, provider, session_locator, resume_bundle_artifact_id,
@@ -895,7 +1056,7 @@ impl RogerStore {
                 input.repo_snapshot,
                 input.continuity_quality,
                 input.session_locator_artifact_id,
-                now_ts()
+                time::now_ts()
             ],
         )?;
         Ok(())
@@ -905,7 +1066,7 @@ impl RogerStore {
         &self,
         input: CreatePromptInvocation<'_>,
     ) -> Result<PromptInvocationRecord> {
-        let now = now_ts();
+        let now = time::now_ts();
         self.conn.execute(
             "INSERT INTO prompt_invocations (
                 id, review_session_id, review_run_id, stage, prompt_preset_id,
@@ -1021,7 +1182,7 @@ impl RogerStore {
                 input.actor_id,
                 input.source_surface,
                 input.payload_json,
-                now_ts()
+                time::now_ts()
             ],
         )?;
         Ok(())
@@ -1062,8 +1223,330 @@ impl RogerStore {
         Ok(events)
     }
 
+    pub fn record_merged_resolution_link(
+        &self,
+        input: CreateMergedResolutionLink<'_>,
+    ) -> Result<()> {
+        self.validate_prompt_usefulness_linkage(
+            input.prompt_invocation_id,
+            input.review_session_id,
+            input.review_run_id,
+            input.source_outcome_event_id,
+        )?;
+
+        self.conn.execute(
+            "INSERT INTO merged_resolution_links (
+                id, prompt_invocation_id, review_session_id, review_run_id,
+                source_outcome_event_id, resolution_kind, source_kind, source_id,
+                remote_identifier, resolved_at, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                input.id,
+                input.prompt_invocation_id,
+                input.review_session_id,
+                input.review_run_id,
+                input.source_outcome_event_id,
+                input.resolution_kind,
+                input.source_kind,
+                input.source_id,
+                input.remote_identifier,
+                input.resolved_at,
+                time::now_ts()
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn merged_resolution_links_for_prompt_invocation(
+        &self,
+        prompt_invocation_id: &str,
+    ) -> Result<Vec<MergedResolutionLinkRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, prompt_invocation_id, review_session_id, review_run_id,
+                source_outcome_event_id, resolution_kind, source_kind, source_id,
+                remote_identifier, resolved_at, created_at
+            FROM merged_resolution_links
+            WHERE prompt_invocation_id = ?1
+            ORDER BY resolved_at DESC, rowid DESC",
+        )?;
+        let rows = stmt.query_map(params![prompt_invocation_id], |row| {
+            Ok(MergedResolutionLinkRecord {
+                id: row.get(0)?,
+                prompt_invocation_id: row.get(1)?,
+                review_session_id: row.get(2)?,
+                review_run_id: row.get(3)?,
+                source_outcome_event_id: row.get(4)?,
+                resolution_kind: row.get(5)?,
+                source_kind: row.get(6)?,
+                source_id: row.get(7)?,
+                remote_identifier: row.get(8)?,
+                resolved_at: row.get(9)?,
+                created_at: row.get(10)?,
+            })
+        })?;
+
+        let mut links = Vec::new();
+        for row in rows {
+            links.push(row?);
+        }
+        Ok(links)
+    }
+
+    pub fn create_usage_event_derivation_job(
+        &self,
+        input: CreateUsageEventDerivationJob<'_>,
+    ) -> Result<UsageEventDerivationJobRecord> {
+        self.validate_prompt_usefulness_linkage(
+            input.prompt_invocation_id,
+            input.review_session_id,
+            input.review_run_id,
+            input.seed_outcome_event_id,
+        )?;
+
+        let now = time::now_ts();
+        self.conn.execute(
+            "INSERT INTO usage_event_derivation_jobs (
+                id, prompt_invocation_id, review_session_id, review_run_id,
+                seed_outcome_event_id, job_kind, status, payload_json, started_at,
+                completed_at, failure_reason, row_version, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?12)",
+            params![
+                input.id,
+                input.prompt_invocation_id,
+                input.review_session_id,
+                input.review_run_id,
+                input.seed_outcome_event_id,
+                input.job_kind,
+                input.status,
+                input.payload_json,
+                input.started_at,
+                input.completed_at,
+                input.failure_reason,
+                now
+            ],
+        )?;
+
+        self.usage_event_derivation_job(input.id)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "usage_event_derivation_job",
+                id: input.id.to_owned(),
+            })
+    }
+
+    pub fn usage_event_derivation_job(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<UsageEventDerivationJobRecord>> {
+        self.conn
+            .query_row(
+                "SELECT id, prompt_invocation_id, review_session_id, review_run_id,
+                    seed_outcome_event_id, job_kind, status, payload_json, started_at,
+                    completed_at, failure_reason, row_version, created_at, updated_at
+                FROM usage_event_derivation_jobs
+                WHERE id = ?1",
+                params![job_id],
+                |row| {
+                    Ok(UsageEventDerivationJobRecord {
+                        id: row.get(0)?,
+                        prompt_invocation_id: row.get(1)?,
+                        review_session_id: row.get(2)?,
+                        review_run_id: row.get(3)?,
+                        seed_outcome_event_id: row.get(4)?,
+                        job_kind: row.get(5)?,
+                        status: row.get(6)?,
+                        payload_json: row.get(7)?,
+                        started_at: row.get(8)?,
+                        completed_at: row.get(9)?,
+                        failure_reason: row.get(10)?,
+                        row_version: row.get(11)?,
+                        created_at: row.get(12)?,
+                        updated_at: row.get(13)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    pub fn usage_event_derivation_jobs_for_prompt_invocation(
+        &self,
+        prompt_invocation_id: &str,
+    ) -> Result<Vec<UsageEventDerivationJobRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, prompt_invocation_id, review_session_id, review_run_id,
+                seed_outcome_event_id, job_kind, status, payload_json, started_at,
+                completed_at, failure_reason, row_version, created_at, updated_at
+            FROM usage_event_derivation_jobs
+            WHERE prompt_invocation_id = ?1
+            ORDER BY created_at DESC, rowid DESC",
+        )?;
+        let rows = stmt.query_map(params![prompt_invocation_id], |row| {
+            Ok(UsageEventDerivationJobRecord {
+                id: row.get(0)?,
+                prompt_invocation_id: row.get(1)?,
+                review_session_id: row.get(2)?,
+                review_run_id: row.get(3)?,
+                seed_outcome_event_id: row.get(4)?,
+                job_kind: row.get(5)?,
+                status: row.get(6)?,
+                payload_json: row.get(7)?,
+                started_at: row.get(8)?,
+                completed_at: row.get(9)?,
+                failure_reason: row.get(10)?,
+                row_version: row.get(11)?,
+                created_at: row.get(12)?,
+                updated_at: row.get(13)?,
+            })
+        })?;
+
+        let mut jobs = Vec::new();
+        for row in rows {
+            jobs.push(row?);
+        }
+        Ok(jobs)
+    }
+
+    pub fn update_usage_event_derivation_job_status(
+        &self,
+        input: UpdateUsageEventDerivationJobStatus<'_>,
+    ) -> Result<UsageEventDerivationJobRecord> {
+        let now = time::now_ts();
+        let rows = self.conn.execute(
+            "UPDATE usage_event_derivation_jobs
+            SET status = ?1,
+                started_at = COALESCE(?2, started_at),
+                completed_at = ?3,
+                failure_reason = ?4,
+                row_version = row_version + 1,
+                updated_at = ?5
+            WHERE id = ?6 AND row_version = ?7",
+            params![
+                input.status,
+                input.started_at,
+                input.completed_at,
+                input.failure_reason,
+                now,
+                input.id,
+                input.expected_row_version
+            ],
+        )?;
+
+        if rows == 0 {
+            if self.usage_event_derivation_job(input.id)?.is_some() {
+                return Err(StorageError::Conflict {
+                    entity: "usage_event_derivation_job",
+                    id: input.id.to_owned(),
+                });
+            }
+            return Err(StorageError::NotFound {
+                entity: "usage_event_derivation_job",
+                id: input.id.to_owned(),
+            });
+        }
+
+        self.usage_event_derivation_job(input.id)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "usage_event_derivation_job",
+                id: input.id.to_owned(),
+            })
+    }
+
+    fn validate_prompt_usefulness_linkage(
+        &self,
+        prompt_invocation_id: &str,
+        review_session_id: &str,
+        review_run_id: Option<&str>,
+        source_outcome_event_id: Option<&str>,
+    ) -> Result<()> {
+        let prompt_invocation = self
+            .prompt_invocation(prompt_invocation_id)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "prompt_invocation",
+                id: prompt_invocation_id.to_owned(),
+            })?;
+
+        if prompt_invocation.review_session_id != review_session_id {
+            return Err(StorageError::Conflict {
+                entity: "prompt_invocation",
+                id: prompt_invocation_id.to_owned(),
+            });
+        }
+
+        if let Some(review_run_id) = review_run_id {
+            if prompt_invocation.review_run_id != review_run_id {
+                return Err(StorageError::Conflict {
+                    entity: "prompt_invocation",
+                    id: prompt_invocation_id.to_owned(),
+                });
+            }
+        }
+
+        if let Some(source_outcome_event_id) = source_outcome_event_id {
+            let event = self
+                .outcome_event(source_outcome_event_id)?
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "outcome_event",
+                    id: source_outcome_event_id.to_owned(),
+                })?;
+
+            if event.review_session_id != review_session_id {
+                return Err(StorageError::Conflict {
+                    entity: "outcome_event",
+                    id: source_outcome_event_id.to_owned(),
+                });
+            }
+
+            if event.prompt_invocation_id.as_deref() != Some(prompt_invocation_id) {
+                return Err(StorageError::Conflict {
+                    entity: "outcome_event",
+                    id: source_outcome_event_id.to_owned(),
+                });
+            }
+
+            if let Some(review_run_id) = review_run_id {
+                if event.review_run_id.as_deref() != Some(review_run_id) {
+                    return Err(StorageError::Conflict {
+                        entity: "outcome_event",
+                        id: source_outcome_event_id.to_owned(),
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn outcome_event(&self, event_id: &str) -> Result<Option<OutcomeEventRecord>> {
+        self.conn
+            .query_row(
+                "SELECT id, event_type, occurred_at, review_session_id, review_run_id,
+                    prompt_invocation_id, actor_kind, actor_id, source_surface, payload_json, created_at
+                FROM outcome_events
+                WHERE id = ?1",
+                params![event_id],
+                |row| {
+                    Ok(OutcomeEventRecord {
+                        id: row.get(0)?,
+                        event_type: row.get(1)?,
+                        occurred_at: row.get(2)?,
+                        review_session_id: row.get(3)?,
+                        review_run_id: row.get(4)?,
+                        prompt_invocation_id: row.get(5)?,
+                        actor_kind: row.get(6)?,
+                        actor_id: row.get(7)?,
+                        source_surface: row.get(8)?,
+                        payload_json: row.get(9)?,
+                        created_at: row.get(10)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
     pub fn create_finding(&self, input: CreateFinding<'_>) -> Result<()> {
-        let now = now_ts();
+        let now = time::now_ts();
         self.conn.execute(
             "INSERT INTO findings (
                 id, session_id, first_run_id, fingerprint, title,
@@ -1099,7 +1582,7 @@ impl RogerStore {
         &self,
         input: CreateMaterializedFinding<'_>,
     ) -> Result<MaterializedFindingRecord> {
-        let now = now_ts();
+        let now = time::now_ts();
         let existing_id = self
             .conn
             .query_row(
@@ -1299,7 +1782,7 @@ impl RogerStore {
                 input.anchor_state,
                 input.anchor_digest,
                 input.excerpt_artifact_id,
-                now_ts()
+                time::now_ts()
             ],
         )?;
         Ok(())
@@ -1342,7 +1825,7 @@ impl RogerStore {
     }
 
     pub fn create_outbound_draft(&self, input: CreateOutboundDraft<'_>) -> Result<()> {
-        let now = now_ts();
+        let now = time::now_ts();
         self.conn.execute(
             "INSERT INTO outbound_drafts (
                 id, session_id, finding_id, target_locator,
@@ -1368,7 +1851,7 @@ impl RogerStore {
         payload_digest: &str,
         target_locator: &str,
     ) -> Result<()> {
-        let now = now_ts();
+        let now = time::now_ts();
         self.conn.execute(
             "INSERT INTO outbound_approval_tokens (
                 id, draft_id, payload_digest, target_locator,
@@ -1387,7 +1870,7 @@ impl RogerStore {
         payload_digest: &str,
         status: &str,
     ) -> Result<()> {
-        let now = now_ts();
+        let now = time::now_ts();
         self.conn.execute(
             "INSERT INTO posted_actions (
                 id, draft_id, remote_locator, payload_digest, status, created_at
@@ -1405,7 +1888,7 @@ impl RogerStore {
     }
 
     pub fn put_launch_profile(&self, profile: CreateLaunchProfile<'_>) -> Result<()> {
-        let now = now_ts();
+        let now = time::now_ts();
         self.conn.execute(
             "INSERT INTO local_launch_profiles (
                 id, name, source_surface, ui_target, terminal_environment,
@@ -1572,7 +2055,7 @@ impl RogerStore {
         &self,
         binding: CreateSessionLaunchBinding<'_>,
     ) -> Result<()> {
-        let now = now_ts();
+        let now = time::now_ts();
         self.conn.execute(
             "INSERT INTO session_launch_bindings (
                 id, session_id, repo_locator, review_target, surface, launch_profile_id,
@@ -1611,7 +2094,7 @@ impl RogerStore {
     }
 
     pub fn put_launch_preflight_plan(&self, plan: CreateLaunchPreflightPlan<'_>) -> Result<()> {
-        let now = now_ts();
+        let now = time::now_ts();
         self.conn.execute(
             "INSERT INTO launch_preflight_plans (
                 id, session_id, launch_binding_id, result_class, selected_mode,
@@ -1745,7 +2228,7 @@ impl RogerStore {
     }
 
     pub fn upsert_index_state(&self, update: UpdateIndexState<'_>) -> Result<()> {
-        let now = now_ts();
+        let now = time::now_ts();
         self.conn.execute(
             "INSERT INTO index_states (
                 scope_key, generation, status, artifact_digest, row_version, created_at, updated_at
@@ -1768,7 +2251,7 @@ impl RogerStore {
     }
 
     pub fn upsert_memory_item(&self, item: UpsertMemoryItem<'_>) -> Result<MemoryItemRecord> {
-        let now = now_ts();
+        let now = time::now_ts();
         self.conn.execute(
             "INSERT INTO memory_items (
                 id, scope_key, memory_class, state, statement, normalized_key,
@@ -1896,11 +2379,17 @@ impl RogerStore {
             .index_state(&format!("semantic:{}", query.scope_key))?
             .is_some_and(|state| state.status == "ready");
 
+        let semantic_assets = self.verify_semantic_asset_manifest()?;
         if !query.semantic_assets_verified {
             degraded_reasons.push(
                 "semantic assets are missing or unverified; using lexical-only retrieval"
                     .to_owned(),
             );
+        }
+        if !semantic_assets.verified
+            && let Some(reason) = semantic_assets.reason.clone()
+        {
+            degraded_reasons.push(reason);
         }
         if !semantic_index_ready {
             degraded_reasons.push(
@@ -1914,6 +2403,7 @@ impl RogerStore {
         }
 
         let semantic_operational = query.semantic_assets_verified
+            && semantic_assets.verified
             && semantic_index_ready
             && !query.semantic_candidates.is_empty();
 
@@ -2073,7 +2563,7 @@ impl RogerStore {
             "UPDATE review_sessions
             SET attention_state = ?1, row_version = row_version + 1, updated_at = ?2
             WHERE id = ?3 AND row_version = ?4",
-            params![attention_state, now_ts(), session_id, expected_row_version],
+            params![attention_state, time::now_ts(), session_id, expected_row_version],
         )?;
 
         if updated == 0 {
@@ -2169,7 +2659,7 @@ impl RogerStore {
             "UPDATE review_sessions
             SET continuity_state = ?1, row_version = row_version + 1, updated_at = ?2
             WHERE id = ?3 AND row_version = ?4",
-            params![continuity_state, now_ts(), session_id, expected_row_version],
+            params![continuity_state, time::now_ts(), session_id, expected_row_version],
         )?;
 
         if updated == 0 {
@@ -3005,7 +3495,7 @@ impl RogerStore {
         let policy = budget_class.policy();
         let digest = format!("{:x}", Sha256::digest(bytes));
         let storage_kind = policy.select_storage(bytes.len());
-        let now = now_ts();
+        let now = time::now_ts();
 
         let (inline_bytes, relative_path) = match storage_kind {
             ArtifactStorageKind::Inline => (Some(bytes.to_vec()), None),
@@ -3133,7 +3623,7 @@ impl RogerStore {
             self.conn.execute(
                 "INSERT INTO schema_migrations(version, name, applied_at)
                 VALUES (1, 'initial_storage_foundation', ?1)",
-                params![now_ts()],
+                params![time::now_ts()],
             )?;
             self.conn.pragma_update(None, "user_version", 1)?;
         }
@@ -3143,7 +3633,7 @@ impl RogerStore {
             self.conn.execute(
                 "INSERT INTO schema_migrations(version, name, applied_at)
                 VALUES (2, 'session_ledger_foundation', ?1)",
-                params![now_ts()],
+                params![time::now_ts()],
             )?;
             self.conn.pragma_update(None, "user_version", 2)?;
         }
@@ -3153,7 +3643,7 @@ impl RogerStore {
             self.conn.execute(
                 "INSERT INTO schema_migrations(version, name, applied_at)
                 VALUES (3, 'launch_binding_context', ?1)",
-                params![now_ts()],
+                params![time::now_ts()],
             )?;
             self.conn.pragma_update(None, "user_version", 3)?;
         }
@@ -3163,7 +3653,7 @@ impl RogerStore {
             self.conn.execute(
                 "INSERT INTO schema_migrations(version, name, applied_at)
                 VALUES (4, 'launch_profile_routing', ?1)",
-                params![now_ts()],
+                params![time::now_ts()],
             )?;
             self.conn.pragma_update(None, "user_version", 4)?;
         }
@@ -3173,7 +3663,7 @@ impl RogerStore {
             self.conn.execute(
                 "INSERT INTO schema_migrations(version, name, applied_at)
                 VALUES (5, 'prompt_invocation_and_outcome_events', ?1)",
-                params![now_ts()],
+                params![time::now_ts()],
             )?;
             self.conn.pragma_update(None, "user_version", 5)?;
         }
@@ -3183,7 +3673,7 @@ impl RogerStore {
             self.conn.execute(
                 "INSERT INTO schema_migrations(version, name, applied_at)
                 VALUES (6, 'finding_materialization_with_provenance', ?1)",
-                params![now_ts()],
+                params![time::now_ts()],
             )?;
             self.conn.pragma_update(None, "user_version", 6)?;
         }
@@ -3193,7 +3683,7 @@ impl RogerStore {
             self.conn.execute(
                 "INSERT INTO schema_migrations(version, name, applied_at)
                 VALUES (7, 'prior_review_lookup_memory_hooks', ?1)",
-                params![now_ts()],
+                params![time::now_ts()],
             )?;
             self.conn.pragma_update(None, "user_version", 7)?;
         }
@@ -3203,9 +3693,19 @@ impl RogerStore {
             self.conn.execute(
                 "INSERT INTO schema_migrations(version, name, applied_at)
                 VALUES (8, 'launch_preflight_plan_persistence', ?1)",
-                params![now_ts()],
+                params![time::now_ts()],
             )?;
             self.conn.pragma_update(None, "user_version", 8)?;
+        }
+
+        if version < 9 {
+            self.conn.execute_batch(MIGRATION_0009)?;
+            self.conn.execute(
+                "INSERT INTO schema_migrations(version, name, applied_at)
+                VALUES (9, 'outcome_event_usefulness_links', ?1)",
+                params![time::now_ts()],
+            )?;
+            self.conn.pragma_update(None, "user_version", 9)?;
         }
 
         Ok(())
@@ -3293,11 +3793,8 @@ fn artifact_relative_path(digest: &str) -> PathBuf {
     PathBuf::from(prefix).join(format!("{rest}.bin"))
 }
 
-fn now_ts() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time before unix epoch")
-        .as_secs() as i64
+fn sha256_prefixed(bytes: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
 #[cfg(test)]

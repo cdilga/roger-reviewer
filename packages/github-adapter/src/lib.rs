@@ -6,9 +6,8 @@
 
 use std::collections::HashMap;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use roger_app_core::ReviewTarget;
+use roger_app_core::{ReviewTarget, now_ts};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
@@ -154,13 +153,6 @@ impl GhCliAdapter {
         Self { gh_path }
     }
 
-    fn now_ts() -> i64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64
-    }
-
     fn run_gh(&self, args: &[&str]) -> Result<String> {
         let output = Command::new(&self.gh_path)
             .args(args)
@@ -244,7 +236,7 @@ impl ReadSafeGitHubAdapter for GhCliAdapter {
             additions: raw["additions"].as_u64().unwrap_or(0),
             deletions: raw["deletions"].as_u64().unwrap_or(0),
             changed_files: raw["changedFiles"].as_u64().unwrap_or(0),
-            fetched_at: Self::now_ts(),
+            fetched_at: now_ts(),
         })
     }
 

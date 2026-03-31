@@ -1,0 +1,12 @@
+id = "int_cli_robot_shortlist_validation"
+budget_id = "INT-CLI-ROBOT-01"
+family = "int_cli"
+flow_ids = ["F01.2", "F09"]
+fixture_families = ["fixture_same_pr_multi_instance"]
+support_tier = "opencode_tier_b"
+support_status = "bounded"
+degraded = true
+bounded = true
+tier = "integration"
+preserve_failure_artifacts = true
+artifact_retention = "on_failure"

@@ -1,0 +1,12 @@
+id = "int_storage_prompt_usefulness"
+budget_id = "INT-STORAGE-02"
+family = "int_storage"
+flow_ids = ["F03", "F09"]
+fixture_families = ["fixture_findings_valid_minimal"]
+support_tier = "opencode_tier_b"
+support_status = "blessed"
+degraded = false
+bounded = false
+tier = "integration"
+preserve_failure_artifacts = true
+artifact_retention = "on_failure"

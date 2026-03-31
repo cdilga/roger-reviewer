@@ -1,8 +1,8 @@
 use roger_app_core::tui_shell::{
-    BackgroundJobClass, BackgroundJobSnapshot, BackgroundJobStatus, ClarificationIntentStatus,
-    DraftReviewDecision, EvidenceSnippet, FindingDetail, FindingListRow, LocalDraftReviewEntry,
-    MinimalTuiShell, ReadOnlySessionSnapshot, SessionChrome, SupervisorSnapshot, WakeReason,
-    WakeSignal,
+    ActiveSessionEntry, BackgroundJobClass, BackgroundJobSnapshot, BackgroundJobStatus,
+    ClarificationIntentStatus, DraftReviewDecision, EvidenceSnippet, FindingDetail, FindingListRow,
+    LocalDraftReviewEntry, MinimalTuiShell, ReadOnlySessionSnapshot, SessionChrome,
+    SupervisorSnapshot, WakeReason, WakeSignal,
 };
 
 fn sample_snapshot() -> ReadOnlySessionSnapshot {
@@ -59,8 +59,30 @@ fn sample_snapshot() -> ReadOnlySessionSnapshot {
             edited_body: None,
             invalidation_reason: None,
             pending_post: false,
+            post_failure_reason: None,
+            recovery_hint: None,
             updated_at: 1_700_000_000,
         }],
+        active_sessions: vec![
+            ActiveSessionEntry {
+                session_id: "session-42".to_owned(),
+                repository: "owner/repo".to_owned(),
+                pull_request_number: 42,
+                provider: "opencode".to_owned(),
+                continuity_state: "review_launched".to_owned(),
+                attention_state: "awaiting_user_input".to_owned(),
+                degraded: false,
+            },
+            ActiveSessionEntry {
+                session_id: "session-43".to_owned(),
+                repository: "owner/repo".to_owned(),
+                pull_request_number: 43,
+                provider: "opencode".to_owned(),
+                continuity_state: "awaiting_resume".to_owned(),
+                attention_state: "review_launched".to_owned(),
+                degraded: true,
+            },
+        ],
     }
 }
 
@@ -145,6 +167,8 @@ fn triage_and_clarification_actions_are_recorded_locally_only() {
         .lines
         .join("\n");
     assert!(detail_lines.contains("clarification_intents_pending=1"));
+    assert!(!detail_lines.contains("pending_post"));
+    assert!(!detail_lines.contains("post_failed="));
 }
 
 #[test]
@@ -175,6 +199,22 @@ fn local_draft_queue_transitions_keep_pending_post_visibility_local() {
     assert_eq!(shell.pending_post_drafts().len(), 1);
     assert!(!shell.posting_requested);
 
+    assert!(shell.mark_draft_post_failed(
+        "draft-1",
+        "github_unavailable",
+        Some("retry after restoring gh auth"),
+        1_700_000_121,
+    ));
+    assert_eq!(shell.pending_post_drafts().len(), 0);
+    assert_eq!(
+        shell.local_draft_queue[0].post_failure_reason.as_deref(),
+        Some("github_unavailable")
+    );
+    assert_eq!(
+        shell.local_draft_queue[0].recovery_hint.as_deref(),
+        Some("retry after restoring gh auth")
+    );
+
     assert!(shell.review_draft(
         "draft-1",
         DraftReviewDecision::Invalidated,
@@ -187,7 +227,36 @@ fn local_draft_queue_transitions_keep_pending_post_visibility_local() {
         shell.local_draft_queue[0].invalidation_reason.as_deref(),
         Some("finding became stale")
     );
+    assert!(shell.local_draft_queue[0].post_failure_reason.is_none());
     assert!(!shell.posting_requested);
+}
+
+#[test]
+fn session_switching_updates_active_chrome_without_side_effects() {
+    let mut shell = MinimalTuiShell::open(sample_snapshot());
+    assert_eq!(shell.active_session().session_id, "session-42");
+    assert_eq!(shell.chrome.session_id, "session-42");
+
+    assert!(shell.switch_to_next_session());
+    assert_eq!(shell.active_session().session_id, "session-43");
+    assert_eq!(shell.chrome.session_id, "session-43");
+    assert_eq!(shell.chrome.pull_request_number, 43);
+
+    assert!(shell.switch_to_previous_session());
+    assert_eq!(shell.active_session().session_id, "session-42");
+    assert!(shell.switch_to_session("session-43"));
+    assert_eq!(shell.chrome.session_id, "session-43");
+    assert!(!shell.posting_requested);
+
+    let session_lines = shell
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Session")
+        .expect("session panel")
+        .lines
+        .join("\n");
+    assert!(session_lines.contains("active_session=session-43"));
+    assert!(session_lines.contains("available_sessions:"));
 }
 
 #[test]
