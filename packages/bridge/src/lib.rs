@@ -136,9 +136,9 @@ pub fn write_native_message<W: Write>(writer: &mut W, response: &BridgeResponse)
     writer.write_all(&json).map_err(|e| {
         BridgeError::NativeMessagingWriteError(format!("failed to write message body: {e}"))
     })?;
-    writer.flush().map_err(|e| {
-        BridgeError::NativeMessagingWriteError(format!("failed to flush: {e}"))
-    })?;
+    writer
+        .flush()
+        .map_err(|e| BridgeError::NativeMessagingWriteError(format!("failed to flush: {e}")))?;
     Ok(())
 }
 
@@ -167,10 +167,7 @@ pub struct NativeHostManifest {
 
 impl NativeHostManifest {
     /// Create a manifest for the Roger bridge host binary.
-    pub fn for_roger(
-        bridge_binary_path: &Path,
-        extension_id: &str,
-    ) -> Self {
+    pub fn for_roger(bridge_binary_path: &Path, extension_id: &str) -> Self {
         Self {
             name: "com.roger_reviewer.bridge".to_owned(),
             description: "Roger Reviewer browser-to-local launch bridge".to_owned(),
@@ -316,14 +313,10 @@ impl BridgePreflight {
             ));
         }
         if !self.roger_data_dir_exists {
-            issues.push(
-                "Roger data directory not found. Run `rr init` to set up.".to_owned(),
-            );
+            issues.push("Roger data directory not found. Run `rr init` to set up.".to_owned());
         }
         if !self.gh_available {
-            issues.push(
-                "GitHub CLI (gh) not authenticated. Run `gh auth login`.".to_owned(),
-            );
+            issues.push("GitHub CLI (gh) not authenticated. Run `gh auth login`.".to_owned());
         }
 
         if issues.is_empty() {
@@ -435,8 +428,7 @@ mod tests {
 
     #[test]
     fn custom_url_parse_basic() {
-        let intent =
-            parse_custom_url("roger://launch/acme/widgets/42").unwrap();
+        let intent = parse_custom_url("roger://launch/acme/widgets/42").unwrap();
         assert_eq!(intent.owner, "acme");
         assert_eq!(intent.repo, "widgets");
         assert_eq!(intent.pr_number, 42);
@@ -472,17 +464,23 @@ mod tests {
     #[test]
     fn host_manifest_install_paths() {
         let chrome_path = NativeHostManifest::install_path(&SupportedBrowser::Chrome);
-        assert!(chrome_path
-            .to_string_lossy()
-            .contains("com.roger_reviewer.bridge.json"));
+        assert!(
+            chrome_path
+                .to_string_lossy()
+                .contains("com.roger_reviewer.bridge.json")
+        );
 
         let edge_path = NativeHostManifest::install_path(&SupportedBrowser::Edge);
-        assert!(edge_path.to_string_lossy().contains("Edge")
-            || edge_path.to_string_lossy().contains("microsoft-edge"));
+        assert!(
+            edge_path.to_string_lossy().contains("Edge")
+                || edge_path.to_string_lossy().contains("microsoft-edge")
+        );
 
         let brave_path = NativeHostManifest::install_path(&SupportedBrowser::Brave);
-        assert!(brave_path.to_string_lossy().contains("Brave")
-            || brave_path.to_string_lossy().contains("BraveSoftware"));
+        assert!(
+            brave_path.to_string_lossy().contains("Brave")
+                || brave_path.to_string_lossy().contains("BraveSoftware")
+        );
     }
 
     #[test]
@@ -551,8 +549,7 @@ mod tests {
 
     #[test]
     fn bridge_response_serialization() {
-        let resp =
-            BridgeResponse::failure("start_review", "not ready", "install Roger first");
+        let resp = BridgeResponse::failure("start_review", "not ready", "install Roger first");
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: BridgeResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.ok, false);
