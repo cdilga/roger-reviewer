@@ -39,8 +39,10 @@ Persistent swarm identity rules:
 - Your Agent Mail identity for this swarm is exactly \`${AGENT_NAME}\`. Reuse that exact name. Do not invent a new identity.
 - Register or refresh that exact Agent Mail name at the start of the cycle before doing other coordination work.
 - Do not take a bead because a launcher hinted at one. Self-select from \`br ready\` and \`bv\`.
+- If the next safe slice is missing, you may create or split beads yourself, but keep dependency truth and add a validation contract.
+- If \`br\` reports the database is busy, wait briefly and retry before concluding the queue is empty.
 - This invocation is cycle ${cycle}. Work autonomously until you reach a durable checkpoint, then stop cleanly.
-- Before stopping, make sure bead status, file reservations, and Agent Mail reflect reality. If you changed bead state or found a blocker, send a short Agent Mail update.
+- Before stopping, make sure bead status, file reservations, Agent Mail, and validation evidence reflect reality. If you changed bead state or found a blocker, send a short Agent Mail update.
 - When this cycle ends, exit instead of waiting at an interactive prompt. The launcher will invoke you again.
 EOF
 }
@@ -58,9 +60,10 @@ run_cycle() {
     claude)
       claude \
         --dangerously-skip-permissions \
+        --no-session-persistence \
         -p \
         "$prompt" \
-        >"$LAST_OUTPUT_FILE"
+        >"$LAST_OUTPUT_FILE" 2>&1
       cat "$LAST_OUTPUT_FILE"
       ;;
     gemini)

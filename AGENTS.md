@@ -101,7 +101,24 @@ Read these to understand the full plan before touching code.
 | [`docs/PLANNING_WORKFLOW_PROMPTS.md`](docs/PLANNING_WORKFLOW_PROMPTS.md) | Prompts for future critique, integration, and bead polishing rounds |
 | [`docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md`](docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md) | Reusable prompt pack for repo onboarding and pre-planning discovery |
 | [`docs/DATA_MODEL_AND_STORAGE_CONTRACT.md`](docs/DATA_MODEL_AND_STORAGE_CONTRACT.md) | Implementation-facing contract for canonical entities, concurrency, artifacts, and migration boundaries |
+| [`docs/CORE_DOMAIN_SCHEMA_AND_FINDING_FINGERPRINT.md`](docs/CORE_DOMAIN_SCHEMA_AND_FINDING_FINGERPRINT.md) | Narrow support contract for the core entity set, finding identity, refresh lineage, and invalidation rules |
+| [`docs/PROMPT_PRESET_AND_OUTCOME_CONTRACT.md`](docs/PROMPT_PRESET_AND_OUTCOME_CONTRACT.md) | Support contract for prompt presets, invocation snapshots, and typed outcome events |
+| [`docs/ATTENTION_EVENT_AND_NOTIFICATION_CONTRACT.md`](docs/ATTENTION_EVENT_AND_NOTIFICATION_CONTRACT.md) | Support contract for the canonical Roger attention-state model across CLI, TUI, and extension surfaces |
+| [`docs/TUI_RUNTIME_SUPERVISOR_POLICY.md`](docs/TUI_RUNTIME_SUPERVISOR_POLICY.md) | Support contract for in-process queue classes, cancellation rules, and bounded refresh cadence |
+| [`docs/EXTENSION_PACKAGING_AND_RELEASE_CONTRACT.md`](docs/EXTENSION_PACKAGING_AND_RELEASE_CONTRACT.md) | Support contract for the minimal extension toolchain, contract export, and bridge/extension release ownership |
+| [`docs/ROBOT_CLI_CONTRACT.md`](docs/ROBOT_CLI_CONTRACT.md) | Support contract for the `0.1.0` `--robot` command shortlist and stable machine-readable output envelopes |
+| [`docs/HARNESS_SESSION_LINKAGE_CONTRACT.md`](docs/HARNESS_SESSION_LINKAGE_CONTRACT.md) | Implementation-facing contract for the Roger-to-harness session boundary, `SessionLocator`, `ResumeBundle`, and adapter obligations (closes `rr-015`) |
+| [`docs/SEARCH_MEMORY_LIFECYCLE_AND_SEMANTIC_ASSET_POLICY.md`](docs/SEARCH_MEMORY_LIFECYCLE_AND_SEMANTIC_ASSET_POLICY.md) | Support contract for prior-review search, semantic asset lifecycle, memory promotion rules, and `0.1.0` scope fence before `rr-024` |
 | [`docs/RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md) | Explicit `0.1.0` provider, browser, OS, fixture, and validation matrix |
+| [`docs/TEST_HARNESS_GUIDELINES.md`](docs/TEST_HARNESS_GUIDELINES.md) | Canonical implementation-facing contract for suite layers, fixtures, CI tiers, and E2E budget rules |
+| [`docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md`](docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md) | Implementation-facing support contract for `0.1.0` test execution tiers, the one blessed automated E2E, and the machine-readable E2E budget guard |
+| [`docs/REVIEW_FLOW_MATRIX.md`](docs/REVIEW_FLOW_MATRIX.md) | Scenario matrix mapping Roger user flows to happy-path, variant, and failure/recovery coverage for alignment across TUI, CLI, extension, and harness |
+| [`docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md) | Planning-stage matrix naming flow families, fixture families, suite families, and support-claim ownership; seeds the `rr-011.x` validation beads (closes `rr-025`) |
+| [`docs/VALIDATION_HARNESS_SCAFFOLD_CONTRACT.md`](docs/VALIDATION_HARNESS_SCAFFOLD_CONTRACT.md) | Implementation-facing contract for suite directory layout, naming conventions, metadata envelope schema, helper boundaries, fixture manifests, and failure-artifact preservation rules (closes `rr-025.1`) |
+| [`docs/VALIDATION_FIXTURE_CORPUS_AND_MANIFEST.md`](docs/VALIDATION_FIXTURE_CORPUS_AND_MANIFEST.md) | Canonical fixture corpus: all 13 initial fixture families with purpose, allowed consumers, degraded-condition annotations, provenance policy, and update rules (closes `rr-025.2`) |
+| [`docs/VALIDATION_CI_TIERS_AND_ENTRYPOINTS.md`](docs/VALIDATION_CI_TIERS_AND_ENTRYPOINTS.md) | CI tier entrypoints (fast-local/PR/gated/nightly/release), suite metadata registration contract, artifact retention rules, and E2E budget guard integration (closes `rr-025.3`) |
+| [`docs/READINESS_REVIEW_FIRST_IMPLEMENTATION_SLICE_WITHOUT_EXTENSION.md`](docs/READINESS_REVIEW_FIRST_IMPLEMENTATION_SLICE_WITHOUT_EXTENSION.md) | Narrow readiness result proving the first local implementation slice does not depend on extension delivery |
+| [`docs/READINESS_IMPLEMENTATION_GATE_DECISION.md`](docs/READINESS_IMPLEMENTATION_GATE_DECISION.md) | Canonical go/no-go record for moving from planning into implementation |
 | [`docs/REFERENCE_SOURCES_AND_EXPLORATION_TARGETS.md`](docs/REFERENCE_SOURCES_AND_EXPLORATION_TARGETS.md) | External standards, prior-art notes, and approved exploration targets for future architecture spikes |
 | [`docs/ALIEN_ARTEFACTS_FOR_ROGER_REVIEWER.md`](docs/ALIEN_ARTEFACTS_FOR_ROGER_REVIEWER.md) | Compact artifact pack for external critique sessions |
 | [`docs/ALIEN_WORKFLOWS_FOR_ROGER_REVIEWER.md`](docs/ALIEN_WORKFLOWS_FOR_ROGER_REVIEWER.md) | Roger-specific alien-workflow pack for external critique, research-and-reimagine, transfer-audit, and feedback-closure loops |
@@ -158,11 +175,14 @@ is the current truth unless the user says otherwise.
 
 ---
 
-## Planning Stage Status
+## Project Stage Status
 
-The project is in the **planning and bead-polishing stage**. No implementation
-work has started. The beads workspace currently has 26 issues loaded and the
-DB/JSONL sync state was repaired on 2026-03-28.
+The project has completed planning, bead polishing, and readiness review.
+Implementation may now begin, but no implementation work has landed yet. The
+live bead count changes as work is added and closed; use `br info` for the
+authoritative current count and see
+[`docs/BEADS_WORKSPACE_STATUS.md`](docs/BEADS_WORKSPACE_STATUS.md) for the
+current repair and health notes.
 
 The first real Roger implementation release is now defined as **`0.1.0`**.
 When this file or the canonical plan says "v1", read that as the `0.1.0`
@@ -175,22 +195,24 @@ Planning phase checklist:
 - [x] Critique Round 02 completed and documented
 - [x] Critique Round 03 completed and documented
 - [x] Architecture reconciliation after Round 03 and stakeholder review
-- [ ] Bead polishing (see prompt in `PLANNING_WORKFLOW_PROMPTS.md`)
-- [ ] Readiness review before implementation begins
+- [x] Bead polishing (see prompt in `PLANNING_WORKFLOW_PROMPTS.md`)
+- [x] Readiness review before implementation begins
 
-Current architecture questions to settle before implementation:
-- Exact OpenCode / multi-harness integration boundary beyond the accepted hybrid CLI/session plus Roger-ledger baseline
-- queue limits, cancellation rules, and refresh cadence inside the accepted
-  in-process Rust TUI/app-core runtime
-- Extension packaging/build strategy that keeps browser runtime deps near zero
-  while allowing the chosen small typed toolchain and Roger-owned pack/install
-  commands, and deciding whether any bundler ever earns its cost
-- Release/devops flow for macOS, Windows, and Linux companion binaries plus
-  browser-extension artifacts
-- Multi-instance/worktree model: single-repo defaults, copied env files, per-instance ports, docker/container naming, DB sharing, and config UX
-- Trigger and notification model: Roger-owned attention events versus thin external launch surfaces
+Implementation gate status:
 
-**Do not begin implementation until the readiness review passes.**
+- passed on 2026-03-30
+- authoritative readiness artifacts:
+  [`docs/READINESS_REVIEW_FIRST_IMPLEMENTATION_SLICE_WITHOUT_EXTENSION.md`](docs/READINESS_REVIEW_FIRST_IMPLEMENTATION_SLICE_WITHOUT_EXTENSION.md)
+  and
+  [`docs/READINESS_IMPLEMENTATION_GATE_DECISION.md`](docs/READINESS_IMPLEMENTATION_GATE_DECISION.md)
+- remaining questions are now bounded implementation-shaping follow-ons tracked
+  in beads and support contracts; they do not block the first local
+  implementation slice
+- keep the implementation order local-core-first and extension-last
+
+**Implementation may begin now. Do not start extension delivery or mutable
+GitHub-write work before the local core, approval surfaces, and posting safety
+beads are in place.**
 
 ---
 
@@ -238,6 +260,57 @@ artefacts under `.beads/.br_recovery` are still only a cleanup warning.
 4. Complete all acceptance criteria before marking `done`.
 5. If you discover a blocker or ambiguity, add a note to the bead rather than
    guessing.
+
+If `br` reports `database is busy`, do not treat that as "no work exists".
+Wait briefly, then retry. The live queue is authoritative only after a clean
+read.
+
+### Bead shaping is allowed
+
+Agents are explicitly allowed to shape the backlog when the current frontier is
+too narrow, a bead is obviously too large, or a blocking unknown needs its own
+container. Valid autonomy includes:
+
+1. splitting a large bead into smaller non-overlapping child beads
+2. creating a planning or design bead to settle a blocking unknown
+3. creating a spike bead to test a risky seam or adapter contract
+4. creating a bead whose purpose is to widen safe parallel work for other agents
+5. adding missing dependency edges or clarifying notes when the graph is
+   materially incomplete
+
+Rules:
+
+- new beads must be justified by the canonical plan and current repo reality,
+  not invented busywork
+- split beads must preserve dependency truth; do not use child beads to dodge a
+  real blocker
+- announce new or split beads in Agent Mail so other agents can pick them up
+- every new implementation bead should include an explicit validation contract
+
+### Validation contract is part of the task
+
+Do not treat validation as an afterthought or as something inferred from vibe.
+Every implementation bead should name the cheapest truthful validation layer
+that defends its promise.
+
+Minimum validation contract:
+
+1. what promise or acceptance criterion is being defended
+2. which layer is required: `unit`, `prop`, `int`, `accept`, `e2e`, or manual
+   `smoke`
+3. the exact suite name or command expected at closeout
+4. the CI tier or release lane it belongs to when relevant
+5. any fixture families or failure artifacts the suite depends on
+
+Rules:
+
+- smoke is not a blanket closeout. It is sufficient only when the bead or the
+  governing validation docs explicitly say smoke is the right layer
+- provider acceptance is not the same thing as end-to-end validation
+- do not add a new blessed automated E2E unless the budget and justification
+  rules in the validation docs are satisfied
+- if a bead is missing a validation contract, add or clarify it before closing
+  the bead rather than silently guessing
 
 ### Critical dependency spine (v1)
 
@@ -391,39 +464,52 @@ The adversarial review loop:
    context.
 2. Read the bead in full with `br show <id>`.
 3. Implement exactly what the acceptance criteria require. No more.
-4. Do not touch GitHub write paths, posting flows, or mutation-capable code
+4. Verify the bead has an explicit validation contract. If it does not, add a
+   note or split the missing validation work before treating the bead as
+   closeable.
+5. Do not touch GitHub write paths, posting flows, or mutation-capable code
    without the approval model in place.
-5. Run any smoke tests specified in the bead before marking done.
-6. If your change increases the number of blessed automated E2E tests, stop and
+6. Run the exact validation layer named by the bead or governing validation
+   contract before marking done.
+7. Record the exact validation command or suite result in the bead close reason
+   or bead notes. Do not imply broader coverage than what actually ran.
+8. Smoke alone is enough only when the bead explicitly calls for smoke or the
+   lower-layer validation docs make that the correct layer.
+9. If your change increases the number of blessed automated E2E tests, stop and
    justify why a unit, parameterized, or narrow integration test would not
    defend the same promise more cheaply.
-7. If you discover a dependency is incomplete, stop and flag it rather than
+10. If you discover a dependency is incomplete, stop and flag it rather than
    working around it.
 
 ---
 
-## Open Questions (as of 2026-03-29)
+## Open Questions (non-blocking as of 2026-03-30)
 
-These are known unknowns. Do not silently bake in assumptions.
+These are bounded follow-on questions. They do not block the first
+implementation slice, but agents should still resolve them in the named beads
+or support contracts before implementing the affected surface.
 
-- **Protocol adapters**: ACP may later become a harness-control edge and MCP
-  may later become a tool/context edge, but neither should become Roger's core
-  architecture or a `0.1.0` dependency.
-- **TUI/runtime execution details**: Set the default queue limits, cancellation
-  rules, and bounded refresh cadence for the accepted in-process Rust
-  TUI/runtime boundary.
-- **Browser bridge packaging and install boundary**: Finalize how Native
-  Messaging host mode, custom URL convenience launch, Roger-owned pack/install
-  commands, and release automation divide responsibility inside the accepted v1
-  bridge model.
-- **Multi-instance/worktree workflow**: Decide how named instances copy env
-  files, allocate ports, handle docker/container naming, and share or isolate
-  mutable local resources safely while keeping single-repo mode the default.
-- **Trigger and notification model**: Finalize the canonical attention-event
-  set and which surfaces must mirror it in `0.1.0`.
-- **Robot-facing CLI surface**: Decide which `rr` commands need first-class
-  `--robot` support and what stable machine-readable output shapes they should
-  expose for future coding-agent automation.
+- **Future harness expansion**: ACP may later become a harness-control edge and
+  MCP may later become a tool/context edge, but neither should become Roger's
+  core architecture or a `0.1.0` dependency.
+- **Semantic packaging**: confirm the first local embedding asset and its
+  install or verify shape before hybrid search moves from contract to code.
+- **Outcome labeling implementation**: settle the exact storage shape for
+  merged-resolution links and `UsageEvent` derivation jobs when the prompt and
+  usefulness pipeline is implemented.
+- **TOON viability**: prove which target backends are strong enough to justify
+  TOON as an optional packer instead of plain JSON or compact JSON.
+
+The following topics are no longer pre-implementation blockers because they now
+have dedicated support contracts or closed planning beads:
+
+- browser bridge packaging and release ownership
+- multi-instance and worktree defaults
+- Roger attention-state and notification mirroring
+- in-process queue classes, cancellation rules, and refresh cadence
+- validation matrix, fixture ownership, and support-claim coverage
+- robot-facing CLI surface
+- first-slice readiness without the extension
 
 ### Harness support policy (`0.1.0`)
 

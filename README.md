@@ -5,17 +5,17 @@
 
 | Status | Stage |
 | --- | --- |
-| Product maturity | Planning and bead-polishing |
-| Release status | In development, not a release |
+| Product maturity | Post-readiness implementation |
+| Release status | Pre-release, active implementation |
 | First implementation release target | `0.1.0` |
 | Planned versioning | `0.1.x` early Roger releases, then CalVer once the product is shipping mature releases |
 | Default mode | Review-only, not auto-fix |
 | Source of truth | Local state |
 | Primary surfaces | CLI, TUI, GitHub launch surface |
 
-Roger Reviewer is not at `v1.0` yet. This repository is still in active
-planning and early development, and nothing here should be treated as a stable
-release artifact.
+Roger Reviewer is not at `v1.0` yet. Planning, bead polishing, and readiness
+review completed on 2026-03-30, and the repository is now in active
+implementation. Nothing here should be treated as a stable release artifact.
 
 Roger Reviewer is a local-first review system built around one core idea:
 review quality improves when findings, prompts, evidence, and follow-up survive
@@ -71,8 +71,8 @@ flowchart LR
 
 ## Current Repo Contents
 
-The repository is intentionally early. At the moment, it contains planning
-artifacts rather than implementation packages.
+The repository is intentionally early. It now contains the planning corpus,
+readiness artifacts, swarm tooling, and early implementation code.
 
 | Path | Purpose |
 | --- | --- |
@@ -83,6 +83,9 @@ artifacts rather than implementation packages.
 | [`docs/CRITIQUE_ROUND_02_FOR_ROGER_REVIEWER.md`](docs/CRITIQUE_ROUND_02_FOR_ROGER_REVIEWER.md) | Second critique round focused on architecture risk |
 | [`docs/CRITIQUE_ROUND_03_FOR_ROGER_REVIEWER.md`](docs/CRITIQUE_ROUND_03_FOR_ROGER_REVIEWER.md) | Third critique round focused on Rust-first local architecture and Native Messaging |
 | [`docs/ROUND_04_ARCHITECTURE_RECONCILIATION_OUTCOME.md`](docs/ROUND_04_ARCHITECTURE_RECONCILIATION_OUTCOME.md) | Round 04 closeout artifact aligning ADR decisions, canonical docs, and remaining bounded questions |
+| [`docs/READINESS_IMPLEMENTATION_GATE_DECISION.md`](docs/READINESS_IMPLEMENTATION_GATE_DECISION.md) | Gate decision that moved Roger from planning into implementation |
+| [`docs/READINESS_REVIEW_SYNTHESIS.md`](docs/READINESS_REVIEW_SYNTHESIS.md) | Consolidated readiness review outcome and remaining bounded risks |
+| [`docs/READINESS_REVIEW_FIRST_IMPLEMENTATION_SLICE_WITHOUT_EXTENSION.md`](docs/READINESS_REVIEW_FIRST_IMPLEMENTATION_SLICE_WITHOUT_EXTENSION.md) | Proof that the first implementation slice does not depend on immediate extension delivery |
 | [`docs/PLANNING_WORKFLOW_PROMPTS.md`](docs/PLANNING_WORKFLOW_PROMPTS.md) | Prompts for critique, integration, and readiness loops |
 | [`docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md`](docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md) | Reusable prompt pack for repo onboarding, discovery, and canonicalization |
 | [`docs/DATA_MODEL_AND_STORAGE_CONTRACT.md`](docs/DATA_MODEL_AND_STORAGE_CONTRACT.md) | Implementation-facing data, concurrency, and storage contract |
@@ -90,7 +93,7 @@ artifacts rather than implementation packages.
 | [`docs/REFERENCE_SOURCES_AND_EXPLORATION_TARGETS.md`](docs/REFERENCE_SOURCES_AND_EXPLORATION_TARGETS.md) | External standards, prior-art sources, and approved exploration targets for future agent review |
 | [`docs/DEV_MACHINE_ONBOARDING.md`](docs/DEV_MACHINE_ONBOARDING.md) | Practical machine setup guide for Codex, Agent Mail, and planning workflow access |
 | [`docs/adr/README.md`](docs/adr/README.md) | Architecture decision records that narrow the plan into implementable contracts |
-| [`.beads/issues.jsonl`](.beads/issues.jsonl) | Tracked planning graph in export form |
+| [`.beads/issues.jsonl`](.beads/issues.jsonl) | Live beads export for the implementation backlog |
 | [`roger-reviewer-brain-dump.md`](roger-reviewer-brain-dump.md) | Raw intent source document |
 
 ## Document Roles
@@ -141,13 +144,16 @@ truth, and treat critique rounds as explanation only.
 
 ## Near-Term Milestones
 
-1. Sync the live bead graph to the current planning set.
-2. Finish bead polishing and readiness review.
-3. Start implementation only after the planning gate passes.
+1. Keep the live bead graph aligned with the implementation backlog.
+2. Build the first `0.1.0` local-core slices across storage, CLI, and TUI.
+3. Preserve the approval-safe GitHub model as implementation expands.
 
 ## Read Next
 
 - [`docs/PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md)
+- [`docs/READINESS_IMPLEMENTATION_GATE_DECISION.md`](docs/READINESS_IMPLEMENTATION_GATE_DECISION.md)
+- [`docs/READINESS_REVIEW_FIRST_IMPLEMENTATION_SLICE_WITHOUT_EXTENSION.md`](docs/READINESS_REVIEW_FIRST_IMPLEMENTATION_SLICE_WITHOUT_EXTENSION.md)
+- [`docs/ROUND_04_ARCHITECTURE_RECONCILIATION_OUTCOME.md`](docs/ROUND_04_ARCHITECTURE_RECONCILIATION_OUTCOME.md)
 - [`docs/ALIEN_ARTEFACTS_FOR_ROGER_REVIEWER.md`](docs/ALIEN_ARTEFACTS_FOR_ROGER_REVIEWER.md)
 - [`docs/REFERENCE_SOURCES_AND_EXPLORATION_TARGETS.md`](docs/REFERENCE_SOURCES_AND_EXPLORATION_TARGETS.md)
 - [`docs/PLANNING_WORKFLOW_PROMPTS.md`](docs/PLANNING_WORKFLOW_PROMPTS.md)

@@ -12,7 +12,9 @@ GEMINI_COUNT=2
 OPENCODE_COUNT=2
 DELAY_SECONDS=45
 ATTACH=0
+SUPERVISOR=1
 PROMPT_FILE="${PROJECT_ROOT}/docs/swarm/overnight-marching-orders.md"
+PROMPT_DIR="${TMPDIR:-/tmp}/roger-reviewer-swarm-prompts"
 WORKER_NAMES=(
   AmberFalcon
   CobaltHarbor
@@ -43,8 +45,9 @@ Options:
   --claude N          Number of Claude windows to spawn
   --gemini N          Number of Gemini windows to spawn
   --opencode N        Number of OpenCode windows to spawn
-  --prompt-file PATH  Prompt file used for every worker cycle
+  --prompt-file PATH  Prompt file used for every worker session
   --delay-seconds N   Delay between spawned windows
+  --no-supervisor     Do not start the tmux swarm supervisor
   --attach            Attach to the session after launch
   --no-attach         Do not attach after launch
   -h, --help          Show this help
@@ -66,6 +69,7 @@ spawn_windows() {
 
   for (( i = 1; i <= count; i++ )); do
     local agent_name
+    local worker_prompt_file
     local window_name
 
     if (( NEXT_WORKER_INDEX >= ${#WORKER_NAMES[@]} )); then
@@ -76,7 +80,9 @@ spawn_windows() {
     agent_name="${WORKER_NAMES[$NEXT_WORKER_INDEX]}"
     NEXT_WORKER_INDEX=$((NEXT_WORKER_INDEX + 1))
     window_name=$(printf "%s-%02d" "$tool" "$i")
-    tmux new-window -t "$SESSION_NAME:" -n "$window_name" "cd '$PROJECT_ROOT' && exec '$PROJECT_ROOT/scripts/swarm/run_agent_loop.sh' '$tool' '$agent_name' '$PROMPT_FILE' '$window_name'"
+    worker_prompt_file="${PROMPT_DIR}/${SESSION_NAME}/${window_name}.txt"
+    bash "${PROJECT_ROOT}/scripts/swarm/build_prompt.sh" "$PROMPT_FILE" "$agent_name" "$worker_prompt_file"
+    tmux new-window -t "$SESSION_NAME:" -n "$window_name" "cd '$PROJECT_ROOT' && exec '$PROJECT_ROOT/scripts/swarm/run_agent.sh' '$tool' '$worker_prompt_file'"
     echo "Spawned $window_name as $agent_name"
     sleep "$DELAY_SECONDS"
   done
@@ -112,6 +118,10 @@ while [[ $# -gt 0 ]]; do
       DELAY_SECONDS="$2"
       shift 2
       ;;
+    --no-supervisor)
+      SUPERVISOR=0
+      shift
+      ;;
     --attach)
       ATTACH=1
       shift
@@ -135,6 +145,10 @@ done
 require_command tmux
 require_command curl
 require_command am
+if [[ ! -f "${PROJECT_ROOT}/scripts/swarm/build_prompt.sh" ]]; then
+  echo "Missing required script: ${PROJECT_ROOT}/scripts/swarm/build_prompt.sh" >&2
+  exit 1
+fi
 
 if (( CODEX_COUNT > 0 )); then
   require_command codex
@@ -175,6 +189,10 @@ spawn_windows codex "$CODEX_COUNT"
 spawn_windows claude "$CLAUDE_COUNT"
 spawn_windows gemini "$GEMINI_COUNT"
 spawn_windows opencode "$OPENCODE_COUNT"
+
+if (( SUPERVISOR == 1 )); then
+  tmux new-window -t "$SESSION_NAME:" -n supervisor "cd '$PROJECT_ROOT' && exec '$PROJECT_ROOT/scripts/swarm/supervise_swarm.sh' --session '$SESSION_NAME'"
+fi
 
 echo
 echo "Swarm launched in tmux session: $SESSION_NAME"

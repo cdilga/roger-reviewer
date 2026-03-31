@@ -1,5 +1,15 @@
 # Plan for Roger Reviewer
 
+## Status
+
+Planning, bead polishing, and readiness review are complete as of 2026-03-30.
+Roger is ready to begin implementation of the local-core-first `0.1.0` slice.
+
+Authoritative readiness artifacts:
+
+- [`READINESS_REVIEW_FIRST_IMPLEMENTATION_SLICE_WITHOUT_EXTENSION.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/READINESS_REVIEW_FIRST_IMPLEMENTATION_SLICE_WITHOUT_EXTENSION.md)
+- [`READINESS_IMPLEMENTATION_GATE_DECISION.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/READINESS_IMPLEMENTATION_GATE_DECISION.md)
+
 ## Project Statement
 
 Roger Reviewer is a local-first pull request review system that combines a
@@ -396,6 +406,10 @@ Escalation rule:
 - extract a stronger cross-process app-core boundary only if a later editor
   client, crash-isolation requirement, or proven operational bottleneck justifies
   the added complexity
+
+The concrete `0.1.0` defaults for queue classes, queue limits, cancellation,
+same-process wake, and cross-process refresh now live in
+[`TUI_RUNTIME_SUPERVISOR_POLICY.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TUI_RUNTIME_SUPERVISOR_POLICY.md).
 
 ### Minimum external envelope family
 
@@ -2212,6 +2226,11 @@ Principles:
 - keep the explicit provider/browser/OS/fixture support matrix in
   [`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md)
   so coverage obligations do not live only as prose
+- keep the implementation-facing harness contract in
+  [`TEST_HARNESS_GUIDELINES.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TEST_HARNESS_GUIDELINES.md)
+  and the automated E2E budget in
+  [`AUTOMATED_E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/AUTOMATED_E2E_BUDGET.json)
+  so tiers, fixtures, and E2E growth rules stay machine-checkable
 
 ## Worktree and Named Instance Model
 
@@ -2242,14 +2261,117 @@ Requirements:
   classes rather than trying to hardcode every development topology
 - environment-specific writes should remain disabled by default
 
-Remaining `0.1.0` design questions:
+`0.1.0` mode-selection rules:
 
-- how users deliberately choose between current-checkout mode, named-instance
-  mode, and worktree mode
-- how per-instance overrides are represented, named, and inspected
-- which resource classes get built-in copy/rename/isolation defaults in
-  `0.1.0`, and which remain explicit manual overrides
-- when Roger should recommend a separate profile instead of a named instance
+- `current_checkout` is the default review mode. Roger should use the existing
+  checkout plus a recorded repo snapshot unless the user explicitly selects a
+  different mode or preflight proves the default would be unsafe.
+- `named_instance` is the default isolation mode when the user needs separate
+  repo-local mutable resources but does not need a separate checkout. Roger may
+  recommend this mode when ports, repo-local dev DBs, container names, caches,
+  artifacts, or logs would otherwise collide, but it must not silently escalate
+  into it.
+- `worktree` is the heavier isolation mode. Roger should require explicit user
+  choice or explicit confirmation before creating one, and should recommend it
+  only when checkout-level isolation is actually needed for code changes,
+  generated files, or conflicting repo state.
+- Roger must not silently escalate from `current_checkout` to `named_instance`
+  or `worktree`. Preflight may recommend a different mode, but the operator
+  must see and approve the change in plain terms.
+- Roger may silently reuse an already-bound named instance or worktree only
+  when the user explicitly targeted that binding or resumed a session already
+  attached to it.
+- a separate Roger profile is required when the canonical Roger store itself
+  must be isolated, not merely the repo-local mutable resources. In `0.1.0`,
+  that means different local human identities, different GitHub identities,
+  confidentiality boundaries that must not share memory/search/audit history,
+  or incompatible policy/config overlays that would make shared-profile state
+  misleading or unsafe.
+
+`0.1.0` resource-class defaults:
+
+| Resource class | `current_checkout` default | `named_instance` default | `worktree` default |
+|----------------|----------------------------|--------------------------|--------------------|
+| env/config files | read in place; no copy | no implicit copy | no implicit copy |
+| ports | shared unless the launch profile declares a rewrite rule | deterministic per-instance rewrite for declared resources; otherwise block on collision | deterministic per-instance rewrite for declared resources; otherwise block on collision |
+| repo-local DBs | shared only for read-mostly flows; mutation-capable use needs explicit override | rewrite to an instance-specific path for declared resources; never copy live DB files by default | rewrite to an instance-specific path for declared resources; never copy live DB files by default |
+| container names | unchanged | append a deterministic instance suffix | append a deterministic instance/worktree suffix |
+| caches | unchanged unless declared as Roger-managed | per-instance cache root by default | per-instance cache root by default |
+| artifact dirs | Roger-managed artifacts stay in the canonical profile store; repo-local artifact outputs stay unchanged unless declared | per-instance repo-local artifact dir by default for declared resources | per-instance repo-local artifact dir by default for declared resources |
+| log dirs | unchanged unless declared as Roger-managed | per-instance log dir by default | per-instance log dir by default |
+
+Rules:
+
+- Roger must never implicitly copy secret-bearing files such as `.env`,
+  `.env.local`, `.env.*.local`, direnv files, local credential files, or other
+  operator-marked secret inputs into a named instance or worktree.
+- non-secret checked-in templates such as `.env.example` may be read or copied
+  only when the resolved config explicitly allows that resource class.
+- Roger should prefer path rewrites, deterministic naming, and explicit
+  environment projection over copying mutable runtime state.
+- Roger's own canonical DB/search store stays per-profile by default; named
+  instances and worktrees isolate repo-local mutable resources before they
+  isolate Roger's profile-level memory or audit state.
+
+`0.1.0` preflight result classes:
+
+| Result | Meaning | Minimum operator guidance |
+|--------|---------|---------------------------|
+| `ready` | selected mode and resource plan are safe as-is | proceed without extra steps |
+| `ready_with_actions` | the topology is supportable, but Roger needs explicit user choices first | show the exact actions required, such as choosing `named_instance`, approving worktree creation, or allowlisting a non-secret file copy |
+| `profile_required` | instance/worktree isolation is insufficient because the Roger profile store must also be isolated | tell the operator to create or select a separate Roger profile and explain why |
+| `unsafe_default_blocked` | the default action would silently share or copy unsafe mutable state | block execution until the user changes mode, removes the unsafe default, or supplies an explicit override |
+| `verification_failed` | Roger could not verify the chosen topology or resource rewrite plan | fail closed and report the specific verification gap |
+
+Preflight rules:
+
+- preflight must classify the launch before Roger creates a worktree, rewrites
+  resources, or starts a mutation-capable local surface
+- recommendation text must say which resources are shared, which are isolated,
+  and which remain blocked
+- the resolved preflight report should be inspectable later from Roger's local
+  session state and CLI output
+
+`0.1.0` hook phases and config layering:
+
+- hook phases are `preflight`, `worktree_create`, `materialize_resources`,
+  `session_env`, `verify`, and `cleanup`
+- `preflight` is read-only and computes the selected mode, resource plan,
+  preflight classification, and any explicit operator actions still required
+- `worktree_create` runs only for approved `worktree` launches and is limited to
+  creating or reusing the checkout plus any explicitly allowlisted non-secret
+  file materialization
+- `materialize_resources` creates instance-specific paths, deterministic names,
+  and rewrite targets for declared ports, DBs, caches, artifacts, and logs; it
+  must not perform implicit secret-file copy
+- `session_env` produces the final environment projection handed to the review
+  session or launched process; it may reference rewritten paths but must not
+  mutate the source checkout's env files in place
+- `verify` confirms that the resolved paths, names, and bindings exist and do
+  not collide; any failure here yields `verification_failed`
+- `cleanup` may remove only Roger-created ephemeral resources for the selected
+  instance/worktree; it must not delete the canonical profile store, the source
+  checkout, or user-provided files without explicit opt-in
+
+Resolved config order for `0.1.0`:
+
+1. built-in defaults
+2. user-global templates
+3. optional project/workspace profiles
+4. repo-specific templates
+5. selected launch profile
+6. mode defaults for `current_checkout`, `named_instance`, or `worktree`
+7. named-instance or worktree overrides
+8. per-review overrides
+
+Rules:
+
+- the resolved config must be inspectable, with provenance for each effective
+  value and resource decision
+- later layers may override declared fields explicitly, but Roger should not
+  rely on ambient shell state or hidden file copies as a second config channel
+- per-instance naming, resource rewrites, and worktree-copy allowlists should
+  all be visible in the same resolved config output
 
 Avoid DB-copy synchronization as the default model.
 
@@ -2594,6 +2716,13 @@ Recommended tiers:
 - release tier: manual smoke against the explicit matrix in
   [`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md)
 
+The exact suite-family rules, fixture contract, artifact layout, and E2E budget
+guard should live in
+[`TEST_HARNESS_GUIDELINES.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TEST_HARNESS_GUIDELINES.md)
+rather than being rediscovered piecemeal during implementation. The concrete
+flow-to-suite mapping and fixture ownership should live in
+[`VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md).
+
 ### Manual validation
 
 Manual smoke should stay small but real.
@@ -2794,6 +2923,13 @@ Mitigation:
 
 ## Open Questions
 
+These remaining questions are bounded implementation follow-ons. They no longer
+block the implementation gate for the first local-core slice. Resolved runtime
+and validation-ownership details now live in
+[`TUI_RUNTIME_SUPERVISOR_POLICY.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TUI_RUNTIME_SUPERVISOR_POLICY.md)
+and
+[`VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md).
+
 - **Future harness expansion**: The `0.1.0` capability tiers and provider
   minima are now fixed. The remaining question is only which later providers
   eventually earn Tier A, Tier B, or Tier C support beyond OpenCode and the
@@ -2804,28 +2940,6 @@ Mitigation:
   which justify MCP as a tool/context edge, and which clients such as VS Code,
   JetBrains, or GitHub Copilot are important enough to shape that evaluation?
 
-- **TUI/runtime execution details**: What default queue limits, cancellation
-  rules, and bounded refresh cadence should the accepted in-process supervisor
-  use for harness work, indexing, bridge traffic, and external session updates?
-
-- **Extension packaging**: What is the minimal TS/JS build/transpile setup that
-  keeps browser runtime dependencies near zero while still giving strong typed
-  contracts, repeatable packaging, and practical local install flows, and when
-  would a single bundler actually earn its keep?
-
-- **Release target matrix**: How should release/devops generate and publish the
-  supported macOS, Windows, and Linux companion binaries and browser-extension
-  artifacts without turning packaging complexity into an ad hoc manual process?
-  The support baseline itself is now captured in
-  [`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md).
-
-- **Multi-instance/worktree UX**: How are named instances configured, which
-  files are copied, and which local resources are shared versus isolated?
-
-- **Robot CLI surface**: Which `rr` commands need first-class `--robot`
-  support in `0.1.0`, what exact output shapes should be stable, and where is
-  TOON justified versus plain JSON or compact JSON?
-
 - **Semantic packaging**: If hybrid search is in the first Roger search slice,
   which local embedding model ships first, how are its assets installed and
   verified, and when should Roger evaluate code-oriented or sparse variants?
@@ -2835,6 +2949,16 @@ Mitigation:
 
 - **TOON viability**: Which target models/backends pass enough structure
   correctness and latency tests to justify TOON as an optional packer?
+
+The following topics were open during late planning but are now considered
+settled enough for implementation:
+
+- extension packaging and release ownership
+- release target matrix baseline
+- multi-instance and worktree defaults
+- robot-facing CLI surface baseline
+- bounded attention-event and notification model
+- first-slice readiness without the extension
 
 ### Resolved questions
 
@@ -2896,3 +3020,6 @@ Planning for Roger Reviewer is complete when:
   ordering
 - the safety model is explicit enough to prevent accidental GitHub or local
   environment mutations
+
+These conditions were satisfied and recorded on 2026-03-30 in
+[`READINESS_IMPLEMENTATION_GATE_DECISION.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/READINESS_IMPLEMENTATION_GATE_DECISION.md).

@@ -59,7 +59,7 @@ echo "== Active in-progress beads =="
 echo
 while IFS=' ' read -r window_index window_name; do
   case "$window_name" in
-    control)
+    control|supervisor)
       continue
       ;;
   esac

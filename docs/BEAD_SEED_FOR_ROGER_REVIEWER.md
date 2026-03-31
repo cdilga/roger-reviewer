@@ -515,11 +515,44 @@ draft.
 - Acceptance: the support matrix is documented, fixture repos are named, and the
   first blessed E2E plus provider-acceptance suites are explicit.
 
+### 11.2.2.1 Stand up shared validation harness scaffold and artifact layout
+
+- Objective: create the common validation harness skeleton before
+  suite-specific work fans out, including shared directory layout, suite naming
+  rules, metadata envelope, helper boundaries, and artifact tree.
+- Depends on: 11.2.1, 11.2.2, 11.7.
+- Acceptance: the shared harness layout is explicit, suite metadata is reusable
+  across validation families, and failure-artifact handling plus structural
+  snapshot rules are fixed before provider acceptance or heavier automation
+  begins.
+
+### 11.2.2.2 Create canonical validation fixture corpus and manifest
+
+- Objective: turn the planned fixture families into one Roger-owned corpus with
+  provenance, ownership, intended suite usage, and degraded-mode annotations.
+- Depends on: 11.2.2.1.
+- Acceptance: the compact review, monorepo, same-PR multi-instance, malformed
+  findings, ResumeBundle reopen/reseed/dropout, GitHub draft/post payload,
+  bridge transcript, and migration/artifact-integrity fixtures are all named,
+  and each fixture declares its allowed suite families plus any intentional
+  brokenness.
+
+### 11.2.2.3 Wire suite metadata, CI tiers, and artifact retention entrypoints
+
+- Objective: connect the shared harness to fast-local, PR, gated, nightly, and
+  release entrypoints, plus the reusable suite metadata and artifact-retention
+  behavior that later suites should inherit.
+- Depends on: 11.2.2.2, 11.7.
+- Acceptance: suite entrypoints are explicit for each tier, flow IDs and
+  fixture-family ownership are declared through one shared metadata contract,
+  and failure artifacts plus automated-E2E budget checks are wired into the
+  harness instead of bespoke suite scripts.
+
 ### 11.2.3 Implement provider acceptance suites for OpenCode and Gemini
 
 - Objective: turn the supported-provider promises into repeatable adapter
   acceptance suites instead of leaving them as documentation-only claims.
-- Depends on: 3.1.1, 3.1.2, 11.2.2.
+- Depends on: 3.1.1, 3.1.2, 11.2.2, 11.2.2.3.
 - Acceptance: OpenCode acceptance covers real reopen plus ResumeBundle fallback;
   Gemini acceptance covers Roger-owned session/run continuity, structured/raw
   capture, and truthful reseed without pretending native parity it does not
@@ -529,7 +562,7 @@ draft.
 
 - Objective: ensure reruns classify old and new findings correctly instead of
   duplicating or losing them.
-- Depends on: 2.1.1, 4.3.
+- Depends on: 2.1.1, 4.3, 11.2.2.3.
 - Acceptance: test scenarios cover carried-forward, resolved, superseded, and
   stale findings.
 
@@ -537,7 +570,7 @@ draft.
 
 - Objective: ensure retrieval stays repo-first, exact-anchor-friendly, and safe
   under degraded indexing or conflicting history.
-- Depends on: 2.3, 2.3.1, 10.2.
+- Depends on: 2.3, 2.3.1, 10.2, 11.2.2.3.
 - Acceptance: test scenarios cover scope-bleed suppression, exact-anchor recall,
   stale-memory suppression, conflict surfacing, abstention, and lexical-only
   degraded mode.
@@ -546,7 +579,7 @@ draft.
 
 - Objective: ensure malformed, partial, or missing findings packs degrade
   truthfully without discarding valid data or hiding raw output.
-- Depends on: 4.2.1, 4.2.2, 6.2, 7.3.
+- Depends on: 4.2.1, 4.2.2, 6.2, 7.3, 11.2.2.3.
 - Acceptance: test scenarios cover valid pack, partial pack, raw-only fallback,
   repair-needed state, retry exhaustion, and extension/TUI state consistency for
   those outcomes.
@@ -555,7 +588,7 @@ draft.
 
 - Objective: ensure Roger can safely route launches when multiple instances or
   worktrees exist for the same PR and different launch profiles are configured.
-- Depends on: 5.1.1, 9.2.1, 11.2.
+- Depends on: 5.1.1, 9.2.1, 11.2.2.3.
 - Acceptance: test scenarios cover same-PR disambiguation, unavailable muxer or
   terminal fallback, and truthful recovery when the originally requested target
   no longer exists.
@@ -564,7 +597,7 @@ draft.
 
 - Objective: ensure stale drafts, launch-only extension mode, and partial GitHub
   posting failures all degrade honestly and recover safely.
-- Depends on: 4.3, 7.2, 8.2, 11.2.
+- Depends on: 4.3, 7.2, 8.2, 11.2.2.3.
 - Acceptance: test scenarios cover draft invalidation after refresh or rebase,
   honest no-status behavior when the extension bridge cannot read back state,
   partial post success with safe retry, and `awaiting_user_input` as a durable
@@ -575,7 +608,7 @@ draft.
 - Objective: ensure users can interrogate a finding without mutating it and can
   intentionally leave Roger for bare OpenCode without losing Roger control
   context.
-- Depends on: 3.2.1, 6.2.1, 11.2.
+- Depends on: 3.2.1, 6.2.1, 11.2.2.3.
 - Acceptance: test scenarios cover non-mutating clarification from the finding
   inspector, dropout to plain OpenCode with Roger control bundle loaded, and
   clean return to the same Roger review session afterward.
@@ -603,7 +636,7 @@ draft.
 
 - Objective: ensure users can get back into the right Roger session whether they
   re-run Roger in the repo or return from elsewhere and need a global finder.
-- Depends on: 5.2.1, 6.1.1, 11.2.
+- Depends on: 5.2.1, 6.1.1, 11.2.2.3.
 - Acceptance: test scenarios cover single strong match in the current repo,
   ambiguous same-repo or same-PR matches, global session search by attention
   state, and truthful recovery when the chosen session cannot be resumed

@@ -312,6 +312,9 @@ generic:
 
 - `rr-011.7`: tiers and budget guard
 - `rr-025`: validation matrix, fixtures, support coverage
+- `rr-025.1`: shared validation harness scaffold and artifact layout
+- `rr-025.2`: canonical fixture corpus and manifest
+- `rr-025.3`: suite metadata, CI-tier entrypoints, and artifact-retention wiring
 - `rr-011.1`: provider acceptance
 - `rr-011.2`: refresh identity validation
 - `rr-011.3`: degraded findings validation
@@ -323,12 +326,19 @@ generic:
 
 The first implementation-facing harness slice should be:
 
-1. fixture layout and naming rules
-2. unit and parameterized harness helpers
-3. narrow integration harness for storage, prompt normalization, and CLI resume
-4. provider acceptance harness for OpenCode and Gemini
-5. one blessed automated E2E
-6. release-smoke checklist and artifact verification
+1. `rr-025`: validation matrix, flow coverage, and support-claim ownership
+2. `rr-025.1`: shared harness scaffold and artifact layout
+3. `rr-025.2`: canonical fixture corpus and manifest
+4. `rr-025.3`: suite metadata, CI-tier entrypoints, and artifact retention wiring
+5. unit and parameterized harness helpers inside that shared harness
+6. narrow integration harness for storage, prompt normalization, and CLI resume
+7. provider acceptance harness for OpenCode and Gemini
+8. one blessed automated E2E
+9. release-smoke checklist and artifact verification
+
+No `rr-011.x` validation suite should start before `rr-025.3` lands. The point
+is to make suites inherit one Roger-owned harness instead of each suite
+inventing its own runner policy, fixture layout, or artifact behavior.
 
 Do not start by building browser-heavy or provider-matrix-heavy E2Es.
 

@@ -1,7 +1,7 @@
 # Beads Workspace Status
 
-As of 2026-03-29, the Roger Reviewer beads workspace has been repaired again
-after diagnosing an upstream `br` regression and is healthy.
+As of 2026-03-30, the Roger Reviewer beads workspace remains healthy after the
+March repair passes, and the implementation gate is open.
 
 ## Current state
 
@@ -9,9 +9,21 @@ after diagnosing an upstream `br` regression and is healthy.
 - [`.beads/beads.db`](/Users/cdilga/Documents/dev/roger-reviewer/.beads/beads.db)
   passes SQLite integrity checks
 - [`.beads/issues.jsonl`](/Users/cdilga/Documents/dev/roger-reviewer/.beads/issues.jsonl)
-  and the DB are back in sync with 44 issues
+  and the DB are in sync with 77 issues
 - `rr-012` is now closed in the live beads graph, matching the Round 04
   reconciliation outcome
+- `rr-025` is now closed; `VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md` is the
+  artifact that satisfies its acceptance criteria
+- `rr-025.1`, `rr-025.2`, and `rr-025.3` are now closed, so the upfront
+  validation-harness scaffold, fixture corpus, and CI-tier entrypoint lane is
+  no longer a planning gap
+- `rr-q18` and `rr-3ve` are closed, so the remaining open beads are
+  implementation work rather than planning-gate work
+- the graph now includes additional independent leaf tasks under harness and
+  prompt execution, including `rr-003.7`, `rr-003.8`, and `rr-016.1` through
+  `rr-016.3`
+- `rr-003.1` is currently `in_progress`, and `br ready` currently surfaces
+  `rr-003.7` and `rr-003.8` as the next unblocked implementation leaves
 - `br doctor`, `br info`, and clean-path `br sync --flush-only` complete
   successfully from the current workspace state
 - `br 0.1.29` through `0.1.34` were repro-bad locally: a fresh temp workspace
@@ -35,7 +47,7 @@ after diagnosing an upstream `br` regression and is healthy.
 - temp repro with `br 0.1.28` on the same steps
   -> `ok`
 - `br doctor`
-- `br show rr-012 rr-015`
+- `br show rr-012 rr-015 rr-025.3`
 - `br sync --flush-only -v`
 - `sqlite3 .beads/beads.db "PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA integrity_check;"`
   -> `ok`

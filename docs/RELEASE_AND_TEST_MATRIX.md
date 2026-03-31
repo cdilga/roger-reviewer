@@ -10,6 +10,11 @@ equally important.
 The canonical plan remains
 [`PLAN_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md).
 
+The implementation-facing harness contract lives in
+[`TEST_HARNESS_GUIDELINES.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TEST_HARNESS_GUIDELINES.md).
+The automated E2E budget file lives in
+[`AUTOMATED_E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/AUTOMATED_E2E_BUDGET.json).
+
 ## Engineering Posture
 
 Rules:
@@ -22,6 +27,8 @@ Rules:
 - keep the support matrix explicit so unsupported combinations are truthful
 - use stubs and fixtures where they increase determinism, but keep at least one
   real boundary test for each major external surface
+- do not add heavyweight automated E2Es outside the declared budget without an
+  explicit justification record
 
 ## `0.1.0` Provider Matrix
 
@@ -322,9 +329,20 @@ Minimum fixture families:
 - `fixture-same-pr-multi-instance`: supports same-PR routing and worktree tests
 - `fixture-malformed-findings`: provider outputs for partial/raw-only/repair
   paths
+- `fixture-resumebundle-continuity`: reopen, reseed, and dropout continuity
+  cases for supported harnesses
+- `fixture-github-draft-payloads`: local outbound drafts, approval hashes, and
+  posted-action payload snapshots
+- `fixture-bridge-transcripts`: Native Messaging and browser launch-intent
+  transcripts for launch-only, no-status, and bounded readback cases
+- `fixture-migration-artifact-integrity`: migration, artifact-budget, and
+  cold-store integrity cases
 - `fixture-memory-scope`: repo/project/org overlay retrieval and abstention
 
 These fixtures should back both integration tests and manual validation.
+The shared fixture corpus and its harness entrypoints should be established
+up front before provider acceptance, smoke suites, or heavier validation work
+fans out.
 
 ## Manual Release Smoke Matrix
 
