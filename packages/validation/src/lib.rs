@@ -1,3 +1,5 @@
+pub mod calver;
+
 use roger_test_harness::{
     BudgetReport, E2eBudgetPolicy, SuiteMetadata, ValidationLane, ValidationPlan, artifact_dir,
     evaluate_e2e_budget, load_suite_metadata, plan_for_lane,

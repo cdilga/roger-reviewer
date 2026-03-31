@@ -100,7 +100,7 @@ ownership and support claims:
 
 | Artifact class | Required for blessed `0.1.0` local release | Target platforms | Notes |
 |----------------|---------------------------------------------|------------------|-------|
-| Core companion archive | Yes | macOS `arm64`, macOS `x86_64`, Windows `x86_64`, Windows `arm64`, Linux `x86_64` | Versioned archive containing the `rr` binary and minimal local runtime assets |
+| Core companion archive | Yes | macOS `arm64`, macOS `x86_64`, Windows `x86_64`, Windows `arm64`, Linux `x86_64` | Versioned archive containing the `rr` binary and minimal local runtime assets. Current `release-build-core` workflow ships a truthful first subset (`macOS arm64/x86_64`, `Windows x86_64`, `Linux x86_64`) and records `Windows arm64` as explicitly excluded in the aggregate manifest until that lane is wired. |
 | Bridge registration bundle | Yes where Roger claims browser-launch support on that OS | macOS, Windows, Linux | Native Messaging manifest templates plus Roger-owned install/uninstall helpers and any custom-URL registration assets |
 | Browser extension sideload package | Optional release lane, but required before Roger claims Chrome/Brave/Edge launch as shipped product behavior | One source base targeting Chrome, Brave, Edge | Keep browser-store publication out of the `0.1.0` critical path; publish installable package assets and docs first |
 | Release metadata bundle | Yes | All published releases | `SHA256SUMS`, install/update docs, release notes, and asset manifest describing what was built and what support tier it carries |
@@ -146,6 +146,7 @@ publication remain inspectable.
 | Job | Ownership | Responsibilities | Outputs |
 |-----|-----------|------------------|---------|
 | `ci-verify` | Continuous integration on every PR and release candidate | Lint, unit/integration suites, packaging smoke, artifact naming checks, checksum-manifest shape validation | Validation only; no published assets |
+| `release-calver-dry-run` | Release-contract guard lane | Run `roger-validation derive-calver` against synthetic stable/rc/nightly refs and assert deterministic tag/channel outputs before packaging jobs consume them | Contract-proof derivation logs; no published assets |
 | `release-build-core` | Release pipeline | Build versioned Rust binaries for the supported OS/arch matrix and stage raw archives | Per-target core companion archives |
 | `release-package-bridge` | Release pipeline | Generate Native Messaging manifests, platform registration helpers, and bridge install/uninstall bundles for supported OS targets | Per-OS bridge registration bundles |
 | `release-package-extension` | Separate optional release lane | Produce browser-installable extension packages from the shared source base and stamp them with the release version/source revision | Extension sideload packages for Chrome/Brave/Edge |

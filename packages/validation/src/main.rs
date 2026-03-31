@@ -1,11 +1,12 @@
 use roger_test_harness::{BudgetStatus, ValidationLane};
+use roger_validation::calver::{CalVerDerivationInput, derive_calver_release};
 use roger_validation::{budget_report, build_plan, failure_artifact_paths};
 use std::env;
 use std::process::ExitCode;
 
 fn print_usage() {
     eprintln!(
-        "usage:\n  rr-validation plan <fast-local|pr|gated|nightly|release> [metadata_dir] [artifact_root]\n  rr-validation guard-e2e-budget [metadata_dir] [budget_json]\n  rr-validation failure-paths <suite_id>... [--metadata-dir DIR] [--artifact-root DIR]"
+        "usage:\n  roger-validation plan <fast-local|pr|gated|nightly|release> [metadata_dir] [artifact_root]\n  roger-validation guard-e2e-budget [metadata_dir] [budget_json]\n  roger-validation failure-paths <suite_id>... [--metadata-dir DIR] [--artifact-root DIR]\n  roger-validation derive-calver [--git-ref REF] [--sha SHA] [--run-number N] [--run-attempt N] [--date-utc YYYY-MM-DD]"
     );
 }
 
@@ -127,6 +128,112 @@ fn main() -> ExitCode {
                     for path in paths {
                         println!("{}", path.display());
                     }
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("{err}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "derive-calver" => {
+            let mut git_ref = env::var("GITHUB_REF").ok();
+            let mut sha = env::var("GITHUB_SHA").ok();
+            let mut run_number = env::var("GITHUB_RUN_NUMBER")
+                .ok()
+                .and_then(|raw| raw.parse::<u64>().ok());
+            let mut run_attempt = env::var("GITHUB_RUN_ATTEMPT")
+                .ok()
+                .and_then(|raw| raw.parse::<u32>().ok());
+            let mut date_utc = env::var("RR_CALVER_DATE_UTC").ok();
+
+            let mut index = 2;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--git-ref" if index + 1 < args.len() => {
+                        git_ref = Some(args[index + 1].clone());
+                        index += 2;
+                    }
+                    "--sha" if index + 1 < args.len() => {
+                        sha = Some(args[index + 1].clone());
+                        index += 2;
+                    }
+                    "--run-number" if index + 1 < args.len() => {
+                        match args[index + 1].parse::<u64>() {
+                            Ok(parsed) => run_number = Some(parsed),
+                            Err(_) => {
+                                eprintln!("invalid --run-number '{}'", args[index + 1]);
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                        index += 2;
+                    }
+                    "--run-attempt" if index + 1 < args.len() => {
+                        match args[index + 1].parse::<u32>() {
+                            Ok(parsed) => run_attempt = Some(parsed),
+                            Err(_) => {
+                                eprintln!("invalid --run-attempt '{}'", args[index + 1]);
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                        index += 2;
+                    }
+                    "--date-utc" if index + 1 < args.len() => {
+                        date_utc = Some(args[index + 1].clone());
+                        index += 2;
+                    }
+                    unknown => {
+                        eprintln!("unknown derive-calver option '{unknown}'");
+                        print_usage();
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+
+            let Some(git_ref) = git_ref else {
+                eprintln!("derive-calver requires --git-ref or GITHUB_REF");
+                return ExitCode::FAILURE;
+            };
+            let Some(sha) = sha else {
+                eprintln!("derive-calver requires --sha or GITHUB_SHA");
+                return ExitCode::FAILURE;
+            };
+            let Some(run_number) = run_number else {
+                eprintln!("derive-calver requires --run-number or GITHUB_RUN_NUMBER");
+                return ExitCode::FAILURE;
+            };
+            let Some(run_attempt) = run_attempt else {
+                eprintln!("derive-calver requires --run-attempt or GITHUB_RUN_ATTEMPT");
+                return ExitCode::FAILURE;
+            };
+            let Some(date_utc) = date_utc else {
+                eprintln!("derive-calver requires --date-utc or RR_CALVER_DATE_UTC");
+                return ExitCode::FAILURE;
+            };
+
+            let input = CalVerDerivationInput {
+                git_ref: &git_ref,
+                sha: &sha,
+                run_number,
+                run_attempt,
+                date_utc: &date_utc,
+            };
+
+            match derive_calver_release(&input) {
+                Ok(derived) => {
+                    println!("channel={}", derived.channel.as_str());
+                    println!("canonical_version={}", derived.canonical_version);
+                    println!("artifact_version={}", derived.artifact_version);
+                    println!("tag={}", derived.tag);
+                    println!("release_name={}", derived.release_name);
+                    println!("artifact_prefix={}", derived.artifact_prefix);
+                    println!("release_prerelease={}", derived.release_prerelease);
+                    println!("provenance={}", derived.provenance);
+                    println!("source_ref={git_ref}");
+                    println!("source_sha={sha}");
+                    println!("source_run_number={run_number}");
+                    println!("source_run_attempt={run_attempt}");
+                    println!("source_date_utc={date_utc}");
                     ExitCode::SUCCESS
                 }
                 Err(err) => {

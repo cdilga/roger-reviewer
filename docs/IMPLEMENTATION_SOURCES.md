@@ -59,9 +59,41 @@ planning decisions.
 
 - URL: <https://docs.rs/schemars/latest/schemars/>
 - Why it matters:
-  - useful for optional JSON Schema snapshots from the same Rust types
-  - not required for `0.1.0` runtime, but useful for tooling, compatibility
-    fixtures, and external automation later
+- useful for optional JSON Schema snapshots from the same Rust types
+- not required for `0.1.0` runtime, but useful for tooling, compatibility
+  fixtures, and external automation later
+
+## TOON Format Evaluation Inputs
+
+### TOON specification reference
+
+- URL: <https://toonformat.dev/reference/spec>
+- Why it matters:
+  - authoritative status and versioning reference for TOON spec maturity
+  - confirms Working Draft posture and provisional media-type details used in
+    Roger risk assessment
+
+### TOON upstream repository
+
+- URL: <https://github.com/toon-format/toon>
+- Why it matters:
+  - source of upstream positioning, scope, and implementation guidance for TOON
+  - baseline reference for deciding when TOON is a fit versus JSON/compact JSON
+
+### `toon-format` Rust crate
+
+- URL: <https://docs.rs/crate/toon-format/0.4.5>
+- Why it matters:
+  - current Rust implementation state for Roger's existing dependency
+  - release recency and API surface for encode/decode viability checks
+
+### TOON vs JSON generation benchmark
+
+- URL: <https://arxiv.org/abs/2603.03306>
+- Why it matters:
+  - empirical trade-off source for token savings versus prompt overhead and
+    structure-correctness behavior across model conditions
+  - supports bounded optional TOON usage rather than unconditional expansion
 
 ## Workflow Methodology
 

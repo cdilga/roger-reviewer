@@ -1,0 +1,68 @@
+name: release-version-dry-run
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - scripts/release/derive_calver_version.py
+      - scripts/release/test_derive_calver_version.sh
+      - docs/RELEASE_CALVER_VERSIONING_CONTRACT.md
+      - .github/workflows/release-version-dry-run.yml
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate deterministic CalVer derivation contract
+        run: ./scripts/release/test_derive_calver_version.sh
+
+  synthetic-ref-dry-run:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        case:
+          - name: stable
+            ref: refs/tags/v2026.03.31
+            sha: 0123456789abcdef0123456789abcdef01234567
+            expect_channel: stable
+            expect_version: 2026.03.31
+            expect_tag: v2026.03.31
+            expect_prerelease: false
+          - name: rc
+            ref: refs/tags/v2026.03.31-rc.2
+            sha: 89abcdef0123456789abcdef0123456789abcdef
+            expect_channel: rc
+            expect_version: 2026.03.31-rc.2
+            expect_tag: v2026.03.31-rc.2
+            expect_prerelease: true
+          - name: nightly
+            ref: refs/heads/main
+            sha: fedcba9876543210fedcba9876543210fedcba98
+            expect_channel: nightly
+            expect_version: 2026.04.01-nightly.fedcba987654
+            expect_tag: nightly-2026.04.01-fedcba987654
+            expect_prerelease: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive metadata for synthetic ref (${{ matrix.case.name }})
+        run: |
+          python3 scripts/release/derive_calver_version.py \
+            --ref "${{ matrix.case.ref }}" \
+            --sha "${{ matrix.case.sha }}" \
+            --today "2026.04.01" > metadata.json
+          cat metadata.json
+
+      - name: Assert expected channel/version/tag for synthetic ref
+        run: |
+          jq -e --arg expected "${{ matrix.case.expect_channel }}" '.channel == $expected' metadata.json
+          jq -e --arg expected "${{ matrix.case.expect_version }}" '.version == $expected' metadata.json
+          jq -e --arg expected "${{ matrix.case.expect_tag }}" '.tag == $expected' metadata.json
+          jq -e --argjson expected "${{ matrix.case.expect_prerelease }}" '.prerelease == $expected' metadata.json
