@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "artifact_root": "target/test-artifacts",
+  "tiers": {
+    "fast-local": {
+      "command": "cargo test --workspace --lib -- --skip accept_ --skip e2e_ --skip smoke_",
+      "upload_mode": "never",
+      "retention_days": 0,
+      "budget_guard_mode": "off"
+    },
+    "pr": {
+      "command": "cargo test --workspace -- --skip accept_ --skip e2e_ --skip smoke_",
+      "upload_mode": "failure",
+      "retention_days": 7,
+      "budget_guard_mode": "warn"
+    },
+    "gated": {
+      "command": "cargo test --workspace -- --skip e2e_ --skip smoke_",
+      "upload_mode": "failure",
+      "retention_days": 14,
+      "budget_guard_mode": "warn"
+    },
+    "nightly": {
+      "command": "cargo test --workspace -- --skip smoke_",
+      "upload_mode": "always",
+      "retention_days": 30,
+      "budget_guard_mode": "enforce"
+    },
+    "release": {
+      "command": "cargo test --workspace -- --skip smoke_",
+      "upload_mode": "always",
+      "retention_days": 90,
+      "budget_guard_mode": "enforce"
+    }
+  }
+}

@@ -1,0 +1,65 @@
+name: Roger Validation Tier
+description: Run one Roger validation tier with bootstrap-safe policy checks.
+
+inputs:
+  tier:
+    description: Validation tier name.
+    required: true
+
+outputs:
+  artifact_root:
+    description: Artifact root for the selected tier.
+    value: ${{ steps.policy.outputs.artifact_root }}
+  retention_days:
+    description: Artifact retention in days for the selected tier.
+    value: ${{ steps.policy.outputs.retention_days }}
+  upload_mode:
+    description: Artifact upload behavior for the selected tier.
+    value: ${{ steps.policy.outputs.upload_mode }}
+  bootstrap_skip:
+    description: Whether the runner skipped because the Rust workspace is not bootstrapped yet.
+    value: ${{ steps.run.outputs.bootstrap_skip }}
+
+runs:
+  using: composite
+  steps:
+    - id: policy
+      shell: bash
+      run: |
+        python3 "$GITHUB_ACTION_PATH/policy.py" \
+          --policy "$GITHUB_ACTION_PATH/policy.json" \
+          --tier "${{ inputs.tier }}" >> "$GITHUB_OUTPUT"
+
+    - id: budget
+      shell: bash
+      run: |
+        python3 "$GITHUB_ACTION_PATH/budget_guard.py" \
+          --workspace "$GITHUB_WORKSPACE" \
+          --tier "${{ inputs.tier }}" \
+          --mode "${{ steps.policy.outputs.budget_guard_mode }}"
+
+    - id: run
+      shell: bash
+      env:
+        ROGER_VALIDATION_TIER: ${{ inputs.tier }}
+        ROGER_VALIDATION_COMMAND: ${{ steps.policy.outputs.command }}
+        ROGER_VALIDATION_ARTIFACT_ROOT: ${{ steps.policy.outputs.artifact_root }}
+      run: |
+        mkdir -p "$ROGER_VALIDATION_ARTIFACT_ROOT"
+
+        {
+          echo "## Roger validation tier: $ROGER_VALIDATION_TIER"
+          echo
+          echo "- command: \`$ROGER_VALIDATION_COMMAND\`"
+          echo "- artifact root: \`$ROGER_VALIDATION_ARTIFACT_ROOT\`"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [ ! -f "$GITHUB_WORKSPACE/Cargo.toml" ]; then
+          echo "bootstrap_skip=true" >> "$GITHUB_OUTPUT"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "Rust workspace is not bootstrapped yet; runner policy is wired, but command execution is skipped truthfully." >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+
+        echo "bootstrap_skip=false" >> "$GITHUB_OUTPUT"
+        bash -lc "$ROGER_VALIDATION_COMMAND"

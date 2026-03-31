@@ -1,0 +1,24 @@
+name: validation-release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: tier
+        uses: ./.github/actions/validation-tier
+        with:
+          tier: release
+
+      - name: Upload release artifacts
+        if: ${{ always() && steps.tier.outputs.upload_mode == 'always' && steps.tier.outputs.bootstrap_skip != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-release-artifacts
+          path: ${{ steps.tier.outputs.artifact_root }}
+          if-no-files-found: ignore
+          retention-days: ${{ steps.tier.outputs.retention_days }}
