@@ -1,0 +1,13 @@
+[package]
+name = "rr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+roger-app-core = { path = "../../packages/app-core" }
+roger-storage = { path = "../../packages/storage" }
+clap = { version = "4.5.11", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+thiserror = "2.0.17"

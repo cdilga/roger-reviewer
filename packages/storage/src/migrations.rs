@@ -1,0 +1,31 @@
+pub const MIGRATIONS: &[(&str, &str)] = &[
+    ("0001_init", include_str!("../migrations/0001_init.sql")),
+    (
+        "0002_session_ledger",
+        include_str!("../migrations/0002_session_ledger.sql"),
+    ),
+    (
+        "0003_launch_binding_context",
+        include_str!("../migrations/0003_launch_binding_context.sql"),
+    ),
+    (
+        "0004_launch_profile_routing",
+        include_str!("../migrations/0004_launch_profile_routing.sql"),
+    ),
+    (
+        "0005_prompt_invocation_outcomes",
+        include_str!("../migrations/0005_prompt_invocation_outcomes.sql"),
+    ),
+    (
+        "0006_finding_materialization",
+        include_str!("../migrations/0006_finding_materialization.sql"),
+    ),
+    (
+        "0007_prior_review_lookup_memory_hooks",
+        include_str!("../migrations/0007_prior_review_lookup_memory_hooks.sql"),
+    ),
+    (
+        "0008_worktree_preflight_plans",
+        include_str!("../migrations/0008_worktree_preflight_plans.sql"),
+    ),
+];

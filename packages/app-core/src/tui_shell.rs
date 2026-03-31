@@ -1,0 +1,563 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellPanelKind {
+    SessionOverview,
+    RecentRuns,
+    FindingsList,
+    FindingDetail,
+    DraftApprovalQueue,
+    ActivityFeed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionChrome {
+    pub session_id: String,
+    pub repository: String,
+    pub pull_request_number: u64,
+    pub provider: String,
+    pub continuity_state: String,
+    pub attention_state: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadOnlyPanelState {
+    pub kind: ShellPanelKind,
+    pub title: String,
+    pub lines: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundJobClass {
+    Refresh,
+    Prompt,
+    Index,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundJobStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundJobSnapshot {
+    pub job_id: String,
+    pub class: BackgroundJobClass,
+    pub status: BackgroundJobStatus,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupervisorSnapshot {
+    pub queue_depth: usize,
+    pub pending_jobs: usize,
+    pub wake_requested: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeReason {
+    Tick,
+    JobUpdate,
+    UserRefresh,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WakeSignal {
+    pub reason: WakeReason,
+    pub jobs: Vec<BackgroundJobSnapshot>,
+    pub supervisor: Option<SupervisorSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingListRow {
+    pub finding_id: String,
+    pub title: String,
+    pub severity: String,
+    pub triage_state: String,
+    pub outbound_state: String,
+    pub refresh_lineage: Option<String>,
+    pub degraded: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceSnippet {
+    pub path: String,
+    pub start_line: u64,
+    pub end_line: Option<u64>,
+    pub excerpt: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingDetail {
+    pub finding_id: String,
+    pub normalized_summary: String,
+    pub refresh_lineage: Option<String>,
+    pub degraded_reason: Option<String>,
+    pub evidence: Vec<EvidenceSnippet>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingTriageIntent {
+    pub finding_id: String,
+    pub from_state: String,
+    pub to_state: String,
+    pub recorded_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClarificationIntentStatus {
+    Queued,
+    Completed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClarificationIntent {
+    pub intent_id: String,
+    pub finding_id: String,
+    pub prompt: String,
+    pub status: ClarificationIntentStatus,
+    pub created_at: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DraftReviewDecision {
+    Pending,
+    Reviewed,
+    Edited,
+    Approved,
+    Rejected,
+    Invalidated,
+}
+
+impl DraftReviewDecision {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Reviewed => "reviewed",
+            Self::Edited => "edited",
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+            Self::Invalidated => "invalidated",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDraftReviewEntry {
+    pub draft_id: String,
+    pub finding_id: Option<String>,
+    pub preview: String,
+    pub decision: DraftReviewDecision,
+    pub edited_body: Option<String>,
+    pub invalidation_reason: Option<String>,
+    pub pending_post: bool,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadOnlySessionSnapshot {
+    pub chrome: SessionChrome,
+    pub overview_lines: Vec<String>,
+    pub recent_run_lines: Vec<String>,
+    pub findings_preview_lines: Vec<String>,
+    pub activity_lines: Vec<String>,
+    pub jobs: Vec<BackgroundJobSnapshot>,
+    pub supervisor: SupervisorSnapshot,
+    #[serde(default)]
+    pub finding_rows: Vec<FindingListRow>,
+    #[serde(default)]
+    pub finding_details: Vec<FindingDetail>,
+    #[serde(default)]
+    pub local_draft_queue: Vec<LocalDraftReviewEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MinimalTuiShell {
+    pub chrome: SessionChrome,
+    pub panels: Vec<ReadOnlyPanelState>,
+    pub active_panel_index: usize,
+    pub wake_count: u64,
+    pub jobs: Vec<BackgroundJobSnapshot>,
+    pub supervisor: SupervisorSnapshot,
+    pub finding_rows: Vec<FindingListRow>,
+    pub finding_details: Vec<FindingDetail>,
+    pub selected_finding_id: Option<String>,
+    pub triage_intents: Vec<FindingTriageIntent>,
+    pub clarification_intents: Vec<ClarificationIntent>,
+    pub local_draft_queue: Vec<LocalDraftReviewEntry>,
+    pub posting_requested: bool,
+    overview_lines: Vec<String>,
+    recent_run_lines: Vec<String>,
+    findings_preview_lines: Vec<String>,
+    activity_lines: Vec<String>,
+}
+
+impl MinimalTuiShell {
+    pub fn open(snapshot: ReadOnlySessionSnapshot) -> Self {
+        let selected_finding_id = snapshot
+            .finding_rows
+            .first()
+            .map(|row| row.finding_id.clone())
+            .or_else(|| {
+                snapshot
+                    .finding_details
+                    .first()
+                    .map(|detail| detail.finding_id.clone())
+            });
+
+        let mut shell = Self {
+            chrome: snapshot.chrome,
+            panels: Vec::new(),
+            active_panel_index: 0,
+            wake_count: 0,
+            jobs: snapshot.jobs,
+            supervisor: snapshot.supervisor,
+            finding_rows: snapshot.finding_rows,
+            finding_details: snapshot.finding_details,
+            selected_finding_id,
+            triage_intents: Vec::new(),
+            clarification_intents: Vec::new(),
+            local_draft_queue: snapshot.local_draft_queue,
+            posting_requested: false,
+            overview_lines: snapshot.overview_lines,
+            recent_run_lines: snapshot.recent_run_lines,
+            findings_preview_lines: snapshot.findings_preview_lines,
+            activity_lines: snapshot.activity_lines,
+        };
+        shell.rebuild_panels();
+        shell
+    }
+
+    pub fn render_chrome_line(&self) -> String {
+        format!(
+            "{} · PR #{} · {} · {}",
+            self.chrome.repository,
+            self.chrome.pull_request_number,
+            self.chrome.provider,
+            self.chrome.attention_state
+        )
+    }
+
+    pub fn active_panel(&self) -> &ReadOnlyPanelState {
+        &self.panels[self.active_panel_index]
+    }
+
+    pub fn navigate_next_panel(&mut self) {
+        self.active_panel_index = (self.active_panel_index + 1) % self.panels.len();
+    }
+
+    pub fn navigate_previous_panel(&mut self) {
+        self.active_panel_index = if self.active_panel_index == 0 {
+            self.panels.len() - 1
+        } else {
+            self.active_panel_index - 1
+        };
+    }
+
+    pub fn select_finding(&mut self, finding_id: &str) -> bool {
+        if !self
+            .finding_rows
+            .iter()
+            .any(|row| row.finding_id == finding_id)
+            && !self
+                .finding_details
+                .iter()
+                .any(|detail| detail.finding_id == finding_id)
+        {
+            return false;
+        }
+
+        self.selected_finding_id = Some(finding_id.to_owned());
+        self.rebuild_panels();
+        true
+    }
+
+    pub fn selected_finding_detail(&self) -> Option<&FindingDetail> {
+        let selected_id = self.selected_finding_id.as_deref()?;
+        self.finding_details
+            .iter()
+            .find(|detail| detail.finding_id == selected_id)
+    }
+
+    pub fn record_triage_intent(
+        &mut self,
+        finding_id: &str,
+        to_state: &str,
+        recorded_at: i64,
+    ) -> bool {
+        let Some(row) = self
+            .finding_rows
+            .iter_mut()
+            .find(|row| row.finding_id == finding_id)
+        else {
+            return false;
+        };
+
+        let from_state = row.triage_state.clone();
+        row.triage_state = to_state.to_owned();
+        self.triage_intents.push(FindingTriageIntent {
+            finding_id: finding_id.to_owned(),
+            from_state,
+            to_state: to_state.to_owned(),
+            recorded_at,
+        });
+        self.rebuild_panels();
+        true
+    }
+
+    pub fn queue_clarification_intent(
+        &mut self,
+        intent_id: &str,
+        finding_id: &str,
+        prompt: &str,
+        created_at: i64,
+    ) -> bool {
+        if !self
+            .finding_rows
+            .iter()
+            .any(|row| row.finding_id == finding_id)
+            && !self
+                .finding_details
+                .iter()
+                .any(|detail| detail.finding_id == finding_id)
+        {
+            return false;
+        }
+
+        self.clarification_intents.push(ClarificationIntent {
+            intent_id: intent_id.to_owned(),
+            finding_id: finding_id.to_owned(),
+            prompt: prompt.to_owned(),
+            status: ClarificationIntentStatus::Queued,
+            created_at,
+        });
+        self.rebuild_panels();
+        true
+    }
+
+    pub fn review_draft(
+        &mut self,
+        draft_id: &str,
+        decision: DraftReviewDecision,
+        edited_body: Option<&str>,
+        invalidation_reason: Option<&str>,
+        updated_at: i64,
+    ) -> bool {
+        let Some(entry) = self
+            .local_draft_queue
+            .iter_mut()
+            .find(|entry| entry.draft_id == draft_id)
+        else {
+            return false;
+        };
+
+        entry.decision = decision;
+        entry.updated_at = updated_at;
+        entry.edited_body = if matches!(decision, DraftReviewDecision::Edited) {
+            edited_body.map(ToOwned::to_owned)
+        } else {
+            None
+        };
+        entry.invalidation_reason = if matches!(decision, DraftReviewDecision::Invalidated) {
+            invalidation_reason.map(ToOwned::to_owned)
+        } else {
+            None
+        };
+        entry.pending_post = matches!(decision, DraftReviewDecision::Approved);
+
+        self.rebuild_panels();
+        true
+    }
+
+    pub fn pending_post_drafts(&self) -> Vec<&LocalDraftReviewEntry> {
+        self.local_draft_queue
+            .iter()
+            .filter(|entry| entry.pending_post)
+            .collect()
+    }
+
+    pub fn apply_wake_signal(&mut self, wake: WakeSignal) {
+        self.wake_count += 1;
+        self.jobs = wake.jobs;
+        if let Some(supervisor) = wake.supervisor {
+            self.supervisor = supervisor;
+        }
+    }
+
+    fn rebuild_panels(&mut self) {
+        let previous_kind = self
+            .panels
+            .get(self.active_panel_index)
+            .map(|panel| panel.kind.clone());
+
+        let mut panels = vec![
+            ReadOnlyPanelState {
+                kind: ShellPanelKind::SessionOverview,
+                title: "Session".to_owned(),
+                lines: self.overview_lines.clone(),
+            },
+            ReadOnlyPanelState {
+                kind: ShellPanelKind::RecentRuns,
+                title: "Recent Runs".to_owned(),
+                lines: self.recent_run_lines.clone(),
+            },
+            ReadOnlyPanelState {
+                kind: ShellPanelKind::FindingsList,
+                title: "Findings".to_owned(),
+                lines: self.render_findings_lines(),
+            },
+            ReadOnlyPanelState {
+                kind: ShellPanelKind::FindingDetail,
+                title: "Finding Detail".to_owned(),
+                lines: self.render_active_detail_lines(),
+            },
+            ReadOnlyPanelState {
+                kind: ShellPanelKind::DraftApprovalQueue,
+                title: "Draft Queue".to_owned(),
+                lines: self.render_draft_queue_lines(),
+            },
+            ReadOnlyPanelState {
+                kind: ShellPanelKind::ActivityFeed,
+                title: "Activity".to_owned(),
+                lines: self.activity_lines.clone(),
+            },
+        ];
+
+        panels.retain(|panel| !panel.lines.is_empty());
+        if panels.is_empty() {
+            panels.push(ReadOnlyPanelState {
+                kind: ShellPanelKind::SessionOverview,
+                title: "Session".to_owned(),
+                lines: vec!["No read-only session data available".to_owned()],
+            });
+        }
+
+        self.panels = panels;
+
+        if let Some(kind) = previous_kind {
+            if let Some(index) = self.panels.iter().position(|panel| panel.kind == kind) {
+                self.active_panel_index = index;
+                return;
+            }
+        }
+
+        if self.active_panel_index >= self.panels.len() {
+            self.active_panel_index = 0;
+        }
+    }
+
+    fn render_findings_lines(&self) -> Vec<String> {
+        if self.finding_rows.is_empty() {
+            return self.findings_preview_lines.clone();
+        }
+
+        self.finding_rows
+            .iter()
+            .map(|row| {
+                let mut line = format!(
+                    "[{}] {} · triage={} · outbound={}",
+                    row.severity, row.title, row.triage_state, row.outbound_state
+                );
+                if let Some(lineage) = row.refresh_lineage.as_deref() {
+                    line.push_str(&format!(" · lineage={lineage}"));
+                }
+                if row.degraded {
+                    line.push_str(" · degraded");
+                }
+                line
+            })
+            .collect()
+    }
+
+    fn render_active_detail_lines(&self) -> Vec<String> {
+        let Some(selected_id) = self.selected_finding_id.as_deref() else {
+            return Vec::new();
+        };
+
+        let Some(detail) = self
+            .finding_details
+            .iter()
+            .find(|detail| detail.finding_id == selected_id)
+        else {
+            return vec![format!("No detail loaded for finding {selected_id}")];
+        };
+
+        let row = self
+            .finding_rows
+            .iter()
+            .find(|row| row.finding_id == selected_id);
+        let mut lines = vec![
+            format!("Finding {}", detail.finding_id),
+            detail.normalized_summary.clone(),
+        ];
+
+        if let Some(row) = row {
+            lines.push(format!(
+                "triage={} · outbound={}",
+                row.triage_state, row.outbound_state
+            ));
+        }
+        if let Some(lineage) = detail.refresh_lineage.as_deref() {
+            lines.push(format!("refresh_lineage={lineage}"));
+        }
+        if let Some(reason) = detail.degraded_reason.as_deref() {
+            lines.push(format!("degraded_reason={reason}"));
+        }
+
+        if !detail.evidence.is_empty() {
+            lines.push("evidence:".to_owned());
+            for snippet in &detail.evidence {
+                let end = snippet
+                    .end_line
+                    .map(|line| format!("-{line}"))
+                    .unwrap_or_default();
+                lines.push(format!(
+                    "{}:{}{} {}",
+                    snippet.path, snippet.start_line, end, snippet.excerpt
+                ));
+            }
+        }
+
+        let pending_clarifications = self
+            .clarification_intents
+            .iter()
+            .filter(|intent| {
+                intent.finding_id == selected_id
+                    && matches!(intent.status, ClarificationIntentStatus::Queued)
+            })
+            .count();
+        if pending_clarifications > 0 {
+            lines.push(format!(
+                "clarification_intents_pending={pending_clarifications}"
+            ));
+        }
+
+        lines
+    }
+
+    fn render_draft_queue_lines(&self) -> Vec<String> {
+        self.local_draft_queue
+            .iter()
+            .map(|entry| {
+                let mut line = format!("{} · {}", entry.draft_id, entry.decision.as_str());
+                if entry.pending_post {
+                    line.push_str(" · pending_post");
+                }
+                if let Some(reason) = entry.invalidation_reason.as_deref() {
+                    line.push_str(&format!(" · reason={reason}"));
+                }
+                line
+            })
+            .collect()
+    }
+}

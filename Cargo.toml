@@ -1,0 +1,29 @@
+[workspace]
+members = [
+  "packages/cli",
+  "packages/app-core",
+  "packages/prompt-engine",
+  "packages/session-gemini",
+  "packages/session-opencode",
+  "packages/bridge",
+  "packages/github-adapter",
+  "packages/storage",
+  "packages/test-harness",
+  "packages/validation",
+  "packages/worktree-manager",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+hex = "0.4.3"
+rusqlite = { version = "0.37.0", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+sha2 = "0.10.9"
+tempfile = "3.23.0"
+thiserror = "2.0.17"
