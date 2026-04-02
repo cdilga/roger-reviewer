@@ -190,6 +190,17 @@ test -f "${pass_dir}/out/SHA256SUMS"
 test -f "${pass_dir}/out/release-asset-manifest.json"
 test -f "${pass_dir}/out/release-notes-signing.md"
 jq -e '.publish_gate.publish_allowed == true' "${pass_dir}/out/release-asset-manifest.json" >/dev/null
+jq -e '
+  .core.assets
+  | any(
+      .kind == "core_manifest"
+      and (
+        .path == "core-manifest.json"
+        or (.path | endswith("/core-manifest.json"))
+      )
+    )
+' "${pass_dir}/out/release-asset-manifest.json" >/dev/null
+rg -q "core-manifest.json$" "${pass_dir}/out/SHA256SUMS"
 
 # FAIL CASE 1: missing archive
 missing_dir="${workdir}/missing"

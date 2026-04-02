@@ -109,6 +109,25 @@ required_download_tokens.each do |token|
     fail!("Download required upstream artifacts must include #{token}")
   end
 end
+if download_run.include?("--dir upstream/core-manifest")
+  fail!("Download required upstream artifacts must stage release-build-core-manifest/core-install-metadata under upstream/assets")
+end
+unless download_run.include?("--name release-build-core-manifest") && download_run.include?("--dir upstream/assets")
+  fail!("release-build-core-manifest must be downloaded into upstream/assets")
+end
+unless download_run.include?("--name core-install-metadata") && download_run.include?("--dir upstream/assets")
+  fail!("core-install-metadata must be downloaded into upstream/assets")
+end
+
+reverify_step = steps.find { |step| step["name"] == "Re-verify downloaded upstream assets" }
+fail!("missing Re-verify downloaded upstream assets step") unless reverify_step.is_a?(Hash)
+reverify_run = reverify_step["run"]
+unless reverify_run.is_a?(String)
+  fail!("Re-verify downloaded upstream assets step must define a run script")
+end
+unless reverify_run.include?("find upstream/assets -type f -name 'release-core-manifest-*.json'")
+  fail!("Re-verify step must resolve core manifest from upstream/assets")
+end
 
 plan_step = steps.find { |step| step["name"] == "Build release publication plan" }
 fail!("missing Build release publication plan step") unless plan_step.is_a?(Hash)

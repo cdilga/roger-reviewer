@@ -125,7 +125,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p upstream/version-metadata upstream/core-manifest upstream/assets upstream/verify-report upstream/optional-summaries upstream/reverified publish-plan
+          mkdir -p upstream/version-metadata upstream/assets upstream/verify-report upstream/optional-summaries upstream/reverified publish-plan
 
           gh run download "${{ inputs.core_run_id }}" \
             --name release-version-metadata \
@@ -133,7 +133,7 @@ jobs:
 
           gh run download "${{ inputs.core_run_id }}" \
             --name release-build-core-manifest \
-            --dir upstream/core-manifest
+            --dir upstream/assets
 
           gh run download "${{ inputs.core_run_id }}" \
             --name core-install-metadata \
@@ -173,7 +173,7 @@ jobs:
           set -euo pipefail
 
           version_metadata="$(find upstream/version-metadata -type f -name 'release-metadata.json' | head -n1)"
-          core_manifest="$(find upstream/core-manifest -type f -name 'release-core-manifest-*.json' | head -n1)"
+          core_manifest="$(find upstream/assets -type f -name 'release-core-manifest-*.json' | head -n1)"
 
           if [[ -z "${version_metadata}" || -z "${core_manifest}" ]]; then
             echo "error: missing version metadata or core manifest from upstream runs" >&2

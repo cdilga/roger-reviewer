@@ -304,6 +304,33 @@ def _verify_core_assets(
     return assets
 
 
+def _verify_core_manifest_asset(
+    metadata: Dict[str, Any],
+    core_manifest_path: pathlib.Path,
+    errors: List[str],
+) -> Optional[VerifiedAsset]:
+    if not core_manifest_path.exists() or not core_manifest_path.is_file():
+        errors.append(f"core manifest file missing: {core_manifest_path}")
+        return None
+
+    _ = metadata
+
+    try:
+        payload = core_manifest_path.read_bytes()
+    except OSError as exc:
+        errors.append(f"failed to read core manifest file {core_manifest_path}: {exc}")
+        return None
+
+    return VerifiedAsset(
+        lane="release-build-core",
+        kind="core_manifest",
+        label=core_manifest_path.name,
+        path=core_manifest_path,
+        sha256=_sha256_bytes(payload),
+        bytes=len(payload),
+    )
+
+
 def _core_targets_by_name(
     core_manifest: Dict[str, Any], errors: List[str]
 ) -> Dict[str, Dict[str, str]]:
@@ -661,6 +688,12 @@ def main() -> int:
         errors.append(f"asset root does not exist: {asset_root}")
 
     core_assets = _verify_core_assets(metadata, core_manifest, asset_root, errors)
+    core_manifest_asset = _verify_core_manifest_asset(
+        metadata=metadata,
+        core_manifest_path=core_manifest_path,
+        errors=errors,
+    )
+    core_manifest_assets = [core_manifest_asset] if core_manifest_asset is not None else []
     install_metadata_asset = _verify_install_metadata_bundle(
         metadata=metadata,
         core_manifest=core_manifest,
@@ -670,7 +703,7 @@ def main() -> int:
     )
     install_assets = [install_metadata_asset] if install_metadata_asset is not None else []
     optional_assets, lane_summary = _verify_optional_lane_assets(summaries, asset_root, errors)
-    all_assets = core_assets + install_assets + optional_assets
+    all_assets = core_assets + core_manifest_assets + install_assets + optional_assets
 
     unsigned_targets = sorted(
         str(target.get("target"))
@@ -727,7 +760,7 @@ def main() -> int:
                     "sha256": asset.sha256,
                     "bytes": asset.bytes,
                 }
-                for asset in (core_assets + install_assets)
+                for asset in (core_assets + core_manifest_assets + install_assets)
             ],
         },
         "optional_lanes": {
