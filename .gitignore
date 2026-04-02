@@ -25,4 +25,5 @@ target/
 .ntm/pids/
 .ntm/summaries/
 .ntm/rate_limits.json
+.ft/
 __pycache__/

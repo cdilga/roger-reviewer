@@ -6,7 +6,9 @@
 # Preserved recovery and backup artefacts
 .br_recovery/
 .br_history/
+.manual_repair_*/
 *.bak
+.br_*.log
 
 # Lock files
 *.lock
