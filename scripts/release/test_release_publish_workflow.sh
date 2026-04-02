@@ -93,6 +93,23 @@ unless validate_run_script.is_a?(String) &&
   fail!("upstream run validation step must call scripts/release/validate_upstream_run.sh")
 end
 
+download_step = steps.find { |step| step["name"] == "Download required upstream artifacts" }
+fail!("missing Download required upstream artifacts step") unless download_step.is_a?(Hash)
+download_run = download_step["run"]
+unless download_run.is_a?(String)
+  fail!("Download required upstream artifacts step must define a run script")
+end
+required_download_tokens = [
+  "--name release-version-metadata",
+  "--name release-build-core-manifest",
+  "--name core-install-metadata",
+]
+required_download_tokens.each do |token|
+  unless download_run.include?(token)
+    fail!("Download required upstream artifacts must include #{token}")
+  end
+end
+
 plan_step = steps.find { |step| step["name"] == "Build release publication plan" }
 fail!("missing Build release publication plan step") unless plan_step.is_a?(Hash)
 plan_run = plan_step["run"]

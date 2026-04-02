@@ -136,6 +136,10 @@ jobs:
             --dir upstream/core-manifest
 
           gh run download "${{ inputs.core_run_id }}" \
+            --name core-install-metadata \
+            --dir upstream/core-manifest
+
+          gh run download "${{ inputs.core_run_id }}" \
             --pattern 'core-*' \
             --dir upstream/assets
 
