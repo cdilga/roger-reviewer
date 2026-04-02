@@ -161,9 +161,14 @@ fi
 # Legacy release payload fallback: metadata expects <artifact>-checksums.txt,
 # but only SHA256SUMS is present in the release assets.
 make_release_payload "2026.04.04" 0
+archive_name_0404="roger-reviewer-2026.04.04-core-${TARGET}.tar.gz"
+archive_sha_0404="$(sha256_file "${DOWNLOAD_FS_ROOT}/v2026.04.04/${archive_name_0404}")"
 mv \
   "${DOWNLOAD_FS_ROOT}/v2026.04.04/roger-reviewer-2026.04.04-checksums.txt" \
   "${DOWNLOAD_FS_ROOT}/v2026.04.04/SHA256SUMS"
+cat >"${DOWNLOAD_FS_ROOT}/v2026.04.04/SHA256SUMS" <<EOF
+${archive_sha_0404}  core-${TARGET}/${archive_name_0404}
+EOF
 
 bash "${INSTALL_SCRIPT}" \
   --version "2026.04.04" \

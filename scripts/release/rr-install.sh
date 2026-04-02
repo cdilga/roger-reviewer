@@ -248,7 +248,8 @@ with open(checksums_path, "r", encoding="utf-8") as handle:
         if len(parts) < 2:
             continue
         candidate_name = parts[-1].lstrip("*")
-        if candidate_name == archive_name:
+        candidate_basename = candidate_name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        if candidate_name == archive_name or candidate_basename == archive_name:
             matches.append(parts[0].lower())
 
 if not matches:
