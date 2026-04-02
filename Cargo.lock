@@ -323,12 +323,14 @@ name = "roger-cli"
 version = "0.1.0"
 dependencies = [
  "roger-app-core",
+ "roger-bridge",
  "roger-config",
  "roger-session-codex",
  "roger-session-opencode",
  "roger-storage",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "toon-format",
 ]

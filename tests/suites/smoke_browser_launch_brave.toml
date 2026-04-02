@@ -1,0 +1,15 @@
+id = "smoke_browser_launch_brave"
+budget_id = "SMOKE-BRIDGE-BRAVE-01"
+family = "smoke"
+flow_ids = ["F02", "F10", "F14"]
+fixture_families = [
+  "fixture_bridge_launch_only_no_status",
+  "fixture_bridge_transcripts",
+]
+support_tier = "native_messaging_v1"
+support_status = "bounded"
+degraded = false
+bounded = true
+tier = "smoke"
+preserve_failure_artifacts = true
+artifact_retention = "on_failure"

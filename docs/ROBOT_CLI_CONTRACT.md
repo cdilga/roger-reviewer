@@ -67,6 +67,12 @@ Commands outside this list may add robot mode later, but they must not claim
 stable `0.1.0` machine-contract support unless a follow-up planning or ADR step
 freezes their payloads explicitly.
 
+Clarification for current `0.1.0` scope:
+
+- `rr memory rebuild` is deferred and is not part of the shipped CLI surface in
+  this slice; automation should treat `rr search` as the only supported
+  memory/search retrieval command until a later command-surface bead lands.
+
 ## Format Commitments
 
 ### Guaranteed in `0.1.0`

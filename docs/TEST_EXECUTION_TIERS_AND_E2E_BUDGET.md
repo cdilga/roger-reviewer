@@ -80,6 +80,10 @@ Required contents for `0.1.0`:
 - OpenCode acceptance suite
 - Gemini bounded acceptance suite
 - browser bridge smoke for the serious v1 bridge path
+- `SMOKE-BRIDGE-CHROME-01` for Chrome PR-page launch smoke
+- `SMOKE-BRIDGE-BRAVE-01` for Brave PR-page launch smoke
+- `SMOKE-BRIDGE-EDGE-01` for the Edge browser-launch edge scenario with
+  fixture-backed transcript ownership
 - same-PR routing or worktree smoke only where lower-level integration coverage
   leaves a real gap
 
@@ -119,6 +123,46 @@ That test protects a product-defining promise across several boundaries:
 
 Everything else should default downward into a cheaper tier unless a lower-cost
 test shape leaves a meaningful product-risk gap.
+
+### Supported-Browser Launch Classification
+
+`SMOKE-BRIDGE-CHROME-01`, `SMOKE-BRIDGE-BRAVE-01`, and
+`SMOKE-BRIDGE-EDGE-01` are named suite ids for supported-browser launch smoke.
+They are explicitly smoke/acceptance lane guards, not heavyweight E2Es.
+
+Chrome/Brave-specific execution is required when:
+
+- Native Messaging host registration logic changes
+- launch-intent payload or bridge envelope handling changes
+- extension packaging/release lane changes could affect Chrome/Brave launch
+  behavior
+- Chrome or Brave launch support is being newly claimed or re-claimed in
+  release notes
+
+Shared-source coverage without fresh Chrome/Brave runs is sufficient only when:
+
+- the change is docs-only or limited to shared UI styling with no launch/bridge
+  envelope changes
+- `int_bridge_*` suites remain green and the latest passing browser smoke
+  artifacts remain representative
+
+`SMOKE-BRIDGE-EDGE-01` is the named suite id for the Edge browser-launch edge
+scenario. It is explicitly a smoke/acceptance lane guard, not a second
+heavyweight E2E.
+
+Edge-specific execution is required when:
+
+- Native Messaging host registration logic changes
+- launch-intent payload or bridge envelope handling changes
+- extension packaging/release lane changes could affect Edge launch behavior
+- Windows Edge support is being newly claimed or re-claimed in release notes
+
+Shared-source coverage without a fresh Edge run is sufficient only when:
+
+- the change is docs-only or limited to shared UI styling with no launch/bridge
+  envelope changes
+- `int_bridge_*` suites remain green and the latest passing
+  `SMOKE-BRIDGE-EDGE-01` artifact remains representative
 
 ## Budget File
 

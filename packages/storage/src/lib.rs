@@ -2563,7 +2563,12 @@ impl RogerStore {
             "UPDATE review_sessions
             SET attention_state = ?1, row_version = row_version + 1, updated_at = ?2
             WHERE id = ?3 AND row_version = ?4",
-            params![attention_state, time::now_ts(), session_id, expected_row_version],
+            params![
+                attention_state,
+                time::now_ts(),
+                session_id,
+                expected_row_version
+            ],
         )?;
 
         if updated == 0 {
@@ -2659,7 +2664,12 @@ impl RogerStore {
             "UPDATE review_sessions
             SET continuity_state = ?1, row_version = row_version + 1, updated_at = ?2
             WHERE id = ?3 AND row_version = ?4",
-            params![continuity_state, time::now_ts(), session_id, expected_row_version],
+            params![
+                continuity_state,
+                time::now_ts(),
+                session_id,
+                expected_row_version
+            ],
         )?;
 
         if updated == 0 {

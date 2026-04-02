@@ -7,6 +7,9 @@ on:
       - scripts/release/derive_calver_version.py
       - scripts/release/test_derive_calver_version.sh
       - docs/RELEASE_CALVER_VERSIONING_CONTRACT.md
+      - packages/cli/src/lib.rs
+      - packages/bridge/src/lib.rs
+      - apps/extension/src/generated/bridge.ts
       - .github/workflows/release-version-dry-run.yml
 
 permissions:
@@ -20,6 +23,22 @@ jobs:
 
       - name: Validate deterministic CalVer derivation contract
         run: ./scripts/release/test_derive_calver_version.sh
+
+  bridge-contract-verification:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify bridge contract drift gate
+        run: cargo run -q -p roger-cli --bin rr -- bridge verify-contracts
+
+      - name: Export bridge contracts and assert deterministic snapshot
+        run: |
+          cargo run -q -p roger-cli --bin rr -- bridge export-contracts
+          git diff --exit-code -- apps/extension/src/generated/bridge.ts
 
   synthetic-ref-dry-run:
     runs-on: ubuntu-latest

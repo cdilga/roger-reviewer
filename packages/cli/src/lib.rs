@@ -1,15 +1,16 @@
+use roger_app_core::cli_config;
+use roger_app_core::time;
 use roger_app_core::{
     AppError, ContinuityQuality, HarnessAdapter, LaunchAction, LaunchIntent, ResumeAttemptOutcome,
     ResumeBundle, ResumeBundleProfile, ReviewTarget, RogerCommand, RogerCommandId,
     RogerCommandInvocationSurface, RogerCommandResult, RogerCommandRouteStatus, Surface,
-    now_ts, route_harness_command, safe_harness_command_bindings,
+    route_harness_command, safe_harness_command_bindings,
 };
-use roger_app_core::time;
-use roger_app_core::cli_config;
-use roger_config::cli_defaults::{
-    DEFAULT_INSTANCE_PREFERENCE, DEFAULT_LAUNCH_PROFILE_ID, DEFAULT_OPENCODE_BIN,
-    DEFAULT_UI_TARGET, ENV_OPENCODE_BIN, ENV_STORE_ROOT,
+use roger_bridge::{
+    NativeHostManifest, SupportedBrowser, SupportedOs, custom_url_helper_path_for,
+    native_host_install_path_for, render_custom_url_helper,
 };
+use roger_config::cli_defaults::{DEFAULT_OPENCODE_BIN, ENV_OPENCODE_BIN, ENV_STORE_ROOT};
 use roger_session_codex::{CodexAdapter, CodexSessionPath};
 use roger_session_opencode::{
     OpenCodeAdapter, OpenCodeReturnPath, OpenCodeSessionPath, rr_return_to_roger_session,
@@ -22,7 +23,9 @@ use roger_storage::{
 };
 use serde::Serialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -78,6 +81,8 @@ enum CommandKind {
     Return,
     Sessions,
     Search,
+    Update,
+    Bridge,
     RobotDocs,
     Findings,
     Status,
@@ -94,6 +99,8 @@ impl CommandKind {
             (Self::Return, _) => "rr return",
             (Self::Sessions, _) => "rr sessions",
             (Self::Search, _) => "rr search",
+            (Self::Update, _) => "rr update",
+            (Self::Bridge, _) => "rr bridge",
             (Self::RobotDocs, _) => "rr robot-docs",
             (Self::Findings, _) => "rr findings",
             (Self::Status, _) => "rr status",
@@ -108,12 +115,23 @@ impl CommandKind {
             Self::Return => "rr.robot.return.v1",
             Self::Sessions => "rr.robot.sessions.v1",
             Self::Search => "rr.robot.search.v1",
+            Self::Update => "rr.robot.update.v1",
+            Self::Bridge => "rr.robot.bridge.v1",
             Self::RobotDocs => "rr.robot.robot_docs.v1",
             Self::Findings => "rr.robot.findings.v1",
             Self::Status => "rr.robot.status.v1",
             Self::Refresh => "rr.robot.refresh.v1",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BridgeCommandKind {
+    ExportContracts,
+    VerifyContracts,
+    PackExtension,
+    Install,
+    Uninstall,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,9 +154,19 @@ impl RobotFormat {
 #[derive(Clone, Debug)]
 struct ParsedArgs {
     command: CommandKind,
+    bridge_command: Option<BridgeCommandKind>,
+    bridge_extension_id: Option<String>,
+    bridge_binary_path: Option<PathBuf>,
+    bridge_install_root: Option<PathBuf>,
+    bridge_output_dir: Option<PathBuf>,
     repo: Option<String>,
     pr: Option<u64>,
     session_id: Option<String>,
+    update_channel: String,
+    update_version: Option<String>,
+    update_api_root: Option<String>,
+    update_download_root: Option<String>,
+    update_target: Option<String>,
     attention_states: Vec<String>,
     limit: Option<usize>,
     query_text: Option<String>,
@@ -460,6 +488,8 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         "return" => CommandKind::Return,
         "sessions" => CommandKind::Sessions,
         "search" => CommandKind::Search,
+        "update" => CommandKind::Update,
+        "bridge" => CommandKind::Bridge,
         "robot-docs" => CommandKind::RobotDocs,
         "findings" => CommandKind::Findings,
         "status" => CommandKind::Status,
@@ -472,9 +502,19 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
 
     let mut parsed = ParsedArgs {
         command,
+        bridge_command: None,
+        bridge_extension_id: None,
+        bridge_binary_path: None,
+        bridge_install_root: None,
+        bridge_output_dir: None,
         repo: None,
         pr: None,
         session_id: None,
+        update_channel: "stable".to_owned(),
+        update_version: None,
+        update_api_root: None,
+        update_download_root: None,
+        update_target: None,
         attention_states: Vec::new(),
         limit: None,
         query_text: None,
@@ -511,6 +551,41 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
                     .get(i + 1)
                     .ok_or_else(|| "--session requires a value".to_owned())?;
                 parsed.session_id = Some(value.clone());
+                i += 2;
+            }
+            "--channel" => {
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--channel requires a value".to_owned())?;
+                parsed.update_channel = value.clone();
+                i += 2;
+            }
+            "--version" => {
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--version requires a value".to_owned())?;
+                parsed.update_version = Some(value.clone());
+                i += 2;
+            }
+            "--api-root" => {
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--api-root requires a value".to_owned())?;
+                parsed.update_api_root = Some(value.clone());
+                i += 2;
+            }
+            "--download-root" => {
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--download-root requires a value".to_owned())?;
+                parsed.update_download_root = Some(value.clone());
+                i += 2;
+            }
+            "--target" => {
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--target requires a value".to_owned())?;
+                parsed.update_target = Some(value.clone());
                 i += 2;
             }
             "--attention" => {
@@ -563,6 +638,34 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
                 parsed.provider = value.clone();
                 i += 2;
             }
+            "--extension-id" => {
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--extension-id requires a value".to_owned())?;
+                parsed.bridge_extension_id = Some(value.clone());
+                i += 2;
+            }
+            "--bridge-binary" => {
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--bridge-binary requires a value".to_owned())?;
+                parsed.bridge_binary_path = Some(PathBuf::from(value));
+                i += 2;
+            }
+            "--install-root" => {
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--install-root requires a value".to_owned())?;
+                parsed.bridge_install_root = Some(PathBuf::from(value));
+                i += 2;
+            }
+            "--output-dir" => {
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--output-dir requires a value".to_owned())?;
+                parsed.bridge_output_dir = Some(PathBuf::from(value));
+                i += 2;
+            }
             "--robot" => {
                 parsed.robot = true;
                 i += 1;
@@ -588,6 +691,19 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
                     return Err(format!("unknown flag: {positional}"));
                 }
                 match parsed.command {
+                    CommandKind::Bridge if parsed.bridge_command.is_none() => {
+                        parsed.bridge_command = match positional {
+                            "export-contracts" => Some(BridgeCommandKind::ExportContracts),
+                            "verify-contracts" => Some(BridgeCommandKind::VerifyContracts),
+                            "pack-extension" => Some(BridgeCommandKind::PackExtension),
+                            "install" => Some(BridgeCommandKind::Install),
+                            "uninstall" => Some(BridgeCommandKind::Uninstall),
+                            other => {
+                                return Err(format!("unknown bridge subcommand: {other}"));
+                            }
+                        };
+                        i += 1;
+                    }
                     CommandKind::RobotDocs if parsed.robot_docs_topic.is_none() => {
                         parsed.robot_docs_topic = Some(positional.to_owned());
                         i += 1;
@@ -629,6 +745,63 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         _ => {}
     }
 
+    if parsed.command == CommandKind::Bridge && parsed.bridge_command.is_none() {
+        return Err(
+            "rr bridge requires a subcommand: export-contracts, verify-contracts, pack-extension, install, or uninstall".to_owned(),
+        );
+    }
+
+    if parsed.command != CommandKind::Bridge
+        && (parsed.bridge_extension_id.is_some()
+            || parsed.bridge_binary_path.is_some()
+            || parsed.bridge_install_root.is_some()
+            || parsed.bridge_output_dir.is_some())
+    {
+        return Err(
+            "--extension-id/--bridge-binary/--install-root/--output-dir are bridge-only flags"
+                .to_owned(),
+        );
+    }
+
+    if parsed.command != CommandKind::Update
+        && (parsed.update_channel != "stable"
+            || parsed.update_version.is_some()
+            || parsed.update_api_root.is_some()
+            || parsed.update_download_root.is_some()
+            || parsed.update_target.is_some())
+    {
+        return Err(
+            "--channel/--version/--api-root/--download-root/--target are update-only flags"
+                .to_owned(),
+        );
+    }
+
+    if parsed.command == CommandKind::Update {
+        if !matches!(parsed.update_channel.as_str(), "stable" | "rc") {
+            return Err(format!(
+                "unsupported --channel: {} (expected stable or rc)",
+                parsed.update_channel
+            ));
+        }
+        if parsed.pr.is_some()
+            || parsed.session_id.is_some()
+            || !parsed.attention_states.is_empty()
+            || parsed.limit.is_some()
+            || parsed.query_text.is_some()
+            || parsed.robot_docs_topic.is_some()
+            || parsed.provider != "opencode"
+            || parsed.bridge_command.is_some()
+            || parsed.bridge_extension_id.is_some()
+            || parsed.bridge_binary_path.is_some()
+            || parsed.bridge_install_root.is_some()
+            || parsed.bridge_output_dir.is_some()
+        {
+            return Err(
+                "rr update only supports --repo, --channel, --version, --api-root, --download-root, --target, --dry-run, and --robot".to_owned(),
+            );
+        }
+    }
+
     Ok(parsed)
 }
 
@@ -641,11 +814,493 @@ fn execute_command(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
         CommandKind::Return => handle_return(parsed, runtime),
         CommandKind::Sessions => handle_sessions(parsed, runtime),
         CommandKind::Search => handle_search(parsed, runtime),
+        CommandKind::Update => handle_update(parsed, runtime),
+        CommandKind::Bridge => handle_bridge(parsed, runtime),
         CommandKind::RobotDocs => handle_robot_docs(parsed),
         CommandKind::Findings => handle_findings(parsed, runtime),
         CommandKind::Status => handle_status(parsed, runtime),
         CommandKind::Refresh => {
             handle_resume_or_refresh(parsed, runtime, LaunchAction::RefreshFindings)
+        }
+    }
+}
+
+fn handle_bridge(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
+    let Some(subcommand) = parsed.bridge_command else {
+        return error_response("rr bridge missing subcommand".to_owned());
+    };
+
+    let Some(workspace_root) = find_workspace_root(&runtime.cwd) else {
+        return blocked_response(
+            "failed to resolve Roger workspace root for bridge contract commands".to_owned(),
+            vec!["run rr bridge from the Roger repository root (or a child directory)".to_owned()],
+            json!({"reason_code": "workspace_root_not_found"}),
+        );
+    };
+
+    let generated_path = workspace_root.join("apps/extension/src/generated/bridge.ts");
+    let expected = bridge_contract_snapshot();
+
+    match subcommand {
+        BridgeCommandKind::ExportContracts => {
+            let Some(parent) = generated_path.parent() else {
+                return error_response(format!(
+                    "invalid generated contract path: {}",
+                    generated_path.display()
+                ));
+            };
+
+            if let Err(err) = fs::create_dir_all(parent) {
+                return error_response(format!(
+                    "failed to create generated contract directory: {err}"
+                ));
+            }
+            if let Err(err) = fs::write(&generated_path, expected) {
+                return error_response(format!("failed to write generated bridge contract: {err}"));
+            }
+
+            CommandResponse {
+                outcome: OutcomeKind::Complete,
+                data: json!({
+                    "subcommand": "export-contracts",
+                    "output_path": generated_path.to_string_lossy().to_string(),
+                    "bytes_written": expected.len(),
+                }),
+                warnings: Vec::new(),
+                repair_actions: Vec::new(),
+                message: "bridge contracts exported".to_owned(),
+            }
+        }
+        BridgeCommandKind::VerifyContracts => {
+            let existing = match fs::read_to_string(&generated_path) {
+                Ok(text) => text,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    return CommandResponse {
+                        outcome: OutcomeKind::RepairNeeded,
+                        data: json!({
+                            "subcommand": "verify-contracts",
+                            "reason_code": "bridge_contract_missing",
+                            "generated_path": generated_path.to_string_lossy().to_string(),
+                        }),
+                        warnings: vec![
+                            "generated bridge contract is missing from the extension tree"
+                                .to_owned(),
+                        ],
+                        repair_actions: vec!["rr bridge export-contracts".to_owned()],
+                        message: "bridge contract verification failed".to_owned(),
+                    };
+                }
+                Err(err) => {
+                    return error_response(format!(
+                        "failed to read generated bridge contract: {err}"
+                    ));
+                }
+            };
+
+            if existing != expected {
+                return CommandResponse {
+                    outcome: OutcomeKind::RepairNeeded,
+                    data: json!({
+                        "subcommand": "verify-contracts",
+                        "reason_code": "bridge_contract_drift",
+                        "generated_path": generated_path.to_string_lossy().to_string(),
+                    }),
+                    warnings: vec![
+                        "generated bridge contract is stale relative to Rust-owned snapshot"
+                            .to_owned(),
+                    ],
+                    repair_actions: vec!["rr bridge export-contracts".to_owned()],
+                    message: "bridge contract verification failed".to_owned(),
+                };
+            }
+
+            CommandResponse {
+                outcome: OutcomeKind::Complete,
+                data: json!({
+                    "subcommand": "verify-contracts",
+                    "generated_path": generated_path.to_string_lossy().to_string(),
+                    "matches_expected": true,
+                }),
+                warnings: Vec::new(),
+                repair_actions: Vec::new(),
+                message: "bridge contract verification passed".to_owned(),
+            }
+        }
+        BridgeCommandKind::PackExtension => {
+            let extension_root = workspace_root.join("apps/extension");
+            if !generated_path.exists() {
+                return CommandResponse {
+                    outcome: OutcomeKind::RepairNeeded,
+                    data: json!({
+                        "subcommand": "pack-extension",
+                        "reason_code": "bridge_contract_missing",
+                        "generated_path": generated_path.to_string_lossy().to_string(),
+                    }),
+                    warnings: vec![
+                        "generated bridge contract is missing from extension tree".to_owned(),
+                    ],
+                    repair_actions: vec![
+                        "rr bridge export-contracts".to_owned(),
+                        "re-run rr bridge pack-extension".to_owned(),
+                    ],
+                    message: "extension packaging blocked by missing generated contract".to_owned(),
+                };
+            }
+
+            let manifest_template_path = extension_root.join("manifest.template.json");
+            let manifest_template = match fs::read_to_string(&manifest_template_path) {
+                Ok(text) => text,
+                Err(err) => {
+                    return error_response(format!(
+                        "failed to read extension manifest template: {err}"
+                    ));
+                }
+            };
+            let manifest_json: Value = match serde_json::from_str(&manifest_template) {
+                Ok(value) => value,
+                Err(err) => {
+                    return error_response(format!(
+                        "failed to parse extension manifest template: {err}"
+                    ));
+                }
+            };
+            let version = manifest_json
+                .get("version")
+                .and_then(Value::as_str)
+                .unwrap_or("0.0.0")
+                .to_owned();
+
+            let output_root = parsed
+                .bridge_output_dir
+                .clone()
+                .unwrap_or_else(|| workspace_root.join("target/bridge/extension"));
+            let package_dir = output_root.join(format!("roger-extension-{version}-unpacked"));
+            if package_dir.exists() {
+                let _ = fs::remove_dir_all(&package_dir);
+            }
+            if let Err(err) = fs::create_dir_all(&package_dir) {
+                return error_response(format!(
+                    "failed to create extension package directory: {err}"
+                ));
+            }
+
+            let manifest_output_path = package_dir.join("manifest.json");
+            let rendered_manifest = match serde_json::to_string_pretty(&manifest_json) {
+                Ok(text) => format!("{text}\n"),
+                Err(err) => {
+                    return error_response(format!("failed to render manifest json: {err}"));
+                }
+            };
+            if let Err(err) = fs::write(&manifest_output_path, rendered_manifest.as_bytes()) {
+                return error_response(format!("failed to write packaged manifest.json: {err}"));
+            }
+
+            let src_root = extension_root.join("src");
+            let static_root = extension_root.join("static");
+            if let Err(err) = copy_dir_recursive(&src_root, &package_dir.join("src")) {
+                return error_response(format!("failed to copy extension src tree: {err}"));
+            }
+            if static_root.exists() {
+                if let Err(err) = copy_dir_recursive(&static_root, &package_dir.join("static")) {
+                    return error_response(format!("failed to copy extension static tree: {err}"));
+                }
+            }
+
+            let mut files = match collect_relative_files(&package_dir) {
+                Ok(items) => items,
+                Err(err) => {
+                    return error_response(format!("failed to collect packaged files: {err}"));
+                }
+            };
+            files.sort();
+
+            let mut checksums = Vec::with_capacity(files.len());
+            let mut checksum_lines = Vec::with_capacity(files.len());
+            for rel in files {
+                let abs = package_dir.join(&rel);
+                let bytes = match fs::read(&abs) {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        return error_response(format!(
+                            "failed to read packaged file {}: {err}",
+                            abs.display()
+                        ));
+                    }
+                };
+                let digest = sha256_hex(&bytes);
+                let rel_str = rel.to_string_lossy().to_string();
+                checksum_lines.push(format!("{digest}  {rel_str}"));
+                checksums.push(json!({
+                    "path": rel_str,
+                    "sha256": digest,
+                    "bytes": bytes.len(),
+                }));
+            }
+            checksum_lines.sort();
+            let checksum_manifest = checksum_lines.join("\n") + "\n";
+            let checksum_manifest_path = package_dir.join("SHA256SUMS");
+            if let Err(err) = fs::write(&checksum_manifest_path, checksum_manifest.as_bytes()) {
+                return error_response(format!("failed to write SHA256SUMS: {err}"));
+            }
+
+            let package_digest = sha256_hex(checksum_manifest.as_bytes());
+            let asset_manifest_path = package_dir.join("asset-manifest.json");
+            let asset_manifest = json!({
+                "artifact_name": format!("roger-extension-{version}-unpacked"),
+                "version": version,
+                "package_digest_sha256": package_digest,
+                "checksums_path": checksum_manifest_path.to_string_lossy().to_string(),
+                "files": checksums,
+            });
+            let asset_manifest_bytes = match serde_json::to_vec_pretty(&asset_manifest) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    return error_response(format!("failed to serialize asset manifest: {err}"));
+                }
+            };
+            if let Err(err) = fs::write(&asset_manifest_path, &asset_manifest_bytes) {
+                return error_response(format!("failed to write asset-manifest.json: {err}"));
+            }
+
+            CommandResponse {
+                outcome: OutcomeKind::Complete,
+                data: json!({
+                    "subcommand": "pack-extension",
+                    "package_dir": package_dir.to_string_lossy().to_string(),
+                    "manifest_path": manifest_output_path.to_string_lossy().to_string(),
+                    "asset_manifest_path": asset_manifest_path.to_string_lossy().to_string(),
+                    "checksums_path": checksum_manifest_path.to_string_lossy().to_string(),
+                    "package_digest_sha256": package_digest,
+                    "install_mode": "unpacked_sideload",
+                    "installs_browser_extension": false,
+                }),
+                warnings: Vec::new(),
+                repair_actions: vec![
+                    "load unpacked extension from package_dir in Chrome/Brave/Edge".to_owned(),
+                ],
+                message: "extension package assembled".to_owned(),
+            }
+        }
+        BridgeCommandKind::Install => {
+            let Some(host_os) = SupportedOs::current() else {
+                return blocked_response(
+                    "rr bridge install supports macOS, Windows, and Linux only".to_owned(),
+                    vec![
+                        "run install from a supported OS or use release-package-bridge artifacts"
+                            .to_owned(),
+                    ],
+                    json!({"reason_code": "unsupported_host_os"}),
+                );
+            };
+
+            let extension_id = parsed
+                .bridge_extension_id
+                .clone()
+                .or_else(|| std::env::var("RR_BRIDGE_EXTENSION_ID").ok())
+                .filter(|value| !value.trim().is_empty());
+            let Some(extension_id) = extension_id else {
+                return blocked_response(
+                    "rr bridge install requires an explicit extension id".to_owned(),
+                    vec![
+                        "pass --extension-id <chrome-extension-id>".to_owned(),
+                        "or set RR_BRIDGE_EXTENSION_ID".to_owned(),
+                    ],
+                    json!({"reason_code": "extension_id_required"}),
+                );
+            };
+
+            let bridge_binary = parsed
+                .bridge_binary_path
+                .clone()
+                .or_else(|| {
+                    std::env::var("RR_BRIDGE_HOST_BINARY")
+                        .ok()
+                        .map(PathBuf::from)
+                })
+                .unwrap_or_else(|| workspace_root.join("target/release/rr-bridge"));
+            if !bridge_binary.exists() {
+                return blocked_response(
+                    format!(
+                        "bridge host binary was not found at {}",
+                        bridge_binary.display()
+                    ),
+                    vec![
+                        "pass --bridge-binary <path-to-rr-bridge>".to_owned(),
+                        "or set RR_BRIDGE_HOST_BINARY".to_owned(),
+                    ],
+                    json!({
+                        "reason_code": "bridge_binary_missing",
+                        "bridge_binary": bridge_binary.to_string_lossy().to_string(),
+                    }),
+                );
+            }
+
+            let install_root = parsed
+                .bridge_install_root
+                .clone()
+                .or_else(|| std::env::var("HOME").ok().map(PathBuf::from));
+            let Some(install_root) = install_root else {
+                return blocked_response(
+                    "failed to determine install root; HOME is missing".to_owned(),
+                    vec!["pass --install-root <path>".to_owned()],
+                    json!({"reason_code": "install_root_missing"}),
+                );
+            };
+
+            let mut installed_assets = Vec::new();
+            for browser in [
+                SupportedBrowser::Chrome,
+                SupportedBrowser::Edge,
+                SupportedBrowser::Brave,
+            ] {
+                let path = native_host_install_path_for(&browser, host_os, &install_root);
+                let manifest = NativeHostManifest::for_roger(&bridge_binary, &extension_id);
+                let bytes = match serde_json::to_vec_pretty(&manifest) {
+                    Ok(mut bytes) => {
+                        bytes.push(b'\n');
+                        bytes
+                    }
+                    Err(err) => {
+                        return error_response(format!(
+                            "failed to serialize native manifest for {browser:?}: {err}"
+                        ));
+                    }
+                };
+                if let Some(parent) = path.parent() {
+                    if let Err(err) = fs::create_dir_all(parent) {
+                        return error_response(format!(
+                            "failed to create native host directory {}: {err}",
+                            parent.display()
+                        ));
+                    }
+                }
+                if let Err(err) = fs::write(&path, &bytes) {
+                    return error_response(format!(
+                        "failed to install native host manifest {}: {err}",
+                        path.display()
+                    ));
+                }
+                installed_assets.push(json!({
+                    "asset_kind": "native_host_manifest",
+                    "browser": format!("{browser:?}").to_ascii_lowercase(),
+                    "path": path.to_string_lossy().to_string(),
+                    "sha256": sha256_hex(&bytes),
+                    "bytes": bytes.len(),
+                }));
+            }
+
+            let helper_path = custom_url_helper_path_for(host_os, &install_root);
+            let helper_contents = render_custom_url_helper(host_os, &bridge_binary);
+            if let Some(parent) = helper_path.parent() {
+                if let Err(err) = fs::create_dir_all(parent) {
+                    return error_response(format!(
+                        "failed to create custom URL helper directory {}: {err}",
+                        parent.display()
+                    ));
+                }
+            }
+            if let Err(err) = fs::write(&helper_path, helper_contents.as_bytes()) {
+                return error_response(format!(
+                    "failed to write custom URL helper {}: {err}",
+                    helper_path.display()
+                ));
+            }
+            installed_assets.push(json!({
+                "asset_kind": "custom_url_helper",
+                "platform": host_os.as_str(),
+                "path": helper_path.to_string_lossy().to_string(),
+                "sha256": sha256_hex(helper_contents.as_bytes()),
+                "bytes": helper_contents.len(),
+            }));
+
+            CommandResponse {
+                outcome: OutcomeKind::Complete,
+                data: json!({
+                    "subcommand": "install",
+                    "platform": host_os.as_str(),
+                    "install_root": install_root.to_string_lossy().to_string(),
+                    "assets": installed_assets,
+                    "installs_browser_extension": false,
+                }),
+                warnings: vec![
+                    "bridge install registers host assets only; browser extension install remains manual".to_owned(),
+                ],
+                repair_actions: Vec::new(),
+                message: "bridge registration assets installed".to_owned(),
+            }
+        }
+        BridgeCommandKind::Uninstall => {
+            let Some(host_os) = SupportedOs::current() else {
+                return blocked_response(
+                    "rr bridge uninstall supports macOS, Windows, and Linux only".to_owned(),
+                    vec!["run uninstall from a supported OS".to_owned()],
+                    json!({"reason_code": "unsupported_host_os"}),
+                );
+            };
+            let install_root = parsed
+                .bridge_install_root
+                .clone()
+                .or_else(|| std::env::var("HOME").ok().map(PathBuf::from));
+            let Some(install_root) = install_root else {
+                return blocked_response(
+                    "failed to determine install root; HOME is missing".to_owned(),
+                    vec!["pass --install-root <path>".to_owned()],
+                    json!({"reason_code": "install_root_missing"}),
+                );
+            };
+
+            let mut removed = Vec::new();
+            let mut missing = Vec::new();
+            for browser in [
+                SupportedBrowser::Chrome,
+                SupportedBrowser::Edge,
+                SupportedBrowser::Brave,
+            ] {
+                let path = native_host_install_path_for(&browser, host_os, &install_root);
+                if path.exists() {
+                    match fs::remove_file(&path) {
+                        Ok(()) => removed.push(path.to_string_lossy().to_string()),
+                        Err(err) => {
+                            return error_response(format!(
+                                "failed to remove native manifest {}: {err}",
+                                path.display()
+                            ));
+                        }
+                    }
+                } else {
+                    missing.push(path.to_string_lossy().to_string());
+                }
+            }
+
+            let helper_path = custom_url_helper_path_for(host_os, &install_root);
+            if helper_path.exists() {
+                match fs::remove_file(&helper_path) {
+                    Ok(()) => removed.push(helper_path.to_string_lossy().to_string()),
+                    Err(err) => {
+                        return error_response(format!(
+                            "failed to remove custom URL helper {}: {err}",
+                            helper_path.display()
+                        ));
+                    }
+                }
+            } else {
+                missing.push(helper_path.to_string_lossy().to_string());
+            }
+
+            CommandResponse {
+                outcome: OutcomeKind::Complete,
+                data: json!({
+                    "subcommand": "uninstall",
+                    "platform": host_os.as_str(),
+                    "install_root": install_root.to_string_lossy().to_string(),
+                    "removed": removed,
+                    "missing": missing,
+                    "installs_browser_extension": false,
+                }),
+                warnings: Vec::new(),
+                repair_actions: Vec::new(),
+                message: "bridge registration assets removed".to_owned(),
+            }
         }
     }
 }
@@ -893,6 +1548,59 @@ fn handle_resume_or_refresh(
         );
     }
 
+    let command_name = if matches!(action, LaunchAction::RefreshFindings) {
+        "rr refresh"
+    } else {
+        "rr resume"
+    };
+
+    if parsed.robot {
+        let continuity_state = session.continuity_state.to_ascii_lowercase();
+        let degraded = continuity_state.contains("degraded")
+            || continuity_state.contains("reseed")
+            || continuity_state.contains("unusable");
+        let continuity_quality = if continuity_state.contains("unusable") {
+            "unusable"
+        } else if degraded {
+            "degraded"
+        } else {
+            "usable"
+        };
+        let inferred_resume_path =
+            if session.provider == "codex" || continuity_state.contains("reseed") {
+                "reseeded_from_bundle"
+            } else if continuity_state.contains("reopen") {
+                "reopened_by_locator"
+            } else {
+                "launch_suppressed_non_interactive"
+            };
+        return CommandResponse {
+            outcome: if degraded {
+                OutcomeKind::Degraded
+            } else {
+                OutcomeKind::Complete
+            },
+            data: json!({
+                "mode": "robot_non_interactive",
+                "launch_suppressed": true,
+                "reason_code": "interactive_launch_suppressed_for_robot_mode",
+                "session_id": session.id,
+                "repository": session.review_target.repository,
+                "pull_request": session.review_target.pull_request_number,
+                "provider": session.provider,
+                "command": if matches!(action, LaunchAction::RefreshFindings) { "refresh" } else { "resume" },
+                "resume_path": inferred_resume_path,
+                "continuity_quality": continuity_quality,
+                "continuity_state_snapshot": session.continuity_state,
+            }),
+            warnings: provider_support_warning(&session.provider, command_name)
+                .into_iter()
+                .collect(),
+            repair_actions: Vec::new(),
+            message: format!("{command_name} completed in robot non-interactive mode"),
+        };
+    }
+
     if parsed.dry_run {
         return CommandResponse {
             outcome: OutcomeKind::Complete,
@@ -903,7 +1611,7 @@ fn handle_resume_or_refresh(
                 "pull_request": session.review_target.pull_request_number,
                 "command": if matches!(action, LaunchAction::RefreshFindings) { "refresh" } else { "resume" },
             }),
-            warnings: provider_support_warning(&session.provider, "rr resume")
+            warnings: provider_support_warning(&session.provider, command_name)
                 .into_iter()
                 .collect(),
             repair_actions: Vec::new(),
@@ -1453,6 +2161,547 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     }
 }
 
+fn normalize_calver_version(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim().trim_start_matches('v');
+    if trimmed.is_empty() {
+        return Err("version value is empty".to_owned());
+    }
+
+    let (date_part, rc_part) = if let Some((lhs, rhs)) = trimmed.split_once("-rc.") {
+        (lhs, Some(rhs))
+    } else {
+        (trimmed, None)
+    };
+
+    let mut date_parts = date_part.split('.');
+    let Some(year) = date_parts.next() else {
+        return Err("version must match YYYY.MM.DD or YYYY.MM.DD-rc.N".to_owned());
+    };
+    let Some(month) = date_parts.next() else {
+        return Err("version must match YYYY.MM.DD or YYYY.MM.DD-rc.N".to_owned());
+    };
+    let Some(day) = date_parts.next() else {
+        return Err("version must match YYYY.MM.DD or YYYY.MM.DD-rc.N".to_owned());
+    };
+    if date_parts.next().is_some() {
+        return Err("version must match YYYY.MM.DD or YYYY.MM.DD-rc.N".to_owned());
+    }
+    if year.len() != 4
+        || month.len() != 2
+        || day.len() != 2
+        || !year.chars().all(|ch| ch.is_ascii_digit())
+        || !month.chars().all(|ch| ch.is_ascii_digit())
+        || !day.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return Err("version must match YYYY.MM.DD or YYYY.MM.DD-rc.N".to_owned());
+    }
+    if let Some(rc) = rc_part {
+        if rc.is_empty()
+            || !rc.chars().all(|ch| ch.is_ascii_digit())
+            || rc.parse::<u32>().ok().unwrap_or(0) == 0
+        {
+            return Err("rc version must use -rc.N with N >= 1".to_owned());
+        }
+    }
+
+    Ok(trimmed.to_owned())
+}
+
+fn fetch_url_with_curl(url: &str) -> Result<String, String> {
+    let output = ProcessCommand::new("curl")
+        .args(["-fsSL", url])
+        .output()
+        .map_err(|err| format!("failed to execute curl for {url}: {err}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(format!(
+            "curl failed for {url} (status {}): {}",
+            output.status,
+            if stderr.is_empty() {
+                "no stderr output".to_owned()
+            } else {
+                stderr
+            }
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn resolve_latest_release_tag(api_root: &str, channel: &str) -> Result<String, String> {
+    if channel == "stable" {
+        let payload = fetch_url_with_curl(&format!("{api_root}/releases/latest"))?;
+        let json: Value = serde_json::from_str(&payload)
+            .map_err(|err| format!("invalid latest release payload: {err}"))?;
+        let Some(tag) = json.get("tag_name").and_then(Value::as_str) else {
+            return Err("latest release payload missing tag_name".to_owned());
+        };
+        return Ok(tag.to_owned());
+    }
+
+    let payload = fetch_url_with_curl(&format!("{api_root}/releases?per_page=30"))?;
+    let json: Value = serde_json::from_str(&payload)
+        .map_err(|err| format!("invalid releases payload: {err}"))?;
+    let Some(entries) = json.as_array() else {
+        return Err("releases payload must be an array".to_owned());
+    };
+    for entry in entries {
+        let prerelease = entry
+            .get("prerelease")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let tag = entry.get("tag_name").and_then(Value::as_str).unwrap_or_default();
+        if prerelease && tag.contains("-rc.") {
+            return Ok(tag.to_owned());
+        }
+    }
+    Err("no rc prerelease found in release feed".to_owned())
+}
+
+fn detect_update_target(target_override: Option<&String>) -> Result<String, String> {
+    if let Some(target) = target_override {
+        if target.trim().is_empty() {
+            return Err("--target cannot be empty".to_owned());
+        }
+        return Ok(target.clone());
+    }
+
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => Ok("aarch64-apple-darwin".to_owned()),
+        ("macos", "x86_64") => Ok("x86_64-apple-darwin".to_owned()),
+        ("linux", "x86_64") => Ok("x86_64-unknown-linux-gnu".to_owned()),
+        ("windows", "x86_64") => Ok("x86_64-pc-windows-msvc".to_owned()),
+        ("windows", "aarch64") => Ok("aarch64-pc-windows-msvc".to_owned()),
+        (os, arch) => Err(format!(
+            "unsupported host platform for rr update: {os}/{arch}; pass --target explicitly"
+        )),
+    }
+}
+
+fn checksums_entry_for_archive(checksums_text: &str, archive_name: &str) -> Result<String, String> {
+    let mut matches = Vec::new();
+    for line in checksums_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let candidate_name = parts[parts.len() - 1].trim_start_matches('*');
+        if candidate_name == archive_name {
+            matches.push(parts[0].to_ascii_lowercase());
+        }
+    }
+    if matches.is_empty() {
+        return Err(format!(
+            "checksums file missing entry for archive {archive_name}"
+        ));
+    }
+    if matches.len() > 1 {
+        return Err(format!(
+            "checksums file has ambiguous entries for archive {archive_name}"
+        ));
+    }
+    Ok(matches.remove(0))
+}
+
+fn handle_update(parsed: &ParsedArgs, _runtime: &CliRuntime) -> CommandResponse {
+    let Some(current_version) = option_env!("ROGER_RELEASE_VERSION").map(str::to_owned) else {
+        return blocked_response(
+            "rr update is disabled for local/unpublished builds without embedded release metadata"
+                .to_owned(),
+            vec![
+                "install a published Roger release artifact before running rr update".to_owned(),
+                "or run scripts/release/rr-install.sh directly with an explicit --version".to_owned(),
+            ],
+            json!({
+                "reason_code": "local_or_unpublished_build",
+            }),
+        );
+    };
+    let current_channel = option_env!("ROGER_RELEASE_CHANNEL")
+        .map(str::to_owned)
+        .unwrap_or_else(|| "unknown".to_owned());
+    let current_tag = option_env!("ROGER_RELEASE_TAG")
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("v{current_version}"));
+
+    let repo = parsed
+        .repo
+        .clone()
+        .unwrap_or_else(|| "cdilga/roger-reviewer".to_owned());
+    let channel = parsed.update_channel.clone();
+    let api_root = parsed
+        .update_api_root
+        .clone()
+        .unwrap_or_else(|| format!("https://api.github.com/repos/{repo}"));
+    let download_root = parsed
+        .update_download_root
+        .clone()
+        .unwrap_or_else(|| format!("https://github.com/{repo}/releases/download"));
+
+    let target = match detect_update_target(parsed.update_target.as_ref()) {
+        Ok(value) => value,
+        Err(err) => {
+            return blocked_response(
+                err,
+                vec!["pass --target <triple> explicitly".to_owned()],
+                json!({"reason_code": "target_resolution_failed"}),
+            );
+        }
+    };
+
+    let target_version = if let Some(raw_version) = parsed.update_version.as_deref() {
+        match normalize_calver_version(raw_version) {
+            Ok(version) => version,
+            Err(err) => {
+                return blocked_response(
+                    format!("invalid --version value: {err}"),
+                    vec!["pass YYYY.MM.DD or YYYY.MM.DD-rc.N".to_owned()],
+                    json!({"reason_code": "invalid_version"}),
+                );
+            }
+        }
+    } else {
+        let tag = match resolve_latest_release_tag(&api_root, &channel) {
+            Ok(tag) => tag,
+            Err(err) => {
+                return blocked_response(
+                    format!("failed to resolve latest release tag: {err}"),
+                    vec!["pass --version <YYYY.MM.DD[-rc.N]> explicitly".to_owned()],
+                    json!({"reason_code": "latest_tag_resolution_failed"}),
+                );
+            }
+        };
+        match normalize_calver_version(&tag) {
+            Ok(version) => version,
+            Err(err) => {
+                return blocked_response(
+                    format!("resolved tag is not a valid CalVer release: {err}"),
+                    vec!["pass --version <YYYY.MM.DD[-rc.N]> explicitly".to_owned()],
+                    json!({"reason_code": "latest_tag_invalid"}),
+                );
+            }
+        }
+    };
+    let target_tag = format!("v{target_version}");
+
+    let install_metadata_name = format!("release-install-metadata-{target_version}.json");
+    let install_metadata_url = format!("{download_root}/{target_tag}/{install_metadata_name}");
+    let install_metadata_text = match fetch_url_with_curl(&install_metadata_url) {
+        Ok(text) => text,
+        Err(err) => {
+            return blocked_response(
+                format!("failed to fetch install metadata bundle: {err}"),
+                vec![
+                    "confirm the release tag is published".to_owned(),
+                    "or pass --version for a known published CalVer release".to_owned(),
+                ],
+                json!({"reason_code": "install_metadata_missing", "url": install_metadata_url}),
+            );
+        }
+    };
+    let install_metadata: Value = match serde_json::from_str(&install_metadata_text) {
+        Ok(value) => value,
+        Err(err) => {
+            return blocked_response(
+                format!("install metadata bundle is invalid JSON: {err}"),
+                vec!["re-run release verification for this tag".to_owned()],
+                json!({"reason_code": "install_metadata_invalid_json"}),
+            );
+        }
+    };
+    if install_metadata
+        .get("schema")
+        .and_then(Value::as_str)
+        != Some("roger.release.install-metadata.v1")
+    {
+        return blocked_response(
+            "install metadata schema mismatch; refusing update".to_owned(),
+            vec!["rebuild release metadata bundle for this tag".to_owned()],
+            json!({"reason_code": "install_metadata_schema_mismatch"}),
+        );
+    }
+
+    let release = install_metadata.get("release").and_then(Value::as_object);
+    let Some(release) = release else {
+        return blocked_response(
+            "install metadata missing release object".to_owned(),
+            vec!["rebuild release metadata bundle for this tag".to_owned()],
+            json!({"reason_code": "install_metadata_release_missing"}),
+        );
+    };
+    if release
+        .get("version")
+        .and_then(Value::as_str)
+        != Some(target_version.as_str())
+    {
+        return blocked_response(
+            "install metadata release.version mismatch".to_owned(),
+            vec!["verify release metadata and republish artifacts".to_owned()],
+            json!({"reason_code": "install_metadata_version_mismatch"}),
+        );
+    }
+    if release.get("tag").and_then(Value::as_str) != Some(target_tag.as_str()) {
+        return blocked_response(
+            "install metadata release.tag mismatch".to_owned(),
+            vec!["verify release metadata and republish artifacts".to_owned()],
+            json!({"reason_code": "install_metadata_tag_mismatch"}),
+        );
+    }
+
+    let checksums_name = install_metadata
+        .get("checksums_name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let core_manifest_name = install_metadata
+        .get("core_manifest_name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if checksums_name.is_empty()
+        || core_manifest_name.is_empty()
+        || checksums_name.contains('/')
+        || checksums_name.contains('\\')
+        || core_manifest_name.contains('/')
+        || core_manifest_name.contains('\\')
+    {
+        return blocked_response(
+            "install metadata checksums/core manifest names are invalid".to_owned(),
+            vec!["rebuild release metadata bundle for this tag".to_owned()],
+            json!({"reason_code": "install_metadata_name_invalid"}),
+        );
+    }
+
+    let Some(target_entries) = install_metadata.get("targets").and_then(Value::as_array) else {
+        return blocked_response(
+            "install metadata targets must be an array".to_owned(),
+            vec!["rebuild release metadata bundle for this tag".to_owned()],
+            json!({"reason_code": "install_metadata_targets_invalid"}),
+        );
+    };
+    let mut matching_targets = target_entries
+        .iter()
+        .filter(|entry| entry.get("target").and_then(Value::as_str) == Some(target.as_str()));
+    let Some(target_entry) = matching_targets.next() else {
+        return blocked_response(
+            format!("install metadata has no entry for target {target}"),
+            vec!["pass --target with an available triple".to_owned()],
+            json!({"reason_code": "install_metadata_target_missing"}),
+        );
+    };
+    if matching_targets.next().is_some() {
+        return blocked_response(
+            format!("install metadata has ambiguous entries for target {target}"),
+            vec!["rebuild release metadata bundle to remove duplicate targets".to_owned()],
+            json!({"reason_code": "install_metadata_target_ambiguous"}),
+        );
+    }
+
+    let archive_name = target_entry
+        .get("archive_name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let archive_sha256 = target_entry
+        .get("archive_sha256")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let payload_dir = target_entry
+        .get("payload_dir")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let binary_name = target_entry
+        .get("binary_name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if archive_name.is_empty()
+        || archive_sha256.is_empty()
+        || payload_dir.is_empty()
+        || binary_name.is_empty()
+    {
+        return blocked_response(
+            "install metadata target entry missing required fields".to_owned(),
+            vec!["rebuild release metadata bundle for this tag".to_owned()],
+            json!({"reason_code": "install_metadata_target_invalid"}),
+        );
+    }
+
+    let core_manifest_url = format!("{download_root}/{target_tag}/{core_manifest_name}");
+    let core_manifest_text = match fetch_url_with_curl(&core_manifest_url) {
+        Ok(text) => text,
+        Err(err) => {
+            return blocked_response(
+                format!("failed to fetch core manifest: {err}"),
+                vec!["rebuild/upload core manifest for this tag".to_owned()],
+                json!({"reason_code": "core_manifest_missing", "url": core_manifest_url}),
+            );
+        }
+    };
+    let core_manifest: Value = match serde_json::from_str(&core_manifest_text) {
+        Ok(value) => value,
+        Err(err) => {
+            return blocked_response(
+                format!("core manifest is invalid JSON: {err}"),
+                vec!["rebuild core manifest for this tag".to_owned()],
+                json!({"reason_code": "core_manifest_invalid_json"}),
+            );
+        }
+    };
+    if core_manifest.get("version").and_then(Value::as_str) != Some(target_version.as_str()) {
+        return blocked_response(
+            "core manifest version mismatch".to_owned(),
+            vec!["rebuild core manifest and install metadata bundle".to_owned()],
+            json!({"reason_code": "core_manifest_version_mismatch"}),
+        );
+    }
+    let Some(core_targets) = core_manifest.get("targets").and_then(Value::as_array) else {
+        return blocked_response(
+            "core manifest targets must be an array".to_owned(),
+            vec!["rebuild core manifest for this tag".to_owned()],
+            json!({"reason_code": "core_manifest_targets_invalid"}),
+        );
+    };
+    let mut matching_core = core_targets
+        .iter()
+        .filter(|entry| entry.get("target").and_then(Value::as_str) == Some(target.as_str()));
+    let Some(core_target) = matching_core.next() else {
+        return blocked_response(
+            format!("core manifest has no entry for target {target}"),
+            vec!["rebuild core manifest for this tag".to_owned()],
+            json!({"reason_code": "core_manifest_target_missing"}),
+        );
+    };
+    if matching_core.next().is_some() {
+        return blocked_response(
+            format!("core manifest has ambiguous entries for target {target}"),
+            vec!["rebuild core manifest for this tag".to_owned()],
+            json!({"reason_code": "core_manifest_target_ambiguous"}),
+        );
+    }
+    for (field, expected) in [
+        ("archive_name", archive_name.as_str()),
+        ("archive_sha256", archive_sha256.as_str()),
+        ("payload_dir", payload_dir.as_str()),
+        ("binary_name", binary_name.as_str()),
+    ] {
+        let observed = core_target
+            .get(field)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if observed != expected.to_ascii_lowercase() {
+            return blocked_response(
+                format!("core manifest target mismatch for {field}"),
+                vec!["rebuild core manifest + install metadata bundle for this tag".to_owned()],
+                json!({"reason_code": "core_manifest_target_mismatch", "field": field}),
+            );
+        }
+    }
+
+    let checksums_url = format!("{download_root}/{target_tag}/{checksums_name}");
+    let checksums_text = match fetch_url_with_curl(&checksums_url) {
+        Ok(text) => text,
+        Err(err) => {
+            return blocked_response(
+                format!("failed to fetch checksums: {err}"),
+                vec!["rebuild/upload checksums for this tag".to_owned()],
+                json!({"reason_code": "checksums_missing", "url": checksums_url}),
+            );
+        }
+    };
+    let checksums_sha = match checksums_entry_for_archive(&checksums_text, &archive_name) {
+        Ok(value) => value,
+        Err(err) => {
+            return blocked_response(
+                err,
+                vec!["rebuild checksums for this tag".to_owned()],
+                json!({"reason_code": "checksums_entry_invalid"}),
+            );
+        }
+    };
+    if checksums_sha != archive_sha256 {
+        return blocked_response(
+            "install metadata/checksums mismatch for release archive".to_owned(),
+            vec!["re-run verify-assets and publish gates for this tag".to_owned()],
+            json!({"reason_code": "checksums_mismatch"}),
+        );
+    }
+
+    if current_version == target_version {
+        return CommandResponse {
+            outcome: OutcomeKind::Empty,
+            data: json!({
+                "current_version": current_version,
+                "current_channel": current_channel,
+                "current_tag": current_tag,
+                "target_version": target_version,
+                "target_tag": target_tag,
+                "target": target,
+                "up_to_date": true,
+            }),
+            warnings: Vec::new(),
+            repair_actions: Vec::new(),
+            message: "rr is already on the requested release".to_owned(),
+        };
+    }
+
+    let recommended_command = if cfg!(target_os = "windows") {
+        format!(
+            "powershell -ExecutionPolicy Bypass -File scripts/release/rr-install.ps1 -Version {target_version} -Repo {repo}"
+        )
+    } else {
+        format!(
+            "bash scripts/release/rr-install.sh --version {target_version} --repo {repo}"
+        )
+    };
+
+    let message = if parsed.dry_run {
+        "rr update dry-run metadata validation complete".to_owned()
+    } else {
+        "rr update metadata validation complete (manual install step required)".to_owned()
+    };
+
+    CommandResponse {
+        outcome: OutcomeKind::Complete,
+        data: json!({
+            "current_release": {
+                "version": current_version,
+                "channel": current_channel,
+                "tag": current_tag,
+            },
+            "target_release": {
+                "version": target_version,
+                "channel": channel,
+                "tag": target_tag,
+            },
+            "target": target,
+            "metadata_urls": {
+                "install_metadata": install_metadata_url,
+                "core_manifest": core_manifest_url,
+                "checksums": checksums_url,
+            },
+            "archive": {
+                "name": archive_name,
+                "sha256": archive_sha256,
+                "payload_dir": payload_dir,
+                "binary_name": binary_name,
+            },
+            "recommended_install_command": recommended_command,
+        }),
+        warnings: Vec::new(),
+        repair_actions: vec![
+            "run the recommended_install_command to apply update".to_owned(),
+        ],
+        message,
+    }
+}
+
 fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
     let topic = parsed.robot_docs_topic.as_deref().unwrap_or("guide");
 
@@ -1463,6 +2712,10 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                 json!({"command": "rr sessions --robot", "purpose": "global session finder"}),
                 json!({"command": "rr findings --robot", "purpose": "structured findings list"}),
                 json!({"command": "rr search --query <text> --robot", "purpose": "prior-review lookup"}),
+                json!({"command": "rr bridge verify-contracts --robot", "purpose": "bridge contract drift check"}),
+                json!({"command": "rr bridge pack-extension --robot", "purpose": "assemble unpacked browser sideload artifact"}),
+                json!({"command": "rr bridge install --extension-id <id> --robot", "purpose": "register native host + custom-url helper assets"}),
+                json!({"command": "rr bridge uninstall --robot", "purpose": "remove bridge registration assets"}),
                 json!({"command": "rr robot-docs schemas --robot", "purpose": "schema inventory"}),
             ],
             "0.1.0",
@@ -1475,6 +2728,11 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                 json!({"command": "rr search", "required_formats": ["json"], "optional_formats": ["compact"]}),
                 json!({"command": "rr review --dry-run", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr resume --dry-run", "required_formats": ["json"], "optional_formats": []}),
+                json!({"command": "rr bridge export-contracts", "required_formats": ["json"], "optional_formats": []}),
+                json!({"command": "rr bridge verify-contracts", "required_formats": ["json"], "optional_formats": []}),
+                json!({"command": "rr bridge pack-extension", "required_formats": ["json"], "optional_formats": []}),
+                json!({"command": "rr bridge install", "required_formats": ["json"], "optional_formats": []}),
+                json!({"command": "rr bridge uninstall", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr robot-docs guide", "required_formats": ["json"], "optional_formats": ["compact"]}),
                 json!({"command": "rr robot-docs commands", "required_formats": ["json"], "optional_formats": ["compact"]}),
                 json!({"command": "rr robot-docs schemas", "required_formats": ["json"], "optional_formats": ["compact"]}),
@@ -1489,6 +2747,7 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                 json!({"command": "rr return", "schema_id": "rr.robot.return.v1"}),
                 json!({"command": "rr sessions", "schema_id": "rr.robot.sessions.v1"}),
                 json!({"command": "rr search", "schema_id": "rr.robot.search.v1"}),
+                json!({"command": "rr bridge", "schema_id": "rr.robot.bridge.v1"}),
                 json!({"command": "rr findings", "schema_id": "rr.robot.findings.v1"}),
                 json!({"command": "rr status", "schema_id": "rr.robot.status.v1"}),
                 json!({"command": "rr refresh", "schema_id": "rr.robot.refresh.v1"}),
@@ -2114,6 +3373,105 @@ fn error_response(message: String) -> CommandResponse {
     }
 }
 
+fn find_workspace_root(start: &Path) -> Option<PathBuf> {
+    for candidate in start.ancestors() {
+        let extension_marker = candidate.join("apps/extension/src");
+        let bridge_marker = candidate.join("packages/bridge/src/lib.rs");
+        if extension_marker.exists() && bridge_marker.exists() {
+            return Some(candidate.to_path_buf());
+        }
+    }
+    None
+}
+
+fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> {
+    if !source.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&source_path, &destination_path)?;
+        } else {
+            if let Some(parent) = destination_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&source_path, &destination_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_relative_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    collect_relative_files_inner(root, root, &mut files)?;
+    Ok(files)
+}
+
+fn collect_relative_files_inner(
+    base: &Path,
+    current: &Path,
+    output: &mut Vec<PathBuf>,
+) -> std::io::Result<()> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            collect_relative_files_inner(base, &path, output)?;
+        } else {
+            let rel = path
+                .strip_prefix(base)
+                .map_err(std::io::Error::other)?
+                .to_path_buf();
+            output.push(rel);
+        }
+    }
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    let mut text = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        text.push_str(&format!("{byte:02x}"));
+    }
+    text
+}
+
+fn bridge_contract_snapshot() -> &'static str {
+    r#"// Generated bridge contract snapshot for extension-side typing.
+// Source of truth: packages/bridge/src/lib.rs (BridgeLaunchIntent / BridgeResponse).
+
+export type BridgeAction =
+  | 'start_review'
+  | 'resume_review'
+  | 'show_findings'
+  | 'refresh_review';
+
+export interface BridgeLaunchIntent {
+  action: BridgeAction;
+  owner: string;
+  repo: string;
+  pr_number: number;
+  head_ref?: string;
+  instance?: string;
+}
+
+export interface BridgeResponse {
+  ok: boolean;
+  action: string;
+  message: string;
+  session_id?: string;
+  guidance?: string;
+}
+"#
+}
+
 fn compact_data(command: CommandKind, data: Value) -> Value {
     match command {
         CommandKind::Status => json!({
@@ -2236,7 +3594,7 @@ fn utc_timestamp() -> String {
             String::from_utf8_lossy(&output.stdout).trim().to_owned()
         }
         _ => {
-            let now = now_ts();
+            let now = time::now_ts();
             format!("{now}")
         }
     }
@@ -2244,11 +3602,11 @@ fn utc_timestamp() -> String {
 
 fn next_id(prefix: &str) -> String {
     let seq = ID_SEQ.fetch_add(1, Ordering::Relaxed);
-    format!("{prefix}-{}-{seq}", now_ts())
+    format!("{prefix}-{}-{seq}", time::now_ts())
 }
 
 fn usage_text() -> &'static str {
-    "Usage:\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--repo owner/repo] [--limit <n>] [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr refresh [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]"
+    "Usage:\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--repo owner/repo] [--limit <n>] [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--dry-run] [--robot]\n  rr bridge export-contracts [--robot]\n  rr bridge verify-contracts [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge install --extension-id <id> [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr refresh [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]"
 }
 
 #[cfg(test)]
@@ -2334,5 +3692,331 @@ mod tests {
 
         let second = infer_git_branch(&repo).expect("second branch");
         assert_eq!(second, first);
+    }
+
+    fn setup_bridge_workspace() -> (tempfile::TempDir, CliRuntime, PathBuf) {
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path().join("workspace");
+        let generated = root.join("apps/extension/src/generated/bridge.ts");
+        let extension_src = root.join("apps/extension/src");
+        let background = extension_src.join("background/main.js");
+        let content = extension_src.join("content/main.js");
+        let manifest_template = root.join("apps/extension/manifest.template.json");
+        let static_root = root.join("apps/extension/static");
+        let bridge_src = root.join("packages/bridge/src/lib.rs");
+        fs::create_dir_all(generated.parent().expect("generated parent")).expect("mkdir generated");
+        fs::create_dir_all(background.parent().expect("background parent"))
+            .expect("mkdir background");
+        fs::create_dir_all(content.parent().expect("content parent")).expect("mkdir content");
+        fs::create_dir_all(&static_root).expect("mkdir static");
+        fs::create_dir_all(bridge_src.parent().expect("bridge src parent"))
+            .expect("mkdir bridge src");
+        fs::write(&bridge_src, "// bridge marker\n").expect("write bridge marker");
+        fs::write(&generated, bridge_contract_snapshot()).expect("write generated bridge contract");
+        fs::write(&background, "export const background = true;\n").expect("write background");
+        fs::write(&content, "export const content = true;\n").expect("write content");
+        fs::write(
+            &manifest_template,
+            r#"{
+  "manifest_version": 3,
+  "name": "Roger Reviewer",
+  "version": "0.1.0",
+  "description": "Launch local Roger review flows from GitHub PR pages.",
+  "permissions": ["nativeMessaging"],
+  "background": {
+    "service_worker": "src/background/main.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://github.com/*/*/pull/*"],
+      "js": ["src/content/main.js"]
+    }
+  ]
+}
+"#,
+        )
+        .expect("write manifest template");
+        fs::write(static_root.join(".gitkeep"), "").expect("write static marker");
+
+        let runtime = CliRuntime {
+            cwd: root.clone(),
+            store_root: root.join(".roger"),
+            opencode_bin: "opencode".to_owned(),
+        };
+
+        (tmp, runtime, generated)
+    }
+
+    fn write_mock_bridge_binary(root: &Path) -> PathBuf {
+        let bridge_binary = root.join("target/release/rr-bridge");
+        fs::create_dir_all(
+            bridge_binary
+                .parent()
+                .expect("bridge binary parent should exist"),
+        )
+        .expect("mkdir bridge binary parent");
+        fs::write(&bridge_binary, b"#!/bin/sh\nexit 0\n").expect("write bridge binary");
+        bridge_binary
+    }
+
+    fn parse_robot(stdout: &str) -> Value {
+        serde_json::from_str(stdout).expect("robot payload")
+    }
+
+    #[test]
+    fn bridge_export_contracts_writes_generated_snapshot() {
+        let (_tmp, runtime, generated) = setup_bridge_workspace();
+        let result = run(
+            &[
+                "bridge".to_owned(),
+                "export-contracts".to_owned(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(result.exit_code, 0, "{}", result.stderr);
+
+        let payload = parse_robot(&result.stdout);
+        assert_eq!(payload["outcome"], "complete");
+        assert_eq!(payload["data"]["subcommand"], "export-contracts");
+
+        let written = fs::read_to_string(&generated).expect("read generated contract");
+        assert_eq!(written, bridge_contract_snapshot());
+    }
+
+    #[test]
+    fn bridge_verify_contracts_reports_drift_with_repair_guidance() {
+        let (_tmp, runtime, generated) = setup_bridge_workspace();
+        fs::write(&generated, "// stale\n").expect("write stale contract");
+
+        let result = run(
+            &[
+                "bridge".to_owned(),
+                "verify-contracts".to_owned(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(result.exit_code, 4, "{}", result.stderr);
+
+        let payload = parse_robot(&result.stdout);
+        assert_eq!(payload["outcome"], "repair_needed");
+        assert_eq!(payload["data"]["reason_code"], "bridge_contract_drift");
+        assert!(
+            payload["repair_actions"]
+                .as_array()
+                .expect("repair actions")
+                .iter()
+                .any(|action| action.as_str() == Some("rr bridge export-contracts"))
+        );
+    }
+
+    #[test]
+    fn bridge_verify_contracts_passes_after_export() {
+        let (_tmp, runtime, _generated) = setup_bridge_workspace();
+        let export = run(
+            &["bridge".to_owned(), "export-contracts".to_owned()],
+            &runtime,
+        );
+        assert_eq!(export.exit_code, 0, "{}", export.stderr);
+
+        let verify = run(
+            &[
+                "bridge".to_owned(),
+                "verify-contracts".to_owned(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(verify.exit_code, 0, "{}", verify.stderr);
+        let payload = parse_robot(&verify.stdout);
+        assert_eq!(payload["outcome"], "complete");
+        assert_eq!(payload["data"]["matches_expected"], true);
+    }
+
+    #[test]
+    fn bridge_pack_extension_emits_checksum_asset_manifest() {
+        let (tmp, runtime, _generated) = setup_bridge_workspace();
+        let output_dir = tmp.path().join("pack-output");
+        let result = run(
+            &[
+                "bridge".to_owned(),
+                "pack-extension".to_owned(),
+                "--output-dir".to_owned(),
+                output_dir.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(result.exit_code, 0, "{}", result.stderr);
+        let payload = parse_robot(&result.stdout);
+        assert_eq!(payload["outcome"], "complete");
+        assert_eq!(payload["data"]["subcommand"], "pack-extension");
+        assert_eq!(payload["data"]["installs_browser_extension"], false);
+
+        let package_dir = PathBuf::from(
+            payload["data"]["package_dir"]
+                .as_str()
+                .expect("package dir should be present"),
+        );
+        assert!(package_dir.exists());
+        assert!(package_dir.join("manifest.json").exists());
+        assert!(package_dir.join("src/background/main.js").exists());
+        assert!(package_dir.join("SHA256SUMS").exists());
+        assert!(package_dir.join("asset-manifest.json").exists());
+    }
+
+    #[test]
+    fn bridge_install_fails_closed_without_extension_id() {
+        let (tmp, runtime, _generated) = setup_bridge_workspace();
+        let install_root = tmp.path().join("install-root");
+        let bridge_binary = write_mock_bridge_binary(&runtime.cwd);
+
+        let result = run(
+            &[
+                "bridge".to_owned(),
+                "install".to_owned(),
+                "--bridge-binary".to_owned(),
+                bridge_binary.to_string_lossy().to_string(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(result.exit_code, 3, "{}", result.stderr);
+        let payload = parse_robot(&result.stdout);
+        assert_eq!(payload["outcome"], "blocked");
+        assert_eq!(payload["data"]["reason_code"], "extension_id_required");
+    }
+
+    #[test]
+    fn bridge_install_and_uninstall_manage_assets_with_checksums() {
+        let (tmp, runtime, _generated) = setup_bridge_workspace();
+        let install_root = tmp.path().join("install-root");
+        let bridge_binary = write_mock_bridge_binary(&runtime.cwd);
+
+        let install = run(
+            &[
+                "bridge".to_owned(),
+                "install".to_owned(),
+                "--extension-id".to_owned(),
+                "abcdefghijklmnopabcdefghijklmnop".to_owned(),
+                "--bridge-binary".to_owned(),
+                bridge_binary.to_string_lossy().to_string(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(install.exit_code, 0, "{}", install.stderr);
+        let install_payload = parse_robot(&install.stdout);
+        assert_eq!(install_payload["outcome"], "complete");
+        assert_eq!(install_payload["data"]["subcommand"], "install");
+        assert_eq!(install_payload["data"]["installs_browser_extension"], false);
+        let assets = install_payload["data"]["assets"]
+            .as_array()
+            .expect("install assets should be an array");
+        assert!(assets.len() >= 4);
+        assert!(assets.iter().all(|asset| {
+            asset["sha256"]
+                .as_str()
+                .is_some_and(|checksum| checksum.len() == 64)
+        }));
+
+        let os = SupportedOs::current().expect("supported host os");
+        for browser in [
+            SupportedBrowser::Chrome,
+            SupportedBrowser::Edge,
+            SupportedBrowser::Brave,
+        ] {
+            let manifest_path = native_host_install_path_for(&browser, os, &install_root);
+            assert!(
+                manifest_path.exists(),
+                "missing {}",
+                manifest_path.display()
+            );
+        }
+        let helper_path = custom_url_helper_path_for(os, &install_root);
+        assert!(helper_path.exists(), "missing {}", helper_path.display());
+
+        let uninstall = run(
+            &[
+                "bridge".to_owned(),
+                "uninstall".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(uninstall.exit_code, 0, "{}", uninstall.stderr);
+        let uninstall_payload = parse_robot(&uninstall.stdout);
+        assert_eq!(uninstall_payload["outcome"], "complete");
+        assert_eq!(uninstall_payload["data"]["subcommand"], "uninstall");
+        let removed = uninstall_payload["data"]["removed"]
+            .as_array()
+            .expect("removed list");
+        assert!(removed.len() >= 4);
+
+        for browser in [
+            SupportedBrowser::Chrome,
+            SupportedBrowser::Edge,
+            SupportedBrowser::Brave,
+        ] {
+            let manifest_path = native_host_install_path_for(&browser, os, &install_root);
+            assert!(
+                !manifest_path.exists(),
+                "still present {}",
+                manifest_path.display()
+            );
+        }
+        assert!(
+            !helper_path.exists(),
+            "still present {}",
+            helper_path.display()
+        );
+    }
+
+    #[test]
+    fn update_rejects_non_update_flags() {
+        let runtime = CliRuntime {
+            cwd: PathBuf::from("."),
+            store_root: PathBuf::from(".roger-test"),
+            opencode_bin: "opencode".to_owned(),
+        };
+        let result = run(
+            &[
+                "update".to_owned(),
+                "--pr".to_owned(),
+                "12".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(result.exit_code, 2);
+        assert!(
+            result.stderr.contains("rr update only supports"),
+            "{}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn update_fails_closed_for_local_build_without_release_metadata() {
+        let runtime = CliRuntime {
+            cwd: PathBuf::from("."),
+            store_root: PathBuf::from(".roger-test"),
+            opencode_bin: "opencode".to_owned(),
+        };
+        let result = run(&["update".to_owned(), "--robot".to_owned()], &runtime);
+        assert_eq!(result.exit_code, 3, "{}", result.stderr);
+        let payload = parse_robot(&result.stdout);
+        assert_eq!(payload["outcome"], "blocked");
+        assert_eq!(
+            payload["data"]["reason_code"],
+            "local_or_unpublished_build"
+        );
     }
 }

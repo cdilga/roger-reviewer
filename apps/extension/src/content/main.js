@@ -1,5 +1,6 @@
 const PANEL_ID = 'roger-reviewer-panel';
 const STATUS_ID = 'roger-reviewer-status';
+const BADGE_ID = 'roger-reviewer-attention-badge';
 
 const ACTIONS = [
   { id: 'start_review', label: 'Start' },
@@ -7,6 +8,18 @@ const ACTIONS = [
   { id: 'show_findings', label: 'Findings' },
   { id: 'refresh_review', label: 'Refresh' },
 ];
+
+const ATTENTION_STYLES = {
+  awaiting_user_input: { label: 'Awaiting user input', background: '#fef3c7', color: '#92400e' },
+  awaiting_outbound_approval: {
+    label: 'Awaiting outbound approval',
+    background: '#ffe4e6',
+    color: '#9f1239',
+  },
+  findings_ready: { label: 'Findings ready', background: '#dcfce7', color: '#166534' },
+  refresh_recommended: { label: 'Refresh recommended', background: '#e0f2fe', color: '#0c4a6e' },
+  review_failed: { label: 'Review failed', background: '#fee2e2', color: '#991b1b' },
+};
 
 function parsePullRequestContext() {
   const match = window.location.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
@@ -28,6 +41,78 @@ function setStatus(message, isError = false) {
   }
   statusNode.textContent = message;
   statusNode.style.color = isError ? '#b42318' : '#0f5132';
+}
+
+function clearAttentionBadge() {
+  const badge = document.getElementById(BADGE_ID);
+  if (!badge) {
+    return;
+  }
+
+  badge.textContent = '';
+  badge.style.display = 'none';
+}
+
+function setAttentionBadge(attentionState, freshnessLabel) {
+  const badge = document.getElementById(BADGE_ID);
+  if (!badge) {
+    return;
+  }
+
+  const style = ATTENTION_STYLES[attentionState];
+  if (!style) {
+    clearAttentionBadge();
+    return;
+  }
+
+  badge.textContent = freshnessLabel
+    ? `${style.label} (${freshnessLabel})`
+    : style.label;
+  badge.style.display = 'inline-block';
+  badge.style.background = style.background;
+  badge.style.color = style.color;
+}
+
+function requestStatusMirror(context) {
+  chrome.runtime.sendMessage(
+    {
+      type: 'roger_bridge_status',
+      intent: {
+        owner: context.owner,
+        repo: context.repo,
+        pr_number: context.pr_number,
+      },
+    },
+    (response) => {
+      if (chrome.runtime.lastError) {
+        clearAttentionBadge();
+        setStatus('Launch-only mode. Open Roger locally for authoritative status.');
+        return;
+      }
+
+      if (!response) {
+        clearAttentionBadge();
+        setStatus('No status response. Open Roger locally for authoritative status.');
+        return;
+      }
+
+      if (!response.ok) {
+        clearAttentionBadge();
+        const guidance = response.guidance ? ` ${response.guidance}` : '';
+        setStatus(`${response.message}.${guidance}`.trim(), true);
+        return;
+      }
+
+      if (response.mode !== 'bounded_status' || !response.attention_state) {
+        clearAttentionBadge();
+        setStatus(response.message || 'Launch-only mode. Open Roger locally for authoritative status.');
+        return;
+      }
+
+      setAttentionBadge(response.attention_state, response.freshness_label || null);
+      setStatus(response.message || 'Mirroring bounded Roger status.');
+    }
+  );
 }
 
 function renderPanel(context) {
@@ -56,6 +141,16 @@ function renderPanel(context) {
   heading.style.lineHeight = '1.3';
   heading.style.fontWeight = '600';
   panel.appendChild(heading);
+
+  const badge = document.createElement('p');
+  badge.id = BADGE_ID;
+  badge.style.margin = '0 0 10px 0';
+  badge.style.fontSize = '11px';
+  badge.style.fontWeight = '600';
+  badge.style.borderRadius = '999px';
+  badge.style.padding = '4px 8px';
+  badge.style.display = 'none';
+  panel.appendChild(badge);
 
   const buttonRow = document.createElement('div');
   buttonRow.style.display = 'grid';
@@ -112,27 +207,38 @@ function triggerLaunch(action, context, button) {
       button.textContent = previousText;
 
       if (chrome.runtime.lastError) {
+        clearAttentionBadge();
         setStatus(`Bridge error: ${chrome.runtime.lastError.message}`, true);
         return;
       }
 
       if (!response) {
+        clearAttentionBadge();
         setStatus('No bridge response. Open Roger locally and run rr manually.', true);
         return;
       }
 
       if (!response.ok) {
+        clearAttentionBadge();
         const guidance = response.guidance ? ` ${response.guidance}` : '';
         setStatus(`${response.message}.${guidance}`.trim(), true);
         return;
       }
 
       if (response.mode === 'custom_url_fallback') {
+        clearAttentionBadge();
         setStatus('Launched via URL fallback. Open Roger locally for authoritative status.');
         return;
       }
 
+      if (response.mode === 'native_messaging' && response.attention_state) {
+        setAttentionBadge(response.attention_state, response.freshness_label || null);
+        setStatus(response.message || 'Launch intent dispatched.');
+        return;
+      }
+
       setStatus(response.message || 'Launch intent dispatched.');
+      requestStatusMirror(context);
     }
   );
 }
@@ -144,4 +250,5 @@ function triggerLaunch(action, context, button) {
   }
 
   renderPanel(context);
+  requestStatusMirror(context);
 })();

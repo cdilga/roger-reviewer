@@ -138,13 +138,34 @@ reads `docs/AUTOMATED_E2E_BUDGET.json` and checks:
 make test-release
 ```
 
-**Includes:** all of Tier 4 plus any `smoke_*` suites that have automated
-stubs; manual smoke checklist is run by the release owner separately.
+**Includes:** all of Tier 4 plus targeted smoke suites with automated stubs,
+including `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, and
+`smoke_browser_launch_edge`; manual smoke checklist is run by the release owner
+separately.
 
 **Artifact retention:** full tree plus a release-candidate artifact bundle;
 upload indefinitely.
 
 **Budget guard:** strictly enforced as in Tier 4.
+
+### Supported-Browser Launch Smoke Policy
+
+`smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, and
+`smoke_browser_launch_edge` are named suite metadata ids for supported-browser
+launch scenarios. They remain smoke suites and do not count toward the
+heavyweight E2E budget.
+
+Run these suites in Tier 5 release validation when:
+
+- bridge host registration behavior changed
+- launch payload/envelope handling changed
+- extension packaging lane changes could affect browser launch behavior
+- release/support wording changed for Chrome/Brave/Edge launch claims
+
+If none of the above changed, Tier 5 may rely on:
+
+- green `int_bridge_*` coverage
+- most recent passing browser-launch smoke artifacts
 
 ---
 

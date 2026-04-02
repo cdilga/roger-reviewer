@@ -677,16 +677,19 @@ Not every provider needs equal status in `0.1.0`.
 | Provider | Roger role | `0.1.0` drop-in support | `0.1.0` deeper integration | Direction |
 |----------|------------|-------------------------|----------------------------|-----------|
 | OpenCode | Primary review harness | Yes | Yes | The canonical first implementation and fallback path |
-| Gemini harness | Secondary review harness | Yes | Bounded | Supported in `0.1.0`, but only through Roger-owned contracts rather than Gemini-specific internals |
-| Codex | Future review harness | No | No | Leave room in the contract; do not promise support in `0.1.0` |
+| Codex | Secondary bounded review harness | Yes | Bounded | Exposed via `rr review --provider codex`; Tier A only today (no locator reopen or `rr return`) |
+| Gemini harness | Adapter-contract lane (not current CLI launch surface) | No | Bounded adapter only | Keep Tier A adapter acceptance truthful; do not claim live `rr review --provider gemini` support until it is exposed |
 | Claude | Future review harness | No | No | Same as Codex |
 | Pi-Agent | Future review harness | No | No | Same as Codex |
 | GitHub CLI (`gh`) | GitHub adapter, not review harness | N/A | N/A | Read/write adapter for GitHub operations only |
 
 Rules:
 
-- `0.1.0` only needs first-class review-harness support for OpenCode and a
-  Gemini harness path
+- `0.1.0` only needs first-class review-harness support for OpenCode
+- Codex may ship as a bounded Tier A live-CLI path without implying Tier B
+  reopen/dropout parity
+- Gemini may stay adapter-contract coverage until provider launch support is
+  intentionally exposed in `rr review`
 - other providers should influence the adapter shape, not the `0.1.0`
   implementation commitment
 - GitHub CLI belongs in the GitHub adapter boundary, not the review-harness
@@ -727,7 +730,9 @@ reputation.
 `0.1.0` provider intent:
 
 - OpenCode should reach Tier B and may reach selected Tier C affordances
-- Gemini only needs Tier A in `0.1.0`
+- Codex currently exposes a bounded Tier A path in the live CLI surface
+- Gemini Tier A remains adapter-contract acceptance coverage until
+  `rr review --provider gemini` is actually exposed
 - future providers should be admitted by capability tier, not by one-off
   exceptions
 
@@ -805,10 +810,13 @@ Minimum expectations:
 - **OpenCode** should support the full primary path: live session linkage,
   reopen by locator when possible, `ResumeBundle` reseed, bare-harness dropout,
   and `rr return`
-- **Gemini harness** should support the bounded secondary path: Roger-owned
+- **Codex** should support the bounded live-CLI path: Roger-owned session/run
+  linkage, prompt intake, raw capture, and truthful `ResumeBundle` reseed
+  without claiming locator reopen or `rr return`
+- **Gemini harness** should keep the bounded adapter contract path: Roger-owned
   session/run linkage, prompt intake, structured/raw result capture, and
-  truthful `ResumeBundle` reseed even if native reopen semantics are weaker than
-  OpenCode
+  truthful `ResumeBundle` reseed, but this does not imply live
+  `rr review --provider gemini` launch support in the current CLI
 - no provider should be allowed to bypass Roger's core session ledger, findings
   normalization, or approval model
 
@@ -1866,10 +1874,14 @@ Candidate commands:
 - `rr findings`
 - `rr search`
 - `rr refresh`
-- `rr memory rebuild`
 - `rr post`
 - `rr status`
 - `rr mark-all-accepted`
+
+Deferred command candidate (not in current shipped `0.1.0` CLI surface):
+
+- `rr memory rebuild` (defer until the explicit search/index maintenance slice
+  is implemented and validated)
 
 CLI behavior should be session-aware. If invoked from a repo directory, it
 should infer the likely review target when possible rather than forcing

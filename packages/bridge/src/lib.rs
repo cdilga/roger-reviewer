@@ -154,6 +154,36 @@ pub enum SupportedBrowser {
     Brave,
 }
 
+/// Supported host operating systems for bridge registration assets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SupportedOs {
+    Macos,
+    Windows,
+    Linux,
+}
+
+impl SupportedOs {
+    pub fn current() -> Option<Self> {
+        if cfg!(target_os = "macos") {
+            Some(Self::Macos)
+        } else if cfg!(target_os = "windows") {
+            Some(Self::Windows)
+        } else if cfg!(target_os = "linux") {
+            Some(Self::Linux)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Macos => "macos",
+            Self::Windows => "windows",
+            Self::Linux => "linux",
+        }
+    }
+}
+
 /// A Native Messaging host manifest for browser registration.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NativeHostManifest {
@@ -180,41 +210,78 @@ impl NativeHostManifest {
     /// Return the platform-specific path where this manifest should be installed.
     pub fn install_path(browser: &SupportedBrowser) -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-        match browser {
-            SupportedBrowser::Chrome => {
-                if cfg!(target_os = "macos") {
-                    PathBuf::from(format!(
-                        "{home}/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.roger_reviewer.bridge.json"
-                    ))
-                } else {
-                    PathBuf::from(format!(
-                        "{home}/.config/google-chrome/NativeMessagingHosts/com.roger_reviewer.bridge.json"
-                    ))
-                }
-            }
-            SupportedBrowser::Edge => {
-                if cfg!(target_os = "macos") {
-                    PathBuf::from(format!(
-                        "{home}/Library/Application Support/Microsoft Edge/NativeMessagingHosts/com.roger_reviewer.bridge.json"
-                    ))
-                } else {
-                    PathBuf::from(format!(
-                        "{home}/.config/microsoft-edge/NativeMessagingHosts/com.roger_reviewer.bridge.json"
-                    ))
-                }
-            }
-            SupportedBrowser::Brave => {
-                if cfg!(target_os = "macos") {
-                    PathBuf::from(format!(
-                        "{home}/Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts/com.roger_reviewer.bridge.json"
-                    ))
-                } else {
-                    PathBuf::from(format!(
-                        "{home}/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts/com.roger_reviewer.bridge.json"
-                    ))
-                }
-            }
+        let home = PathBuf::from(home);
+        let os = SupportedOs::current().unwrap_or(SupportedOs::Linux);
+        native_host_install_path_for(browser, os, &home)
+    }
+}
+
+/// Return the Native Messaging manifest install path for a specific OS.
+pub fn native_host_install_path_for(
+    browser: &SupportedBrowser,
+    os: SupportedOs,
+    home_dir: &Path,
+) -> PathBuf {
+    let manifest_name = "com.roger_reviewer.bridge.json";
+    match (browser, os) {
+        (SupportedBrowser::Chrome, SupportedOs::Macos) => {
+            home_dir.join("Library/Application Support/Google/Chrome/NativeMessagingHosts")
         }
+        (SupportedBrowser::Edge, SupportedOs::Macos) => {
+            home_dir.join("Library/Application Support/Microsoft Edge/NativeMessagingHosts")
+        }
+        (SupportedBrowser::Brave, SupportedOs::Macos) => home_dir
+            .join("Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts"),
+        (SupportedBrowser::Chrome, SupportedOs::Windows) => {
+            home_dir.join("AppData/Local/Google/Chrome/User Data/NativeMessagingHosts")
+        }
+        (SupportedBrowser::Edge, SupportedOs::Windows) => {
+            home_dir.join("AppData/Local/Microsoft/Edge/User Data/NativeMessagingHosts")
+        }
+        (SupportedBrowser::Brave, SupportedOs::Windows) => home_dir
+            .join("AppData/Local/BraveSoftware/Brave-Browser/User Data/NativeMessagingHosts"),
+        (SupportedBrowser::Chrome, SupportedOs::Linux) => {
+            home_dir.join(".config/google-chrome/NativeMessagingHosts")
+        }
+        (SupportedBrowser::Edge, SupportedOs::Linux) => {
+            home_dir.join(".config/microsoft-edge/NativeMessagingHosts")
+        }
+        (SupportedBrowser::Brave, SupportedOs::Linux) => {
+            home_dir.join(".config/BraveSoftware/Brave-Browser/NativeMessagingHosts")
+        }
+    }
+    .join(manifest_name)
+}
+
+/// Return the per-OS location for the custom URL registration helper asset.
+pub fn custom_url_helper_path_for(os: SupportedOs, home_dir: &Path) -> PathBuf {
+    match os {
+        SupportedOs::Macos => home_dir
+            .join("Library/Application Support/RogerReviewer/bridge/register-roger-url.command"),
+        SupportedOs::Windows => {
+            home_dir.join("AppData/Local/RogerReviewer/bridge/register-roger-url.reg")
+        }
+        SupportedOs::Linux => {
+            home_dir.join(".local/share/roger-reviewer/bridge/register-roger-url.desktop")
+        }
+    }
+}
+
+/// Render the OS-specific custom-URL registration helper content.
+pub fn render_custom_url_helper(os: SupportedOs, rr_binary_path: &Path) -> String {
+    match os {
+        SupportedOs::Macos => format!(
+            "#!/bin/sh\n# Roger custom URL registration helper (manual apply)\n# target: macOS\n# Binary: {binary}\n# Register a roger:// handler that launches Roger.\n# This helper is intentionally explicit and does not auto-run.\n",
+            binary = rr_binary_path.to_string_lossy()
+        ),
+        SupportedOs::Windows => format!(
+            "Windows Registry Editor Version 5.00\n\n[HKEY_CURRENT_USER\\\\Software\\\\Classes\\\\roger]\n@=\"URL:Roger Protocol\"\n\"URL Protocol\"=\"\"\n\n[HKEY_CURRENT_USER\\\\Software\\\\Classes\\\\roger\\\\shell\\\\open\\\\command]\n@=\"\\\"{binary}\\\" \\\"%1\\\"\"\n",
+            binary = rr_binary_path.to_string_lossy().replace('\\', "\\\\")
+        ),
+        SupportedOs::Linux => format!(
+            "[Desktop Entry]\nName=Roger Reviewer URL Handler\nType=Application\nNoDisplay=true\nMimeType=x-scheme-handler/roger;\nExec={binary} %u\n",
+            binary = rr_binary_path.to_string_lossy()
+        ),
     }
 }
 
@@ -480,6 +547,68 @@ mod tests {
         assert!(
             brave_path.to_string_lossy().contains("Brave")
                 || brave_path.to_string_lossy().contains("BraveSoftware")
+        );
+    }
+
+    #[test]
+    fn host_manifest_install_paths_cover_supported_os_matrix() {
+        let home = Path::new("/home/tester");
+        let matrix = vec![
+            (
+                SupportedBrowser::Chrome,
+                SupportedOs::Macos,
+                "Google/Chrome/NativeMessagingHosts/com.roger_reviewer.bridge.json",
+            ),
+            (
+                SupportedBrowser::Edge,
+                SupportedOs::Windows,
+                "Microsoft/Edge/User Data/NativeMessagingHosts/com.roger_reviewer.bridge.json",
+            ),
+            (
+                SupportedBrowser::Brave,
+                SupportedOs::Linux,
+                "BraveSoftware/Brave-Browser/NativeMessagingHosts/com.roger_reviewer.bridge.json",
+            ),
+        ];
+
+        for (browser, os, expected_suffix) in matrix {
+            let path = native_host_install_path_for(&browser, os, home);
+            assert!(
+                path.to_string_lossy().contains(expected_suffix),
+                "expected {expected_suffix}, got {}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn custom_url_helper_assets_cover_supported_os_matrix() {
+        let home = Path::new("/home/tester");
+        let binary = Path::new("/usr/local/bin/rr");
+
+        let mac = custom_url_helper_path_for(SupportedOs::Macos, home);
+        assert!(
+            mac.to_string_lossy()
+                .ends_with("register-roger-url.command")
+        );
+        assert!(render_custom_url_helper(SupportedOs::Macos, binary).contains("macOS"));
+
+        let windows = custom_url_helper_path_for(SupportedOs::Windows, home);
+        assert!(
+            windows
+                .to_string_lossy()
+                .ends_with("register-roger-url.reg")
+        );
+        assert!(render_custom_url_helper(SupportedOs::Windows, binary).contains("URL Protocol"));
+
+        let linux = custom_url_helper_path_for(SupportedOs::Linux, home);
+        assert!(
+            linux
+                .to_string_lossy()
+                .ends_with("register-roger-url.desktop")
+        );
+        assert!(
+            render_custom_url_helper(SupportedOs::Linux, binary).contains("x-scheme-handler/roger")
         );
     }
 

@@ -57,6 +57,7 @@ Each fixture family must be small, named by purpose, and reusable across suites.
 | `fixture_resumebundle_stale_locator` | stale `SessionLocator` plus valid `ResumeBundle` reseed path | `accept_opencode_*`, `accept_gemini_*`, `rr-011.5` |
 | `fixture_opencode_dropout_return` | bare-harness dropout and `rr return` control flow | `accept_opencode_*`, `rr-011.5` |
 | `fixture_bridge_launch_only_no_status` | bridge present, truthful launch-only/no-status mode | `int_bridge_*`, `rr-011.4` |
+| `fixture_bridge_transcripts` | browser launch-intent and Native Messaging transcript corpus for supported browsers | `int_bridge_*`, `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, `smoke_browser_launch_edge` |
 | `fixture_bridge_install_recovery` | missing host manifest, version drift, install repair path | `int_bridge_*`, `smoke_bridge_install_*` |
 | `fixture_github_draft_batch` | local outbound drafts, approval snapshot, payload rendering | `int_github_*`, `e2e_core_review_happy_path` |
 | `fixture_partial_post_recovery` | one posted action succeeds while another fails | `int_github_*`, `rr-011.4` |
@@ -68,14 +69,14 @@ Each fixture family must be small, named by purpose, and reusable across suites.
 |-------------|-------------------------|---------------|
 | `F00` launch profile and terminal topology | `unit_*`, `prop_*`, `int_cli_*`, targeted `smoke_*` | `rr-018` |
 | `F01`, `F01.1`, `F01.2` local entry, repo re-entry, global session finder | `int_cli_*`, `accept_opencode_*`, targeted `smoke_*` | `rr-011.6` |
-| `F02` GitHub PR page launch | `int_bridge_*`, supported-browser `smoke_*` | `rr-021` |
+| `F02` GitHub PR page launch | `int_bridge_*`, `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, `smoke_browser_launch_edge`, supported-browser `smoke_*` | `rr-021` |
 | `F03`, `F11` structured findings intake and degraded parse fallback | `unit_*`, `int_harness_*`, provider acceptance where needed | `rr-011.3` |
 | `F04`, `F04.1`, `F05`, `F05.1` triage, editor handoff, follow-up, clarification | `int_tui_*`, `int_harness_*`, targeted `smoke_*` | `rr-011.5` |
 | `F06`, `F13` refresh and draft invalidation | `prop_*`, `int_github_*`, `int_cli_*` | `rr-011.2`, `rr-011.4` |
 | `F07` draft review, approval, posting | `unit_*`, `int_github_*`, `e2e_core_review_happy_path` | `rr-008.1`, `rr-011.4` |
 | `F08` history, original pack, and raw output inspection | `int_tui_*`, `int_storage_*` | `rr-019` |
 | `F09` search and recall during review | `unit_*`, `int_search_*`, targeted manual smoke | `rr-024` |
-| `F10`, `F14` bridge recovery and honest no-status mode | `int_bridge_*`, supported-browser `smoke_*` | `rr-011.4` |
+| `F10`, `F14` bridge recovery and honest no-status mode | `int_bridge_*`, `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, `smoke_browser_launch_edge`, supported-browser `smoke_*` | `rr-011.4` |
 | `F12` same-PR multi-instance selection and routing | `prop_*`, `int_cli_*`, `int_bridge_*`, `smoke_*` | `rr-011.6` |
 
 ## Support-Claim Ownership
@@ -85,6 +86,7 @@ Each fixture family must be small, named by purpose, and reusable across suites.
 | OpenCode direct resume, stale-locator reseed, dropout, and `rr return` | `accept_opencode_*` plus release-lane `smoke_*` |
 | Gemini bounded Tier A support | `accept_gemini_*`; no deeper continuity claim without new acceptance |
 | Native Messaging is the serious v1 bridge | `int_bridge_*` plus supported-browser `smoke_*` |
+| Chrome/Brave/Edge browser launch support is explicit and bounded | `int_bridge_*`, `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, `smoke_browser_launch_edge`, `fixture_bridge_transcripts` |
 | Launch-only bridge mode is truthful and does not fake status | `fixture_bridge_launch_only_no_status`, `int_bridge_*`, `rr-011.4` |
 | Approval invalidation and partial post recovery are safe | `prop_*`, `int_github_*`, `fixture_partial_post_recovery`, `rr-011.4` |
 | Same-PR multi-instance routing is explicit and safe | `fixture_same_pr_multi_instance`, `int_cli_*`, `int_bridge_*`, `rr-011.6` |

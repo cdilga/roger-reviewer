@@ -89,6 +89,15 @@ fn parse_toon_payload(stdout: &str) -> Value {
     toon_format::decode_default(stdout).expect("robot payload toon")
 }
 
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("packages parent")
+        .parent()
+        .expect("workspace root")
+        .to_path_buf()
+}
+
 fn init_repo(temp: &TempDir) -> PathBuf {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo dir");
@@ -149,6 +158,29 @@ exit 0
     perms.set_mode(0o755);
     fs::set_permissions(&path, perms).expect("chmod stub binary");
     (dir, path)
+}
+
+fn write_probe_binary() -> (TempDir, PathBuf, PathBuf) {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("opencode-probe");
+    let marker = dir.path().join("invoked.log");
+    let script = format!(
+        r#"#!/bin/sh
+echo "$@" >> "{marker}"
+if [ "$1" = "export" ]; then
+  echo "{{}}"
+  exit 0
+fi
+exit 0
+"#,
+        marker = marker.to_string_lossy()
+    );
+
+    fs::write(&path, script).expect("write probe binary");
+    let mut perms = fs::metadata(&path).expect("metadata").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).expect("chmod probe binary");
+    (dir, path, marker)
 }
 
 fn seed_session_with_provider(
@@ -256,6 +288,105 @@ fn shell_commands_work_without_extension_on_blessed_opencode_path() {
 }
 
 #[test]
+fn status_repo_pr_resolution_matches_live_session_picker_and_explicit_session() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let review = run_rr(
+        &["review", "--pr", "11", "--repo", "owner/repo", "--robot"],
+        &runtime,
+    );
+    assert_eq!(review.exit_code, 0, "{}", review.stderr);
+    let review_payload = parse_robot_payload(&review.stdout);
+    let session_id = review_payload["data"]["session_id"]
+        .as_str()
+        .expect("review session id")
+        .to_owned();
+
+    let sessions = run_rr(
+        &["sessions", "--repo", "owner/repo", "--pr", "11", "--robot"],
+        &runtime,
+    );
+    assert_eq!(sessions.exit_code, 0, "{}", sessions.stderr);
+    let sessions_payload = parse_robot_payload(&sessions.stdout);
+    let listed_session = sessions_payload["data"]["items"]
+        .as_array()
+        .expect("sessions items")
+        .first()
+        .expect("single session entry");
+    assert_eq!(
+        listed_session["session_id"]
+            .as_str()
+            .expect("listed session id"),
+        session_id
+    );
+
+    let resume = run_rr(
+        &[
+            "resume",
+            "--repo",
+            "owner/repo",
+            "--pr",
+            "11",
+            "--dry-run",
+            "--robot",
+        ],
+        &runtime,
+    );
+    assert_eq!(resume.exit_code, 0, "{}", resume.stderr);
+    let resume_payload = parse_robot_payload(&resume.stdout);
+    assert_eq!(
+        resume_payload["data"]["session_id"]
+            .as_str()
+            .expect("resume session id"),
+        session_id
+    );
+
+    let status = run_rr(
+        &["status", "--repo", "owner/repo", "--pr", "11", "--robot"],
+        &runtime,
+    );
+    assert_eq!(status.exit_code, 0, "{}", status.stderr);
+    let status_payload = parse_robot_payload(&status.stdout);
+    assert_eq!(status_payload["outcome"], "complete");
+    assert_eq!(
+        status_payload["data"]["session"]["id"]
+            .as_str()
+            .expect("status session id"),
+        session_id
+    );
+
+    let status_by_session = run(
+        &[
+            "status".to_owned(),
+            "--session".to_owned(),
+            session_id.clone(),
+            "--robot".to_owned(),
+        ],
+        &runtime,
+    );
+    assert_eq!(
+        status_by_session.exit_code, 0,
+        "{}",
+        status_by_session.stderr
+    );
+    let status_by_session_payload = parse_robot_payload(&status_by_session.stdout);
+    assert_eq!(
+        status_by_session_payload["data"]["session"]["id"]
+            .as_str()
+            .expect("explicit status session id"),
+        session_id
+    );
+}
+
+#[test]
 fn resume_blocks_with_picker_when_repo_match_is_ambiguous() {
     let temp = tempdir().expect("tempdir");
     let repo = init_repo(&temp);
@@ -296,7 +427,7 @@ fn resume_blocks_with_picker_when_repo_match_is_ambiguous() {
 }
 
 #[test]
-fn resume_stale_locator_falls_back_to_resumebundle_reseed() {
+fn resume_robot_mode_suppresses_stale_locator_reopen_attempts() {
     let temp = tempdir().expect("tempdir");
     let repo = init_repo(&temp);
     let (_ok_stub_dir, ok_bin) = write_stub_binary(false);
@@ -318,11 +449,71 @@ fn resume_stale_locator_falls_back_to_resumebundle_reseed() {
     };
 
     let resume = run_rr(&["resume", "--pr", "42", "--robot"], &stale_runtime);
-    assert_eq!(resume.exit_code, 5, "{}", resume.stderr);
+    assert_eq!(resume.exit_code, 0, "{}", resume.stderr);
 
     let payload = parse_robot_payload(&resume.stdout);
-    assert_eq!(payload["outcome"], "degraded");
-    assert_eq!(payload["data"]["resume_path"], "reseeded_from_bundle");
+    assert_eq!(payload["outcome"], "complete");
+    assert_eq!(payload["data"]["mode"], "robot_non_interactive");
+    assert_eq!(payload["data"]["launch_suppressed"], true);
+    assert_eq!(
+        payload["data"]["reason_code"],
+        "interactive_launch_suppressed_for_robot_mode"
+    );
+    assert_eq!(payload["data"]["command"], "resume");
+}
+
+#[test]
+fn robot_resume_and_refresh_do_not_launch_interactive_provider_paths() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_probe_dir, probe_bin, marker_path) = write_probe_binary();
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: probe_bin.to_string_lossy().to_string(),
+    };
+    seed_session_with_provider(&runtime, "opencode", 42, "session-opencode-robot-1");
+
+    let resume = run_rr(
+        &["resume", "--session", "session-opencode-robot-1", "--robot"],
+        &runtime,
+    );
+    assert_eq!(resume.exit_code, 0, "{}", resume.stderr);
+    let resume_payload = parse_robot_payload(&resume.stdout);
+    assert_eq!(resume_payload["outcome"], "complete");
+    assert_eq!(resume_payload["data"]["mode"], "robot_non_interactive");
+    assert_eq!(resume_payload["data"]["launch_suppressed"], true);
+    assert_eq!(
+        resume_payload["data"]["reason_code"],
+        "interactive_launch_suppressed_for_robot_mode"
+    );
+    assert_eq!(resume_payload["data"]["command"], "resume");
+
+    let refresh = run_rr(
+        &[
+            "refresh",
+            "--session",
+            "session-opencode-robot-1",
+            "--robot",
+        ],
+        &runtime,
+    );
+    assert_eq!(refresh.exit_code, 0, "{}", refresh.stderr);
+    let refresh_payload = parse_robot_payload(&refresh.stdout);
+    assert_eq!(refresh_payload["outcome"], "complete");
+    assert_eq!(refresh_payload["data"]["mode"], "robot_non_interactive");
+    assert_eq!(refresh_payload["data"]["launch_suppressed"], true);
+    assert_eq!(
+        refresh_payload["data"]["reason_code"],
+        "interactive_launch_suppressed_for_robot_mode"
+    );
+    assert_eq!(refresh_payload["data"]["command"], "refresh");
+
+    assert!(
+        !marker_path.exists(),
+        "provider binary should not be invoked for robot resume/refresh"
+    );
 }
 
 #[test]
@@ -362,6 +553,46 @@ fn review_blocks_truthfully_for_unsupported_provider() {
                 .as_str()
                 .expect("repair action string")
                 .contains("--provider opencode"))
+    );
+}
+
+#[test]
+fn review_blocks_truthfully_for_gemini_until_provider_launch_support_is_exposed() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let review = run_rr(
+        &["review", "--pr", "42", "--provider", "gemini", "--robot"],
+        &runtime,
+    );
+    assert_eq!(review.exit_code, 3, "{}", review.stderr);
+
+    let payload = parse_robot_payload(&review.stdout);
+    assert_eq!(payload["outcome"], "blocked");
+    assert_eq!(payload["data"]["provider"], "gemini");
+    assert_eq!(
+        payload["data"]["supported_providers"],
+        Value::Array(vec![
+            Value::String("opencode".to_owned()),
+            Value::String("codex".to_owned())
+        ])
+    );
+    assert!(
+        payload["repair_actions"]
+            .as_array()
+            .expect("repair actions")
+            .iter()
+            .any(|action| action
+                .as_str()
+                .expect("repair action string")
+                .contains("--provider codex"))
     );
 }
 
@@ -822,6 +1053,121 @@ fn robot_docs_surfaces_schema_inventory_and_blocks_unknown_topics() {
     assert_eq!(
         blocked_payload["data"]["reason_code"],
         "unknown_robot_docs_topic"
+    );
+}
+
+#[test]
+fn bridge_pack_extension_emits_checksum_artifacts_in_smoke() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = CliRuntime {
+        cwd: workspace_root(),
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: "opencode".to_owned(),
+    };
+    let output_dir = temp.path().join("pack-output");
+    let result = run(
+        &[
+            "bridge".to_owned(),
+            "pack-extension".to_owned(),
+            "--output-dir".to_owned(),
+            output_dir.to_string_lossy().to_string(),
+            "--robot".to_owned(),
+        ],
+        &runtime,
+    );
+    assert_eq!(result.exit_code, 0, "{}", result.stderr);
+    let payload = parse_robot_payload(&result.stdout);
+    assert_eq!(payload["outcome"], "complete");
+    assert_eq!(payload["data"]["subcommand"], "pack-extension");
+    assert_eq!(payload["data"]["installs_browser_extension"], false);
+    let package_dir = PathBuf::from(
+        payload["data"]["package_dir"]
+            .as_str()
+            .expect("package_dir should be present"),
+    );
+    assert!(package_dir.join("SHA256SUMS").exists());
+    assert!(package_dir.join("asset-manifest.json").exists());
+}
+
+#[test]
+fn bridge_install_uninstall_is_failure_closed_and_reports_asset_checksums_in_smoke() {
+    let temp = tempdir().expect("tempdir");
+    let bridge_binary = temp.path().join("rr-bridge");
+    fs::write(&bridge_binary, b"#!/bin/sh\nexit 0\n").expect("write mock bridge binary");
+
+    let runtime = CliRuntime {
+        cwd: workspace_root(),
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: "opencode".to_owned(),
+    };
+    let install_root = temp.path().join("install-root");
+
+    let blocked = run(
+        &[
+            "bridge".to_owned(),
+            "install".to_owned(),
+            "--bridge-binary".to_owned(),
+            bridge_binary.to_string_lossy().to_string(),
+            "--install-root".to_owned(),
+            install_root.to_string_lossy().to_string(),
+            "--robot".to_owned(),
+        ],
+        &runtime,
+    );
+    assert_eq!(blocked.exit_code, 3, "{}", blocked.stderr);
+    let blocked_payload = parse_robot_payload(&blocked.stdout);
+    assert_eq!(blocked_payload["outcome"], "blocked");
+    assert_eq!(
+        blocked_payload["data"]["reason_code"],
+        "extension_id_required"
+    );
+
+    let install = run(
+        &[
+            "bridge".to_owned(),
+            "install".to_owned(),
+            "--extension-id".to_owned(),
+            "abcdefghijklmnopabcdefghijklmnop".to_owned(),
+            "--bridge-binary".to_owned(),
+            bridge_binary.to_string_lossy().to_string(),
+            "--install-root".to_owned(),
+            install_root.to_string_lossy().to_string(),
+            "--robot".to_owned(),
+        ],
+        &runtime,
+    );
+    assert_eq!(install.exit_code, 0, "{}", install.stderr);
+    let install_payload = parse_robot_payload(&install.stdout);
+    assert_eq!(install_payload["outcome"], "complete");
+    let assets = install_payload["data"]["assets"]
+        .as_array()
+        .expect("assets array");
+    assert!(!assets.is_empty());
+    assert!(assets.iter().all(|asset| {
+        asset["sha256"]
+            .as_str()
+            .is_some_and(|checksum| checksum.len() == 64)
+    }));
+
+    let uninstall = run(
+        &[
+            "bridge".to_owned(),
+            "uninstall".to_owned(),
+            "--install-root".to_owned(),
+            install_root.to_string_lossy().to_string(),
+            "--robot".to_owned(),
+        ],
+        &runtime,
+    );
+    assert_eq!(uninstall.exit_code, 0, "{}", uninstall.stderr);
+    let uninstall_payload = parse_robot_payload(&uninstall.stdout);
+    assert_eq!(uninstall_payload["outcome"], "complete");
+    assert!(
+        uninstall_payload["data"]["removed"]
+            .as_array()
+            .expect("removed list")
+            .len()
+            >= 1
     );
 }
 
