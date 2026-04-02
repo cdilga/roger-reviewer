@@ -80,7 +80,7 @@ jobs:
           - os: macos-14
             target: aarch64-apple-darwin
             binary_name: rr
-          - os: macos-13
+          - os: macos-14
             target: x86_64-apple-darwin
             binary_name: rr
           - os: windows-2022
@@ -97,6 +97,10 @@ jobs:
 
       - name: Build rr for target
         shell: bash
+        env:
+          ROGER_RELEASE_VERSION: ${{ needs.derive-release-metadata.outputs.version }}
+          ROGER_RELEASE_CHANNEL: ${{ needs.derive-release-metadata.outputs.channel }}
+          ROGER_RELEASE_TAG: ${{ needs.derive-release-metadata.outputs.tag }}
         run: |
           set -euo pipefail
           cargo build -p roger-cli --bin rr --release --target "${{ matrix.target }}"
@@ -176,6 +180,8 @@ jobs:
       release_prerelease: ${{ needs.derive-release-metadata.outputs.prerelease }}
       manifest_name: ${{ steps.aggregate.outputs.manifest_name }}
       manifest_path: ${{ steps.aggregate.outputs.manifest_path }}
+      install_metadata_name: ${{ steps.aggregate.outputs.install_metadata_name }}
+      install_metadata_path: ${{ steps.aggregate.outputs.install_metadata_path }}
       built_target_count: ${{ steps.aggregate.outputs.built_target_count }}
       matrix_scope: ${{ steps.aggregate.outputs.matrix_scope }}
       excluded_targets: ${{ steps.aggregate.outputs.excluded_targets }}
@@ -200,6 +206,8 @@ jobs:
           excluded_target="aarch64-pc-windows-msvc"
           manifest_name="release-core-manifest-${{ needs.derive-release-metadata.outputs.version }}.json"
           manifest_path="core-builds/${manifest_name}"
+          install_metadata_name="release-install-metadata-${{ needs.derive-release-metadata.outputs.version }}.json"
+          install_metadata_path="core-builds/${install_metadata_name}"
 
           python3 scripts/release/build_core_manifest.py \
             --version-metadata release-metadata/release-metadata.json \
@@ -208,8 +216,15 @@ jobs:
             --excluded-target "${excluded_target}" \
             --output "${manifest_path}"
 
+          python3 scripts/release/build_install_metadata_bundle.py \
+            --version-metadata release-metadata/release-metadata.json \
+            --core-manifest "${manifest_path}" \
+            --output "${install_metadata_path}"
+
           echo "manifest_name=${manifest_name}" >>"${GITHUB_OUTPUT}"
           echo "manifest_path=${manifest_path}" >>"${GITHUB_OUTPUT}"
+          echo "install_metadata_name=${install_metadata_name}" >>"${GITHUB_OUTPUT}"
+          echo "install_metadata_path=${install_metadata_path}" >>"${GITHUB_OUTPUT}"
           echo "built_target_count=$(jq -r '.built_target_count' "${manifest_path}")" >>"${GITHUB_OUTPUT}"
           echo "matrix_scope=${matrix_scope}" >>"${GITHUB_OUTPUT}"
           echo "excluded_targets=${excluded_target}" >>"${GITHUB_OUTPUT}"
@@ -219,5 +234,13 @@ jobs:
         with:
           name: release-build-core-manifest
           path: ${{ steps.aggregate.outputs.manifest_path }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload install metadata bundle for publish consumption
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-install-metadata
+          path: ${{ steps.aggregate.outputs.install_metadata_path }}
           if-no-files-found: error
           retention-days: 14

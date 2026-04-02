@@ -35,18 +35,18 @@ Rules:
 | Provider | `0.1.0` status | Minimum expectation |
 |----------|----------------|---------------------|
 | OpenCode | Primary | Real locator-based resume, Roger ledger integration, bare-harness dropout, `rr return` |
-| Gemini harness | Secondary, bounded | Roger-owned session/run ledger, prompt intake, structured/raw output capture, ResumeBundle reseed path |
-| Codex | Not in `0.1.0` | Contract-shaping only |
+| Codex | Secondary, bounded | Exposed via `rr review --provider codex`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |
+| Gemini harness | Adapter-contract lane, bounded | Keep Tier A adapter acceptance truthful (ledger + intake + structured/raw capture + ResumeBundle reseed) without claiming live `rr review --provider gemini` support |
 | Claude | Not in `0.1.0` | Contract-shaping only |
 | Pi-Agent | Not in `0.1.0` | Contract-shaping only |
 
-Gemini support in `0.1.0` should stay common-sense:
+Gemini adapter coverage in `0.1.0` should stay common-sense:
 
 - Roger owns the continuity model
-- Gemini support does not require transcript-isomorphic resume parity with
+- Gemini adapter coverage does not require transcript-isomorphic resume parity with
   OpenCode
 - if Gemini lacks a stable reopen path, Roger should still support truthful
-  reseed/resume through `ResumeBundle`
+  reseed/resume through `ResumeBundle` when that provider path is exposed
 
 Provider claim rule:
 
@@ -166,6 +166,46 @@ Ownership rules:
 - manual release work should be limited to explicit approval and smoke checks,
   not ad hoc asset assembly
 
+`release-publish` operator contract for `0.1.0`:
+
+1. Run upstream release lanes and capture workflow run ids:
+   - required: `core_run_id` from `release-build-core`
+   - required: `verify_run_id` from `release-verify-assets`
+   - optional: `bridge_run_id` and `extension_run_id` when those lanes ship
+     artifacts for the same tag.
+2. Run `release-publish` via `workflow_dispatch` with:
+   - `core_run_id=<release-build-core-run-id>`
+   - `verify_run_id=<release-verify-assets-run-id>`
+   - `publish_mode=draft` for rehearsal, or `publish_mode=publish` for stable
+     CalVer tags only.
+3. Approval is explicit via the `release-publish-approval` environment gate.
+4. `release-publish` must fail closed unless:
+   - verify manifest schema is `roger.release-verify-assets.v1`
+   - `publish_gate.publish_allowed == true`
+   - upstream run payloads map to expected workflow paths and successful
+     conclusions
+   - captured upstream run URLs are canonical GitHub Actions run URLs
+     (`https://github.com/<owner>/<repo>/actions/runs/<id>`)
+   - approved tag ref and release metadata stay consistent across verified
+     manifests
+   - optional-lane parity holds with upstream verify data (no silent widening
+     or downgrade). If upstream verify data marks bridge or extension as built,
+     release-publish must reverify that lane and require matching lane run
+     provenance. Optional lane status values are constrained to `built` or
+     `skipped`, and lane-summary entries for both optional lanes must be
+     present. When upstream verify data marks a lane as skipped, the matching
+     optional run URL input must be omitted.
+5. Release notes are generated from the verified manifest and must include:
+   support posture, narrowed claims, checksum/signing references, and upstream
+   run provenance.
+6. Stable publish (`publish_mode=publish`) requires explicit operator smoke
+   acknowledgement and the checklist in
+   `docs/release-publish-operator-smoke.md`.
+7. `release-publish-plan` artifacts should retain:
+   - generated release plan + notes
+   - reverified manifest/checksums/signing notes
+   - upstream run payload evidence (`run-*.json`, including optional-lane run payloads when present).
+
 ### Publication posture
 
 For `0.1.0`, Roger should publish release artifacts in this order:
@@ -204,23 +244,43 @@ Behavior rules:
 - platform-specific install paths and PATH guidance are Roger-owned release-doc
   work, not hidden Homebrew, winget, or npm assumptions
 
+Current repo entrypoints for this lane:
+
+- Unix-like installer: `scripts/release/rr-install.sh`
+- PowerShell installer: `scripts/release/rr-install.ps1`
+
+Smoke validation for this contract:
+
+- `bash scripts/release/test_rr_install.sh`
+  - verifies fresh install success from a synthetic release payload
+  - verifies fail-closed behavior when release metadata is missing
+  - verifies fail-closed behavior when release metadata is ambiguous for target
+- PowerShell installer validation is currently a manual smoke on a Windows host
+  until a stable `pwsh` lane is available in this workspace
+
 ### Update lane
 
-After installation, the blessed one-line update flow is Roger-owned:
+`0.1.0` implementation status:
 
-- `rr self-update`
+- `rr self-update` is deferred and not yet implemented in `packages/cli`
+- the currently implemented Roger-owned update path is to rerun the installer
+  contract against published CalVer metadata:
+  - Unix-like shells: `scripts/release/rr-install.sh --channel stable`
+  - PowerShell: `scripts/release/rr-install.ps1 -Channel stable`
+  - explicit pinned updates remain available through `--version` / `-Version`
 
 Behavior rules:
 
-- default behavior stays on the current release channel and upgrades only to a
-  newer published version in that lane
+- default update behavior stays on the selected published channel (`stable` or
+  `rc`) and upgrades only to a newer published version in that lane
 - an explicit pinned target version is allowed
-- the updater reuses the same host detection and checksum-verification rules as
-  install and fails closed on checksum mismatch, missing metadata, or ambiguous
-  provenance
+- the updater path reuses the same host detection and install metadata +
+  manifest + checksum verification rules as install and fails closed on missing
+  metadata, metadata/manifest drift, checksum mismatch, or ambiguous target
+  resolution
 - installs created from local/unpublished artifacts should not be upgraded as
-  if they were blessed release installs; Roger should require an explicit
-  reinstall from a published release in that case
+  if they were blessed release installs; Roger requires an explicit reinstall
+  from a published CalVer release in that case
 
 ### Separate optional extension lane
 
@@ -285,6 +345,62 @@ Purpose:
 
 - prove the companion/install story is real, not just the domain model
 
+#### SMOKE-BRIDGE-CHROME-01: Chrome PR-page launch smoke
+
+Required shape:
+
+- launch a GitHub PR from Chrome through the serious bridge path
+- capture launch-intent and bridge response transcripts
+- verify Native Messaging happy path when registration is present
+- verify truthful launch-only fallback guidance when Native Messaging is absent
+
+Purpose:
+
+- keep Chrome launch support explicit without adding a second heavyweight E2E
+
+#### SMOKE-BRIDGE-BRAVE-01: Brave PR-page launch smoke
+
+Required shape:
+
+- launch a GitHub PR from Brave through the serious bridge path
+- capture launch-intent and bridge response transcripts
+- verify Native Messaging happy path when registration is present
+- verify truthful launch-only fallback guidance when Native Messaging is absent
+
+Purpose:
+
+- keep Brave launch support explicit without adding a second heavyweight E2E
+
+#### SMOKE-BRIDGE-EDGE-01: Edge PR-page launch smoke
+
+Required shape:
+
+- launch a GitHub PR from Edge through the serious bridge path
+- capture launch-intent and bridge response transcripts
+- verify Native Messaging happy path when registration is present
+- verify launch-only honesty (no fake local status claims)
+- verify truthful launch-only fallback guidance when Native Messaging is absent
+
+Purpose:
+
+- keep Edge launch support explicit without adding a second heavyweight E2E
+
+Rules:
+
+- these suites stay in targeted smoke/acceptance coverage by default
+- it must not be promoted into the heavyweight E2E lane unless the
+  `0.1.x` E2E budget contract is explicitly changed
+- fixture ownership for these scenarios is
+  `fixture-bridge-transcripts` plus `fixture-bridge-launch-only-no-status`
+- a Chrome-specific run is required when bridge host registration, launch
+  envelopes, extension packaging, or Chrome launch support claims change
+- a Brave-specific run is required when bridge host registration, launch
+  envelopes, extension packaging, or Brave launch support claims change
+- an Edge-specific run is required when bridge host registration, launch
+  envelopes, extension packaging, or Edge support claims change
+- shared-source coverage is sufficient only for docs-only or style-only changes
+  with no launch-surface behavior deltas
+
 #### Harness-INT-01: OpenCode dropout and return
 
 Required shape:
@@ -311,7 +427,7 @@ structured/raw capture, and ResumeBundle-driven reseed.
 - raw output and structured findings both persist
 - bare-harness dropout and `rr return` work
 
-### Gemini acceptance
+### Gemini adapter acceptance
 
 - Roger can start a Gemini-backed review through the adapter
 - structured findings and raw output both persist
@@ -357,6 +473,15 @@ Minimum manual smoke set:
   browser-extension install flow
 - Linux `x86_64`: CLI/TUI path plus bridge/install truthfulness for the shipped
   support level
+
+Supported-browser release rule:
+
+- run `SMOKE-BRIDGE-CHROME-01`, `SMOKE-BRIDGE-BRAVE-01`, and
+  `SMOKE-BRIDGE-EDGE-01` for release candidates whenever bridge host
+  registration, launch payload handling, extension packaging, or browser
+  support wording changed since the last passing smoke artifacts
+- otherwise, previously passing browser smoke artifacts plus green shared-source
+  bridge integration coverage are sufficient
 
 ## What Must Be Stubbed
 

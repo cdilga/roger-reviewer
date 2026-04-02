@@ -1,0 +1,381 @@
+name: release-verify-assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref for CalVer derivation (defaults to GITHUB_REF)"
+        required: false
+        type: string
+      sha:
+        description: "Commit SHA for derivation (defaults to GITHUB_SHA)"
+        required: false
+        type: string
+      today:
+        description: "UTC date basis for nightly derivation (YYYY.MM.DD)"
+        required: false
+        type: string
+  push:
+    tags:
+      - "v*"
+  pull_request:
+    paths:
+      - .github/workflows/release-verify-assets.yml
+      - scripts/release/verify_release_assets.py
+      - scripts/release/test_verify_release_assets.sh
+      - scripts/release/build_core_manifest.py
+      - scripts/release/build_optional_lane_summary.py
+
+permissions:
+  contents: read
+
+jobs:
+  derive-release-metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.derive.outputs.channel }}
+      version: ${{ steps.derive.outputs.version }}
+      tag: ${{ steps.derive.outputs.tag }}
+      prerelease: ${{ steps.derive.outputs.prerelease }}
+      artifact_stem: ${{ steps.derive.outputs.artifact_stem }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: derive
+        env:
+          INPUT_REF: ${{ github.event.inputs.ref || '' }}
+          INPUT_SHA: ${{ github.event.inputs.sha || '' }}
+          INPUT_TODAY: ${{ github.event.inputs.today || '' }}
+        run: |
+          set -euo pipefail
+          ref="${INPUT_REF:-${GITHUB_REF}}"
+          sha="${INPUT_SHA:-${GITHUB_SHA}}"
+          today="${INPUT_TODAY:-$(date -u +%Y.%m.%d)}"
+
+          python3 scripts/release/derive_calver_version.py \
+            --ref "${ref}" \
+            --sha "${sha}" \
+            --today "${today}" > release-metadata.json
+
+          echo "channel=$(jq -r '.channel' release-metadata.json)" >>"${GITHUB_OUTPUT}"
+          echo "version=$(jq -r '.version' release-metadata.json)" >>"${GITHUB_OUTPUT}"
+          echo "tag=$(jq -r '.tag' release-metadata.json)" >>"${GITHUB_OUTPUT}"
+          echo "prerelease=$(jq -r '.prerelease' release-metadata.json)" >>"${GITHUB_OUTPUT}"
+          echo "artifact_stem=$(jq -r '.artifact_stem' release-metadata.json)" >>"${GITHUB_OUTPUT}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-version-metadata
+          path: release-metadata.json
+          if-no-files-found: error
+          retention-days: 14
+
+  fixture-rehearsal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rehearse verify-assets pass+fail fixtures
+        run: bash scripts/release/test_verify_release_assets.sh
+
+  verify-candidate-assets:
+    needs: derive-release-metadata
+    runs-on: ubuntu-latest
+    outputs:
+      publish_allowed: ${{ steps.gate.outputs.publish_allowed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-version-metadata
+          path: release-metadata
+
+      - name: Build synthetic candidate artifacts for verification lane
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p verify-input/assets verify-output
+          metadata_path="release-metadata/release-metadata.json"
+
+          python3 - "$metadata_path" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import tarfile
+          import tempfile
+          import sys
+
+          metadata = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          root = pathlib.Path("verify-input")
+          assets = root / "assets"
+          assets.mkdir(parents=True, exist_ok=True)
+
+          artifact_stem = metadata["artifact_stem"]
+          archive_name = f"{artifact_stem}-core-x86_64-unknown-linux-gnu.tar.gz"
+          archive_path = assets / archive_name
+
+          with tempfile.TemporaryDirectory() as tmp:
+              payload = pathlib.Path(tmp) / f"{artifact_stem}-core-x86_64-unknown-linux-gnu"
+              payload.mkdir(parents=True, exist_ok=True)
+              (payload / "rr").write_text("#!/bin/sh\necho rr\n", encoding="utf-8")
+              with tarfile.open(archive_path, "w:gz") as tf:
+                  tf.add(payload, arcname=payload.name)
+
+          core_manifest = {
+              "schema": "roger.release-build-core.v1",
+              "channel": metadata["channel"],
+              "version": metadata["version"],
+              "tag": metadata["tag"],
+              "targets": [
+                  {
+                      "target": "x86_64-unknown-linux-gnu",
+                      "binary_name": "rr",
+                      "archive_name": archive_name,
+                      "archive_sha256": hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+                      "payload_dir": f"{artifact_stem}-core-x86_64-unknown-linux-gnu",
+                  }
+              ],
+          }
+          (root / "core-manifest.json").write_text(
+              json.dumps(core_manifest, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+
+          install_metadata = {
+              "schema": "roger.release.install-metadata.v1",
+              "release": {
+                  "channel": metadata["channel"],
+                  "version": metadata["version"],
+                  "tag": metadata["tag"],
+                  "prerelease": bool(metadata.get("prerelease", False)),
+                  "artifact_stem": artifact_stem,
+              },
+              "checksums_name": f"{artifact_stem}-checksums.txt",
+              "core_manifest_name": "core-manifest.json",
+              "targets": [
+                  {
+                      "target": "x86_64-unknown-linux-gnu",
+                      "binary_name": "rr",
+                      "archive_name": archive_name,
+                      "archive_sha256": core_manifest["targets"][0]["archive_sha256"],
+                      "payload_dir": core_manifest["targets"][0]["payload_dir"],
+                  }
+              ],
+          }
+          (assets / f"release-install-metadata-{metadata['version']}.json").write_text(
+              json.dumps(install_metadata, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+
+          bridge_name = f"{artifact_stem}-bridge-linux.tar.gz"
+          bridge_path = assets / bridge_name
+          bridge_path.write_bytes(b"bridge-bundle")
+
+          optional_summary = {
+              "schema": "roger.release.optional_lanes.v1",
+              "release": {
+                  "channel": metadata["channel"],
+                  "version": metadata["version"],
+                  "tag": metadata["tag"],
+                  "prerelease": bool(metadata.get("prerelease", False)),
+                  "artifact_stem": artifact_stem,
+              },
+              "lanes": {
+                  "release-package-bridge": {
+                      "status": "built",
+                      "built": True,
+                      "artifacts": [bridge_name],
+                      "notes": [],
+                  },
+                  "release-package-extension": {
+                      "status": "skipped",
+                      "built": False,
+                      "artifacts": [],
+                      "notes": ["extension lane intentionally skipped in this rehearsal workflow"],
+                  },
+              },
+              "support_claims": {
+                  "posture": "core_plus_bridge",
+                  "shipped_optional_lanes": ["release-package-bridge"],
+                  "narrowed_claims": ["extension_sideload_unshipped"],
+                  "warnings": [],
+              },
+          }
+          (root / "optional-summary.json").write_text(
+              json.dumps(optional_summary, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Verify candidate assets and emit publish gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/release/verify_release_assets.py \
+            --version-metadata release-metadata/release-metadata.json \
+            --core-manifest verify-input/core-manifest.json \
+            --asset-root verify-input/assets \
+            --optional-summary verify-input/optional-summary.json \
+            --output-dir verify-output
+
+      - id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          publish_allowed="$(jq -r '.publish_gate.publish_allowed' verify-output/release-asset-manifest.json)"
+          echo "publish_allowed=${publish_allowed}" >>"${GITHUB_OUTPUT}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-verify-assets-report
+          path: |
+            verify-output/release-asset-manifest.json
+            verify-output/SHA256SUMS
+            verify-output/release-notes-signing.md
+          if-no-files-found: error
+          retention-days: 14
+
+  rehearsal-intentional-fail:
+    needs: derive-release-metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-version-metadata
+          path: release-metadata
+
+      - name: Build intentionally-invalid fixture and assert failure
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p fail-input/assets fail-output
+          metadata_path="release-metadata/release-metadata.json"
+
+          python3 - "$metadata_path" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          metadata = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          root = pathlib.Path("fail-input")
+          assets = root / "assets"
+          assets.mkdir(parents=True, exist_ok=True)
+
+          artifact_stem = metadata["artifact_stem"]
+          archive_name = f"{artifact_stem}-core-x86_64-unknown-linux-gnu.tar.gz"
+
+          core_manifest = {
+              "schema": "roger.release-build-core.v1",
+              "channel": metadata["channel"],
+              "version": metadata["version"],
+              "tag": metadata["tag"],
+              "targets": [
+                  {
+                      "target": "x86_64-unknown-linux-gnu",
+                      "binary_name": "rr",
+                      "archive_name": archive_name,
+                      "archive_sha256": "deadbeef",
+                      "payload_dir": f"{artifact_stem}-core-x86_64-unknown-linux-gnu",
+                  }
+              ],
+          }
+          (root / "core-manifest.json").write_text(
+              json.dumps(core_manifest, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+
+          install_metadata = {
+              "schema": "roger.release.install-metadata.v1",
+              "release": {
+                  "channel": metadata["channel"],
+                  "version": metadata["version"],
+                  "tag": metadata["tag"],
+                  "prerelease": bool(metadata.get("prerelease", False)),
+                  "artifact_stem": artifact_stem,
+              },
+              "checksums_name": f"{artifact_stem}-checksums.txt",
+              "core_manifest_name": "core-manifest.json",
+              "targets": [
+                  {
+                      "target": "x86_64-unknown-linux-gnu",
+                      "binary_name": "rr",
+                      "archive_name": archive_name,
+                      "archive_sha256": "deadbeef",
+                      "payload_dir": core_manifest["targets"][0]["payload_dir"],
+                  }
+              ],
+          }
+          (assets / f"release-install-metadata-{metadata['version']}.json").write_text(
+              json.dumps(install_metadata, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+
+          optional_summary = {
+              "schema": "roger.release.optional_lanes.v1",
+              "release": {
+                  "channel": metadata["channel"],
+                  "version": metadata["version"],
+                  "tag": metadata["tag"],
+                  "prerelease": bool(metadata.get("prerelease", False)),
+                  "artifact_stem": artifact_stem,
+              },
+              "lanes": {
+                  "release-package-bridge": {
+                      "status": "built",
+                      "built": True,
+                      "artifacts": [f"{artifact_stem}-bridge-linux.tar.gz"],
+                      "notes": [],
+                  },
+                  "release-package-extension": {
+                      "status": "skipped",
+                      "built": False,
+                      "artifacts": [],
+                      "notes": [],
+                  },
+              },
+              "support_claims": {
+                  "posture": "core_plus_bridge",
+                  "shipped_optional_lanes": ["release-package-bridge"],
+                  "narrowed_claims": [
+                      "bridge_registration_unshipped",
+                      "extension_sideload_unshipped"
+                  ],
+                  "warnings": [],
+              },
+          }
+          (root / "optional-summary.json").write_text(
+              json.dumps(optional_summary, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+          set +e
+          python3 scripts/release/verify_release_assets.py \
+            --version-metadata release-metadata/release-metadata.json \
+            --core-manifest fail-input/core-manifest.json \
+            --asset-root fail-input/assets \
+            --optional-summary fail-input/optional-summary.json \
+            --output-dir fail-output
+          code=$?
+          set -e
+          if [[ $code -eq 0 ]]; then
+            echo "expected verification failure for intentionally-invalid fixture" >&2
+            exit 1
+          fi
+
+          jq -e '.publish_gate.publish_allowed == false' fail-output/release-asset-manifest.json >/dev/null
+
+  publish-gate-sentinel:
+    needs:
+      - verify-candidate-assets
+      - rehearsal-intentional-fail
+    if: ${{ needs.verify-candidate-assets.outputs.publish_allowed == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Emit publish-gate sentinel
+        run: |
+          set -euo pipefail
+          echo "publish gate open: release-publish lane may proceed only from verified artifacts"

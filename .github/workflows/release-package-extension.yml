@@ -1,0 +1,163 @@
+name: release-package-extension
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref for CalVer derivation (defaults to GITHUB_REF)"
+        required: false
+        type: string
+      sha:
+        description: "Commit SHA for derivation (defaults to GITHUB_SHA)"
+        required: false
+        type: string
+      today:
+        description: "UTC date basis for nightly derivation (YYYY.MM.DD)"
+        required: false
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  derive-release-metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.derive.outputs.channel }}
+      version: ${{ steps.derive.outputs.version }}
+      tag: ${{ steps.derive.outputs.tag }}
+      prerelease: ${{ steps.derive.outputs.prerelease }}
+      artifact_stem: ${{ steps.derive.outputs.artifact_stem }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: derive
+        env:
+          INPUT_REF: ${{ github.event.inputs.ref || '' }}
+          INPUT_SHA: ${{ github.event.inputs.sha || '' }}
+          INPUT_TODAY: ${{ github.event.inputs.today || '' }}
+        run: |
+          set -euo pipefail
+          ref="${INPUT_REF:-${GITHUB_REF}}"
+          sha="${INPUT_SHA:-${GITHUB_SHA}}"
+          today="${INPUT_TODAY:-$(date -u +%Y.%m.%d)}"
+
+          python3 scripts/release/derive_calver_version.py \
+            --ref "${ref}" \
+            --sha "${sha}" \
+            --today "${today}" > release-metadata.json
+
+          echo "channel=$(jq -r '.channel' release-metadata.json)" >>"${GITHUB_OUTPUT}"
+          echo "version=$(jq -r '.version' release-metadata.json)" >>"${GITHUB_OUTPUT}"
+          echo "tag=$(jq -r '.tag' release-metadata.json)" >>"${GITHUB_OUTPUT}"
+          echo "prerelease=$(jq -r '.prerelease' release-metadata.json)" >>"${GITHUB_OUTPUT}"
+          echo "artifact_stem=$(jq -r '.artifact_stem' release-metadata.json)" >>"${GITHUB_OUTPUT}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-version-metadata
+          path: release-metadata.json
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-bridge-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify bridge contract drift gate
+        run: cargo run -q -p roger-cli --bin rr -- bridge verify-contracts --robot > bridge-verify.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bridge-contract-verify
+          path: bridge-verify.json
+          if-no-files-found: error
+          retention-days: 14
+
+  package-extension:
+    needs:
+      - derive-release-metadata
+      - verify-bridge-contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-version-metadata
+          path: release-metadata
+
+      - name: Package extension lane output after contract verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/release/package_extension_bundle.sh \
+            --version-metadata release-metadata/release-metadata.json \
+            --output-dir dist/extension
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extension-bundle
+          path: |
+            dist/extension/*-extension.zip
+            dist/extension/extension-bundle-manifest.json
+            dist/extension/bridge-verify.json
+            dist/extension/pack-extension.json
+          if-no-files-found: error
+          retention-days: 14
+
+  summarize-optional-lanes:
+    needs:
+      - derive-release-metadata
+      - package-extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-version-metadata
+          path: release-metadata
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: extension-bundle
+          path: optional-lanes/extension
+
+      - name: Build optional-lane summary (extension built, bridge skipped)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t extension_archives < <(find optional-lanes/extension -type f -name '*.zip' | sort)
+          if [[ ${#extension_archives[@]} -eq 0 ]]; then
+            echo "error: expected extension bundle archive was not found" >&2
+            exit 1
+          fi
+
+          args=()
+          for archive in "${extension_archives[@]}"; do
+            args+=(--extension-artifact "$(basename "$archive")")
+          done
+
+          python3 scripts/release/build_optional_lane_summary.py \
+            --version-metadata release-metadata/release-metadata.json \
+            --bridge-status skipped \
+            --bridge-note "release-package-bridge lane was not run in release-package-extension workflow" \
+            --extension-status built \
+            "${args[@]}" \
+            --output optional-lanes/release-optional-lanes-extension.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-optional-lanes-extension
+          path: optional-lanes/release-optional-lanes-extension.json
+          if-no-files-found: error
+          retention-days: 14
