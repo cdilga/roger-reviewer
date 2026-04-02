@@ -83,11 +83,11 @@ resolve_latest_tag() {
 
   if [[ "$channel" == "stable" ]]; then
     response="$(curl -fsSL "${api_root}/releases/latest")" || die "failed to query latest stable release"
-    python3 - <<'PY' <<<"$response"
+    python3 - "$response" <<'PY'
 import json
 import sys
 
-payload = json.load(sys.stdin)
+payload = json.loads(sys.argv[1])
 tag = payload.get("tag_name")
 if not tag:
     raise SystemExit("missing tag_name in GitHub latest release response")
@@ -97,11 +97,11 @@ PY
   fi
 
   response="$(curl -fsSL "${api_root}/releases?per_page=30")" || die "failed to query releases for rc channel"
-  python3 - <<'PY' <<<"$response"
+  python3 - "$response" <<'PY'
 import json
 import sys
 
-payload = json.load(sys.stdin)
+payload = json.loads(sys.argv[1])
 for entry in payload:
     tag = entry.get("tag_name", "")
     if entry.get("prerelease") and "-rc." in tag:

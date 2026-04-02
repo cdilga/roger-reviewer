@@ -179,4 +179,23 @@ bash "${INSTALL_SCRIPT}" \
 [[ -x "${TMP_DIR}/fallback/bin/rr" ]] || { echo "fallback install did not create executable rr" >&2; exit 1; }
 [[ "$("${TMP_DIR}/fallback/bin/rr")" == "rr smoke ok" ]] || { echo "fallback-installed rr smoke output mismatch" >&2; exit 1; }
 
+# Stable-channel lookup should resolve tag via API payload and install without --version.
+API_FS_ROOT="${TMP_DIR}/api/repos/cdilga/roger-reviewer/releases"
+mkdir -p "${API_FS_ROOT}"
+cat >"${API_FS_ROOT}/latest" <<'EOF'
+{
+  "tag_name": "v2026.04.04"
+}
+EOF
+
+bash "${INSTALL_SCRIPT}" \
+  --channel stable \
+  --api-root "file://${TMP_DIR}/api/repos/cdilga/roger-reviewer" \
+  --download-root "${DOWNLOAD_ROOT}" \
+  --install-dir "${TMP_DIR}/stable/bin" \
+  --target "${TARGET}"
+
+[[ -x "${TMP_DIR}/stable/bin/rr" ]] || { echo "stable-channel install did not create executable rr" >&2; exit 1; }
+[[ "$("${TMP_DIR}/stable/bin/rr")" == "rr smoke ok" ]] || { echo "stable-channel rr smoke output mismatch" >&2; exit 1; }
+
 echo "rr-install.sh smoke: ok"
