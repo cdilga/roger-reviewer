@@ -390,7 +390,16 @@ checksums_url="${download_root}/${tag}/${checksums_name}"
 checksums_path="${tmp_dir}/${checksums_name}"
 
 if ! curl -fsSL "$checksums_url" -o "$checksums_path"; then
-  die "failed to download checksums file: ${checksums_url}"
+  fallback_checksums_name="SHA256SUMS"
+  fallback_checksums_url="${download_root}/${tag}/${fallback_checksums_name}"
+  fallback_checksums_path="${tmp_dir}/${fallback_checksums_name}"
+  if curl -fsSL "$fallback_checksums_url" -o "$fallback_checksums_path"; then
+    checksums_name="${fallback_checksums_name}"
+    checksums_url="${fallback_checksums_url}"
+    checksums_path="${fallback_checksums_path}"
+  else
+    die "failed to download checksums file: ${checksums_url} (fallback also failed: ${fallback_checksums_url})"
+  fi
 fi
 
 checksum_index_value="$(read_checksums_entry "$checksums_path" "$archive_name")" || die "invalid checksums file"

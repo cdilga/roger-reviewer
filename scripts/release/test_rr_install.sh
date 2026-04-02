@@ -158,4 +158,20 @@ if bash "${INSTALL_SCRIPT}" \
   exit 1
 fi
 
+# Legacy release payload fallback: metadata expects <artifact>-checksums.txt,
+# but only SHA256SUMS is present in the release assets.
+make_release_payload "2026.04.04" 0
+mv \
+  "${DOWNLOAD_FS_ROOT}/v2026.04.04/roger-reviewer-2026.04.04-checksums.txt" \
+  "${DOWNLOAD_FS_ROOT}/v2026.04.04/SHA256SUMS"
+
+bash "${INSTALL_SCRIPT}" \
+  --version "2026.04.04" \
+  --download-root "${DOWNLOAD_ROOT}" \
+  --install-dir "${TMP_DIR}/fallback/bin" \
+  --target "${TARGET}"
+
+[[ -x "${TMP_DIR}/fallback/bin/rr" ]] || { echo "fallback install did not create executable rr" >&2; exit 1; }
+[[ "$("${TMP_DIR}/fallback/bin/rr")" == "rr smoke ok" ]] || { echo "fallback-installed rr smoke output mismatch" >&2; exit 1; }
+
 echo "rr-install.sh smoke: ok"
