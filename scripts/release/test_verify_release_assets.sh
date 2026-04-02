@@ -200,7 +200,7 @@ jq -e '
       )
     )
 ' "${pass_dir}/out/release-asset-manifest.json" >/dev/null
-rg -q "core-manifest.json$" "${pass_dir}/out/SHA256SUMS"
+grep -q "core-manifest.json$" "${pass_dir}/out/SHA256SUMS"
 
 # FAIL CASE 1: missing archive
 missing_dir="${workdir}/missing"
