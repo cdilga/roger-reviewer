@@ -181,7 +181,6 @@ struct ParsedArgs {
 enum OutcomeKind {
     Complete,
     Empty,
-    Partial,
     Degraded,
     Blocked,
     RepairNeeded,
@@ -193,7 +192,6 @@ impl OutcomeKind {
         match self {
             Self::Complete => "complete",
             Self::Empty => "empty",
-            Self::Partial => "partial",
             Self::Degraded => "degraded",
             Self::Blocked => "blocked",
             Self::RepairNeeded => "repair_needed",
@@ -204,7 +202,7 @@ impl OutcomeKind {
     fn exit_code(self) -> i32 {
         match self {
             Self::Complete | Self::Empty => 0,
-            Self::Partial | Self::Degraded => 5,
+            Self::Degraded => 5,
             Self::Blocked => 3,
             Self::RepairNeeded => 4,
             Self::Error => 1,
@@ -3581,22 +3579,6 @@ fn compact_data(command: CommandKind, data: Value) -> Value {
             "items": data.get("items").cloned().unwrap_or(Value::Array(Vec::new())),
         }),
         _ => data,
-    }
-}
-
-fn utc_timestamp() -> String {
-    match ProcessCommand::new("date")
-        .arg("-u")
-        .arg("+%Y-%m-%dT%H:%M:%SZ")
-        .output()
-    {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).trim().to_owned()
-        }
-        _ => {
-            let now = time::now_ts();
-            format!("{now}")
-        }
     }
 }
 
