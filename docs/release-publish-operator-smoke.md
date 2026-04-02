@@ -45,8 +45,16 @@ gh workflow run release-publish.yml \
 - only after steps 1-4 pass, run with `publish_mode=publish`
 - set `operator_smoke_ack=true`
 
+6. Post-publish live installer proof (required for stable readiness):
+- `curl -fsSL https://api.github.com/repos/<owner>/<repo>/releases/latest` must
+  resolve (HTTP 200) and return the expected stable tag.
+- `bash scripts/release/rr-install.sh --repo <owner>/<repo> --dry-run` must
+  exit 0 against the live release feed.
+- record absolute UTC timestamp and resolved stable tag in closeout notes.
+
 ## Evidence to retain
 
 - URLs for upstream run IDs used by release-publish
 - `release-publish-plan` artifact from the publish run
 - final release URL
+- live installer proof outputs (`releases/latest` response summary + dry-run output)

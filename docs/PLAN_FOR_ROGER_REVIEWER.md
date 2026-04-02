@@ -3015,11 +3015,20 @@ Each bead must include:
 - rationale
 - dependencies
 - exact acceptance criteria
-- smoke tests
+- explicit validation contract, naming the cheapest truthful layer
 - whether it is v1-critical or later
 - any relevant flow ids from `REVIEW_FLOW_MATRIX.md`
 - any relevant provider/browser/OS coverage obligations from
   `RELEASE_AND_TEST_MATRIX.md`
+
+Execution-governance rules:
+
+- beads should be proof-bearing slices, not broad work buckets
+- parent beads should usually act as integration checkpoints while child beads
+  carry implementation burden
+- a bead does not close on "code landed"; it closes on acceptance evidence
+- support claims must match live surface + docs + validation, not planning
+  intent alone
 
 ## Definition of Done for the Planning Stage
 

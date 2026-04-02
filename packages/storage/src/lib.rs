@@ -81,6 +81,15 @@ impl ArtifactStorageKind {
             Self::DerivedSidecar => "derived_sidecar",
         }
     }
+
+    fn from_str(raw: &str) -> Option<Self> {
+        match raw {
+            "inline" => Some(Self::Inline),
+            "external_content_addressed" => Some(Self::ExternalContentAddressed),
+            "derived_sidecar" => Some(Self::DerivedSidecar),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3504,6 +3513,9 @@ impl RogerStore {
     ) -> Result<StoredArtifact> {
         let policy = budget_class.policy();
         let digest = format!("{:x}", Sha256::digest(bytes));
+        if let Some(existing) = self.stored_artifact_by_digest(&digest)? {
+            return Ok(existing);
+        }
         let storage_kind = policy.select_storage(bytes.len());
         let now = time::now_ts();
 
@@ -3558,6 +3570,47 @@ impl RogerStore {
         })
     }
 
+    fn stored_artifact_by_digest(&self, digest: &str) -> Result<Option<StoredArtifact>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, storage_kind, size_bytes, inline_bytes, relative_path
+                 FROM artifacts
+                 WHERE digest = ?1
+                 LIMIT 1",
+                params![digest],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<Vec<u8>>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let Some((id, storage_kind_raw, size_bytes, inline_bytes, relative_path)) = row else {
+            return Ok(None);
+        };
+
+        let storage_kind =
+            ArtifactStorageKind::from_str(&storage_kind_raw).ok_or_else(|| StorageError::NotFound {
+                entity: "artifact_storage_kind",
+                id: storage_kind_raw,
+            })?;
+
+        Ok(Some(StoredArtifact {
+            id,
+            digest: digest.to_owned(),
+            storage_kind,
+            size_bytes: size_bytes as usize,
+            inline_bytes,
+            relative_path: relative_path.map(PathBuf::from),
+        }))
+    }
+
     pub fn artifact_bytes(&self, artifact_id: &str) -> Result<Vec<u8>> {
         let artifact = self.conn.query_row(
             "SELECT storage_kind, inline_bytes, relative_path
@@ -3593,6 +3646,17 @@ impl RogerStore {
                 id: other.to_owned(),
             }),
         }
+    }
+
+    pub fn artifact_id_by_digest(&self, digest: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT id FROM artifacts WHERE digest = ?1",
+                params![digest],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StorageError::from)
     }
 
     pub fn store_resume_bundle(

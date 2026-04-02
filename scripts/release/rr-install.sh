@@ -8,7 +8,7 @@ Usage: rr-install.sh [options]
 Install the Roger `rr` binary from published release artifacts.
 
 Options:
-  --version <version>       Install an explicit version (for example 2026.04.01)
+  --version <version>       Install an explicit version (for example 0.1.0 or 2026.04.01)
   --channel <stable|rc>     Channel when --version is omitted (default: stable)
   --repo <owner/repo>       GitHub repository slug (default: cdilga/roger-reviewer)
   --api-root <url>          Override GitHub API root
@@ -35,13 +35,27 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
-normalize_version() {
+normalize_calver_version() {
   local value="$1"
   value="${value#v}"
   if [[ ! "$value" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}(-rc\.[0-9]+)?$ ]]; then
-    die "invalid version format: ${value} (expected YYYY.MM.DD or YYYY.MM.DD-rc.N)"
+    die "invalid CalVer format: ${value} (expected YYYY.MM.DD or YYYY.MM.DD-rc.N)"
   fi
   printf '%s\n' "$value"
+}
+
+normalize_requested_version() {
+  local value="$1"
+  value="${value#v}"
+  if [[ "$value" == "0.1.0" ]]; then
+    printf '%s\n' "$value"
+    return
+  fi
+  if [[ "$value" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}(-rc\.[0-9]+)?$ ]]; then
+    printf '%s\n' "$value"
+    return
+  fi
+  die "invalid version format: ${value} (expected 0.1.0 alias or YYYY.MM.DD[-rc.N])"
 }
 
 detect_target() {
@@ -340,12 +354,22 @@ need_cmd python3
 need_cmd tar
 
 if [[ -n "$version" ]]; then
-  version="$(normalize_version "$version")"
-  tag="v${version}"
+  requested_version="$(normalize_requested_version "$version")"
+  if [[ "$requested_version" == "0.1.0" ]]; then
+    if [[ "$channel" != "stable" ]]; then
+      die "--version 0.1.0 is a stable-only alias; omit --channel or use --channel stable"
+    fi
+    tag="$(resolve_latest_tag "$api_root" "stable")"
+    [[ -n "$tag" ]] || die "failed to resolve stable release for --version 0.1.0 alias"
+    version="$(normalize_calver_version "$tag")"
+  else
+    version="$requested_version"
+    tag="v${version}"
+  fi
 else
   tag="$(resolve_latest_tag "$api_root" "$channel")"
   [[ -n "$tag" ]] || die "failed to resolve release tag"
-  version="$(normalize_version "$tag")"
+  version="$(normalize_calver_version "$tag")"
 fi
 
 target="${target_override:-$(detect_target)}"

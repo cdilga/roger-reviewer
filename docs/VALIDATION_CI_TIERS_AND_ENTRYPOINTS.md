@@ -18,6 +18,15 @@ This document does not override the tier definitions in
 entrypoint names, runner commands, retention rules, and budget-guard
 integration so downstream suites do not invent their own runner policy.
 
+Current repo truth as of 2026-04-02:
+
+- `tests/suites/e2e_core_review_happy_path.toml` is present as suite metadata.
+- No functional executable `e2e_*` test implementation for that suite id is
+  currently landed.
+- Nightly/release lanes therefore enforce budget and run the configured test
+  command, but should not be described as having demonstrated functional E2E
+  coverage until the real suite exists and runs.
+
 ---
 
 ## Governing Rules
@@ -115,7 +124,8 @@ automated E2E tests.
 make test-nightly
 ```
 
-**Includes:** all of Tier 3 plus `e2e_core_review_happy_path`
+**Includes:** all of Tier 3 plus `e2e_core_review_happy_path` once that suite
+is implemented as executable tests (currently metadata-only).
 
 **Artifact retention:** full tree; upload for 30 days.
 

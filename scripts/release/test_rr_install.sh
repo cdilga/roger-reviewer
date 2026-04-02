@@ -189,6 +189,25 @@ cat >"${API_FS_ROOT}/latest" <<'EOF'
 EOF
 
 bash "${INSTALL_SCRIPT}" \
+  --version "0.1.0" \
+  --api-root "file://${TMP_DIR}/api/repos/cdilga/roger-reviewer" \
+  --download-root "${DOWNLOAD_ROOT}" \
+  --install-dir "${TMP_DIR}/semver-alias/bin" \
+  --target "${TARGET}"
+
+[[ -x "${TMP_DIR}/semver-alias/bin/rr" ]] || { echo "0.1.0 alias install did not create executable rr" >&2; exit 1; }
+[[ "$("${TMP_DIR}/semver-alias/bin/rr")" == "rr smoke ok" ]] || { echo "0.1.0 alias rr smoke output mismatch" >&2; exit 1; }
+
+if bash "${INSTALL_SCRIPT}" \
+  --version "0.2.0" \
+  --download-root "${DOWNLOAD_ROOT}" \
+  --install-dir "${TMP_DIR}/bad-semver/bin" \
+  --target "${TARGET}" >/dev/null 2>&1; then
+  echo "expected unsupported semver alias to fail closed" >&2
+  exit 1
+fi
+
+bash "${INSTALL_SCRIPT}" \
   --channel stable \
   --api-root "file://${TMP_DIR}/api/repos/cdilga/roger-reviewer" \
   --download-root "${DOWNLOAD_ROOT}" \

@@ -235,6 +235,13 @@ struct RobotEnvelope {
 pub fn run(argv: &[String], runtime: &CliRuntime) -> CliRunResult {
     let parsed = match parse_args(argv) {
         Ok(parsed) => parsed,
+        Err(message) if message == "help requested" => {
+            return CliRunResult {
+                exit_code: 0,
+                stdout: format!("{}\n", usage_text()),
+                stderr: String::new(),
+            };
+        }
         Err(message) => {
             return CliRunResult {
                 exit_code: 2,
@@ -1432,16 +1439,48 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         "review launched via rr review",
     );
 
-    if let Err(err) = store.store_resume_bundle(&bundle_id, &bundle) {
-        return error_response(format!("failed to persist ResumeBundle: {err}"));
-    }
+    let bundle_payload = match serde_json::to_vec(&bundle) {
+        Ok(payload) => payload,
+        Err(err) => return error_response(format!("failed to serialize ResumeBundle: {err}")),
+    };
+    let bundle_digest = sha256_hex(&bundle_payload);
+    let bundle_artifact_id = match store.artifact_id_by_digest(&bundle_digest) {
+        Ok(Some(existing_id)) => existing_id,
+        Ok(None) => match store.store_resume_bundle(&bundle_id, &bundle) {
+            Ok(stored) => stored.id,
+            Err(err) if err
+                .to_string()
+                .contains("UNIQUE constraint failed: artifacts.digest") =>
+            {
+                match store.artifact_id_by_digest(&bundle_digest) {
+                    Ok(Some(existing_id)) => existing_id,
+                    Ok(None) => {
+                        return error_response(
+                            "failed to persist ResumeBundle: duplicate digest detected but no stored artifact could be resolved".to_owned(),
+                        );
+                    }
+                    Err(lookup_err) => {
+                        return error_response(format!(
+                            "failed to persist ResumeBundle: duplicate digest lookup failed: {lookup_err}"
+                        ));
+                    }
+                }
+            }
+            Err(err) => return error_response(format!("failed to persist ResumeBundle: {err}")),
+        },
+        Err(err) => {
+            return error_response(format!(
+                "failed to resolve existing ResumeBundle artifact by digest: {err}"
+            ));
+        }
+    };
 
     if let Err(err) = store.create_review_session(CreateReviewSession {
         id: &session_id,
         review_target: &target,
         provider: &parsed.provider,
         session_locator: Some(&session_locator),
-        resume_bundle_artifact_id: Some(&bundle_id),
+        resume_bundle_artifact_id: Some(&bundle_artifact_id),
         continuity_state: continuity_state_label(&continuity_quality),
         attention_state: "review_launched",
         launch_profile_id: Some(cli_config::PROFILE_ID),
@@ -1486,7 +1525,7 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         data: json!({
             "session_id": session_id,
             "review_run_id": run_id,
-            "resume_bundle_artifact_id": bundle_id,
+            "resume_bundle_artifact_id": bundle_artifact_id,
             "repository": target.repository,
             "pull_request": target.pull_request_number,
             "provider": parsed.provider,

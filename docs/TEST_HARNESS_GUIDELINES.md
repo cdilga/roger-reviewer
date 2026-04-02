@@ -274,6 +274,12 @@ Every non-unit suite should declare:
 | `nightly` | heavy or broad confidence work | expensive cross-matrix suites, broader fixture permutations, non-critical longevity checks | no for ordinary PRs |
 | `release` | tagged release validation | manual smoke plus artifact verification from the release matrix | yes for release promotion |
 
+Current repo truth as of 2026-04-02:
+- `e2e_core_review_happy_path` exists as suite metadata and budget policy, but
+  no executable functional `e2e_*` test implementation is landed yet.
+- Until that suite is implemented and actually run, do not claim functional
+  automated E2E coverage for gated/nightly/release lanes.
+
 Rules:
 - a suite must live in exactly one default tier
 - promoting a suite upward requires an explicit reason in code review or the
@@ -333,7 +339,7 @@ The first implementation-facing harness slice should be:
 5. unit and parameterized harness helpers inside that shared harness
 6. narrow integration harness for storage, prompt normalization, and CLI resume
 7. provider acceptance harness for OpenCode and Gemini
-8. one blessed automated E2E
+8. implement one blessed automated E2E (currently pending in repo)
 9. release-smoke checklist and artifact verification
 
 No `rr-011.x` validation suite should start before `rr-025.3` lands. The point

@@ -183,6 +183,31 @@ exit 0
     (dir, path, marker)
 }
 
+#[test]
+fn help_forms_exit_cleanly_for_quickstart_probe() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = CliRuntime {
+        cwd: temp.path().to_path_buf(),
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: "opencode".to_owned(),
+    };
+
+    for args in [&["help"][..], &["--help"][..], &["-h"][..]] {
+        let result = run_rr(args, &runtime);
+        assert_eq!(result.exit_code, 0, "args={args:?} stderr={}", result.stderr);
+        assert!(
+            result.stdout.contains("Usage:"),
+            "args={args:?} stdout={}",
+            result.stdout
+        );
+        assert!(
+            result.stderr.trim().is_empty(),
+            "args={args:?} stderr={}",
+            result.stderr
+        );
+    }
+}
+
 fn seed_session_with_provider(
     runtime: &CliRuntime,
     provider: &str,
@@ -285,6 +310,43 @@ fn shell_commands_work_without_extension_on_blessed_opencode_path() {
 
     let ret = run_rr(&["return", "--pr", "42", "--robot"], &runtime);
     assert_eq!(ret.exit_code, 0, "{}", ret.stderr);
+}
+
+#[test]
+fn repeated_review_reuses_resume_bundle_artifact_for_duplicate_digest() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let first = run_rr(&["review", "--pr", "42", "--robot"], &runtime);
+    assert_eq!(first.exit_code, 0, "{}", first.stderr);
+    let first_payload = parse_robot_payload(&first.stdout);
+    let first_bundle_id = first_payload["data"]["resume_bundle_artifact_id"]
+        .as_str()
+        .expect("first bundle id");
+
+    let second = run_rr(&["review", "--pr", "42", "--robot"], &runtime);
+    assert_eq!(second.exit_code, 0, "{}", second.stderr);
+    let second_payload = parse_robot_payload(&second.stdout);
+    let second_bundle_id = second_payload["data"]["resume_bundle_artifact_id"]
+        .as_str()
+        .expect("second bundle id");
+
+    assert_eq!(
+        first_bundle_id, second_bundle_id,
+        "duplicate resume-bundle payload digest should reuse the existing artifact id"
+    );
+    assert!(
+        !second.stderr.contains("UNIQUE constraint failed: artifacts.digest"),
+        "review path should avoid duplicate artifact digest failures: {}",
+        second.stderr
+    );
 }
 
 #[test]

@@ -205,6 +205,14 @@ Ownership rules:
    - generated release plan + notes
    - reverified manifest/checksums/signing notes
    - upstream run payload evidence (`run-*.json`, including optional-lane run payloads when present).
+8. Stable installer-readiness is not complete until live post-publish checks pass
+   against the canonical repo:
+   - `GET https://api.github.com/repos/<owner>/<repo>/releases/latest` returns
+     `200` and resolves to the expected stable tag.
+   - `bash scripts/release/rr-install.sh --repo <owner>/<repo> --dry-run`
+     exits `0` and resolves install metadata + target archive URLs for that tag.
+   - closeout records the absolute UTC probe timestamp and stable release tag
+     used for the live check.
 
 ### Publication posture
 
@@ -234,6 +242,8 @@ Behavior rules:
 
 - the installer resolves the latest stable release by default and may accept an
   explicit pinned version or allowed channel such as `stable` or `rc`
+- `--version 0.1.0` is a product-line alias that resolves to the latest stable
+  published CalVer tag; explicit CalVer pins remain `YYYY.MM.DD[-rc.N]`
 - host OS and CPU detection map to the published core companion archive matrix
   and must fail clearly for unsupported targets rather than guessing
 - the installer downloads the chosen core companion archive plus the release
@@ -255,6 +265,10 @@ Smoke validation for this contract:
   - verifies fresh install success from a synthetic release payload
   - verifies fail-closed behavior when release metadata is missing
   - verifies fail-closed behavior when release metadata is ambiguous for target
+- post-publish live stable smoke (manual release lane):
+  - `curl -fsSL https://api.github.com/repos/cdilga/roger-reviewer/releases/latest`
+  - `bash scripts/release/rr-install.sh --repo cdilga/roger-reviewer --dry-run`
+  - record UTC timestamp + resolved stable tag in release closeout evidence
 - PowerShell installer validation is currently a manual smoke on a Windows host
   until a stable `pwsh` lane is available in this workspace
 

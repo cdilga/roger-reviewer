@@ -15,6 +15,14 @@ The `0.1.0` validation contract needs four explicit execution tiers, one
 blessed automated end-to-end test, and a small machine-readable budget file
 that makes E2E growth visible instead of ambient.
 
+Current repo truth as of 2026-04-02:
+
+- `tests/suites/e2e_core_review_happy_path.toml` is a suite-metadata contract.
+- No executable functional `e2e_*` test implementation for
+  `e2e_core_review_happy_path` is currently present in the repo.
+- Until that executable suite lands, do not claim functional automated E2E
+  coverage from lane policy or metadata alone.
+
 ## Test Tiers
 
 ### Tier 1: Fast local
@@ -69,14 +77,15 @@ cross-boundary validation.
 
 Required posture:
 
-- include the one blessed automated E2E
+- include the one blessed automated E2E once implemented
 - include provider acceptance suites and bridge/install smoke that are too slow
   or environment-sensitive for every PR
 - keep the lane small enough that failures are actionable rather than noisy
 
 Required contents for `0.1.0`:
 
-- `E2E-01` core review happy path
+- planned `E2E-01` core review happy path (metadata exists; executable suite
+  still pending)
 - OpenCode acceptance suite
 - Gemini bounded acceptance suite
 - browser bridge smoke for the serious v1 bridge path
@@ -111,6 +120,11 @@ Required contents:
 Roger `0.1.0` carries one blessed automated heavyweight E2E:
 
 - `E2E-01`: core review happy path
+
+Current implementation status:
+
+- planned in budget and suite metadata
+- not yet implemented as a functional executable E2E test
 
 That test protects a product-defining promise across several boundaries:
 
@@ -167,15 +181,15 @@ Shared-source coverage without a fresh Edge run is sufficient only when:
 ## Budget File
 
 The machine-readable budget for automated heavyweight E2Es lives in
-[`docs/E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/E2E_BUDGET.json).
+[`docs/AUTOMATED_E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/AUTOMATED_E2E_BUDGET.json).
 
 Contract:
 
-- `blessed_automated_e2e_count` is the current allowed baseline
-- `blessed_tests` lists the approved heavyweight E2Es by stable id
-- `warning_on_growth` controls the initial feedback phase
-- `ci_fail_without_justification` defines the stricter gate Roger should enable
-  once the workflow is proven
+- `blessed_automated_e2e_budget` is the current allowed baseline
+- `blessed_e2e_ids` lists approved heavyweight E2Es by stable id
+- `warning_mode` controls the initial feedback phase
+- `future_ci_mode` defines the stricter gate Roger should enable once the
+  workflow is proven
 - each new heavyweight E2E must add a justification entry instead of quietly
   raising the count
 
