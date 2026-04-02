@@ -129,6 +129,7 @@ Read these to understand the full plan before touching code.
 | [`docs/ALIEN_WORKFLOWS_FOR_ROGER_REVIEWER.md`](docs/ALIEN_WORKFLOWS_FOR_ROGER_REVIEWER.md) | Roger-specific alien-workflow pack for external critique, research-and-reimagine, transfer-audit, and feedback-closure loops |
 | [`docs/DEV_MACHINE_ONBOARDING.md`](docs/DEV_MACHINE_ONBOARDING.md) | Practical machine setup guide for Codex, Agent Mail, and planning workflow access |
 | [`docs/IMPLEMENTATION_SOURCES.md`](docs/IMPLEMENTATION_SOURCES.md) | Saved implementation-time external sources for browser bridge, contract generation, and workflow methodology |
+| [`docs/EXECUTION_GOVERNANCE_AND_REPO_BOUNDARY.md`](docs/EXECUTION_GOVERNANCE_AND_REPO_BOUNDARY.md) | Delivery-governance contract for bead splitting, closure proof, support-claim truthfulness, and repo-vs-operator boundary |
 | [`roger-reviewer-brain-dump.md`](roger-reviewer-brain-dump.md) | Original raw brain dump — source of intent, not specification |
 
 ---
@@ -146,7 +147,7 @@ Authority order for repo work:
 4. [`docs/BEAD_SEED_FOR_ROGER_REVIEWER.md`](docs/BEAD_SEED_FOR_ROGER_REVIEWER.md)
    and the live beads graph for task decomposition
 5. Support docs such as the data/storage contract, release/test matrix,
-   onboarding, workspace-status, ADRs, and prompt packs
+   onboarding, workspace-status, ADRs, execution-governance notes, and prompt packs
 6. Historical critique rounds and supplementary feedback
 7. [`roger-reviewer-brain-dump.md`](roger-reviewer-brain-dump.md) as raw intent only
 
@@ -221,6 +222,35 @@ Implementation gate status:
 not start extension delivery or mutable GitHub-write work before the local
 core, approval surfaces, and posting safety beads are in place.**
 
+### Current Repo Truth
+
+Use this as the short truth snapshot before you start inferring support from
+historical docs.
+
+- the repo contains active Rust implementation across CLI, storage, harness,
+  bridge, and validation crates
+- the local-first CLI path is real, but not every planned `0.1.0` flow is
+  equally complete or equally proven
+- support claims must be earned by live command surfaces plus named validation,
+  not by planning intent or partially landed adapters
+- the extension remains bounded and should not be treated as the source of
+  truth for Roger state
+- operator/swarm tooling exists in this repo today, but much of it is process
+  machinery rather than product scope; do not confuse it with Roger itself
+- if the live code, tests, and beads disagree with a planning doc, fix the
+  mismatch instead of rationalizing it away
+
+### Non-Goals For Agents
+
+Do not optimize for these:
+
+- closing beads early to make the graph look healthy
+- preserving stale support claims because the docs once said them
+- treating personal swarm/operator tooling as if it were core Roger product work
+- widening claims from adapter coverage to live user-facing support
+- adding heavyweight validation when a cheaper truthful layer would defend the
+  same promise
+
 ---
 
 ## Working with Beads
@@ -242,21 +272,24 @@ br doctor            # workspace health check
 ```
 
 `br` currently resolves to a local patched build at
-`/Users/cdilga/.local/bin/br -> /Users/cdilga/.local/bin/br-0.1.34.localfix`.
+`/Users/cdilga/.local/bin/br -> /Users/cdilga/.local/bin/br-0.1.34.pinned`.
 This is not the stock upstream `0.1.34` release. Local investigation on
 2026-03-31 showed the upstream regression still reproduced on both the
 published `0.1.34` build and upstream `main`, but a narrow local source patch
 to the fresh-schema migration path restored clean `init`, `create`, `doctor`,
 and `info` behavior for Roger's workload.
 
-Important 2026-04-01 follow-up:
+Important 2026-04-02 follow-up:
 
-- `rr-xr6.5`-specific claim mutation still exhibited FK failures on
-  `br-0.1.34.localfix` and was tracked/contained in `rr-1ab.7`.
-- a temporary rollback experiment to `br-0.1.28.pinned` was rejected for this
-  workspace: repeated live status mutations caused queue-truth divergence and
-  SQLite integrity corruption that required checkpoint/VACUUM repair.
-- therefore, keep `br-0.1.34.localfix` as the canonical default for this repo
+- onboarding rehearsal `rr-1f4.2` reproduced claim-mutation FK failures on
+  `br-0.1.34.localfix` while `br-0.1.34.pinned` succeeded for the same
+  mutation path.
+- `scripts/swarm/resolve_br.sh` now defaults to `br-0.1.34.pinned` so swarm
+  and onboarding flows converge on the mutation-safe binary without manual
+  per-command overrides.
+- the prior rollback experiment to `br-0.1.28.pinned` remains rejected for this
+  workspace due queue-truth divergence and SQLite integrity risk.
+- therefore, keep `br-0.1.34.pinned` as the canonical default for this repo
   unless a newly validated replacement is explicitly announced.
 
 Upstream fresh-init regression report remains:
@@ -320,6 +353,52 @@ Rules:
   real blocker
 - announce new or split beads in Agent Mail so other agents can pick them up
 - every new implementation bead should include an explicit validation contract
+
+### Beads are proof units, not work buckets
+
+Treat beads as independently provable slices of product progress.
+
+Rules:
+
+- a leaf bead should usually have one clear ownership area, one acceptance
+  boundary, and one validation story
+- if a bead is too large for one agent to finish and prove in one bounded
+  session, split it before or during execution
+- parent beads should usually act as integration checkpoints; child beads should
+  carry the implementation burden
+- if `br ready` is empty but adjacent safe work is obvious, do not declare the
+  repo "done"; shape the graph or create the missing child bead instead
+- if a bead contains multiple disjoint code areas, multiple support claims, or
+  multiple unrelated validation layers, it is probably undersplit
+
+### A bead does not close on "code landed"
+
+Closing a bead requires explicit acceptance evidence, not just changed files or
+passing vibes.
+
+Minimum closeout evidence:
+
+1. each acceptance criterion is either satisfied explicitly or left open
+2. the exact validation command, suite, or manual smoke is named
+3. the actual result is recorded truthfully
+4. any residual gap or degraded mode is stated plainly
+5. if support wording changed, the relevant docs/tests changed in the same slice
+
+Do not close a bead if:
+
+- acceptance criteria were not checked one by one
+- no validation was run for implementation work
+- the behavior was inferred from code instead of exercised
+- obvious missing child beads or dependency gaps were discovered but left
+  untracked
+- the close reason would overstate provider, browser, setup, E2E, or approval
+  support relative to the current repo
+
+When a bead cannot yet be closed honestly:
+
+- leave it open
+- add a note describing the exact remaining gap
+- create a child bead if the remaining work is separable
 
 ### Validation contract is part of the task
 
@@ -414,6 +493,37 @@ First-class entities:
   while still demanding explicit contracts, bounded complexity, and hard
   evidence that each added moving part earns its cost.
 
+## Expected Agent Posture
+
+Agents should operate with high initiative and high closure pressure.
+
+Default posture:
+
+- try to finish the full truthful scope of the bead, not just the easiest
+  visible fragment
+- when the remaining work is adjacent and clear, investigate it and either
+  complete it or split it into a new bead immediately
+- do not stop at the first local success signal if the real product promise is
+  still only partially defended
+- do not wait passively for the user to notice a missing child bead, setup gap,
+  support-claim mismatch, or validation hole that is already obvious from the
+  code and docs
+- when you find "a bit more" that is necessary for an honest closeout, treat
+  that as part of the job: finish it, or bead it
+
+The desired behavior is:
+
+- finish the bead completely and truthfully when that is feasible
+- otherwise leave the repo in a better-shaped state by creating the next obvious
+  bead, dependency, or note so another agent can continue without rediscovery
+
+The undesired behavior is:
+
+- doing the narrowest possible interpretation of the bead and stopping
+- closing a bead while known adjacent work remains untracked
+- treating investigation as optional when it is the difference between "mostly
+  works" and "truthfully complete"
+
 ## Testing Philosophy
 
 Testing is part of the implementation contract, not cleanup for later. Roger
@@ -479,6 +589,28 @@ Authority:
   is the canonical tiering and E2E-budget contract
 - [`docs/REVIEW_FLOW_MATRIX.md`](docs/REVIEW_FLOW_MATRIX.md) identifies the
   user flows whose promises eventually deserve broader cross-boundary coverage
+
+## Support Claim Discipline
+
+Support claims are product commitments, not optimistic interpretations of code.
+
+Rules:
+
+- the code, tests, and docs must agree on what is actually supported now
+- a planned capability is not a shipped capability
+- adapter coverage is not the same thing as live CLI or UX support
+- bounded or degraded support must be described as bounded or degraded, not as
+  parity with the primary path
+- when live probing contradicts docs or beads, reality wins and the docs or
+  graph must be corrected
+
+Required honesty checks:
+
+- provider claims must match the live `rr` surface and named acceptance coverage
+- browser or extension claims must match the real launch/readback/install scope
+- setup or install claims must match a fresh-user path that was actually
+  exercised
+- E2E claims must match executable suites that exist and were run
 
 ## Dependency Policy
 
@@ -585,6 +717,36 @@ The adversarial review loop:
    defend the same promise more cheaply.
 12. If you discover a dependency is incomplete, stop and flag it rather than
    working around it.
+13. Do not close the bead until the acceptance criteria and proof have been
+    mapped explicitly in the close reason or bead note.
+14. If the bead is too large to close honestly in one pass, split it rather
+    than forcing a premature close.
+15. If you find the next obvious missing slice needed for a truthful closeout,
+    investigate it and either finish it if it is already inside scope or create
+    the follow-on bead yourself.
+
+## Repo Boundary
+
+This repo should primarily contain Roger product code, product tests, release
+machinery, and repo-specific policy/config.
+
+Keep in repo:
+
+- product code and fixtures
+- product validation and release scripts
+- canonical product and implementation-policy docs
+- minimal repo-specific config needed to point external tooling at Roger
+
+Keep out of repo when possible:
+
+- personal swarm launcher/control scripts
+- personal Agent Mail dashboards or watcher surfaces
+- machine-local observer/bootstrap tooling
+- ad hoc repro helpers that are only useful for the operator's own workflow
+
+If tooling is primarily part of your personal multi-agent operating system,
+prefer moving it to an external ops toolkit and leaving only a small repo-local
+config or wrapper here.
 
 ---
 

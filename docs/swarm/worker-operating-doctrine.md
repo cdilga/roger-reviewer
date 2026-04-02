@@ -52,6 +52,30 @@ contract that will be required to close it. Name the cheapest truthful layer:
 expected suite or command. Do not close a bead on smoke alone unless smoke is
 explicitly the correct layer for that bead.
 
+CI-sensitive closeout categories require remote evidence in closeout notes:
+
+1. labels include `ci` or `github-actions` (remote CI validation category)
+2. labels include `release` or `publish` (release/publication truth category)
+
+For those categories, closeout evidence must include:
+
+1. GitHub Actions run URL (`https://github.com/<owner>/<repo>/actions/runs/<id>`)
+2. run outcome (`success|failure|cancelled|skipped|timed_out|neutral|action_required`)
+
+Use the helper before closeout:
+
+```bash
+scripts/swarm/check_ci_closeout_evidence.sh --bead <id> --run-url <url> --outcome <outcome>
+```
+
+Local-only evidence is sufficient only for beads that are not in the
+CI-sensitive categories above. For local-only closeout on those beads, record a
+clear reason and run:
+
+```bash
+scripts/swarm/check_ci_closeout_evidence.sh --bead <id> --local-only-reason "<reason>"
+```
+
 When you pick work:
 
 1. Claim it with `br update <id> --status in_progress`.
@@ -62,6 +86,48 @@ When you pick work:
 6. Record the exact validation command or suite result in the bead close reason
    or notes. Do not imply broader coverage than what actually ran.
 7. If you change bead state or notes, run `br sync --flush-only`.
+
+## Remote CI failure ownership protocol
+
+When a GitHub Actions run fails during swarm execution, treat it as local
+backlog intake work, not ambient noise:
+
+1. first reporter wins ownership: the first worker who sees the failure claims
+   one local bead for it (existing bead if present, otherwise one new repair
+   bead) and posts an Agent Mail claim message
+2. claim message must include: run id, run URL, workflow path/name, ref or tag,
+   and the local bead id that owns remediation
+3. no duplicate repair beads: if an open/in-progress bead already references the
+   same run id + workflow identity, update that bead and reply in-thread instead
+   of creating another bead
+4. routing is explicit: send the claim/update to active workers via Agent Mail
+   topic `ci-failure` so everyone sees owner + current status
+5. if no owner claim exists within 15 minutes of first detection, any worker may
+   claim and announce; do not leave failing runs unowned
+
+## Fresh-Eyes Finding Intake Workflow (Testing-Only)
+
+Use this path for onboarding and first-use rehearsals (`README.md`,
+`docs/DEV_MACHINE_ONBOARDING.md`, and related devx probes).
+
+1. Raise a repair bead immediately when a finding is reproducible and affects:
+   - a documented onboarding step,
+   - command correctness, or
+   - queue/safety behavior.
+2. Before creating a new repair bead, dedupe against open/in-progress beads by
+   command/path + failure symptom. Reuse the existing bead when equivalent.
+3. Record one explicit test-follow-up decision for each raised finding:
+   - add a lower-layer test in the same repair bead when the failure is
+     deterministic and repo-local, or
+   - record a no-new-test decision (with reason + exact manual/int command) when
+     the failure is external/environment-dependent and not truthfully unit/int-testable.
+4. Post the finding claim/update in Agent Mail with topic `fresh-eyes` and
+   include the rehearsal source doc/step plus linked bead id.
+
+Minimum rehearsal evidence before closing a fresh-eyes workflow bead:
+
+1. at least one linked repair bead id from the rehearsal, and
+2. one linked test-follow-up decision (test added or explicit no-test decision).
 
 When `br ready` is empty but useful work still obviously exists, do not stop at "queue empty". Instead:
 

@@ -38,6 +38,7 @@ CARGO_TARGET_DIR=/tmp/br-target-v0134 cargo build --release --bin br
 
 - [docker_repro_v0134_fresh_init_corruption.sh](/Users/cdilga/Documents/dev/roger-reviewer/scripts/br-repros/docker_repro_v0134_fresh_init_corruption.sh)
 - [docker_repro_v0134_ready_mutates_state.sh](/Users/cdilga/Documents/dev/roger-reviewer/scripts/br-repros/docker_repro_v0134_ready_mutates_state.sh)
+- [docker_repro_v0134_foreign_key_parent_child_metadata.sh](/Users/cdilga/Documents/dev/roger-reviewer/scripts/br-repros/docker_repro_v0134_foreign_key_parent_child_metadata.sh)
 
 ## Verified bug 1: fresh `br init` creates an integrity-check-failing DB on stock `v0.1.34`
 
@@ -155,40 +156,46 @@ ready:
 after:
 ```
 
-## Candidate behaviors not yet validated cleanly enough to file
+## Verified bug 3: routine parent-child metadata maintenance can fail with `FOREIGN KEY constraint failed`
 
-### Foreign-key failures during routine maintenance
+Severity: high
 
-Status: reproduced in fresh temp workspaces on Roger's current local `br` path;
-not yet reconfirmed as an upstream-stock filing candidate in this document.
+Why this is a real bug:
 
-Repro now carried in repo:
+- it reproduces in a fresh temp workspace inside a fresh Docker container
+- it does not depend on Roger's long-lived workspace state
+- it fails during ordinary create, dependency-add, and metadata-update flows
 
-- [repro_foreign_key_parent_child_metadata.sh](/Users/cdilga/Documents/dev/roger-reviewer/scripts/br-repros/repro_foreign_key_parent_child_metadata.sh)
-- minimal command:
+Repro shape:
 
 ```bash
-ITERATIONS=40 READ_PATH_STRESS=0 scripts/br-repros/repro_foreign_key_parent_child_metadata.sh
+ITERATIONS=120 scripts/br-repros/docker_repro_v0134_foreign_key_parent_child_metadata.sh
 ```
 
-Observed on 2026-04-01 from this workspace:
+Observed behavior:
 
-- command failed during ordinary metadata update on the parent issue:
-  `br update <parent_id> --notes ...`
-- error:
-  `Database error: FOREIGN KEY constraint failed`
+- repeated create/update/parent-child operations succeed for a while
+- then a normal parent issue note update fails with:
+  `Error: Database error: FOREIGN KEY constraint failed`
 
-Containment path now available:
+Helper script:
 
-- `scripts/swarm/check_beads_trust.sh --mutation-probe --probe-iterations 200`
-- this probe fails fast when the mutation sequence hits the FK failure mode
+- [repro_foreign_key_parent_child_metadata.sh](/Users/cdilga/Documents/dev/roger-reviewer/scripts/br-repros/repro_foreign_key_parent_child_metadata.sh)
+- [docker_repro_v0134_foreign_key_parent_child_metadata.sh](/Users/cdilga/Documents/dev/roger-reviewer/scripts/br-repros/docker_repro_v0134_foreign_key_parent_child_metadata.sh)
 
-Conclusion:
+Docker-validated output on 2026-04-02:
 
-- this is now a real Roger-local reproducible bug class
-- keep upstream filing conservative until the same script is rerun against a
-  fresh upstream-stock build in an isolated environment and produces matching
-  failure evidence
+```text
+workspace=/tmp/tmp.pyY0hXYzbD
+progress=25
+progress=50
+progress=75
+progress=100
+FAILED_PARENT_NOTES:109
+Error: Database error: FOREIGN KEY constraint failed
+```
+
+## Candidate behaviors not yet validated cleanly enough to file
 
 ### `br doctor` lock-race false failure
 
@@ -209,5 +216,6 @@ Conclusion:
 
 1. Fresh-init corruption on stock `v0.1.34`
 2. `br ready` mutates DB state on the read path
+3. Parent-child metadata maintenance hits `FOREIGN KEY constraint failed`
 
-Those two are clean, isolated, reproducible, and supported by exact steps.
+Those three are clean, isolated, reproducible, and supported by exact steps.

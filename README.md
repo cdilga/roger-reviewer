@@ -146,6 +146,30 @@ Launch-only honesty in this slice:
 - no in-extension authoritative local status mirror
 - no in-extension approval/posting controls
 
+## Agent Mail Watch Over ngrok
+
+For a browser-readable, read-only Agent Mail view over ngrok, expose the local
+watcher instead of the raw Agent Mail MCP endpoint.
+
+Start the watcher:
+
+```bash
+AGENT_MAIL_WATCH_AGENTS=BlueCat scripts/run_agent_mail_watch.sh
+```
+
+It prints the local URL, the Basic Auth username (`watch`), the generated
+browser password, and the watcher port.
+
+Tunnel the watcher port, not Agent Mail's `8765` MCP port:
+
+```bash
+ngrok http 8781
+```
+
+The watcher proxies read-only inbox fetches to Agent Mail server-side, so your
+phone browser never needs the Agent Mail bearer token and never talks to the
+raw SSE/MCP endpoint directly.
+
 ## Safety Model (Non-Negotiable)
 
 - No automatic GitHub posting.

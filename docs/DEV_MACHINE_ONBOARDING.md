@@ -11,7 +11,7 @@ want a new laptop, server, or `ssh devbox` environment to be able to:
 - access the required prompts and planning artifacts
 - use Agent Mail from Codex without repo-local secret files
 
-Last validated: 2026-03-29.
+Last validated: 2026-04-02.
 
 ## Scope
 
@@ -205,19 +205,13 @@ Recommended local shape on the current machine:
 Keep Agent Mail outside this repo. It is a separate project used to support the
 development environment, not part of Roger Reviewer's source tree.
 
-The Agent Mail repo currently has a known Codex integration issue in
-`scripts/integrate_codex_cli.sh` on upstream `origin/main` as last checked on
-2026-03-29.
+`scripts/integrate_codex_cli.sh` previously had an upstream syntax-regression
+lane. On this machine, the same script passed `bash -n` on 2026-04-02.
 
-What was observed:
+Operational rule:
 
-- upstream issue `#124` was filed
-- an owner comment claimed a fix existed
-- current `origin/main` still failed `bash -n` at the time of validation
-- a local fix was applied and committed on the current machine
-
-If onboarding a fresh machine later, re-check upstream before assuming the
-local patch is still needed.
+- always re-run the syntax check on your machine rather than assuming current
+  upstream state from this document
 
 Minimal verification:
 
@@ -242,16 +236,16 @@ If this fails, do not trust the Codex integration script as-is.
 
 ## Beads CLI Pin for This Repo
 
-This repo intentionally pins `br` to `0.1.28` while upstream regression
-`Dicklesworthstone/beads_rust#213` remains unresolved.
+This repo currently resolves `br` to a local patched build while upstream
+regression `Dicklesworthstone/beads_rust#213` remains unresolved.
 
 Swarm automation resolves and repairs the default path through:
 
 - `/path/to/roger-reviewer/scripts/swarm/resolve_br.sh`
 
-Canonical expected path shape on a healthy machine:
+Canonical expected path shape on this machine as of 2026-04-02:
 
-- `~/.local/bin/br -> ~/.local/bin/br-0.1.28.pinned`
+- `~/.local/bin/br -> ~/.local/bin/br-0.1.34.pinned`
 
 Minimal verification:
 
@@ -261,8 +255,35 @@ br --version
 readlink ~/.local/bin/br
 ```
 
-Do not run backup binary filenames directly (for example
-`br-0.1.28.queuebug.bak`) in automation or runbooks.
+Do not run backup binary filenames directly in automation or runbooks.
+
+## Rehearsal Transcript Summary (2026-04-02)
+
+Manual smoke commands run from this repo:
+
+- `codex --version` -> `codex-cli 0.118.0`
+- `test -f ~/.codex/auth.json` -> pass
+- `test -f ~/.codex/skills/planning-workflow/SKILL.md` -> pass
+- `codex mcp list` and `codex mcp get mcp-agent-mail` -> pass (`enabled`)
+- `codex -C /Users/cdilga/Documents/dev/roger-reviewer mcp list` -> pass
+- `codex exec --ephemeral ...` Agent Mail tool probe -> pass
+- `bash -n /Users/cdilga/Documents/dev/mcp_agent_mail/scripts/integrate_codex_cli.sh` -> pass
+- `scripts/swarm/resolve_br.sh --print-path` -> `/Users/cdilga/.local/bin/br`
+- `readlink ~/.local/bin/br` -> `/Users/cdilga/.local/bin/br-0.1.34.pinned`
+- `br --version` -> `br 0.1.34`
+
+Fixes applied from this rehearsal:
+
+- updated stale `br` pin guidance from `0.1.28` to current `0.1.34.pinned`
+- updated stale Agent Mail integration-script status text
+
+Fresh-eyes intake evidence from this rehearsal:
+
+- linked repair bead: `rr-1f4.5` (default `br` claim-mutation FK mismatch)
+- linked test-follow-up decision: `no-test` for a new lower-layer unit/integration
+  suite in this bead, because the failure is a binary-selection/runtime-path issue;
+  validation stays at int/manual-smoke using the explicit 3-step repro command set
+  recorded in `rr-1f4.5` acceptance/validation contract.
 
 ## Quick Checklist
 

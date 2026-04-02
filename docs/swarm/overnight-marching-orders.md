@@ -14,7 +14,11 @@ Implementation is active. Work from live queue truth (`br ready`), not launcher 
 6. Announce claim + reserved files in Agent Mail.
 7. Implement exactly to acceptance criteria (no extra scope).
 8. Run the required validation layer and record exact command/suite in bead close reason or notes.
-9. Close bead and run `br sync --flush-only` after bead state/note changes.
+9. For CI-sensitive beads (labels `ci`/`github-actions`/`release`/`publish`), record remote run evidence before close:
+   - `scripts/swarm/check_ci_closeout_evidence.sh --bead <id> --run-url <url> --outcome <outcome>`
+   For non-CI-sensitive beads, local-only evidence is allowed with:
+   - `scripts/swarm/check_ci_closeout_evidence.sh --bead <id> --local-only-reason "<reason>"`
+10. Close bead and run `br sync --flush-only` after bead state/note changes.
 
 If `br` reports `database is busy`, back off and retry.
 If normal `br` queue commands still fail after a few retries, use the direct fallback path for queue truth and claiming:
