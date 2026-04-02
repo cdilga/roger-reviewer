@@ -20,7 +20,7 @@ usage() {
   cat <<EOF_USAGE
 Usage: $(basename "$0") [options]
 
-Fail-loud swarm preflight for pinned br path, queue health, and launch readiness.
+Fail-loud swarm preflight for the vetted br path, queue health, and launch readiness.
 
 Options:
   --session NAME           Tmux session name to validate for launch
@@ -72,16 +72,24 @@ transient_fail() {
   exit 75
 }
 
+is_transient_lock_output() {
+  local output="${1:-}"
+  [[ "$output" == *"database is busy"* ]] || \
+    [[ "$output" == *"database is locked"* ]] || \
+    [[ "$output" == *"SQLITE_BUSY"* ]] || \
+    [[ "$output" == *"resource temporarily unavailable"* ]]
+}
+
 run_br_doctor_with_retry() {
   local attempts=0
   local output
 
   while true; do
-    if output=$(cd "$PROJECT_ROOT" && "$BR_BIN" doctor 2>&1); then
+    if output=$(cd "$PROJECT_ROOT" && "$BR_BIN" doctor --no-auto-import --no-auto-flush 2>&1); then
       printf '%s\n' "$output"
       return 0
     fi
-    if [[ "$output" == *"database is busy"* ]]; then
+    if is_transient_lock_output "$output"; then
       if (( attempts < RETRY_COUNT )); then
         attempts=$((attempts + 1))
         sleep "$RETRY_DELAY_SECONDS"
@@ -100,11 +108,11 @@ run_br_json_with_retry() {
   local output
 
   while true; do
-    if output=$(cd "$PROJECT_ROOT" && RUST_LOG=error "$BR_BIN" "$@" --json 2>&1); then
+    if output=$(cd "$PROJECT_ROOT" && RUST_LOG=error "$BR_BIN" "$@" --json --no-auto-import --no-auto-flush 2>&1); then
       printf '%s\n' "$output"
       return 0
     fi
-    if [[ "$output" == *"database is busy"* ]]; then
+    if is_transient_lock_output "$output"; then
       if (( attempts < RETRY_COUNT )); then
         attempts=$((attempts + 1))
         sleep "$RETRY_DELAY_SECONDS"
@@ -187,7 +195,7 @@ if [[ ! -x "$BR_RESOLVER" ]]; then
   operator_fail "missing required script: $BR_RESOLVER"
 fi
 if ! BR_BIN="$($BR_RESOLVER --quiet --print-path)"; then
-  operator_fail "unable to resolve pinned br path"
+  operator_fail "unable to resolve vetted br path"
 fi
 
 if ! curl -fsS http://127.0.0.1:8765/health/readiness >/dev/null; then
@@ -201,12 +209,23 @@ fi
 if ! doctor_output="$(run_br_doctor_with_retry)"; then
   status=$?
   if [[ "$status" -eq 75 ]]; then
-    transient_fail "br doctor hit database busy after retries" "$LAST_BR_ERROR_OUTPUT"
+    transient_fail "br doctor hit transient sqlite lock after retries" "$LAST_BR_ERROR_OUTPUT"
   fi
   operator_fail "br doctor failed" "$LAST_BR_ERROR_OUTPUT"
 fi
-if grep -q '^ERROR ' <<<"$doctor_output"; then
-  operator_fail "br doctor reported workspace health errors" "$doctor_output"
+doctor_errors="$(grep '^ERROR ' <<<"$doctor_output" || true)"
+if [[ -n "$doctor_errors" ]]; then
+  fatal_doctor_errors="$(grep -Ev '^ERROR db\.recoverable_anomalies: blocked_issues_cache is marked stale and needs rebuild$' <<<"$doctor_errors" || true)"
+  if [[ -n "$fatal_doctor_errors" ]]; then
+    operator_fail "br doctor reported workspace health errors" "$doctor_output"
+  fi
+  echo "WARN: br doctor reported stale blocked cache metadata; treating as recoverable advisory for launch preflight."
+fi
+if grep -q '^WARN db.recovery_artifacts:' <<<"$doctor_output"; then
+  echo "WARN: br doctor reported preserved recovery artifacts; advisory only."
+fi
+if grep -q '^WARN db.sidecars:' <<<"$doctor_output"; then
+  echo "WARN: br doctor reported sqlite sidecar warnings; advisory only unless accompanied by fatal ERROR lines."
 fi
 
 if ! ready_json="$(run_br_json_with_retry ready)"; then
@@ -241,8 +260,8 @@ fi
 echo "=== Swarm preflight ==="
 echo "Project root: $PROJECT_ROOT"
 echo "Session: $SESSION_NAME"
-echo "Pinned br path: $BR_BIN"
-echo "Pinned br version: $($BR_BIN --version)"
+echo "Resolved br path: $BR_BIN"
+echo "Resolved br version: $($BR_BIN --version)"
 echo "Open issues: $open_count"
 echo "Ready issues: $ready_count"
 echo "Planned workers: $planned_workers"

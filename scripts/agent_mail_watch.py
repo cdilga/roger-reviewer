@@ -77,6 +77,16 @@ def coerce_structured_result(payload: dict[str, Any]) -> Any:
     return result
 
 
+def normalize_inbox_payload(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, dict) and isinstance(payload.get("result"), list):
+        return {"messages": payload["result"]}
+    if isinstance(payload, list):
+        return {"messages": payload}
+    if isinstance(payload, str):
+        return {"error": payload, "messages": []}
+    return {"messages": [], "raw": payload}
+
+
 @dataclass
 class AppConfig:
     agent_mail_api: str
@@ -336,6 +346,9 @@ def render_html() -> str:
       }
       gridEl.innerHTML = state.agents.map((agent) => {
         const messages = Array.isArray(agent.messages) ? agent.messages : [];
+        const errorBlock = agent.error
+          ? `<pre>${escapeHtml(agent.error)}</pre>`
+          : "";
         const messageHtml = messages.length === 0
           ? `<p class="muted">No messages returned.</p>`
           : messages.map((message) => `
@@ -354,6 +367,7 @@ def render_html() -> str:
           <section class="panel">
             <h2>${escapeHtml(agent.agent_name)}</h2>
             <p class="muted">Unread snapshot of the agent inbox.</p>
+            ${errorBlock}
             ${messageHtml}
           </section>
         `;
@@ -468,7 +482,8 @@ class WatchHandler(BaseHTTPRequestHandler):
         try:
             state["health"] = self.client.health()
             for agent_name in agents:
-                inbox = self.client.call_tool(
+                inbox = normalize_inbox_payload(
+                    self.client.call_tool(
                     "fetch_inbox",
                     {
                         "project_key": project_key,
@@ -477,7 +492,8 @@ class WatchHandler(BaseHTTPRequestHandler):
                         "include_bodies": True,
                     },
                 )
-                state["agents"].append({"agent_name": agent_name, "messages": inbox})
+                )
+                state["agents"].append({"agent_name": agent_name, **inbox})
         except urllib.error.HTTPError as exc:
             try:
                 details = json.loads(exc.read().decode("utf-8"))

@@ -13,6 +13,8 @@ ASSIGN_SESSION=""
 CONTROLLER_SESSION=""
 FT_SESSION=""
 HEALTH_SESSION=""
+FT_STARTED=0
+FT_REASON=""
 
 usage() {
   cat <<EOF
@@ -102,11 +104,18 @@ fi
 tmux new-session -d -s "$HEALTH_SESSION" /bin/bash -lc \
   "cd \"$PROJECT_ROOT\" && while true; do \"$UPSTREAM_NTM\" health \"$SESSION_NAME\" --auto-restart-stuck --threshold 8m >/dev/null 2>&1 || true; sleep 30; done"
 
-if (( START_FT == 1 )) && command -v ft >/dev/null 2>&1; then
-  if tmux has-session -t "$FT_SESSION" 2>/dev/null; then
-    tmux kill-session -t "$FT_SESSION"
+if (( START_FT == 1 )); then
+  if ! command -v ft >/dev/null 2>&1; then
+    FT_REASON="ft not found on PATH"
+  elif ! ft doctor --json >/dev/null 2>&1; then
+    FT_REASON="ft doctor failed (run 'ft doctor' for details)"
+  else
+    if tmux has-session -t "$FT_SESSION" 2>/dev/null; then
+      tmux kill-session -t "$FT_SESSION"
+    fi
+    tmux new-session -d -s "$FT_SESSION" /bin/bash -lc "cd \"$PROJECT_ROOT\" && exec ft watch --foreground"
+    FT_STARTED=1
   fi
-  tmux new-session -d -s "$FT_SESSION" /bin/bash -lc "cd \"$PROJECT_ROOT\" && exec ft watch --foreground"
 fi
 
 echo "Started control plane for $SESSION_NAME"
@@ -116,6 +125,11 @@ if [[ "$MODE" == "assign" ]]; then
 fi
 echo "  controller: $CONTROLLER_SESSION"
 echo "  health: $HEALTH_SESSION"
-if (( START_FT == 1 )) && command -v ft >/dev/null 2>&1; then
+if (( START_FT == 0 )); then
+  echo "  frankenterm: disabled (--no-ft)"
+elif (( FT_STARTED == 1 )); then
   echo "  frankenterm: $FT_SESSION"
+else
+  echo "  frankenterm: unavailable (${FT_REASON})"
+  echo "  frankenterm install: $PROJECT_ROOT/scripts/swarm/install_frankenterm.sh"
 fi

@@ -85,8 +85,8 @@ state_file() {
 count_ready() {
   (
     cd "$PROJECT_ROOT"
-    "$BR_BIN" ready 2>/dev/null || true
-  ) | awk '/^[○●] / { count += 1 } END { print count + 0 }'
+    "$BR_BIN" ready --json 2>/dev/null || printf '[]\n'
+  ) | jq 'if type == "array" then length else 0 end' 2>/dev/null || echo 0
 }
 
 count_status() {
@@ -113,7 +113,7 @@ Immediately:
 1. check Agent Mail and acknowledge anything pending
 2. rerun `br ready`
 3. if a ready bead exists, inspect it with `br show`, claim it, reserve files, and continue working
-4. if `br` says `database is busy`, back off and retry before concluding queue state
+4. if `br` says `database is busy`, back off and retry before concluding queue state; if retries still fail, use `br ready --no-daemon`, `br show <id> --no-daemon`, and `br update <id> --status in_progress --no-daemon`
 5. if `br ready` is still empty but useful open work remains, inspect `bv --robot-triage`, `br list --status open`, and the most adjacent blocked frontier; only create or split the next safe bead if the slice is obvious and you can attach a truthful validation contract
 
 Do not ask the human for routine permission. Either claim real work, widen the graph safely, or post an explicit exhausted-queue report in Agent Mail and hold.

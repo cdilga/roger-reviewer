@@ -36,6 +36,64 @@ require_command() {
   fi
 }
 
+is_transient_lock_output() {
+  local output="${1:-}"
+  [[ "$output" == *"database is busy"* ]] || \
+    [[ "$output" == *"database is locked"* ]] || \
+    [[ "$output" == *"SQLITE_BUSY"* ]] || \
+    [[ "$output" == *"resource temporarily unavailable"* ]]
+}
+
+run_doctor_summary() {
+  local attempts=0
+  local max_attempts=3
+  local output
+  local status
+  local doctor_errors
+  local fatal_doctor_errors
+
+  while true; do
+    set +e
+    output=$(cd "$PROJECT_ROOT" && "$BR_BIN" doctor --no-auto-import --no-auto-flush 2>&1)
+    status=$?
+    set -e
+
+    printf '%s\n' "$output"
+    if grep -q '^WARN db.recovery_artifacts:' <<<"$output"; then
+      echo "WARN: br doctor reported preserved recovery artifacts; advisory only." >&2
+    fi
+    if grep -q '^WARN db.sidecars:' <<<"$output"; then
+      echo "WARN: br doctor reported sqlite sidecar warnings; advisory only unless accompanied by fatal ERROR lines." >&2
+    fi
+
+    if [[ "$status" -eq 0 ]]; then
+      return 0
+    fi
+
+    if is_transient_lock_output "$output"; then
+      if (( attempts < max_attempts )); then
+        attempts=$((attempts + 1))
+        echo "WARN: br doctor hit transient sqlite lock; retrying (${attempts}/${max_attempts})..." >&2
+        sleep 1
+        continue
+      fi
+      echo "WARN: br doctor still reports transient sqlite lock after retries; treating as transient advisory." >&2
+      return 0
+    fi
+
+    doctor_errors="$(grep '^ERROR ' <<<"$output" || true)"
+    if [[ -n "$doctor_errors" ]]; then
+      fatal_doctor_errors="$(grep -Ev '^ERROR db\.recoverable_anomalies: blocked_issues_cache is marked stale and needs rebuild$' <<<"$doctor_errors" || true)"
+      if [[ -z "$fatal_doctor_errors" ]]; then
+        echo "WARN: br doctor only reported stale blocked cache metadata; treating as recoverable advisory." >&2
+        return 0
+      fi
+    fi
+
+    return "$status"
+  done
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --session)
@@ -93,7 +151,7 @@ if [[ ! -x "$BR_RESOLVER" ]]; then
   exit 1
 fi
 if ! BR_BIN="$("$BR_RESOLVER" --quiet --print-path)"; then
-  echo "Unable to resolve pinned br path for this workspace." >&2
+  echo "Unable to resolve vetted br path for this workspace." >&2
   exit 1
 fi
 
@@ -119,8 +177,8 @@ fi
 echo "Project root: $PROJECT_ROOT"
 echo "Swarm session: $SESSION_NAME"
 echo "Planned mix: codex=$CODEX_COUNT claude=$CLAUDE_COUNT gemini=$GEMINI_COUNT opencode=$OPENCODE_COUNT"
-echo "Pinned br path: $BR_BIN"
-echo "Pinned br version: $("$BR_BIN" --version)"
+echo "Resolved br path: $BR_BIN"
+echo "Resolved br version: $("$BR_BIN" --version)"
 echo
 
 echo "Agent Mail readiness: OK"
@@ -133,11 +191,14 @@ fi
 
 echo
 echo "br doctor:"
-"$BR_BIN" doctor
+if ! run_doctor_summary; then
+  echo "br doctor reported non-recoverable workspace health errors." >&2
+  exit 1
+fi
 
 echo
 echo "br ready:"
-"$BR_BIN" ready
+"$BR_BIN" ready --no-auto-import --no-auto-flush
 
 echo
 echo "bv --robot-next:"

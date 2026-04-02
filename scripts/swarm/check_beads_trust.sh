@@ -7,11 +7,14 @@ DEFAULT_BEADS_DIR="${PROJECT_ROOT}/.beads"
 DEFAULT_DB_PATH="${DEFAULT_BEADS_DIR}/beads.db"
 DEFAULT_JSONL_PATH="${DEFAULT_BEADS_DIR}/issues.jsonl"
 BR_RESOLVER="${SCRIPT_DIR}/resolve_br.sh"
+FK_REPRO_SCRIPT="${PROJECT_ROOT}/scripts/br-repros/repro_foreign_key_parent_child_metadata.sh"
 
 BEADS_DIR="${DEFAULT_BEADS_DIR}"
 DB_PATH="${DEFAULT_DB_PATH}"
 JSONL_PATH="${DEFAULT_JSONL_PATH}"
 RUN_BR_DOCTOR=1
+RUN_MUTATION_PROBE=0
+MUTATION_PROBE_ITERATIONS=200
 BR_BIN=""
 
 cleanup() {
@@ -21,7 +24,7 @@ trap cleanup EXIT
 
 usage() {
   cat <<'EOF'
-Usage: check_beads_trust.sh [--beads-dir <path>] [--db <path>] [--jsonl <path>] [--skip-br-doctor]
+Usage: check_beads_trust.sh [--beads-dir <path>] [--db <path>] [--jsonl <path>] [--skip-br-doctor] [--mutation-probe] [--probe-iterations <n>]
 
 Run a direct workspace-trust check for the Roger beads workspace without
 depending on br's higher-level queue interpretation.
@@ -31,6 +34,7 @@ Checks:
 - DB issue count vs JSONL line count
 - exact ID/status parity between DB and JSONL
 - optional br doctor summary if br is resolvable
+- optional parent-child metadata mutation probe for FK failures
 
 Exit codes:
 - 0: trust checks passed
@@ -82,6 +86,19 @@ while [[ $# -gt 0 ]]; do
     --skip-br-doctor)
       RUN_BR_DOCTOR=0
       shift
+      ;;
+    --mutation-probe)
+      RUN_MUTATION_PROBE=1
+      shift
+      ;;
+    --probe-iterations)
+      if [[ $# -lt 2 ]]; then
+        echo "TRUST_STATUS=fail"
+        echo "TRUST_REASON=missing value for --probe-iterations"
+        exit 2
+      fi
+      MUTATION_PROBE_ITERATIONS="$2"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -162,6 +179,37 @@ if [[ "$RUN_BR_DOCTOR" -eq 1 && -x "$BR_RESOLVER" ]] && BR_BIN="$($BR_RESOLVER -
   fi
 fi
 
+mutation_probe_status="skipped"
+mutation_probe_summary=""
+mutation_probe_output=""
+if [[ "$RUN_MUTATION_PROBE" -eq 1 ]]; then
+  if [[ ! -x "$FK_REPRO_SCRIPT" ]]; then
+    echo "TRUST_STATUS=fail"
+    echo "TRUST_REASON=missing executable mutation probe script: $FK_REPRO_SCRIPT"
+    exit 2
+  fi
+  if ! [[ "$MUTATION_PROBE_ITERATIONS" =~ ^[0-9]+$ ]] || [[ "$MUTATION_PROBE_ITERATIONS" -lt 1 ]]; then
+    echo "TRUST_STATUS=fail"
+    echo "TRUST_REASON=--probe-iterations must be a positive integer"
+    exit 2
+  fi
+
+  probe_br_bin=""
+  if [[ -x "$BR_RESOLVER" ]] && probe_br_bin="$($BR_RESOLVER --quiet --print-path 2>/dev/null)"; then
+    :
+  else
+    probe_br_bin="${BR_BIN:-br}"
+  fi
+
+  if mutation_probe_output=$(BR_BIN="$probe_br_bin" ITERATIONS="$MUTATION_PROBE_ITERATIONS" "$FK_REPRO_SCRIPT" 2>&1); then
+    mutation_probe_status="ok"
+    mutation_probe_summary=$(printf '%s\n' "$mutation_probe_output" | tail -n 1)
+  else
+    mutation_probe_status="failed"
+    mutation_probe_summary=$(printf '%s\n' "$mutation_probe_output" | tail -n 1)
+  fi
+fi
+
 echo "DB_PATH=$DB_PATH"
 echo "JSONL_PATH=$JSONL_PATH"
 echo "DB_TOTAL=$db_total"
@@ -173,6 +221,22 @@ echo "JSONL_CLOSED=$jsonl_closed"
 echo "BR_DOCTOR_STATUS=$doctor_status"
 if [[ -n "$doctor_summary" ]]; then
   echo "BR_DOCTOR_SUMMARY=$doctor_summary"
+fi
+echo "MUTATION_PROBE_STATUS=$mutation_probe_status"
+if [[ "$RUN_MUTATION_PROBE" -eq 1 ]]; then
+  echo "MUTATION_PROBE_ITERATIONS=$MUTATION_PROBE_ITERATIONS"
+fi
+if [[ -n "$mutation_probe_summary" ]]; then
+  echo "MUTATION_PROBE_SUMMARY=$mutation_probe_summary"
+fi
+
+if [[ "$mutation_probe_status" == "failed" ]]; then
+  echo "TRUST_STATUS=fail"
+  echo "TRUST_REASON=parent-child metadata mutation probe failed"
+  echo "MUTATION_PROBE_OUTPUT_START"
+  echo "$mutation_probe_output"
+  echo "MUTATION_PROBE_OUTPUT_END"
+  exit 1
 fi
 
 if [[ "$db_total" != "$jsonl_total" || "$db_open" != "$jsonl_open" || "$db_closed" != "$jsonl_closed" ]]; then

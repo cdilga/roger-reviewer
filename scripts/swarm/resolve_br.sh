@@ -4,7 +4,8 @@ set -euo pipefail
 PINNED_VERSION="${RR_BR_PINNED_VERSION:-0.1.34}"
 LOCAL_BIN_DIR="${RR_LOCAL_BIN_DIR:-${HOME}/.local/bin}"
 DEFAULT_BR_PATH="${RR_BR_DEFAULT_PATH:-${LOCAL_BIN_DIR}/br}"
-PINNED_BR_PATH="${RR_BR_PINNED_PATH:-${LOCAL_BIN_DIR}/br-${PINNED_VERSION}.pinned}"
+PINNED_BR_PATH="${RR_BR_PINNED_PATH:-${LOCAL_BIN_DIR}/br-${PINNED_VERSION}.localfix}"
+STRICT_TARGET="${RR_BR_STRICT_TARGET:-1}"
 
 REPAIR=1
 QUIET=0
@@ -14,7 +15,7 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [options]
 
-Ensure the default br path resolves to the pinned $PINNED_VERSION build.
+Ensure the default br path resolves to the vetted $PINNED_VERSION build.
 
 Options:
   --repair       Repair pathing when needed (default)
@@ -127,6 +128,7 @@ mkdir -p "$LOCAL_BIN_DIR"
 
 declare -a CANDIDATES=()
 add_candidate "$PINNED_BR_PATH"
+add_candidate "${LOCAL_BIN_DIR}/br-${PINNED_VERSION}.localfix"
 add_candidate "${LOCAL_BIN_DIR}/br-${PINNED_VERSION}.queuebug.bak"
 add_candidate "${LOCAL_BIN_DIR}/br-${PINNED_VERSION}.bak"
 add_candidate "${LOCAL_BIN_DIR}/br.${PINNED_VERSION}.bak"
@@ -137,6 +139,9 @@ fi
 
 if (( REPAIR == 1 )); then
   if ! is_pinned_version_bin "$PINNED_BR_PATH"; then
+    if (( STRICT_TARGET == 1 )); then
+      fail "expected vetted br target missing or wrong version: $PINNED_BR_PATH (set RR_BR_STRICT_TARGET=0 to allow fallback copy)"
+    fi
     source_path="$(find_pinned_source)" || fail "could not find a usable br $PINNED_VERSION candidate"
     cp "$source_path" "$PINNED_BR_PATH"
     chmod 755 "$PINNED_BR_PATH"

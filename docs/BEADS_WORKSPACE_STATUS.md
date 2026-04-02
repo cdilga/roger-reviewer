@@ -1,14 +1,20 @@
 # Beads Workspace Status
 
-As of 2026-03-31, the Roger Reviewer beads workspace is healthy again after a
-local `br` remediation pass, and the implementation gate is open.
+As of 2026-04-01, the Roger Reviewer beads workspace is healthy after a second
+`br` path correction: queue-critical claim mutations now run through a known
+good pinned runtime while upstream/localfix regressions remain documented.
 
 ## Current state
 
 - default automation path now resolves through
-  `/Users/cdilga/.local/bin/br -> /Users/cdilga/.local/bin/br-0.1.34.localfix`
-- `br-0.1.34.localfix` is a local patched build, not the stock upstream
-  `0.1.34` release
+  `/Users/cdilga/.local/bin/br -> /Users/cdilga/.local/bin/br-0.1.28.pinned`
+- this rollback was applied on 2026-04-01 because `br-0.1.34.localfix`
+  introduced claim-mutation FK failures on ready-bead updates in the active
+  Roger workspace
+- stock/pinned `0.1.34` remains repro-bad for fresh-init integrity checks
+  (`Page ...: never used`)
+- `br-0.1.28.pinned` currently satisfies both trust predicates used by Roger:
+  fresh-init integrity and routine mutation-path updates
 - [`.beads/beads.db`](/Users/cdilga/Documents/dev/roger-reviewer/.beads/beads.db)
   passes SQLite integrity checks
 - [`.beads/issues.jsonl`](/Users/cdilga/Documents/dev/roger-reviewer/.beads/issues.jsonl)
@@ -55,6 +61,11 @@ local `br` remediation pass, and the implementation gate is open.
 - `br doctor`
 - `readlink /Users/cdilga/.local/bin/br` ->
   `/Users/cdilga/.local/bin/br-0.1.34.localfix`
+- temp repro with `/Users/cdilga/.local/bin/br-0.1.34.bak` (stock `0.1.34`)
+  on `init -> create -> create -> sqlite3 integrity_check`
+  -> `Page 17: never used; Page 57: never used; Page 58: never used; Page 60: never used`
+- temp repro with `/Users/cdilga/.local/bin/br-0.1.34.pinned` on the same
+  steps -> `Page 17: never used; Page 57: never used; Page 58: never used; Page 60: never used`
 - temp repro with `br 0.1.34`:
   `git init && br init && br create ... && sqlite3 .beads/beads.db "PRAGMA integrity_check;"`
   -> `Page 17: never used`

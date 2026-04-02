@@ -247,7 +247,19 @@ This is not the stock upstream `0.1.34` release. Local investigation on
 2026-03-31 showed the upstream regression still reproduced on both the
 published `0.1.34` build and upstream `main`, but a narrow local source patch
 to the fresh-schema migration path restored clean `init`, `create`, `doctor`,
-and `info` behavior for Roger's workload. Upstream regression report:
+and `info` behavior for Roger's workload.
+
+Important 2026-04-01 follow-up:
+
+- `rr-xr6.5`-specific claim mutation still exhibited FK failures on
+  `br-0.1.34.localfix` and was tracked/contained in `rr-1ab.7`.
+- a temporary rollback experiment to `br-0.1.28.pinned` was rejected for this
+  workspace: repeated live status mutations caused queue-truth divergence and
+  SQLite integrity corruption that required checkpoint/VACUUM repair.
+- therefore, keep `br-0.1.34.localfix` as the canonical default for this repo
+  unless a newly validated replacement is explicitly announced.
+
+Upstream fresh-init regression report remains:
 `Dicklesworthstone/beads_rust#213`.
 
 If `br doctor` reports malformed-page warnings again, repair with:
@@ -612,8 +624,8 @@ every provider is equally supported.
 | Provider | Roger role | `0.1.0` drop-in support | `0.1.0` deeper integration | Notes |
 |----------|------------|-------------------------|----------------------------|-------|
 | OpenCode | Primary review harness | Yes | Yes | Must preserve real direct-resume fallback |
-| Gemini harness | Secondary review harness | Yes | Bounded | Supported in `0.1.0`, but without making Roger depend on Gemini-specific internals |
-| Codex | Future review harness | No | No | Plan the adapter boundary so support can be added later |
+| Codex | Secondary bounded review harness | Yes | Bounded | Exposed via `rr review --provider codex`; Tier A only today (no locator reopen or `rr return`) |
+| Gemini harness | Adapter-contract lane (not current CLI launch surface) | No | Bounded adapter only | Keep Tier A adapter acceptance truthful; do not claim live `rr review --provider gemini` support until it is actually exposed |
 | Claude | Future review harness | No | No | Same as Codex |
 | Pi-Agent | Future review harness | No | No | Keep room in the adapter contract only |
 | GitHub CLI (`gh`) | GitHub adapter, not review harness | N/A | N/A | Write/read adapter for GitHub flows, not a drop-in review engine |
@@ -622,8 +634,8 @@ Rules:
 
 - `0.1.0` should feel excellent on the OpenCode path before Roger widens the
   provider matrix.
-- Gemini support must be truthful, bounded, and useful rather than parity
-  theater.
+- Codex and Gemini claims must stay truthful and bounded; only Codex is
+  currently exposed in the live `rr review --provider ...` surface.
 - Roger may commit to an eventual broader provider/browser/OS support track, but
   current beta claims must still stay honest about which paths are presently
   blessed, acceptance-tested, or partial.
@@ -643,7 +655,9 @@ Capability-tier rule:
 `0.1.0` intent:
 
 - OpenCode should reach Tier B and may expose selected Tier C affordances
-- Gemini only needs Tier A in `0.1.0`
+- Codex currently exposes a bounded Tier A path in the live CLI
+- Gemini Tier A remains adapter-contract coverage until `rr` provider launch
+  support is actually exposed
 - no provider is allowed to claim deeper support than its capability tier earns
 
 Harness-native Roger commands are optional in `0.1.0`. If implemented, prefer

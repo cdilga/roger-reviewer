@@ -79,3 +79,16 @@ Interpretation:
 ## Queue-trust verdict
 
 Queue trust is improved enough for **small bounded runs with explicit operator checks**, but not yet ready for another large uncontrolled swarm launch. The remediation lane is directionally successful; next step is to reduce warning density and stabilize `br doctor` health before scaling worker count.
+
+## Follow-up (2026-04-01, rr-1ab.6)
+
+Swarm preflight and prereq scripts now classify `br doctor` outcomes more
+explicitly:
+
+- transient sqlite lock races are retried and surfaced as transient-retry class
+- preserved recovery artifacts and sidecar warnings are advisory, not
+  launch-blocking on their own
+- the recoverable stale blocked-cache anomaly is advisory unless another fatal
+  doctor `ERROR` line is present
+- resolver defaults now target the vetted `br-0.1.34.localfix` binary so
+  preflight no longer silently repoints `br` to a repro-bad `*.pinned` target

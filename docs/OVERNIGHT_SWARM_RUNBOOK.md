@@ -12,7 +12,8 @@ This repo now has a native-upstream NTM swarm launcher so you can run a Jeffrey-
 - `ntm` now points directly at the upstream binary.
 - The repo-local scripts under `scripts/swarm/` are thin Roger-specific launch/control helpers layered on top of upstream NTM.
 - The canonical native session name for this repo is `roger-reviewer`. Use `roger-reviewer--<label>` if you need a second swarm on the same repo.
-- Frankenterm / `ft` is optional. If it is installed later, the control-plane helper can start it; otherwise the swarm still runs through tmux + upstream NTM.
+- Frankenterm / `ft` is part of the default observer path. Install it with `./scripts/swarm/install_frankenterm.sh` before swarm launch unless you are explicitly choosing degraded mode (`--no-ft`).
+- WezTerm visibility limit is real: `ft` can only observe panes visible through WezTerm CLI; tmux-internal panes not surfaced to WezTerm are out-of-scope for `ft` and remain observable via tmux/NTM logs only.
 - The helper now defaults to `assign` mode, which starts a persistent `ntm assign --watch --auto` lane plus a controller nudge lane so idle panes keep moving without manual typing.
 
 ## Important Roger-Specific State
@@ -24,6 +25,8 @@ Roger Reviewer has passed readiness and is now in active implementation. Workers
   [docs/swarm/worker-operating-doctrine.md](/Users/cdilga/Documents/dev/roger-reviewer/docs/swarm/worker-operating-doctrine.md)
 - Latest bounded queue-trust rehearsal record:
   [docs/SWARM_QUEUE_TRUST_REHEARSAL_20260331.md](/Users/cdilga/Documents/dev/roger-reviewer/docs/SWARM_QUEUE_TRUST_REHEARSAL_20260331.md)
+- For operator read checks under contention, prefer read-safe `br` flags:
+  `--no-auto-import --no-auto-flush`.
 
 ## Commands
 
@@ -31,6 +34,12 @@ Validate the machine and repo first:
 
 ```bash
 ./scripts/swarm/preflight_swarm.sh --codex 6 --claude 0 --gemini 0 --opencode 0
+```
+
+Install Frankenterm (`ft`) for the default observer path:
+
+```bash
+./scripts/swarm/install_frankenterm.sh
 ```
 
 For a deeper diagnostic dump (after preflight passes), run:
@@ -101,7 +110,7 @@ ntm view roger-reviewer
 - `roger-reviewer-control-plane`: upstream `ntm assign --watch --auto` lane
 - `roger-reviewer-controller`: controller nudge lane (runs `scripts/swarm/supervise_swarm.sh`)
 - `roger-reviewer-health`: stuck-agent auto-restart lane
-- `roger-reviewer-ft`: optional Frankenterm watcher if `ft` is installed later
+- `roger-reviewer-ft`: Frankenterm watcher (`ft watch --foreground`) when observer mode is enabled
 - one pane per agent, titled by upstream NTM like `roger-reviewer__cod_1`
 
 ## Recommended Tonight Flow
@@ -118,7 +127,7 @@ ntm view roger-reviewer
 Check current in-progress work:
 
 ```bash
-br list --status in_progress
+br list --status in_progress --no-auto-import --no-auto-flush
 ```
 
 See what `bv` thinks is highest leverage:

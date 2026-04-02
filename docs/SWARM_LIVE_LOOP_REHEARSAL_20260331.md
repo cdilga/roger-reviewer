@@ -41,6 +41,23 @@ Bounded live rehearsal for `rr-eus.5` on the active swarm session `roger-reviewe
   This indicates completion-state reconciliation drift when beads are already closed or re-triaged outside the assignment lane.
 - `roger-reviewer-ft` was not present because `ft`/Frankenterm is not installed on this machine (`command -v ft` fails). This is tracked separately by the Frankenterm wiring/install beads.
 
+## Follow-up: rr-eus.1 Frankenterm Wiring Validation (2026-04-01)
+
+Resolved the Frankenterm install/wiring gap with local validation in this repo workspace:
+
+1. `./scripts/swarm/install_frankenterm.sh`
+2. `ft doctor --json`
+3. `ft status --format json`
+4. `ft watch --foreground` (bounded run, then SIGINT shutdown)
+
+Observed outcomes:
+
+- `ft doctor --json` exited `0` and reported workspace + WezTerm connection checks as healthy (with an expected warning if `scrollback_lines` is unset).
+- `ft status --format json` exited `0` and returned active pane data from the current WezTerm workspace.
+- `ft watch --foreground` exited `0` after SIGINT and logged startup snapshot + graceful shutdown with observed panes.
+
+Visibility limit remains explicit: `ft` observes panes visible via WezTerm CLI; tmux-internal panes not surfaced by WezTerm still require tmux/NTM-side observation.
+
 ## Rehearsal Verdict
 
 `rr-eus.5` acceptance intent is met for the current swarm topology:

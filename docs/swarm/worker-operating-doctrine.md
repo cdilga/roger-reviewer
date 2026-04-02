@@ -7,10 +7,27 @@ The implementation gate has passed. You may now claim and execute implementation
 
 Register with MCP Agent Mail immediately, introduce yourself to the other active agents, and keep checking your inbox. Use Agent Mail file reservations before editing any docs or repo files. Acknowledge messages that require it, and do not drift into communication-only loops without moving work forward.
 
+Frankenterm (`ft`) is the default observer path for swarm sessions. If `ft` is missing, install it with `./scripts/swarm/install_frankenterm.sh` unless the run is intentionally degraded (`--no-ft`). Keep limits explicit in status notes: `ft` only sees panes discoverable through WezTerm CLI; tmux-internal panes not surfaced by WezTerm stay outside `ft` visibility.
+
 Use `br ready` as the source of truth for what is truly unblocked. Use `bv --robot-triage` or `bv --robot-next` only to rank or understand the queue, then verify the bead with `br show <id>` before claiming it. If `bv` points at something blocked, trust `br ready` and choose a different bead.
 
 If `br` reports `database is busy`, that is lock contention, not "no work".
 Back off briefly and retry before deciding the queue is empty.
+If standard `br` reads or claims still fail after a few retries, switch to the
+direct fallback path for queue truth and claiming:
+
+1. `br ready --no-daemon`
+2. `br show <id> --no-daemon`
+3. `br update <id> --status in_progress --no-daemon`
+
+Use the first clean `--no-daemon` result as authoritative rather than parking
+on a busy DB. Announce in Agent Mail when you had to fall back so other workers
+know the queue view came from the direct path.
+For scripted queue-inspection reads (`ready/list/show`), prefer `--no-auto-import --no-auto-flush` so read paths do not trigger hidden write-side repair under contention.
+For launch preflight and prerequisites, treat transient `br doctor` sqlite lock
+signals as retry-class, and treat preserved recovery-artifact warnings, sidecar
+warnings, plus the stale blocked-cache recoverable-anomaly line as advisory
+unless another fatal `ERROR` is present.
 
 Before launching a large swarm batch, the operator should run
 `./scripts/swarm/audit_bead_batch.sh --limit 20 --strict` from repo root.
