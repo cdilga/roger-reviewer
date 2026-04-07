@@ -80,13 +80,34 @@ Purpose:
 
 - Surfaces: extension, local companion, TUI
 - Primary artifact: structured review-intake payload
-- Happy path: extension sends PR-aware launch intent and Roger opens the correct
-  local session
+- Happy path: extension injects GitHub-native inline Roger actions into the PR
+  page and Roger opens the correct local session
 - Common variants: `start`, `resume`, `refresh`, short objective or preset, open
-  directly into a target local queue
+  directly into a target local queue, fallback to browser-action popup when
+  inline DOM attachment is unavailable
 - Failure/recovery: companion unavailable, bridge missing, multiple local
-  instances, launch-only mode with no readback
+  instances, launch-only mode with no readback, GitHub DOM drift that forces a
+  bounded fallback entrypoint
 - Test intent: prove honest daemonless handoff behavior on supported browsers
+
+### F02.1: Guided Browser Setup And Verification
+
+- Surfaces: CLI, extension packaging, local host registration
+- Primary artifact: browser setup state plus doctor result envelope
+- Happy path: user runs `rr extension setup`, Roger prepares the unpacked
+  extension artifact, guides the one required manual browser load step, learns
+  the extension identity without requiring the user to type it, registers the
+  installed `rr` binary as the Native Messaging host, and `rr extension doctor`
+  confirms the setup truthfully
+- Common variants: browser-specific setup for Edge, Chrome, or Brave;
+  extension self-registration versus Roger-owned discovery; repair/dev-only use
+  of lower-level bridge commands
+- Failure/recovery: extension not yet loaded, extension identity missing, host
+  registration drift, unsupported browser path, doctor reports blocked guidance
+  instead of claiming browser launch support
+- Test intent: prove the normal browser setup path is guided, truthful, and
+  does not require manual extension-id entry or a user-facing separate host
+  binary
 
 ### F03: Structured Findings Pack Intake
 
@@ -253,7 +274,8 @@ Purpose:
 - Surfaces: extension, local companion
 - Primary artifact: bounded bridge capability state
 - Happy path: extension knows it is operating in launch-only mode and offers
-  start/resume/refresh without pretending it has live local status
+  start/resume/refresh without pretending it has live local status, whether the
+  entrypoint is inline on the PR page or via the browser-action fallback
 - Common variants: install page explains limited mode, user upgrades later to a
   richer companion/readback bridge
 - Failure/recovery: stale cached status is suppressed rather than shown as live,

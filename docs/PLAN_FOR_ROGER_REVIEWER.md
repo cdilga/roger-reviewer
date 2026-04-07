@@ -1664,10 +1664,29 @@ Accepted `0.1.0` contract:
   OS, but they must be Roger-owned and documented in release instructions rather
   than delegated to Homebrew, winget, npm, or another external package manager
 - the browser extension remains a separate optional workflow after the local
-  product is installed; if a user wants browser launch, Roger may later expose
-  explicit follow-up commands such as `rr bridge install` or
-  `rr bridge pack-extension`, but those are not part of the base one-line
-  install/update contract
+  product is installed; if a user wants browser launch, Roger should expose a
+  guided Roger-owned setup flow rather than requiring the user to manually
+  manage extension ids or host-binary paths
+- the intended follow-on shape is a guided command such as
+  `rr extension setup [--browser edge|chrome|brave]` that prepares the
+  unpacked/browser-loadable extension artifact, tells the user the one required
+  manual browser step, learns the extension id through Roger-owned discovery or
+  extension self-registration rather than asking the user to type it, completes
+  Native Messaging/helper registration automatically using the installed `rr`
+  binary in host mode rather than a normal-path separate `rr-bridge` binary,
+  and verifies connectivity truthfully at the end of setup
+- Roger should also expose a follow-on verification command such as
+  `rr extension doctor` that checks the unpacked extension artifact, discovered
+  extension identity, host registration, and bridge reachability without
+  pretending browser launch support is healthy when one of those pieces is
+  missing
+- `rr extension doctor` should fail closed when any of those checks fail and
+  return bounded repair guidance (for example rerun `rr extension setup` for
+  normal-path recovery, or use low-level bridge commands only for explicit
+  development/repair workflows)
+- lower-level commands such as `rr bridge pack-extension` or host-registration
+  subcommands may still exist for development and repair work, but they are not
+  the intended primary user-facing setup flow
 
 Non-goal for `0.1.0`:
 
@@ -1688,8 +1707,14 @@ handoff path, but it is not the primary v1 bridge.
 Likely v1 minimum:
 
 - PR-aware launch from the GitHub page into a specific local Roger target
+- GitHub-native placement on PR pages: prefer inline buttons or cards attached
+  to the PR header or action area rather than a free-floating overlay when the
+  page DOM offers a stable seam
 - explicit local handoff without a hidden daemon
 - first-class support for Edge as well as Chrome/Brave
+- a manual browser-action fallback that can open the same bounded launch surface
+  when inline attachment is unavailable, delayed, or broken on a given GitHub
+  DOM revision
 
 Candidate features that may remain v2:
 
@@ -1704,7 +1729,8 @@ Candidate features that may remain v2:
 The extension should mirror the TUI selectively rather than imitate it fully:
 
 - **Review Home** becomes a PR-local launcher card with `start`, `resume`,
-  `refresh`, and `open in Roger`
+  `refresh`, and `open in Roger`, styled to feel native to GitHub and attached
+  inline to the page when a stable host seam exists
 - **Session Overview** becomes a compact status badge or popover showing bounded
   counts such as `new`, `needs follow-up`, `drafted`, and `awaiting approval`
 - **Findings Queue** becomes at most a short teaser list or counts plus a local
@@ -1728,6 +1754,8 @@ Plan extension features in two explicit capability tiers:
 - start, resume, or refresh a review from a PR page
 - choose a bounded launch mode or preset
 - pass a short objective and preferred local UI target
+- expose a manual browser-action fallback entry when PR-page inline injection is
+  unavailable or GitHub DOM drift prevents a clean attachment
 - no promise of live status beyond successful handoff
 
 **Companion tier** (works with Native Messaging or equivalent daemonless

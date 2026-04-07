@@ -143,7 +143,8 @@ The minimum command surface for `0.1.0` is:
 - `rr bridge export-contracts`
 - `rr bridge verify-contracts`
 - `rr bridge pack-extension`
-- `rr bridge install`
+- `rr extension setup`
+- `rr extension doctor`
 - `rr bridge uninstall`
 
 Command roles:
@@ -152,18 +153,51 @@ Command roles:
 - `verify-contracts` enforces freshness and drift detection
 - `pack-extension` builds the browser-installable extension artifact from the
   extension source tree and Roger-owned manifest rendering
-- `install` registers the Native Messaging host manifest and any thin
-  custom-URL launch assets for the current OS
+- `extension setup` is the primary user-facing flow: it prepares the unpacked
+  extension artifact, guides the one required manual browser load step, learns
+  the extension id through Roger-owned discovery or extension self-registration,
+  and then registers the Native Messaging host manifest and any thin custom-URL
+  launch assets for the current OS using the installed `rr` binary in host mode
+  rather than a normal-path separate `rr-bridge` binary
+- `extension doctor` verifies that the extension package, extension identity,
+  local host registration, and bridge reachability are present and truthful
 - `uninstall` removes Roger-owned bridge registration state for the current OS
 
 Rules:
 
 - `pack-extension` packages a local installable artifact; browser-store
   submission remains outside the `0.1.0` contract
-- `install` and `uninstall` target host registration only; they do not silently
-  install or update the browser extension itself
+- `extension setup` and `uninstall` must not silently install or update the
+  browser extension itself; the browser load/enable step remains explicit
+- the normal user-facing flow must not require a manually typed extension id or
+  a user-facing separate bridge-host binary path
 - the base one-line Roger install flow remains local-product-only and does not
   imply bridge registration or extension packaging
+
+### Guided setup and doctor contract (`rr-ivjk.1`)
+
+Normal-path contract:
+
+1. user runs `rr extension setup [--browser edge|chrome|brave]`
+2. Roger prepares the unpacked extension artifact and prints the one required
+   manual browser action (load/enable that unpacked artifact)
+3. Roger learns extension identity through discovery or extension-side
+   self-registration; the normal user path must not ask for manually typed
+   extension ids
+4. Roger registers Native Messaging/custom-URL launch assets for the current OS
+   against the installed `rr` binary in host mode (no normal-path separate
+   `rr-bridge` binary workflow)
+5. Roger runs the same bounded checks exposed by `rr extension doctor` and
+   reports readiness truthfully
+
+Doctor contract:
+
+- `rr extension doctor` verifies package presence, discovered extension
+  identity, host registration linkage, and bridge reachability claims
+- doctor output must fail closed if any check is missing or inconsistent
+- doctor output must include bounded repair guidance: rerun `rr extension setup`
+  for normal-path recovery, and reserve low-level bridge commands for
+  development/repair workflows
 
 ## Artifact Ownership
 
