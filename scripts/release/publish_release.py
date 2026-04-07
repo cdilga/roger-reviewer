@@ -25,7 +25,9 @@ RC_TAG_RE = re.compile(r"^v\d{4}\.\d{2}\.\d{2}-rc\.[1-9]\d*$")
 VERIFY_MANIFEST_SCHEMA = "roger.release-verify-assets.v1"
 ALLOWED_OPTIONAL_LANE_STATUSES = {"built", "skipped"}
 OPTIONAL_LANE_NAMES = ("release-package-bridge", "release-package-extension")
+INSTALL_BOOTSTRAP_ASSETS = ("rr-install.sh", "rr-install.ps1")
 GITHUB_RUN_URL_RE = re.compile(r"^https://github\.com/[^/]+/[^/]+/actions/runs/\d+$")
+RELEASES_BASE_URL = "https://github.com/cdilga/roger-reviewer/releases"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -283,6 +285,48 @@ def _collect_verified_assets(
     return deduped
 
 
+def _require_install_bootstrap_entries(
+    manifest: Dict[str, Any], errors: List[str]
+) -> None:
+    core = manifest.get("core")
+    if not isinstance(core, dict):
+        errors.append("verified manifest missing core object for install bootstrap checks")
+        return
+
+    entries = core.get("assets")
+    if not isinstance(entries, list):
+        errors.append("verified manifest core.assets must be an array")
+        return
+
+    observed_names = set()
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        if item.get("kind") != "install_bootstrap":
+            continue
+
+        raw_path = item.get("path")
+        raw_label = item.get("label")
+
+        if isinstance(raw_path, str) and raw_path:
+            observed_names.add(pathlib.Path(raw_path).name)
+            continue
+        if isinstance(raw_label, str) and raw_label:
+            observed_names.add(pathlib.Path(raw_label).name)
+            continue
+
+        errors.append(
+            "verified manifest install_bootstrap entry missing path/label metadata"
+        )
+
+    for required in INSTALL_BOOTSTRAP_ASSETS:
+        if required not in observed_names:
+            errors.append(
+                "verified manifest missing required install bootstrap asset entry: "
+                f"{required}"
+            )
+
+
 def _normalize_run_url(
     label: str,
     value: Optional[str],
@@ -405,6 +449,10 @@ def _render_notes(
     channel = str(metadata.get("channel"))
     tag = str(metadata.get("tag"))
     version = str(metadata.get("version"))
+    installer_latest_sh = f"{RELEASES_BASE_URL}/latest/download/rr-install.sh"
+    installer_latest_ps1 = f"{RELEASES_BASE_URL}/latest/download/rr-install.ps1"
+    installer_tag_sh = f"{RELEASES_BASE_URL}/download/{tag}/rr-install.sh"
+    installer_tag_ps1 = f"{RELEASES_BASE_URL}/download/{tag}/rr-install.ps1"
 
     lines = [
         f"# {release_name}",
@@ -466,6 +514,24 @@ def _render_notes(
             f"- Checksums: `{checksums_name}`",
             f"- Verified asset manifest: `{verified_manifest_name}`",
             f"- Signing notes: `{signing_notes_name}`",
+            "",
+            "## Install Commands (CLI Base Product)",
+            "",
+            "- Stable/latest (Unix):",
+            f"  - `curl -fsSL {installer_latest_sh} | bash`",
+            "- Stable/latest (PowerShell):",
+            "  - `& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing "
+            + f"'{installer_latest_ps1}').Content))`",
+            f"- Pinned `{tag}` (Unix):",
+            f"  - `curl -fsSL {installer_tag_sh} | bash -s -- --version {version}`",
+            f"- Pinned `{tag}` (PowerShell):",
+            "  - `& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing "
+            + f"'{installer_tag_ps1}').Content)) -Version '{version}'`",
+            "",
+            "## Optional Follow-On (Separate From Base Install)",
+            "",
+            "- Bridge and extension lanes are optional packaging surfaces and are not required for the base CLI install.",
+            "- Use the release optional-lane artifacts only when you need browser launch/helper integration.",
             "",
             "## Manual Smoke",
             "",
@@ -619,6 +685,7 @@ def main() -> int:
         lane_summary_obj = {}
 
     support_claims = _lane_support_claims(lane_summary_obj)
+    _require_install_bootstrap_entries(verified_manifest, errors)
     verified_assets = _collect_verified_assets(verified_manifest, asset_root, errors)
 
     if errors:

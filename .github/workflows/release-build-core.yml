@@ -247,3 +247,13 @@ jobs:
           path: ${{ steps.aggregate.outputs.install_metadata_path }}
           if-no-files-found: error
           retention-days: 14
+
+      - name: Upload installer bootstrap scripts for release-page entrypoints
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-install-bootstrap
+          path: |
+            scripts/release/rr-install.sh
+            scripts/release/rr-install.ps1
+          if-no-files-found: error
+          retention-days: 14
