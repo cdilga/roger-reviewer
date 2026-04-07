@@ -15,13 +15,16 @@ The `0.1.0` validation contract needs four explicit execution tiers, one
 blessed automated end-to-end test, and a small machine-readable budget file
 that makes E2E growth visible instead of ambient.
 
-Current repo truth as of 2026-04-02:
+Current repo truth as of 2026-04-07:
 
-- `tests/suites/e2e_core_review_happy_path.toml` is a suite-metadata contract.
-- No executable functional `e2e_*` test implementation for
-  `e2e_core_review_happy_path` is currently present in the repo.
-- Until that executable suite lands, do not claim functional automated E2E
-  coverage from lane policy or metadata alone.
+- `tests/suites/e2e_core_review_happy_path.toml` is the suite-metadata contract
+  for the blessed E2E.
+- `packages/cli/tests/e2e_core_review_happy_path.rs` is now the executable
+  functional implementation for `e2e_core_review_happy_path`.
+- Do not claim functional automated E2E coverage from lane policy or metadata
+  alone; the suite must also be actually run in the relevant lane.
+- The metadata file reserves the suite id and budget slot, but the E2E exists
+  because the executable suite landed, not because the metadata exists.
 
 ## Test Tiers
 
@@ -84,8 +87,8 @@ Required posture:
 
 Required contents for `0.1.0`:
 
-- planned `E2E-01` core review happy path (metadata exists; executable suite
-  still pending)
+- `E2E-01` core review happy path as an executable suite that is actually run;
+  metadata or budget registration alone does not satisfy this
 - OpenCode acceptance suite
 - Gemini bounded acceptance suite
 - browser bridge smoke for the serious v1 bridge path
@@ -123,8 +126,9 @@ Roger `0.1.0` carries one blessed automated heavyweight E2E:
 
 Current implementation status:
 
-- planned in budget and suite metadata
-- not yet implemented as a functional executable E2E test
+- implemented as `packages/cli/tests/e2e_core_review_happy_path.rs`
+- registered in budget and suite metadata
+- still requires a real run before any specific lane can claim that coverage
 
 That test protects a product-defining promise across several boundaries:
 
@@ -137,6 +141,19 @@ That test protects a product-defining promise across several boundaries:
 
 Everything else should default downward into a cheaper tier unless a lower-cost
 test shape leaves a meaningful product-risk gap.
+
+Execution rule:
+
+- do not close an implementation bead for `E2E-01` by narrowing docs,
+  registering metadata, or wiring lane policy alone
+- if docs need correction while the suite is still missing, that is a separate
+  docs-truthfulness task and the implementation bead remains open
+
+The suite was exercised locally on 2026-04-07 with:
+
+```sh
+cargo test -p roger-cli --test e2e_core_review_happy_path -- --nocapture
+```
 
 ### Supported-Browser Launch Classification
 

@@ -126,6 +126,45 @@ fn ambiguous_or_missing_repo_matches_require_picker_instead_of_guessing() -> Res
 }
 
 #[test]
+fn explicit_pr_no_match_returns_no_match_picker_without_cross_pr_candidates() -> Result<()> {
+    let temp = tempdir()?;
+    let store = RogerStore::open(temp.path())?;
+
+    let existing_target = target("owner/repo", 123);
+    store.create_review_session(CreateReviewSession {
+        id: "session-123",
+        review_target: &existing_target,
+        provider: "opencode",
+        session_locator: None,
+        resume_bundle_artifact_id: None,
+        continuity_state: "awaiting_resume",
+        attention_state: "awaiting_user_input",
+        launch_profile_id: None,
+    })?;
+
+    let resolution = store.resolve_session_reentry(ResolveSessionReentry {
+        explicit_session_id: None,
+        repository: Some("owner/repo".to_owned()),
+        pull_request_number: Some(2),
+        source_surface: LaunchSurface::Cli,
+        ui_target: Some("cli".to_owned()),
+        instance_preference: Some("reuse_if_possible".to_owned()),
+    })?;
+
+    assert!(
+        matches!(
+            &resolution,
+            SessionReentryResolution::PickerRequired { reason, candidates }
+                if reason.contains("no matching repo-local session found for pull request 2")
+                    && candidates.is_empty()
+        ),
+        "expected no-match picker response, got {resolution:?}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn global_session_finder_can_filter_across_repos_and_attention_states() -> Result<()> {
     let temp = tempdir()?;
     let store = RogerStore::open(temp.path())?;

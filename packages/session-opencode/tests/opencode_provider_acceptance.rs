@@ -224,6 +224,7 @@ fn accept_opencode_dropout_and_rr_return_rebinds_session() {
         &adapter,
         &reopened,
         ResolveSessionLaunchBinding {
+            explicit_session_id: None,
             surface: LaunchSurface::Cli,
             repo_locator: &target.repository,
             review_target: Some(&target),

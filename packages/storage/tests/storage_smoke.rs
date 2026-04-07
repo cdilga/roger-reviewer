@@ -271,6 +271,7 @@ fn storage_smoke_persists_resume_and_approval_state_across_restart() -> Result<(
         );
 
         let resolved = reopened.resolve_session_launch_binding(ResolveSessionLaunchBinding {
+            explicit_session_id: None,
             surface: LaunchSurface::Tui,
             repo_locator: "owner/repo",
             review_target: Some(&sample_target()),
@@ -376,6 +377,7 @@ fn launch_binding_resolution_fails_closed_for_ambiguous_and_mismatched_state() -
     }
 
     let ambiguous = store.resolve_session_launch_binding(ResolveSessionLaunchBinding {
+        explicit_session_id: None,
         surface: LaunchSurface::Cli,
         repo_locator: "owner/repo",
         review_target: None,
@@ -392,6 +394,7 @@ fn launch_binding_resolution_fails_closed_for_ambiguous_and_mismatched_state() -
     );
 
     let stale = store.resolve_session_launch_binding(ResolveSessionLaunchBinding {
+        explicit_session_id: None,
         surface: LaunchSurface::Cli,
         repo_locator: "owner/repo",
         review_target: Some(&ReviewTarget {

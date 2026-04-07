@@ -549,6 +549,7 @@ pub struct SessionLaunchBindingRecord {
 
 #[derive(Debug, Clone)]
 pub struct ResolveSessionLaunchBinding<'a> {
+    pub explicit_session_id: Option<&'a str>,
     pub surface: LaunchSurface,
     pub repo_locator: &'a str,
     pub review_target: Option<&'a ReviewTarget>,
@@ -1772,6 +1773,42 @@ impl RogerStore {
         Ok(findings)
     }
 
+    pub fn count_findings_by_triage_state(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        triage_state: &str,
+    ) -> Result<i64> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM findings
+                WHERE session_id = ?1
+                  AND COALESCE(last_seen_run_id, first_run_id) = ?2
+                  AND triage_state = ?3",
+                params![session_id, run_id, triage_state],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::from)
+    }
+
+    pub fn count_findings_by_outbound_state(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        outbound_state: &str,
+    ) -> Result<i64> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM findings
+                WHERE session_id = ?1
+                  AND COALESCE(last_seen_run_id, first_run_id) = ?2
+                  AND outbound_state = ?3",
+                params![session_id, run_id, outbound_state],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::from)
+    }
+
     pub fn add_code_evidence_location(&self, input: CreateCodeEvidenceLocation<'_>) -> Result<()> {
         self.conn.execute(
             "INSERT INTO code_evidence_locations (
@@ -2907,6 +2944,11 @@ impl RogerStore {
         let mut candidates = Vec::new();
         for row in rows {
             let record = row?;
+            if let Some(explicit_session_id) = query.explicit_session_id {
+                if record.session_id != explicit_session_id {
+                    continue;
+                }
+            }
             if let Some(ui_target) = query.ui_target {
                 if record.ui_target.as_deref() != Some(ui_target) {
                     continue;
@@ -3109,6 +3151,7 @@ impl RogerStore {
                 let session = sessions[0].clone();
                 let binding_resolution =
                     self.resolve_session_launch_binding(ResolveSessionLaunchBinding {
+                        explicit_session_id: Some(&session.id),
                         surface: query.source_surface,
                         repo_locator: repository,
                         review_target: Some(&session.review_target),
@@ -3141,24 +3184,20 @@ impl RogerStore {
                 };
             }
 
-            let candidates = if sessions.is_empty() {
-                self.session_finder(SessionFinderQuery {
-                    repository: Some(repository.to_owned()),
-                    pull_request_number: None,
-                    attention_states: Vec::new(),
-                    limit: 25,
-                })?
-            } else {
-                sessions.iter().map(session_entry_from_record).collect()
-            };
+            if sessions.is_empty() {
+                return Ok(SessionReentryResolution::PickerRequired {
+                    reason: format!(
+                        "no matching repo-local session found for pull request {pull_request_number}"
+                    ),
+                    candidates: Vec::new(),
+                });
+            }
 
-            let reason = if candidates.is_empty() {
-                "no matching repo-local session found".to_owned()
-            } else {
-                "ambiguous repo-local session match; picker required".to_owned()
-            };
-
-            return Ok(SessionReentryResolution::PickerRequired { reason, candidates });
+            let candidates = sessions.iter().map(session_entry_from_record).collect();
+            return Ok(SessionReentryResolution::PickerRequired {
+                reason: "ambiguous repo-local session match; picker required".to_owned(),
+                candidates,
+            });
         }
 
         if let Some(repository) = query.repository.clone() {
@@ -3595,11 +3634,12 @@ impl RogerStore {
             return Ok(None);
         };
 
-        let storage_kind =
-            ArtifactStorageKind::from_str(&storage_kind_raw).ok_or_else(|| StorageError::NotFound {
+        let storage_kind = ArtifactStorageKind::from_str(&storage_kind_raw).ok_or_else(|| {
+            StorageError::NotFound {
                 entity: "artifact_storage_kind",
                 id: storage_kind_raw,
-            })?;
+            }
+        })?;
 
         Ok(Some(StoredArtifact {
             id,

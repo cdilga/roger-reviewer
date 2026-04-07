@@ -124,6 +124,7 @@ fn rr_return_rebinds_to_the_correct_session_after_restart() -> Result<()> {
     let reopened = RogerStore::open(&root)?;
     let resolution = reopened.resolve_resume_ledger(
         ResolveSessionLaunchBinding {
+            explicit_session_id: None,
             surface: LaunchSurface::Cli,
             repo_locator: &target.repository,
             review_target: Some(&target),
@@ -171,6 +172,7 @@ fn rr_return_falls_back_to_reseed_when_locator_is_unavailable() -> Result<()> {
     let reopened = RogerStore::open(&root)?;
     let resolution = reopened.resolve_resume_ledger(
         ResolveSessionLaunchBinding {
+            explicit_session_id: None,
             surface: LaunchSurface::Cli,
             repo_locator: &target.repository,
             review_target: Some(&target),

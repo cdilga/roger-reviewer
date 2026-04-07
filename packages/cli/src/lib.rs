@@ -4,7 +4,7 @@ use roger_app_core::{
     AppError, ContinuityQuality, HarnessAdapter, LaunchAction, LaunchIntent, ResumeAttemptOutcome,
     ResumeBundle, ResumeBundleProfile, ReviewTarget, RogerCommand, RogerCommandId,
     RogerCommandInvocationSurface, RogerCommandResult, RogerCommandRouteStatus, Surface,
-    route_harness_command, safe_harness_command_bindings,
+    route_harness_command, safe_harness_command_bindings, FindingTriageState, FindingOutboundState,
 };
 use roger_bridge::{
     NativeHostManifest, SupportedBrowser, SupportedOs, custom_url_helper_path_for,
@@ -1448,9 +1448,10 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         Ok(Some(existing_id)) => existing_id,
         Ok(None) => match store.store_resume_bundle(&bundle_id, &bundle) {
             Ok(stored) => stored.id,
-            Err(err) if err
-                .to_string()
-                .contains("UNIQUE constraint failed: artifacts.digest") =>
+            Err(err)
+                if err
+                    .to_string()
+                    .contains("UNIQUE constraint failed: artifacts.digest") =>
             {
                 match store.artifact_id_by_digest(&bundle_digest) {
                     Ok(Some(existing_id)) => existing_id,
@@ -1902,6 +1903,7 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         &adapter,
         &store,
         ResolveSessionLaunchBinding {
+            explicit_session_id: Some(&session.id),
             surface: LaunchSurface::Cli,
             repo_locator: &session.review_target.repository,
             review_target: Some(&session.review_target),
@@ -2276,8 +2278,8 @@ fn resolve_latest_release_tag(api_root: &str, channel: &str) -> Result<String, S
     }
 
     let payload = fetch_url_with_curl(&format!("{api_root}/releases?per_page=30"))?;
-    let json: Value = serde_json::from_str(&payload)
-        .map_err(|err| format!("invalid releases payload: {err}"))?;
+    let json: Value =
+        serde_json::from_str(&payload).map_err(|err| format!("invalid releases payload: {err}"))?;
     let Some(entries) = json.as_array() else {
         return Err("releases payload must be an array".to_owned());
     };
@@ -2286,7 +2288,10 @@ fn resolve_latest_release_tag(api_root: &str, channel: &str) -> Result<String, S
             .get("prerelease")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let tag = entry.get("tag_name").and_then(Value::as_str).unwrap_or_default();
+        let tag = entry
+            .get("tag_name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         if prerelease && tag.contains("-rc.") {
             return Ok(tag.to_owned());
         }
@@ -2350,7 +2355,8 @@ fn handle_update(parsed: &ParsedArgs, _runtime: &CliRuntime) -> CommandResponse 
                 .to_owned(),
             vec![
                 "install a published Roger release artifact before running rr update".to_owned(),
-                "or run scripts/release/rr-install.sh directly with an explicit --version".to_owned(),
+                "or run scripts/release/rr-install.sh directly with an explicit --version"
+                    .to_owned(),
             ],
             json!({
                 "reason_code": "local_or_unpublished_build",
@@ -2449,9 +2455,7 @@ fn handle_update(parsed: &ParsedArgs, _runtime: &CliRuntime) -> CommandResponse 
             );
         }
     };
-    if install_metadata
-        .get("schema")
-        .and_then(Value::as_str)
+    if install_metadata.get("schema").and_then(Value::as_str)
         != Some("roger.release.install-metadata.v1")
     {
         return blocked_response(
@@ -2469,11 +2473,7 @@ fn handle_update(parsed: &ParsedArgs, _runtime: &CliRuntime) -> CommandResponse 
             json!({"reason_code": "install_metadata_release_missing"}),
         );
     };
-    if release
-        .get("version")
-        .and_then(Value::as_str)
-        != Some(target_version.as_str())
-    {
+    if release.get("version").and_then(Value::as_str) != Some(target_version.as_str()) {
         return blocked_response(
             "install metadata release.version mismatch".to_owned(),
             vec!["verify release metadata and republish artifacts".to_owned()],
@@ -2693,9 +2693,7 @@ fn handle_update(parsed: &ParsedArgs, _runtime: &CliRuntime) -> CommandResponse 
             "powershell -ExecutionPolicy Bypass -File scripts/release/rr-install.ps1 -Version {target_version} -Repo {repo}"
         )
     } else {
-        format!(
-            "bash scripts/release/rr-install.sh --version {target_version} --repo {repo}"
-        )
+        format!("bash scripts/release/rr-install.sh --version {target_version} --repo {repo}")
     };
 
     let message = if parsed.dry_run {
@@ -2732,9 +2730,7 @@ fn handle_update(parsed: &ParsedArgs, _runtime: &CliRuntime) -> CommandResponse 
             "recommended_install_command": recommended_command,
         }),
         warnings: Vec::new(),
-        repair_actions: vec![
-            "run the recommended_install_command to apply update".to_owned(),
-        ],
+        repair_actions: vec!["run the recommended_install_command to apply update".to_owned()],
         message,
     }
 }
@@ -2874,6 +2870,32 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         None => 0,
     };
 
+    let needs_follow_up_count = if let Some(run) = latest_run.as_ref() {
+        match store.count_findings_by_triage_state(
+            &session.id,
+            &run.id,
+            FindingTriageState::NeedsFollowUp.as_str(),
+        ) {
+            Ok(count) => count as usize,
+            Err(err) => return error_response(format!("failed to count needs follow up findings: {err}")),
+        }
+    } else {
+        0
+    };
+
+    let awaiting_approval_count = if let Some(run) = latest_run.as_ref() {
+        match store.count_findings_by_outbound_state(
+            &session.id,
+            &run.id,
+            FindingOutboundState::Approved.as_str(),
+        ) {
+            Ok(count) => count as usize,
+            Err(err) => return error_response(format!("failed to count awaiting approval findings: {err}")),
+        }
+    } else {
+        0
+    };
+
     let branch = infer_git_branch(&runtime.cwd);
     let provider_tier = provider_tier(&session.provider);
     let provider_warning = provider_support_warning(&session.provider, "rr status");
@@ -2901,10 +2923,10 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             },
             "findings": {
                 "total": findings_count,
-                "needs_follow_up": 0,
+                "needs_follow_up": needs_follow_up_count,
             },
             "drafts": {
-                "awaiting_approval": 0,
+                "awaiting_approval": awaiting_approval_count,
             },
             "continuity": {
                 "tier": provider_tier,
@@ -3366,6 +3388,21 @@ fn return_path_label(path: OpenCodeReturnPath) -> &'static str {
 }
 
 fn blocked_picker_response(reason: String, candidates: Vec<SessionFinderEntry>) -> CommandResponse {
+    let no_match = candidates.is_empty() || reason.contains("no matching repo-local session found");
+    let warnings = if no_match {
+        vec!["no matching session found for the requested target".to_owned()]
+    } else {
+        vec!["session inference is ambiguous; explicit selection is required".to_owned()]
+    };
+    let repair_actions = if no_match {
+        vec![
+            "run rr review --pr <number> to create a new session".to_owned(),
+            "run rr sessions --robot to inspect available sessions".to_owned(),
+        ]
+    } else {
+        vec!["re-run with --session <id> or pass --pr <number> for a unique match".to_owned()]
+    };
+
     CommandResponse {
         outcome: OutcomeKind::Blocked,
         data: json!({
@@ -3382,10 +3419,8 @@ fn blocked_picker_response(reason: String, candidates: Vec<SessionFinderEntry>) 
                 }))
                 .collect::<Vec<_>>(),
         }),
-        warnings: vec!["session inference is ambiguous; explicit selection is required".to_owned()],
-        repair_actions: vec![
-            "re-run with --session <id> or pass --pr <number> for a unique match".to_owned(),
-        ],
+        warnings,
+        repair_actions,
         message: "session picker required".to_owned(),
     }
 }
@@ -3623,7 +3658,8 @@ fn compact_data(command: CommandKind, data: Value) -> Value {
 
 fn next_id(prefix: &str) -> String {
     let seq = ID_SEQ.fetch_add(1, Ordering::Relaxed);
-    format!("{prefix}-{}-{seq}", time::now_ts())
+    let pid = std::process::id();
+    format!("{prefix}-{}-{pid}-{seq}", time::now_ts())
 }
 
 fn usage_text() -> &'static str {
@@ -4009,11 +4045,7 @@ mod tests {
             opencode_bin: "opencode".to_owned(),
         };
         let result = run(
-            &[
-                "update".to_owned(),
-                "--pr".to_owned(),
-                "12".to_owned(),
-            ],
+            &["update".to_owned(), "--pr".to_owned(), "12".to_owned()],
             &runtime,
         );
         assert_eq!(result.exit_code, 2);
@@ -4035,9 +4067,6 @@ mod tests {
         assert_eq!(result.exit_code, 3, "{}", result.stderr);
         let payload = parse_robot(&result.stdout);
         assert_eq!(payload["outcome"], "blocked");
-        assert_eq!(
-            payload["data"]["reason_code"],
-            "local_or_unpublished_build"
-        );
+        assert_eq!(payload["data"]["reason_code"], "local_or_unpublished_build");
     }
 }

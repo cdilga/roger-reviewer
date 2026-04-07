@@ -732,6 +732,7 @@ mod tests {
             &harness,
             &reopened,
             ResolveSessionLaunchBinding {
+                explicit_session_id: None,
                 surface: LaunchSurface::Cli,
                 repo_locator: &target.repository,
                 review_target: Some(&target),
@@ -799,6 +800,7 @@ mod tests {
             &harness,
             &reopened,
             ResolveSessionLaunchBinding {
+                explicit_session_id: None,
                 surface: LaunchSurface::Cli,
                 repo_locator: &target.repository,
                 review_target: Some(&target),

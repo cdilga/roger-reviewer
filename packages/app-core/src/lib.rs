@@ -276,6 +276,19 @@ pub enum FindingTriageState {
     Stale,
 }
 
+impl FindingTriageState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FindingTriageState::New => "New",
+            FindingTriageState::Accepted => "Accepted",
+            FindingTriageState::Ignored => "Ignored",
+            FindingTriageState::NeedsFollowUp => "NeedsFollowUp",
+            FindingTriageState::Resolved => "Resolved",
+            FindingTriageState::Stale => "Stale",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FindingOutboundState {
     NotDrafted,
@@ -283,6 +296,18 @@ pub enum FindingOutboundState {
     Approved,
     Posted,
     Failed,
+}
+
+impl FindingOutboundState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FindingOutboundState::NotDrafted => "NotDrafted",
+            FindingOutboundState::Drafted => "Drafted",
+            FindingOutboundState::Approved => "Approved",
+            FindingOutboundState::Posted => "Posted",
+            FindingOutboundState::Failed => "Failed",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -274,11 +274,14 @@ Every non-unit suite should declare:
 | `nightly` | heavy or broad confidence work | expensive cross-matrix suites, broader fixture permutations, non-critical longevity checks | no for ordinary PRs |
 | `release` | tagged release validation | manual smoke plus artifact verification from the release matrix | yes for release promotion |
 
-Current repo truth as of 2026-04-02:
-- `e2e_core_review_happy_path` exists as suite metadata and budget policy, but
-  no executable functional `e2e_*` test implementation is landed yet.
-- Until that suite is implemented and actually run, do not claim functional
-  automated E2E coverage for gated/nightly/release lanes.
+Current repo truth as of 2026-04-07:
+- `e2e_core_review_happy_path` exists as suite metadata and budget policy.
+- executable functional coverage now exists in
+  `packages/cli/tests/e2e_core_review_happy_path.rs`.
+- do not claim functional automated E2E coverage for gated/nightly/release
+  lanes unless that suite is actually run in the relevant lane.
+- the metadata file reserves an id and documents intended scope, but the E2E
+  exists only because the executable test landed.
 
 Rules:
 - a suite must live in exactly one default tier
@@ -299,6 +302,8 @@ Guard rules:
 - a new automated E2E must include a written justification that explains why a
   unit, parameterized, acceptance, or narrow integration suite would not defend
   the promise more cheaply
+- declaring an `e2e_*` suite in metadata or budget files does not mean Roger
+  has that E2E; the suite exists only when executable tests land and are run
 - local runs should warn when the budget increases without a recorded
   justification
 - CI should fail once the warning-only phase is retired
@@ -339,8 +344,11 @@ The first implementation-facing harness slice should be:
 5. unit and parameterized harness helpers inside that shared harness
 6. narrow integration harness for storage, prompt normalization, and CLI resume
 7. provider acceptance harness for OpenCode and Gemini
-8. implement one blessed automated E2E (currently pending in repo)
+8. keep one blessed automated E2E implemented and runnable
 9. release-smoke checklist and artifact verification
+
+Do not resolve step 8 by editing docs, budget files, or suite metadata alone.
+That step closes only when the executable E2E implementation lands and is run.
 
 No `rr-011.x` validation suite should start before `rr-025.3` lands. The point
 is to make suites inherit one Roger-owned harness instead of each suite

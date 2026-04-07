@@ -18,14 +18,15 @@ This document does not override the tier definitions in
 entrypoint names, runner commands, retention rules, and budget-guard
 integration so downstream suites do not invent their own runner policy.
 
-Current repo truth as of 2026-04-02:
+Current repo truth as of 2026-04-07:
 
 - `tests/suites/e2e_core_review_happy_path.toml` is present as suite metadata.
-- No functional executable `e2e_*` test implementation for that suite id is
-  currently landed.
-- Nightly/release lanes therefore enforce budget and run the configured test
-  command, but should not be described as having demonstrated functional E2E
-  coverage until the real suite exists and runs.
+- `packages/cli/tests/e2e_core_review_happy_path.rs` is landed as the
+  executable implementation for that suite id.
+- Nightly/release lanes should only be described as having demonstrated
+  functional E2E coverage when the suite is actually run in those lanes.
+- The metadata file is a registration record, not an implementation milestone
+  by itself.
 
 ---
 
@@ -124,8 +125,10 @@ automated E2E tests.
 make test-nightly
 ```
 
-**Includes:** all of Tier 3 plus `e2e_core_review_happy_path` once that suite
-is implemented as executable tests (currently metadata-only).
+**Includes:** all of Tier 3 plus `e2e_core_review_happy_path`.
+
+Tier 4 counts as functional E2E coverage only when that suite is actually run
+in the lane.
 
 **Artifact retention:** full tree; upload for 30 days.
 
@@ -136,6 +139,11 @@ reads `docs/AUTOMATED_E2E_BUDGET.json` and checks:
 - if over budget: emit the five required justification fields as a CI
   failure with a `WARN` annotation and block merge until the fields are
   present in the budget file.
+
+Important:
+- budget compliance and suite registration do not replace the executable suite
+- an implementation bead for `e2e_core_review_happy_path` closes only after the
+  executable suite lands and is run
 
 ---
 

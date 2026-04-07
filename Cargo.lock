@@ -328,6 +328,7 @@ dependencies = [
  "roger-session-codex",
  "roger-session-opencode",
  "roger-storage",
+ "roger-validation",
  "serde",
  "serde_json",
  "sha2",

@@ -85,6 +85,7 @@ fn resume_ledger_reopens_when_locator_is_usable_after_restart() -> Result<()> {
     let reopened = RogerStore::open(&root)?;
     let resolution = reopened.resolve_resume_ledger(
         ResolveSessionLaunchBinding {
+            explicit_session_id: None,
             surface: LaunchSurface::Cli,
             repo_locator: "owner/repo",
             review_target: Some(&sample_target()),
@@ -153,6 +154,7 @@ fn stale_locator_reseeds_with_target_identity_preserved() -> Result<()> {
 
     let resolution = store.resolve_resume_ledger(
         ResolveSessionLaunchBinding {
+            explicit_session_id: None,
             surface: LaunchSurface::Tui,
             repo_locator: "owner/repo",
             review_target: Some(&sample_target()),
@@ -219,6 +221,7 @@ fn missing_harness_state_fails_closed_without_resume_bundle() -> Result<()> {
 
     let resolution = store.resolve_resume_ledger(
         ResolveSessionLaunchBinding {
+            explicit_session_id: None,
             surface: LaunchSurface::Bridge,
             repo_locator: "owner/repo",
             review_target: Some(&sample_target()),
@@ -304,6 +307,7 @@ fn cross_surface_bindings_resolve_to_same_durable_session_state() -> Result<()> 
     ] {
         let resolution = store.resolve_resume_ledger(
             ResolveSessionLaunchBinding {
+                explicit_session_id: None,
                 surface,
                 repo_locator: "owner/repo",
                 review_target: Some(&sample_target()),

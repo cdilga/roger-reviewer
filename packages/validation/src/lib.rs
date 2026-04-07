@@ -189,4 +189,54 @@ artifact_retention = "on_failure"
             "smoke failure artifacts must route through the failure artifact namespace"
         );
     }
+
+    #[test]
+    fn full_repo_suite_directory_supports_codex_acceptance_metadata() {
+        let metadata_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/suites");
+        let plan = build_plan(
+            ValidationLane::Gated,
+            &metadata_dir,
+            "target/test-artifacts",
+        )
+        .expect("real suite metadata directory should be plannable");
+        let suite_ids = plan.suite_ids();
+        assert!(
+            suite_ids.contains(&"accept_codex_reseed"),
+            "gated lane plan should include codex acceptance metadata"
+        );
+    }
+
+    #[test]
+    fn unsupported_suite_family_fails_with_explicit_error() {
+        let metadata_dir = temp_dir("unsupported-family");
+        fs::write(
+            metadata_dir.join("accept_unknown_reseed.toml"),
+            r#"
+id = "accept_unknown_reseed"
+budget_id = "ACCEPT-UNKNOWN-01"
+family = "accept_unknown"
+flow_ids = ["F01"]
+fixture_families = ["fixture_repo_compact_review"]
+support_tier = "unknown_tier"
+support_status = "bounded"
+degraded = true
+bounded = true
+tier = "acceptance"
+preserve_failure_artifacts = true
+artifact_retention = "on_failure"
+"#,
+        )
+        .unwrap();
+
+        let err = build_plan(
+            ValidationLane::Gated,
+            &metadata_dir,
+            "target/test-artifacts",
+        )
+        .expect_err("unsupported family should fail loudly");
+        assert!(
+            err.contains("unknown variant `accept_unknown`"),
+            "unexpected unsupported-family error: {err}"
+        );
+    }
 }

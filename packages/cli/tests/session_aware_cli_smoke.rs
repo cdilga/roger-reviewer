@@ -62,6 +62,44 @@ fn run_rr(args: &[&str], runtime: &CliRuntime) -> roger_cli::CliRunResult {
     run(&argv, runtime)
 }
 
+fn run_rr_process(args: &[&str], runtime: &CliRuntime) -> std::process::Output {
+    if let Ok(rr_bin) = std::env::var("CARGO_BIN_EXE_rr") {
+        return Command::new(rr_bin)
+            .args(args)
+            .current_dir(&runtime.cwd)
+            .env("RR_STORE_ROOT", &runtime.store_root)
+            .env("RR_OPENCODE_BIN", &runtime.opencode_bin)
+            .output()
+            .expect("run rr process via CARGO_BIN_EXE_rr");
+    }
+
+    let workspace = workspace_root();
+    let local_rr = workspace.join("target/debug/rr");
+    if local_rr.exists() {
+        return Command::new(local_rr)
+            .args(args)
+            .current_dir(&runtime.cwd)
+            .env("RR_STORE_ROOT", &runtime.store_root)
+            .env("RR_OPENCODE_BIN", &runtime.opencode_bin)
+            .output()
+            .expect("run rr process via target/debug/rr");
+    }
+
+    let mut cmd = Command::new("cargo");
+    cmd.arg("run")
+        .arg("-q")
+        .arg("-p")
+        .arg("roger-cli")
+        .arg("--bin")
+        .arg("rr")
+        .arg("--");
+    cmd.args(args)
+        .current_dir(workspace)
+        .env("RR_STORE_ROOT", &runtime.store_root)
+        .env("RR_OPENCODE_BIN", &runtime.opencode_bin);
+    cmd.output().expect("run rr process via cargo run fallback")
+}
+
 fn run_harness(
     command_id: RogerCommandId,
     provider: &str,
@@ -194,7 +232,11 @@ fn help_forms_exit_cleanly_for_quickstart_probe() {
 
     for args in [&["help"][..], &["--help"][..], &["-h"][..]] {
         let result = run_rr(args, &runtime);
-        assert_eq!(result.exit_code, 0, "args={args:?} stderr={}", result.stderr);
+        assert_eq!(
+            result.exit_code, 0,
+            "args={args:?} stderr={}",
+            result.stderr
+        );
         assert!(
             result.stdout.contains("Usage:"),
             "args={args:?} stdout={}",
@@ -343,10 +385,88 @@ fn repeated_review_reuses_resume_bundle_artifact_for_duplicate_digest() {
         "duplicate resume-bundle payload digest should reuse the existing artifact id"
     );
     assert!(
-        !second.stderr.contains("UNIQUE constraint failed: artifacts.digest"),
+        !second
+            .stderr
+            .contains("UNIQUE constraint failed: artifacts.digest"),
         "review path should avoid duplicate artifact digest failures: {}",
         second.stderr
     );
+}
+
+#[test]
+fn separate_process_review_sequence_avoids_cross_process_artifact_id_collisions() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let review_42 = run_rr_process(
+        &["review", "--repo", "owner/repo", "--pr", "42", "--robot"],
+        &runtime,
+    );
+    assert_eq!(
+        review_42.status.code(),
+        Some(0),
+        "review PR 42 failed: {}",
+        String::from_utf8_lossy(&review_42.stderr)
+    );
+    let review_42_payload = parse_robot_payload(std::str::from_utf8(&review_42.stdout).unwrap());
+    let bundle_42 = review_42_payload["data"]["resume_bundle_artifact_id"]
+        .as_str()
+        .expect("bundle id for PR 42")
+        .to_owned();
+
+    let review_43 = run_rr_process(
+        &["review", "--repo", "owner/repo", "--pr", "43", "--robot"],
+        &runtime,
+    );
+    assert_eq!(
+        review_43.status.code(),
+        Some(0),
+        "review PR 43 failed: {}",
+        String::from_utf8_lossy(&review_43.stderr)
+    );
+    let review_43_payload = parse_robot_payload(std::str::from_utf8(&review_43.stdout).unwrap());
+    let bundle_43 = review_43_payload["data"]["resume_bundle_artifact_id"]
+        .as_str()
+        .expect("bundle id for PR 43")
+        .to_owned();
+    assert_ne!(
+        bundle_42, bundle_43,
+        "separate process invocations must not collide on bundle artifact id"
+    );
+
+    let review_codex = run_rr_process(
+        &[
+            "review",
+            "--repo",
+            "owner/repo",
+            "--pr",
+            "99",
+            "--provider",
+            "codex",
+            "--robot",
+        ],
+        &runtime,
+    );
+    assert_eq!(
+        review_codex.status.code(),
+        Some(5),
+        "codex review should remain degraded tier-a, stderr: {}",
+        String::from_utf8_lossy(&review_codex.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&review_codex.stderr).contains("UNIQUE constraint failed"),
+        "cross-process sequence must not fail with unique-constraint artifact collisions"
+    );
+    let codex_payload = parse_robot_payload(std::str::from_utf8(&review_codex.stdout).unwrap());
+    assert_eq!(codex_payload["outcome"], "degraded");
+    assert_eq!(codex_payload["data"]["provider"], "codex");
 }
 
 #[test]
@@ -485,6 +605,102 @@ fn resume_blocks_with_picker_when_repo_match_is_ambiguous() {
             .expect("candidate list")
             .len(),
         2
+    );
+}
+
+#[test]
+fn return_with_explicit_session_bypasses_repo_ambiguity() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let review_42 = run_rr(&["review", "--pr", "42", "--robot"], &runtime);
+    assert_eq!(review_42.exit_code, 0, "{}", review_42.stderr);
+    let review_42_payload = parse_robot_payload(&review_42.stdout);
+    let session_42 = review_42_payload["data"]["session_id"]
+        .as_str()
+        .expect("session id for pr 42")
+        .to_owned();
+
+    let review_43 = run_rr(&["review", "--pr", "43", "--robot"], &runtime);
+    assert_eq!(review_43.exit_code, 0, "{}", review_43.stderr);
+
+    let explicit_return = run(
+        &[
+            "return".to_owned(),
+            "--session".to_owned(),
+            session_42.clone(),
+            "--robot".to_owned(),
+        ],
+        &runtime,
+    );
+    assert_eq!(explicit_return.exit_code, 0, "{}", explicit_return.stderr);
+    let explicit_payload = parse_robot_payload(&explicit_return.stdout);
+    assert_eq!(explicit_payload["outcome"], "complete");
+    assert_eq!(explicit_payload["data"]["session_id"], session_42);
+    assert_eq!(explicit_payload["data"]["return_path"], "rebound_existing_session");
+
+    let ambiguous_return = run_rr(&["return", "--robot"], &runtime);
+    assert_eq!(ambiguous_return.exit_code, 3, "{}", ambiguous_return.stderr);
+    let ambiguous_payload = parse_robot_payload(&ambiguous_return.stdout);
+    assert_eq!(ambiguous_payload["outcome"], "blocked");
+    assert!(
+        ambiguous_payload["data"]["reason"]
+            .as_str()
+            .expect("blocked reason")
+            .contains("multiple repo-local sessions"),
+    );
+}
+
+#[test]
+fn resume_dry_run_with_explicit_pr_no_match_fails_closed_without_cross_pr_candidates() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    seed_session_with_provider(&runtime, "opencode", 123, "session-opencode-123");
+
+    let resume = run_rr(&["resume", "--pr", "2", "--dry-run", "--robot"], &runtime);
+    assert_eq!(resume.exit_code, 3, "{}", resume.stderr);
+
+    let payload = parse_robot_payload(&resume.stdout);
+    assert_eq!(payload["outcome"], "blocked");
+    assert!(
+        payload["data"]["reason"]
+            .as_str()
+            .expect("blocked reason")
+            .contains("no matching repo-local session found for pull request 2")
+    );
+    assert_eq!(
+        payload["data"]["candidates"]
+            .as_array()
+            .expect("candidate list")
+            .len(),
+        0,
+        "explicit PR no-match should not include cross-PR picker candidates"
+    );
+    assert!(
+        payload["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .expect("warning text")
+                .contains("no matching session found")),
+        "no-match path should emit truthful no-match warning"
     );
 }
 

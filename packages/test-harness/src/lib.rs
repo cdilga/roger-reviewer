@@ -17,6 +17,7 @@ pub enum SuiteFamily {
     IntGithub,
     IntSearch,
     AcceptOpencode,
+    AcceptCodex,
     AcceptGemini,
     E2e,
     Smoke,
@@ -35,6 +36,7 @@ impl SuiteFamily {
             Self::IntGithub => "int_github_",
             Self::IntSearch => "int_search_",
             Self::AcceptOpencode => "accept_opencode_",
+            Self::AcceptCodex => "accept_codex_",
             Self::AcceptGemini => "accept_gemini_",
             Self::E2e => "e2e_",
             Self::Smoke => "smoke_",
@@ -146,6 +148,7 @@ impl SuiteMetadata {
         if matches!(
             self.family,
             SuiteFamily::AcceptOpencode
+                | SuiteFamily::AcceptCodex
                 | SuiteFamily::AcceptGemini
                 | SuiteFamily::IntBridge
                 | SuiteFamily::IntHarness
@@ -368,6 +371,34 @@ mod tests {
             SuiteTier::Integration,
         );
         assert!(suite.validate().is_err());
+    }
+
+    #[test]
+    fn codex_acceptance_family_has_expected_prefix_and_validation() {
+        let suite = sample_suite(
+            "accept_codex_reseed",
+            SuiteFamily::AcceptCodex,
+            SuiteTier::Acceptance,
+        );
+        assert_eq!(suite.family.prefix(), "accept_codex_");
+        assert!(suite.validate().is_ok());
+    }
+
+    #[test]
+    fn codex_acceptance_family_requires_failure_artifacts() {
+        let mut suite = sample_suite(
+            "accept_codex_reseed",
+            SuiteFamily::AcceptCodex,
+            SuiteTier::Acceptance,
+        );
+        suite.preserve_failure_artifacts = false;
+        let err = suite
+            .validate()
+            .expect_err("codex acceptance must fail closed");
+        assert!(
+            err.contains("must preserve failure artifacts"),
+            "expected explicit failure-artifact error, got: {err}"
+        );
     }
 
     #[test]
