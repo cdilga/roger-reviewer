@@ -73,6 +73,9 @@ detect_target() {
     Linux:x86_64|Linux:amd64)
       echo "x86_64-unknown-linux-gnu"
       ;;
+    Linux:arm64|Linux:aarch64)
+      echo "aarch64-unknown-linux-gnu"
+      ;;
     *)
       die "unsupported host platform: ${os}/${arch}; pass --target explicitly"
       ;;

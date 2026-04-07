@@ -28,9 +28,10 @@ TARGET="x86_64-unknown-linux-gnu"
 make_release_payload() {
   local version="$1"
   local ambiguous="${2:-0}"
+  local target="${3:-${TARGET}}"
   local tag="v${version}"
   local artifact_stem="roger-reviewer-${version}"
-  local payload_dir="${artifact_stem}-core-${TARGET}"
+  local payload_dir="${artifact_stem}-core-${target}"
   local archive_name="${payload_dir}.tar.gz"
   local release_dir="${DOWNLOAD_FS_ROOT}/${tag}"
   local checksums_name="${artifact_stem}-checksums.txt"
@@ -67,14 +68,14 @@ EOF
   "core_manifest_name": "${core_manifest_name}",
   "targets": [
     {
-      "target": "${TARGET}",
+      "target": "${target}",
       "archive_name": "${archive_name}",
       "archive_sha256": "${archive_sha}",
       "payload_dir": "${payload_dir}",
       "binary_name": "rr"
     },
     {
-      "target": "${TARGET}",
+      "target": "${target}",
       "archive_name": "${archive_name}",
       "archive_sha256": "${archive_sha}",
       "payload_dir": "${payload_dir}",
@@ -98,7 +99,7 @@ EOF
   "core_manifest_name": "${core_manifest_name}",
   "targets": [
     {
-      "target": "${TARGET}",
+      "target": "${target}",
       "archive_name": "${archive_name}",
       "archive_sha256": "${archive_sha}",
       "payload_dir": "${payload_dir}",
@@ -116,7 +117,7 @@ EOF
   "artifact_stem": "${artifact_stem}",
   "targets": [
     {
-      "target": "${TARGET}",
+      "target": "${target}",
       "archive_name": "${archive_name}",
       "archive_sha256": "${archive_sha}",
       "payload_dir": "${payload_dir}",
@@ -216,5 +217,31 @@ bash "${INSTALL_SCRIPT}" \
 
 [[ -x "${TMP_DIR}/stable/bin/rr" ]] || { echo "stable-channel install did not create executable rr" >&2; exit 1; }
 [[ "$("${TMP_DIR}/stable/bin/rr")" == "rr smoke ok" ]] || { echo "stable-channel rr smoke output mismatch" >&2; exit 1; }
+
+# Linux/aarch64 auto-detection path should resolve without requiring --target.
+make_release_payload "2026.04.05" 0 "aarch64-unknown-linux-gnu"
+MOCK_UNAME_DIR="${TMP_DIR}/mock-uname"
+mkdir -p "${MOCK_UNAME_DIR}"
+cat >"${MOCK_UNAME_DIR}/uname" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-s" ]]; then
+  echo "Linux"
+  exit 0
+fi
+if [[ "${1:-}" == "-m" ]]; then
+  echo "aarch64"
+  exit 0
+fi
+echo "Linux"
+EOF
+chmod +x "${MOCK_UNAME_DIR}/uname"
+
+PATH="${MOCK_UNAME_DIR}:${PATH}" bash "${INSTALL_SCRIPT}" \
+  --version "2026.04.05" \
+  --download-root "${DOWNLOAD_ROOT}" \
+  --install-dir "${TMP_DIR}/linux-aarch64/bin"
+
+[[ -x "${TMP_DIR}/linux-aarch64/bin/rr" ]] || { echo "linux/aarch64 auto-detect install did not create executable rr" >&2; exit 1; }
+[[ "$("${TMP_DIR}/linux-aarch64/bin/rr")" == "rr smoke ok" ]] || { echo "linux/aarch64 auto-detect rr smoke output mismatch" >&2; exit 1; }
 
 echo "rr-install.sh smoke: ok"

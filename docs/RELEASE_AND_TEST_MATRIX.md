@@ -85,7 +85,7 @@ Recommended minimum target matrix:
 
 | Artifact class | Required targets |
 |----------------|------------------|
-| Core Rust binaries | macOS `arm64`, macOS `x86_64`, Windows `x86_64`, Windows `arm64`, Linux `x86_64` |
+| Core Rust binaries | macOS `arm64`, macOS `x86_64`, Windows `x86_64`, Windows `arm64`, Linux `x86_64`, Linux `arm64` |
 | Extension package | Chrome, Brave, Edge from one source base |
 | Bridge install docs | macOS, Windows, Linux |
 
@@ -100,7 +100,7 @@ ownership and support claims:
 
 | Artifact class | Required for blessed `0.1.0` local release | Target platforms | Notes |
 |----------------|---------------------------------------------|------------------|-------|
-| Core companion archive | Yes | macOS `arm64`, macOS `x86_64`, Windows `x86_64`, Windows `arm64`, Linux `x86_64` | Versioned archive containing the `rr` binary and minimal local runtime assets. Current `release-build-core` workflow ships a truthful first subset (`macOS arm64/x86_64`, `Windows x86_64`, `Linux x86_64`) and records `Windows arm64` as explicitly excluded in the aggregate manifest until that lane is wired. |
+| Core companion archive | Yes | macOS `arm64`, macOS `x86_64`, Windows `x86_64`, Windows `arm64`, Linux `x86_64`, Linux `arm64` | Versioned archive containing the `rr` binary and minimal local runtime assets. Current `release-build-core` workflow ships a truthful first subset (`macOS arm64/x86_64`, `Windows x86_64`, `Linux x86_64/arm64`) and records `Windows arm64` as explicitly excluded in the aggregate manifest until that lane is wired. |
 | Bridge registration bundle | Yes where Roger claims browser-launch support on that OS | macOS, Windows, Linux | Native Messaging manifest templates plus Roger-owned install/uninstall helpers and any custom-URL registration assets |
 | Browser extension sideload package | Optional release lane, but required before Roger claims Chrome/Brave/Edge launch as shipped product behavior | One source base targeting Chrome, Brave, Edge | Keep browser-store publication out of the `0.1.0` critical path; publish installable package assets and docs first |
 | Release metadata bundle | Yes | All published releases | `SHA256SUMS`, install/update docs, release notes, and asset manifest describing what was built and what support tier it carries |
