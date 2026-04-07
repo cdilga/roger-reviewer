@@ -238,6 +238,11 @@ fn help_forms_exit_cleanly_for_quickstart_probe() {
             result.stderr
         );
         assert!(
+            result.stdout.contains("Roger Reviewer"),
+            "args={args:?} stdout={}",
+            result.stdout
+        );
+        assert!(
             result.stdout.contains("Usage:"),
             "args={args:?} stdout={}",
             result.stdout
