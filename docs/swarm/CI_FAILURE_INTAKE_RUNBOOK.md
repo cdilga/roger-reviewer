@@ -28,6 +28,15 @@ The watcher:
 ./scripts/swarm/watch_ci_failures.sh
 ```
 
+Preferred operational bootstrap:
+
+```bash
+./scripts/swarm/ensure_ci_failure_watch.sh
+```
+
+That script keeps the watcher in a dedicated tmux session named
+`ci-failure-watch`.
+
 One-shot mode:
 
 ```bash
@@ -90,3 +99,17 @@ The workflow is also debounced:
 This is intentional. The goal is to get feedback shortly after pushes to
 `main` without piling up obsolete heavyweight runs or burning runner minutes on
 sleep-only debounce steps.
+
+### Swarm integration
+
+The repo swarm wrapper now auto-starts the CI failure watcher after a successful
+[`launch_swarm.sh`](/Users/cdilga/Documents/dev/roger-reviewer/scripts/swarm/launch_swarm.sh)
+run. The shared status wrapper also reports whether `ci-failure-watch` is up.
+
+Manual checks:
+
+```bash
+./scripts/swarm/ensure_ci_failure_watch.sh --status
+./scripts/swarm/status.sh
+tmux attach -t ci-failure-watch
+```

@@ -64,15 +64,34 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         payload = self.rfile.read(length).decode("utf-8")
+        parsed = json.loads(payload)
         with open(log_path, "a", encoding="utf-8") as handle:
             handle.write(payload + "\n")
-        body = json.dumps(
-            {
-                "jsonrpc": "2.0",
-                "id": "1",
-                "result": {"structuredContent": {"count": 1, "deliveries": [{"ok": True}]}},
-            }
-        ).encode("utf-8")
+        args = parsed.get("params", {}).get("arguments", {})
+        if "topic" in args:
+            body = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "1",
+                    "result": {
+                        "isError": True,
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "send_message does not support the 'topic' argument yet. Omit 'topic' and retry.",
+                            }
+                        ],
+                    },
+                }
+            ).encode("utf-8")
+        else:
+            body = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "1",
+                    "result": {"structuredContent": {"count": 1, "deliveries": [{"ok": True}]}},
+                }
+            ).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -226,6 +245,7 @@ jq -e '.updated | length == 0' out-1.json >/dev/null
 jq -e '.ingested_keys == 2' out-1.json >/dev/null
 jq -e '.notifications | length == 2' out-1.json >/dev/null
 jq -e '.notifications | map(select(.status == "sent" and .topic == "ci-failure")) | length == 2' out-1.json >/dev/null
+jq -e '.notifications | map(select(.compat_retry_without_topic == true)) | length == 2' out-1.json >/dev/null
 
 count_after_first=$("${BR_BIN}" list --status open --json --no-daemon | jq '.issues | map(select(.labels | index("ci-failure-intake"))) | length')
 [[ "${count_after_first}" == "2" ]] || {
@@ -242,9 +262,10 @@ release_issue_id=$("${BR_BIN}" list --status open --json --no-daemon | jq -r '.i
 "${BR_BIN}" show "${release_issue_id}" --json --no-daemon | jq -r '.[0].notes' | rg -n "run_id: 102" >/dev/null
 "${BR_BIN}" show "${release_issue_id}" --json --no-daemon | jq -r '.[0].notes' | rg -n "quarantined_fields: summary" >/dev/null
 "${BR_BIN}" show "${release_issue_id}" --json --no-daemon | jq -r '.[0].description' | rg -n "investigate this failure" >/dev/null
-jq -s 'length == 2' "${FAKE_AM_REQUESTS}" >/dev/null
-jq -s 'map(.params.arguments.topic) | all(. == "ci-failure")' "${FAKE_AM_REQUESTS}" >/dev/null
+jq -s 'length == 4' "${FAKE_AM_REQUESTS}" >/dev/null
 jq -s 'map(.params.arguments.to[0]) | all(. == "AmberFalcon")' "${FAKE_AM_REQUESTS}" >/dev/null
+jq -s 'map(select(.params.arguments.topic == "ci-failure")) | length == 2' "${FAKE_AM_REQUESTS}" >/dev/null
+jq -s 'map(select(.params.arguments.topic == null)) | length == 2' "${FAKE_AM_REQUESTS}" >/dev/null
 
 cat >runs-2.json <<'EOF'
 {
@@ -280,6 +301,7 @@ jq -e '.created | length == 0' out-2.json >/dev/null
 jq -e '.updated | length == 1' out-2.json >/dev/null
 jq -e '.notifications | length == 1' out-2.json >/dev/null
 jq -e '.notifications[0].status == "sent"' out-2.json >/dev/null
+jq -e '.notifications[0].compat_retry_without_topic == true' out-2.json >/dev/null
 
 count_after_second=$("${BR_BIN}" list --status open --json --no-daemon | jq '.issues | map(select(.labels | index("ci-failure-intake"))) | length')
 [[ "${count_after_second}" == "2" ]] || {
@@ -288,7 +310,7 @@ count_after_second=$("${BR_BIN}" list --status open --json --no-daemon | jq '.is
 }
 
 "${BR_BIN}" show "${release_issue_id}" --json --no-daemon | jq -r '.[0].notes' | rg -n "run_id: 103" >/dev/null
-jq -s 'length == 3' "${FAKE_AM_REQUESTS}" >/dev/null
+jq -s 'length == 6' "${FAKE_AM_REQUESTS}" >/dev/null
 
 python3 "${SCRIPT}" \
   --repo cdilga/roger-reviewer \

@@ -742,6 +742,13 @@ def _call_agent_mail_tool(
     if payload.get("error"):
         raise RuntimeError(f"agent mail error: {payload['error']}")
     result = payload.get("result", {})
+    if isinstance(result, dict) and result.get("isError"):
+        parts: list[str] = []
+        for item in result.get("content", []):
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        detail = " ".join(parts).strip() or "unknown agent mail tool error"
+        raise RuntimeError(detail)
     if isinstance(result, dict) and "structuredContent" in result:
         return result["structuredContent"]
     return result
@@ -853,29 +860,45 @@ def _notify_agent_mail(
         }
     _agent_mail_sender_ready(config=config, project_root=project_root)
     token = _discover_agent_mail_token(config.token_path)
-    response = _call_agent_mail_tool(
-        api_url=config.api_url,
-        token=token,
-        tool_name="send_message",
-        arguments={
-            "project_key": str(project_root),
-            "sender_name": config.sender_name,
-            "to": recipients,
-            "subject": f"CI failure {action}: {run.workflow_path} [{run.ref_label}] -> {issue_id}",
-            "body_md": _build_notification_body(
-                run, issue_id=issue_id, action=action, topic=config.topic
-            ),
-            "importance": config.importance,
-            "ack_required": config.ack_required,
-            "topic": config.topic,
-        },
-    )
+    arguments = {
+        "project_key": str(project_root),
+        "sender_name": config.sender_name,
+        "to": recipients,
+        "subject": f"CI failure {action}: {run.workflow_path} [{run.ref_label}] -> {issue_id}",
+        "body_md": _build_notification_body(
+            run, issue_id=issue_id, action=action, topic=config.topic
+        ),
+        "importance": config.importance,
+        "ack_required": config.ack_required,
+        "topic": config.topic,
+    }
+    compat_retry = False
+    try:
+        response = _call_agent_mail_tool(
+            api_url=config.api_url,
+            token=token,
+            tool_name="send_message",
+            arguments=arguments,
+        )
+    except RuntimeError as exc:
+        if "does not support the 'topic' argument yet" not in str(exc):
+            raise
+        compat_retry = True
+        compat_arguments = dict(arguments)
+        compat_arguments.pop("topic", None)
+        response = _call_agent_mail_tool(
+            api_url=config.api_url,
+            token=token,
+            tool_name="send_message",
+            arguments=compat_arguments,
+        )
     return {
         "status": "sent",
         "topic": config.topic,
         "recipients": recipients,
         "issue_id": issue_id,
         "action": action,
+        "compat_retry_without_topic": compat_retry,
         "response": response,
     }
 
