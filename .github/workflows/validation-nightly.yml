@@ -10,17 +10,13 @@ on:
 
 concurrency:
   group: validation-nightly-${{ github.ref_name }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   nightly:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Debounce push-triggered nightly lane
-        if: ${{ github.event_name == 'push' }}
-        run: sleep 600
 
       - id: tier
         uses: ./.github/actions/validation-tier

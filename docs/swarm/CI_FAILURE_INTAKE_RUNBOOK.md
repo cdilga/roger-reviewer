@@ -11,7 +11,7 @@ repo and feeds them through
 
 The watcher:
 
-- watches release and validation workflows by default
+- watches all repo workflows under `.github/workflows/` by default
 - creates or updates deduplicated `ci-failure-intake` beads
 - stores incremental state under `.beads/ci-failure-intake-state.json` so the
   same run does not rewrite the same bead every poll
@@ -60,10 +60,11 @@ Supported knobs:
 
 The workflow is also debounced:
 
-- it waits 600 seconds on push-triggered runs
 - it uses a workflow concurrency group keyed by branch
-- `cancel-in-progress: true` means a newer push supersedes the older pending or
-  running nightly pass for that branch
+- `cancel-in-progress: false` means the active run is preserved, but GitHub
+  collapses stale queued runs in the same concurrency group so the latest queued
+  follow-up wins
 
 This is intentional. The goal is to get feedback shortly after pushes to
-`main` without piling up obsolete heavyweight runs.
+`main` without piling up obsolete heavyweight runs or burning runner minutes on
+sleep-only debounce steps.

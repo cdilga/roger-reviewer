@@ -20,15 +20,13 @@ abort("validation-nightly must keep workflow_dispatch trigger") unless on_block.
 
 concurrency = workflow.fetch("concurrency")
 abort("validation-nightly concurrency group must be branch-scoped") unless concurrency.fetch("group") == "validation-nightly-${{ github.ref_name }}"
-abort("validation-nightly must cancel in-progress runs to debounce pushes") unless concurrency.fetch("cancel-in-progress") == true
+abort("validation-nightly must preserve the active run while collapsing queued runs") unless concurrency.fetch("cancel-in-progress") == false
 
 steps = workflow.fetch("jobs").fetch("nightly").fetch("steps")
 debounce = steps.find { |step| step["name"] == "Debounce push-triggered nightly lane" }
-abort("validation-nightly is missing debounce step") unless debounce
-abort("debounce step must only run on push events") unless debounce["if"] == "${{ github.event_name == 'push' }}"
-abort("debounce step must sleep 600 seconds") unless debounce["run"] == "sleep 600"
+abort("validation-nightly should not burn runner minutes on an in-workflow debounce sleep") if debounce
 
-puts "validation-nightly workflow includes push trigger, debounce, and concurrency guard"
+puts "validation-nightly workflow includes push trigger and queued-run concurrency guard"
 RUBY
 
 echo "PASS: validation-nightly workflow guard"
