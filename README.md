@@ -1,9 +1,9 @@
 # Roger Reviewer
 
-> Pre-release, local-first pull request review with durable sessions and explicit
-> approval gates before any GitHub write.
+> Local-first pull request review with durable sessions and explicit approval
+> gates before any GitHub write.
 
-## Status (As Of April 1, 2026)
+## Status (As Of April 7, 2026)
 
 Roger Reviewer is in active `0.1.0` implementation.
 
@@ -14,15 +14,15 @@ What is real in this repo right now:
 - extension support is optional and launch-focused, not the source of truth
 - safety model is explicit: no automatic posting and no hidden mutation path
 
-What is not shipped as a polished user release yet:
+What is not fully shipped yet:
 
-- no GA signed installer distribution channel yet (release lanes are still pre-release)
+- no GA signed installer distribution channel yet
 - no automatic in-place binary mutation path from `rr update` (manual install step remains explicit)
 - no in-extension approval or posting controls
 
 ## Who This Is For
 
-Primary audience for this pre-release slice:
+Primary audience for this slice:
 
 - engineers reviewing GitHub PRs from terminal-first workflows
 - teams that want durable local review continuity rather than one-shot prompt output
@@ -47,13 +47,14 @@ Roger Reviewer is not:
 
 | Surface | Current reality | Notes |
 | --- | --- | --- |
+| Published `rr` CLI install | Available | One-line release installer ships on GitHub Releases |
 | `rr` CLI from source | Available for local/dev use | Commands are implemented in `packages/cli`; run via `cargo run` |
 | OpenCode provider flow | Blessed quickstart path | Primary documented continuity path for this slice |
 | Codex provider path | Bounded/non-primary | Exists in command surface but is not the primary supported onboarding lane |
 | Browser extension | Optional launch helper | PR-page launch panel; local Roger remains authoritative |
 | In-extension posting controls | Not shipped | Approval/posting stays local and explicit |
 
-## Install Reality (Pre-Release)
+## Install Reality
 
 Installer/update metadata contracts now exist in-repo:
 
@@ -62,7 +63,33 @@ Installer/update metadata contracts now exist in-repo:
 - `rr update` validates published release metadata and fails closed for
   local/unpublished builds without embedded release markers
 
-Source-run onboarding is still the default developer path:
+Public one-line installer entrypoints (CLI base product):
+
+- Stable/latest (Unix):
+  - `curl -fsSL https://github.com/cdilga/roger-reviewer/releases/latest/download/rr-install.sh | bash`
+- Stable/latest (PowerShell):
+  - `& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing 'https://github.com/cdilga/roger-reviewer/releases/latest/download/rr-install.ps1').Content))`
+- Pinned release (Unix, example `2026.04.07`):
+  - `curl -fsSL https://github.com/cdilga/roger-reviewer/releases/download/v2026.04.07/rr-install.sh | bash -s -- --version 2026.04.07`
+- Pinned release (PowerShell, example `2026.04.07`):
+  - `& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing 'https://github.com/cdilga/roger-reviewer/releases/download/v2026.04.07/rr-install.ps1').Content)) -Version '2026.04.07'`
+
+Optional follow-on workflow (separate from base CLI install):
+
+- bridge and extension packaging assets are optional; base `rr` install does not require them
+- use optional lanes only when browser launch/helper integration is needed
+- the browser extension is not shipped as a release artifact in this slice; pack/sideload it from source if you need the PR-page launch panel
+
+Safe isolated install example:
+
+```bash
+mkdir -p "$HOME/.local/rr-test-bin"
+curl -fsSL https://github.com/cdilga/roger-reviewer/releases/latest/download/rr-install.sh | \
+  bash -s -- --install-dir "$HOME/.local/rr-test-bin"
+alias rr-rel="$HOME/.local/rr-test-bin/rr"
+```
+
+Source-run onboarding remains the developer path:
 
 1. install Rust toolchain
 2. clone repo and run `rr` through Cargo
@@ -79,11 +106,66 @@ export RR_OPENCODE_BIN="opencode"
 
 ### 1. Prerequisites
 
-- Rust toolchain
 - a Git repository with a GitHub `origin` remote
 - OpenCode CLI available on `PATH` (or `RR_OPENCODE_BIN` override)
 
-### 2. Run `rr` from source
+### 2. Install `rr`
+
+Stable/latest:
+
+```bash
+curl -fsSL https://github.com/cdilga/roger-reviewer/releases/latest/download/rr-install.sh | bash
+```
+
+Safe isolated install:
+
+```bash
+mkdir -p "$HOME/.local/rr-test-bin"
+curl -fsSL https://github.com/cdilga/roger-reviewer/releases/latest/download/rr-install.sh | \
+  bash -s -- --install-dir "$HOME/.local/rr-test-bin"
+alias rr="$HOME/.local/rr-test-bin/rr"
+```
+
+### 3. Check the installed CLI
+
+```bash
+rr --help
+rr update --dry-run
+```
+
+### 4. Start a review session (OpenCode)
+
+```bash
+rr review --pr 123 --provider opencode
+```
+
+### 5. Inspect local state
+
+```bash
+rr status
+rr findings
+rr sessions
+rr search --query "null pointer"
+```
+
+### 6. Continue the same review safely
+
+```bash
+rr resume --pr 123
+rr refresh --pr 123
+rr return --pr 123
+```
+
+If candidate sessions are ambiguous, Roger fails closed and requires explicit
+selection (for example `--session <id>`).
+
+## Developer Path (Run From Source)
+
+Prerequisites:
+
+- Rust toolchain
+
+Run `rr` from source:
 
 ```bash
 cargo run -p roger-cli --bin rr -- help
@@ -94,32 +176,6 @@ Optional shell alias:
 ```bash
 alias rr='cargo run -q -p roger-cli --bin rr --'
 ```
-
-### 3. Start a review session (OpenCode)
-
-```bash
-rr review --pr 123 --provider opencode
-```
-
-### 4. Inspect local state
-
-```bash
-rr status
-rr findings
-rr sessions
-rr search --query "null pointer"
-```
-
-### 5. Continue the same review safely
-
-```bash
-rr resume --pr 123
-rr refresh --pr 123
-rr return --pr 123
-```
-
-If candidate sessions are ambiguous, Roger fails closed and requires explicit
-selection (for example `--session <id>`).
 
 ## Optional Browser Launch Surface
 
