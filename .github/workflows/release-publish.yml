@@ -37,6 +37,8 @@ on:
       - .github/workflows/release-publish.yml
       - scripts/release/publish_release.py
       - scripts/release/test_release_publish_workflow.sh
+      - scripts/release/release_publish_trigger.sh
+      - scripts/release/test_release_publish_trigger.sh
       - scripts/release/test_publish_release.sh
       - scripts/release/validate_upstream_run.sh
       - scripts/release/test_validate_upstream_run.sh
@@ -58,6 +60,7 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/release/test_release_publish_workflow.sh
+          bash scripts/release/test_release_publish_trigger.sh
           bash scripts/release/test_validate_upstream_run.sh
           bash scripts/release/test_publish_release.sh
 
@@ -137,6 +140,10 @@ jobs:
 
           gh run download "${{ inputs.core_run_id }}" \
             --name core-install-metadata \
+            --dir upstream/assets
+
+          gh run download "${{ inputs.core_run_id }}" \
+            --name core-install-bootstrap \
             --dir upstream/assets
 
           gh run download "${{ inputs.core_run_id }}" \
