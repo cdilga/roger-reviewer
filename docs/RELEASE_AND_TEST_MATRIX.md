@@ -100,7 +100,7 @@ ownership and support claims:
 
 | Artifact class | Required for blessed `0.1.0` local release | Target platforms | Notes |
 |----------------|---------------------------------------------|------------------|-------|
-| Core companion archive | Yes | macOS `arm64`, macOS `x86_64`, Windows `x86_64`, Windows `arm64`, Linux `x86_64`, Linux `arm64` | Versioned archive containing the `rr` binary and minimal local runtime assets. Current `release-build-core` workflow ships a truthful first subset (`macOS arm64/x86_64`, `Windows x86_64`, `Linux x86_64/arm64`) and records `Windows arm64` as explicitly excluded in the aggregate manifest until that lane is wired. |
+| Core companion archive | Yes | macOS `arm64`, macOS `x86_64`, Windows `x86_64`, Windows `arm64`, Linux `x86_64`, Linux `arm64` | Versioned archive containing the `rr` binary and minimal local runtime assets. The unified `release` workflow currently ships a truthful first subset (`macOS arm64/x86_64`, `Windows x86_64`, `Linux x86_64/arm64`) and records `Windows arm64` as explicitly excluded in the aggregate manifest until that lane is wired. |
 | Bridge registration bundle | Yes where Roger claims browser-launch support on that OS | macOS, Windows, Linux | Native Messaging manifest templates plus Roger-owned install/uninstall helpers and any custom-URL registration assets |
 | Browser extension sideload package | Optional release lane, but required before Roger claims Chrome/Brave/Edge launch as shipped product behavior | One source base targeting Chrome, Brave, Edge | Keep browser-store publication out of the `0.1.0` critical path; publish installable package assets and docs first |
 | Release metadata bundle | Yes | All published releases | `SHA256SUMS`, install/update docs, release notes, and asset manifest describing what was built and what support tier it carries |
@@ -140,71 +140,60 @@ Rules:
 
 ### CI and release job ownership
 
-Roger should split release automation by responsibility so build, packaging, and
-publication remain inspectable.
+Roger should keep release automation inspectable without exploding the GitHub
+Actions sidebar. The current shape is one operator-facing `release` workflow
+with parallel jobs for build, packaging, verification, and publication.
 
 | Job | Ownership | Responsibilities | Outputs |
 |-----|-----------|------------------|---------|
 | `ci-verify` | Continuous integration on every PR and release candidate | Lint, unit/integration suites, packaging smoke, artifact naming checks, checksum-manifest shape validation | Validation only; no published assets |
-| `release-calver-dry-run` | Release-contract guard lane | Run `roger-validation derive-calver` against synthetic stable/rc/nightly refs and assert deterministic tag/channel outputs before packaging jobs consume them | Contract-proof derivation logs; no published assets |
-| `release-build-core` | Release pipeline | Build versioned Rust binaries for the supported OS/arch matrix and stage raw archives | Per-target core companion archives |
-| `release-package-bridge` | Release pipeline | Generate Native Messaging manifests, platform registration helpers, and bridge install/uninstall bundles for supported OS targets | Per-OS bridge registration bundles |
-| `release-package-extension` | Separate optional release lane | Produce browser-installable extension packages from the shared source base and stamp them with the release version/source revision | Extension sideload packages for Chrome/Brave/Edge |
-| `release-verify-assets` | Release pipeline | Recompute checksums, verify archive contents, confirm release manifest completeness, and enforce signing policy gates that are active for the target | Verified `SHA256SUMS` and release asset manifest |
-| `release-publish` | Release pipeline with explicit maintainer approval | Attach approved artifacts to the versioned release, publish notes, and mark which artifact lanes are shipped for that tag | Published GitHub release and notes |
+| `release` `fixture-rehearsal` | PR guard inside unified release workflow | Run deterministic release fixture scripts and contract checks when release plumbing changes | Validation only; no published assets |
+| `release` `build-core` | Release pipeline | Build versioned Rust binaries for the supported OS/arch matrix and stage raw archives | Per-target core companion archives |
+| `release` `package-bridge` | Release pipeline | Generate Native Messaging manifests, platform registration helpers, and bridge install/uninstall bundles for supported OS targets | Per-OS bridge registration bundles |
+| `release` `package-extension` | Release pipeline | Produce browser-installable extension packages from the shared source base and stamp them with the release version/source revision | Extension sideload packages for Chrome/Brave/Edge |
+| `release` `verify-release-assets` | Release pipeline | Recompute checksums, verify archive contents, confirm release manifest completeness, and enforce publish gates | Verified `SHA256SUMS` and release asset manifest |
+| `release` `publish-release` | Release pipeline with explicit maintainer approval | Attach approved artifacts to the versioned release and publish notes from the same workflow run | Published GitHub release and notes |
 
 Ownership rules:
 
-- `release-build-core` owns compilation, but not publication
-- `release-package-bridge` owns Native Messaging and custom-URL registration
+- `release` keeps one top-level workflow while preserving job-level ownership
+- `build-core` owns compilation, but not publication
+- `package-bridge` owns Native Messaging and custom-URL registration
   assets, but not browser-extension packaging
-- `release-package-extension` is intentionally separate so the browser lane can
+- `package-extension` remains its own job so the browser lane can
   advance or pause without muddying the core local-product release lane
-- `release-publish` should publish only the artifact classes that actually
+- `publish-release` should publish only the artifact classes that actually
   passed verification; it must not imply extension availability if the extension
-  lane was skipped for that tag
+  job was skipped or failed for that tag
 - manual release work should be limited to explicit approval and smoke checks,
   not ad hoc asset assembly
 
-`release-publish` operator contract for `0.1.0`:
+Unified `release` operator contract for `0.1.0`:
 
-1. Run upstream release lanes and capture workflow run ids:
-   - required: `core_run_id` from `release-build-core`
-   - required: `verify_run_id` from `release-verify-assets`
-   - optional: `bridge_run_id` and `extension_run_id` when those lanes ship
-     artifacts for the same tag.
-2. Run `release-publish` via `workflow_dispatch` with:
-   - `core_run_id=<release-build-core-run-id>`
-   - `verify_run_id=<release-verify-assets-run-id>`
-   - `publish_mode=draft` for rehearsal, or `publish_mode=publish` for stable
-     CalVer tags only.
+1. Run the unified `release` workflow for the intended tag.
+2. Use `workflow_dispatch` with `publish_mode=draft` for rehearsal, or
+   `publish_mode=publish` for stable CalVer tags only.
 3. Approval is explicit via the `release-publish-approval` environment gate.
-4. `release-publish` must fail closed unless:
+4. `publish-release` must fail closed unless:
    - verify manifest schema is `roger.release-verify-assets.v1`
    - `publish_gate.publish_allowed == true`
-   - upstream run payloads map to expected workflow paths and successful
-     conclusions
-   - captured upstream run URLs are canonical GitHub Actions run URLs
-     (`https://github.com/<owner>/<repo>/actions/runs/<id>`)
+   - the same workflow run produced successful build/package/verify jobs for the
+     artifact classes being published
+   - captured provenance URLs resolve to the canonical GitHub Actions run URL
+     for that unified release run
    - approved tag ref and release metadata stay consistent across verified
      manifests
-   - optional-lane parity holds with upstream verify data (no silent widening
-     or downgrade). If upstream verify data marks bridge or extension as built,
-     release-publish must reverify that lane and require matching lane run
-     provenance. Optional lane status values are constrained to `built` or
-     `skipped`, and lane-summary entries for both optional lanes must be
-     present. When upstream verify data marks a lane as skipped, the matching
-     optional run URL input must be omitted.
+   - optional-lane parity holds with verify data from the same run; no silent
+     widening or downgrade is allowed
 5. Release notes are generated from the verified manifest and must include:
-   support posture, narrowed claims, checksum/signing references, and upstream
+   support posture, narrowed claims, checksum/signing references, and release
    run provenance.
 6. Stable publish (`publish_mode=publish`) requires explicit operator smoke
    acknowledgement and the checklist in
    `docs/release-publish-operator-smoke.md`.
 7. `release-publish-plan` artifacts should retain:
    - generated release plan + notes
-   - reverified manifest/checksums/signing notes
-   - upstream run payload evidence (`run-*.json`, including optional-lane run payloads when present).
+   - verified manifest/checksums/signing notes from the same run
 8. Stable installer-readiness is not complete until live post-publish checks pass
    against the canonical repo:
    - `GET https://api.github.com/repos/<owner>/<repo>/releases/latest` returns
@@ -213,6 +202,12 @@ Ownership rules:
      exits `0` and resolves install metadata + target archive URLs for that tag.
    - closeout records the absolute UTC probe timestamp and stable release tag
      used for the live check.
+   - CI-sensitive closeout evidence for release/publish-labelled beads must
+     include these live-proof fields through
+     `scripts/swarm/check_ci_closeout_evidence.sh`:
+     `--latest-proof-utc <YYYY-MM-DDTHH:MM:SSZ>`,
+     `--latest-proof-tag <stable-tag>`, and
+     `--installer-dry-run-outcome success`.
 
 ### Publication posture
 

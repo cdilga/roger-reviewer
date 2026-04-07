@@ -1,49 +1,35 @@
 # Release Publish Operator Smoke (rr-xr6.5)
 
-Purpose: provide the minimum truthful manual smoke checklist that must be completed before running `release-publish` with `publish_mode=publish`.
+Purpose: provide the minimum truthful manual smoke checklist that must be completed before running the unified `release` workflow with `publish_mode=publish`.
 
 ## Preconditions
 
-1. `release-build-core` run completed successfully for the intended tag.
-2. `release-verify-assets` run completed successfully and reports `publish_gate.publish_allowed=true`.
-3. If optional lanes are claimed as shipped, corresponding `release-package-bridge` and/or `release-package-extension` runs completed successfully.
-4. You have the run IDs for all lanes being referenced.
-   - `scripts/release/release_publish_trigger.sh` can discover required run IDs
-     for a tag when `core_run_id` / `verify_run_id` are omitted.
+1. The unified `release` workflow completed its build, packaging, and verify jobs successfully for the intended tag.
+2. The `release-verify-assets-report` artifact reports `publish_gate.publish_allowed=true`.
+3. The same workflow run produced the optional bridge/extension artifacts you intend to ship.
 
 ## Required Checks
 
 1. Verify run identity in GitHub Actions UI:
-- run IDs map to expected workflows (`release-build-core`, `release-verify-assets`, optional package lanes)
+- the run is the unified `release` workflow for the intended tag
 - run conclusion is `success`
 - run event is `push` or `workflow_dispatch`
-- if upstream verify data claims bridge/extension lanes as built, provide
-  matching `bridge_run_id` / `extension_run_id` (and keep those runs successful)
+- the internal jobs `build-core`, `package-bridge`, `package-extension`, and
+  `verify-release-assets` all succeeded for the run you are using
 
 2. Verify release artifacts in the `release-verify-assets-report` artifact:
 - `release-asset-manifest.json` schema is `roger.release-verify-assets.v1`
 - `publish_gate.publish_allowed` is `true`
 - release tag/version/channel are the intended values
 - `SHA256SUMS` and signing notes are present
-- optional lane claims in upstream verify data match the lanes you provide to
-  `release-publish` (no silent optional-lane downgrade)
+- optional lane claims in verify data match the artifacts the unified release
+  run actually produced (no silent optional-lane downgrade)
 
 3. Dry-run publication path as draft first (recommended):
 ```bash
-# Recommended scripted trigger path:
-# - discovers core/verify run IDs from the tag
-# - validates workflow identity + success state before dispatch
-bash scripts/release/release_publish_trigger.sh \
-  --repo <owner>/<repo> \
-  --tag <stable-or-rc-tag> \
-  --publish-mode draft
-
-# Optional explicit-ID path when IDs are already known:
-bash scripts/release/release_publish_trigger.sh \
-  --repo <owner>/<repo> \
-  --core-run-id <core_run_id> \
-  --verify-run-id <verify_run_id> \
-  --publish-mode draft
+gh workflow run release.yml \
+  -f ref=refs/tags/<stable-or-rc-tag> \
+  -f publish_mode=draft
 ```
 
 4. Inspect draft output:
@@ -56,24 +42,27 @@ bash scripts/release/release_publish_trigger.sh \
 - publish mode must pass `--operator-smoke-ack`
 - example:
 ```bash
-bash scripts/release/release_publish_trigger.sh \
-  --repo <owner>/<repo> \
-  --core-run-id <core_run_id> \
-  --verify-run-id <verify_run_id> \
-  --publish-mode publish \
-  --operator-smoke-ack
+gh workflow run release.yml \
+  -f ref=refs/tags/<stable-or-rc-tag> \
+  -f publish_mode=publish \
+  -f operator_smoke_ack=true
 ```
 
 6. Post-publish live installer proof (required for stable readiness):
-- `curl -fsSL https://api.github.com/repos/<owner>/<repo>/releases/latest` must
-  resolve (HTTP 200) and return the expected stable tag.
-- `bash scripts/release/rr-install.sh --repo <owner>/<repo> --dry-run` must
-  exit 0 against the live release feed.
-- record absolute UTC timestamp and resolved stable tag in closeout notes.
+- `curl -fsSL https://api.github.com/repos/cdilga/roger-reviewer/releases/latest`
+  must resolve (HTTP 200) and return the expected stable tag.
+- `bash scripts/release/rr-install.sh --repo cdilga/roger-reviewer --dry-run`
+  must exit 0 against the live release feed.
+- record these exact CI-evidence fields in closeout:
+  - `--latest-proof-utc <YYYY-MM-DDTHH:MM:SSZ>`
+  - `--latest-proof-tag <stable-tag>`
+  - `--installer-dry-run-outcome success`
 
 ## Evidence to retain
 
-- URLs for upstream run IDs used by release-publish
+- URL for the unified `release` workflow run used for publish
 - `release-publish-plan` artifact from the publish run
 - final release URL
 - live installer proof outputs (`releases/latest` response summary + dry-run output)
+- explicit CI evidence fields for the closeout guard:
+  `latest_proof_utc`, `latest_proof_tag`, `installer_dry_run_outcome`

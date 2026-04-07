@@ -1,0 +1,59 @@
+name: validation-main
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "17 8 * * *"
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "Validation tier to run manually"
+        required: true
+        default: release
+        type: choice
+        options:
+          - gated
+          - nightly
+          - release
+
+concurrency:
+  group: validation-main-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  main:
+    runs-on: ubuntu-latest
+    outputs:
+      selected_tier: ${{ steps.select.outputs.tier }}
+    steps:
+      - id: select
+        shell: bash
+        run: |
+          set -euo pipefail
+          tier="release"
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            tier="gated"
+          elif [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+            tier="nightly"
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tier="${{ github.event.inputs.tier }}"
+          fi
+          echo "tier=${tier}" >>"${GITHUB_OUTPUT}"
+
+      - uses: actions/checkout@v4
+
+      - id: tier
+        uses: ./.github/actions/validation-tier
+        with:
+          tier: ${{ steps.select.outputs.tier }}
+
+      - name: Upload validation artifacts
+        if: ${{ always() && steps.tier.outputs.bootstrap_skip != 'true' && (steps.tier.outputs.upload_mode == 'always' || failure()) }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-${{ steps.select.outputs.tier }}-artifacts
+          path: ${{ steps.tier.outputs.artifact_root }}
+          if-no-files-found: ignore
+          retention-days: ${{ steps.tier.outputs.retention_days }}

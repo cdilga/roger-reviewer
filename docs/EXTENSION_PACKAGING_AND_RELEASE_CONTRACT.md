@@ -184,14 +184,15 @@ can ship the local product honestly even when the browser lane is not shipped.
 
 Release-job ownership is:
 
-- `release-build-core` builds Rust companion archives only
-- `release-package-bridge` owns Native Messaging manifest rendering,
-  OS-specific registration helpers, and platform bridge registration bundles
-- `release-package-extension` owns extension packaging from the shared source
-  tree after contract verification passes
-- `release-verify-assets` recomputes checksums, verifies package contents, and
-  confirms the correct release lanes were produced
-- `release-publish` publishes only the artifact classes that actually passed
+- the unified `release` workflow is the operator-facing release lane
+- `build-core` builds Rust companion archives only
+- `package-bridge` owns Native Messaging manifest rendering, OS-specific
+  registration helpers, and platform bridge registration bundles
+- `package-extension` owns extension packaging from the shared source tree
+  after contract verification passes
+- `verify-release-assets` recomputes checksums, verifies package contents, and
+  confirms the correct release jobs were produced
+- `publish-release` publishes only the artifact classes that actually passed
   verification
 
 ### Publication rules

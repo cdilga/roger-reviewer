@@ -102,7 +102,7 @@ cargo run -p roger-validation -- derive-calver \
 
 CI dry-run coverage for synthetic refs is defined in:
 
-- `.github/workflows/release-calver-dry-run.yml`
+- PR fixture checks inside `.github/workflows/release.yml`
 
 ## Why `rr-001.2` / `rr-001.3` Were Not Enough
 

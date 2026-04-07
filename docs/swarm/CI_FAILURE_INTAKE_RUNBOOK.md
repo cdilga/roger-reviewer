@@ -83,22 +83,15 @@ The watcher treats GitHub run metadata as untrusted text.
 
 ### Triggering behavior
 
-`validation-nightly` now runs on:
+`validation-main` now covers the old main-branch validation lanes:
 
-- push to `main`
-- scheduled nightly cron
-- manual dispatch
+- push to `main` selects the `gated` tier
+- scheduled runs select the `nightly` tier
+- manual dispatch selects `gated`, `nightly`, or `release`
 
-The workflow is also debounced:
-
-- it uses a workflow concurrency group keyed by branch
-- `cancel-in-progress: false` means the active run is preserved, but GitHub
-  collapses stale queued runs in the same concurrency group so the latest queued
-  follow-up wins
-
-This is intentional. The goal is to get feedback shortly after pushes to
-`main` without piling up obsolete heavyweight runs or burning runner minutes on
-sleep-only debounce steps.
+The workflow uses a single branch-scoped concurrency group with
+`cancel-in-progress: false`, so the active run is preserved while stale queued
+follow-ups are collapsed.
 
 ### Swarm integration
 

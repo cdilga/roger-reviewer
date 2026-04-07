@@ -6,7 +6,7 @@ This document defines Roger's canonical release-version authority for `0.1.x`.
 
 - canonical derivation path: `scripts/release/derive_calver_version.py`
 - canonical deterministic validation command: `./scripts/release/test_derive_calver_version.sh`
-- canonical CI dry-run lane: `.github/workflows/release-version-dry-run.yml`
+- canonical CI dry-run path: PR fixture checks inside `.github/workflows/release.yml`
 
 Any workflow that names release tags, release titles, archive names, checksums, or
 manifest files must consume the JSON envelope emitted by the derivation script.

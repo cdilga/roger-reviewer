@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-workflow_path=".github/workflows/release-publish.yml"
+workflow_path=".github/workflows/release.yml"
 
 ruby - "${workflow_path}" <<'RUBY'
 require "yaml"
@@ -17,6 +17,8 @@ end
 jobs = workflow.fetch("jobs")
 publish = jobs.fetch("publish-release")
 fixture = jobs.fetch("fixture-rehearsal")
+build_core = jobs.fetch("build-core")
+verify_release_assets = jobs.fetch("verify-release-assets")
 
 unless publish["environment"] == "release-publish-approval"
   fail!("expected publish-release.environment=release-publish-approval")
@@ -44,14 +46,11 @@ unless pr_paths.is_a?(Array)
   fail!("pull_request.paths must be an array")
 end
 required_pr_paths = [
-  ".github/workflows/release-publish.yml",
-  "scripts/release/publish_release.py",
-  "scripts/release/test_release_publish_workflow.sh",
-  "scripts/release/release_publish_trigger.sh",
-  "scripts/release/test_release_publish_trigger.sh",
-  "scripts/release/test_publish_release.sh",
-  "scripts/release/validate_upstream_run.sh",
-  "scripts/release/test_validate_upstream_run.sh",
+  ".github/workflows/release.yml",
+  "scripts/release/**",
+  "docs/RELEASE_AND_TEST_MATRIX.md",
+  "docs/RELEASE_CALVER_VERSIONING_CONTRACT.md",
+  "docs/release-publish-operator-smoke.md",
 ]
 required_pr_paths.each do |path_entry|
   unless pr_paths.include?(path_entry)
@@ -59,7 +58,7 @@ required_pr_paths.each do |path_entry|
   end
 end
 
-required_input_ids = ["core_run_id", "verify_run_id", "publish_mode"]
+required_input_ids = ["publish_mode"]
 required_input_ids.each do |id|
   input = inputs[id]
   fail!("missing workflow_dispatch input #{id}") unless input.is_a?(Hash)
@@ -85,54 +84,9 @@ end
 
 steps = publish.fetch("steps")
 
-validate_step = steps.find do |step|
-  step["name"] == "Validate upstream run identities and successful completion"
-end
-fail!("missing upstream run validation step") unless validate_step.is_a?(Hash)
-validate_run_script = validate_step["run"]
-unless validate_run_script.is_a?(String) &&
-       validate_run_script.include?("scripts/release/validate_upstream_run.sh")
-  fail!("upstream run validation step must call scripts/release/validate_upstream_run.sh")
-end
-
-download_step = steps.find { |step| step["name"] == "Download required upstream artifacts" }
-fail!("missing Download required upstream artifacts step") unless download_step.is_a?(Hash)
-download_run = download_step["run"]
-unless download_run.is_a?(String)
-  fail!("Download required upstream artifacts step must define a run script")
-end
-required_download_tokens = [
-  "--name release-version-metadata",
-  "--name release-build-core-manifest",
-  "--name core-install-metadata",
-  "--name core-install-bootstrap",
-]
-required_download_tokens.each do |token|
-  unless download_run.include?(token)
-    fail!("Download required upstream artifacts must include #{token}")
-  end
-end
-if download_run.include?("--dir upstream/core-manifest")
-  fail!("Download required upstream artifacts must stage release-build-core-manifest/core-install-metadata under upstream/assets")
-end
-unless download_run.include?("--name release-build-core-manifest") && download_run.include?("--dir upstream/assets")
-  fail!("release-build-core-manifest must be downloaded into upstream/assets")
-end
-unless download_run.include?("--name core-install-metadata") && download_run.include?("--dir upstream/assets")
-  fail!("core-install-metadata must be downloaded into upstream/assets")
-end
-unless download_run.include?("--name core-install-bootstrap") && download_run.include?("--dir upstream/assets")
-  fail!("core-install-bootstrap must be downloaded into upstream/assets")
-end
-
-reverify_step = steps.find { |step| step["name"] == "Re-verify downloaded upstream assets" }
-fail!("missing Re-verify downloaded upstream assets step") unless reverify_step.is_a?(Hash)
-reverify_run = reverify_step["run"]
-unless reverify_run.is_a?(String)
-  fail!("Re-verify downloaded upstream assets step must define a run script")
-end
-unless reverify_run.include?("find upstream/assets -type f -name 'release-core-manifest-*.json'")
-  fail!("Re-verify step must resolve core manifest from upstream/assets")
+needs = publish.fetch("needs")
+unless needs.sort == ["derive-release-metadata", "verify-release-assets"]
+  fail!("publish-release must depend on derive-release-metadata and verify-release-assets")
 end
 
 plan_step = steps.find { |step| step["name"] == "Build release publication plan" }
@@ -143,8 +97,6 @@ unless plan_run.is_a?(String)
 end
 required_plan_flags = [
   "--upstream-verified-manifest",
-  "--core-run-url",
-  "--verify-run-url",
   "--publish-mode",
 ]
 required_plan_flags.each do |flag|
@@ -157,15 +109,12 @@ upload_step = steps.find { |step| step["name"] == "Upload publish-plan evidence"
 fail!("missing Upload publish-plan evidence step") unless upload_step.is_a?(Hash)
 
 artifact_path = upload_step.fetch("with").fetch("path")
-unless artifact_path.include?("run-*.json")
-  fail!("publish-plan evidence must retain run-*.json payloads")
-end
 required_artifact_entries = [
   "publish-plan/release-plan.json",
   "publish-plan/release-notes.md",
-  "upstream/reverified/release-asset-manifest.json",
-  "upstream/reverified/SHA256SUMS",
-  "upstream/reverified/release-notes-signing.md",
+  "upstream/verify-report/release-asset-manifest.json",
+  "upstream/verify-report/SHA256SUMS",
+  "upstream/verify-report/release-notes-signing.md",
 ]
 required_artifact_entries.each do |entry|
   unless artifact_path.include?(entry)
@@ -181,15 +130,24 @@ end
 fail!("fixture-rehearsal must execute test_release_publish_workflow.sh") if fixture_script_step.nil?
 fixture_run = fixture_script_step["run"]
 required_fixture_commands = [
+  "bash scripts/release/test_release_build_core_workflow.sh",
   "bash scripts/release/test_release_publish_workflow.sh",
-  "bash scripts/release/test_release_publish_trigger.sh",
-  "bash scripts/release/test_validate_upstream_run.sh",
   "bash scripts/release/test_publish_release.sh",
 ]
 required_fixture_commands.each do |cmd|
   unless fixture_run.include?(cmd)
     fail!("fixture-rehearsal command must include #{cmd}")
   end
+end
+
+matrix_targets = build_core.fetch("strategy").fetch("matrix").fetch("include").map { |entry| entry.fetch("target") }
+unless matrix_targets.include?("aarch64-unknown-linux-gnu")
+  fail!("release build-core matrix must keep linux arm64")
+end
+
+verify_needs = verify_release_assets.fetch("needs")
+unless verify_needs.sort == ["aggregate-core-manifest", "derive-release-metadata", "summarize-optional-lanes"]
+  fail!("verify-release-assets must fan in aggregate-core-manifest, derive-release-metadata, and summarize-optional-lanes")
 end
 
 puts("test_release_publish_workflow: PASS")

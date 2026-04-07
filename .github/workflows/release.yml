@@ -1,0 +1,618 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref for CalVer derivation (defaults to GITHUB_REF)"
+        required: false
+        type: string
+      sha:
+        description: "Commit SHA for derivation (defaults to GITHUB_SHA)"
+        required: false
+        type: string
+      today:
+        description: "UTC date basis for nightly derivation (YYYY.MM.DD)"
+        required: false
+        type: string
+      publish_mode:
+        description: "Explicit release behavior"
+        required: true
+        default: draft
+        type: choice
+        options:
+          - draft
+          - publish
+      operator_smoke_ack:
+        description: "Set true after manual release-smoke completion (required for publish mode)"
+        required: false
+        default: false
+        type: boolean
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/release/**
+      - docs/RELEASE_AND_TEST_MATRIX.md
+      - docs/RELEASE_CALVER_VERSIONING_CONTRACT.md
+      - docs/release-publish-operator-smoke.md
+      - docs/EXTENSION_PACKAGING_AND_RELEASE_CONTRACT.md
+      - packages/cli/src/lib.rs
+      - packages/bridge/src/lib.rs
+      - apps/extension/src/generated/bridge.ts
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  fixture-rehearsal:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rehearse release fixture/test workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/release/test_release_build_core_workflow.sh
+          bash scripts/release/test_release_publish_workflow.sh
+          bash scripts/release/test_publish_release.sh
+          bash scripts/release/test_verify_release_assets.sh
+          bash scripts/release/test_build_release_notes.sh
+          bash scripts/release/test_build_install_metadata_bundle.sh
+          bash scripts/release/test_derive_calver_version.sh
+
+  derive-release-metadata:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.derive.outputs.channel }}
+      version: ${{ steps.derive.outputs.version }}
+      tag: ${{ steps.derive.outputs.tag }}
+      prerelease: ${{ steps.derive.outputs.prerelease }}
+      artifact_stem: ${{ steps.derive.outputs.artifact_stem }}
+      release_name: ${{ steps.derive.outputs.release_name }}
+      workspace_version: ${{ steps.derive.outputs.workspace_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: derive
+        env:
+          INPUT_REF: ${{ github.event.inputs.ref || '' }}
+          INPUT_SHA: ${{ github.event.inputs.sha || '' }}
+          INPUT_TODAY: ${{ github.event.inputs.today || '' }}
+        run: |
+          set -euo pipefail
+          ref="${INPUT_REF:-${GITHUB_REF}}"
+          sha="${INPUT_SHA:-${GITHUB_SHA}}"
+          today="${INPUT_TODAY:-$(date -u +%Y.%m.%d)}"
+
+          python3 scripts/release/derive_calver_version.py \
+            --ref "${ref}" \
+            --sha "${sha}" \
+            --today "${today}" > release-metadata.json
+
+          echo "channel=$(jq -r '.channel' release-metadata.json)" >>"${GITHUB_OUTPUT}"
+          echo "version=$(jq -r '.version' release-metadata.json)" >>"${GITHUB_OUTPUT}"
+          echo "tag=$(jq -r '.tag' release-metadata.json)" >>"${GITHUB_OUTPUT}"
+          echo "prerelease=$(jq -r '.prerelease' release-metadata.json)" >>"${GITHUB_OUTPUT}"
+          echo "artifact_stem=$(jq -r '.artifact_stem' release-metadata.json)" >>"${GITHUB_OUTPUT}"
+          echo "release_name=$(jq -r '.release_name' release-metadata.json)" >>"${GITHUB_OUTPUT}"
+          echo "workspace_version=$(jq -r '.workspace_version' release-metadata.json)" >>"${GITHUB_OUTPUT}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-version-metadata
+          path: release-metadata.json
+          if-no-files-found: error
+          retention-days: 14
+
+  build-core:
+    if: github.event_name != 'pull_request'
+    needs: derive-release-metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: rr
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary_name: rr
+          - os: macos-14
+            target: aarch64-apple-darwin
+            binary_name: rr
+          - os: macos-14
+            target: x86_64-apple-darwin
+            binary_name: rr
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            binary_name: rr.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build rr for target
+        shell: bash
+        env:
+          ROGER_RELEASE_VERSION: ${{ needs.derive-release-metadata.outputs.version }}
+          ROGER_RELEASE_CHANNEL: ${{ needs.derive-release-metadata.outputs.channel }}
+          ROGER_RELEASE_TAG: ${{ needs.derive-release-metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cargo build -p roger-cli --bin rr --release --target "${{ matrix.target }}"
+
+      - name: Package target archive + per-target manifest
+        shell: bash
+        env:
+          ARTIFACT_STEM: ${{ needs.derive-release-metadata.outputs.artifact_stem }}
+          RELEASE_CHANNEL: ${{ needs.derive-release-metadata.outputs.channel }}
+          RELEASE_VERSION: ${{ needs.derive-release-metadata.outputs.version }}
+          RELEASE_TAG: ${{ needs.derive-release-metadata.outputs.tag }}
+          RELEASE_PRERELEASE: ${{ needs.derive-release-metadata.outputs.prerelease }}
+          RELEASE_NAME: ${{ needs.derive-release-metadata.outputs.release_name }}
+          WORKSPACE_VERSION: ${{ needs.derive-release-metadata.outputs.workspace_version }}
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          binary_name="${{ matrix.binary_name }}"
+
+          archive_name="${ARTIFACT_STEM}-core-${target}.tar.gz"
+          payload_dir="${ARTIFACT_STEM}-core-${target}"
+          mkdir -p "dist/${payload_dir}"
+
+          cp "target/${target}/release/${binary_name}" "dist/${payload_dir}/${binary_name}"
+
+          cat >"dist/${payload_dir}/runtime-metadata.json" <<EOF
+          {
+            "schema": "roger.release-core-runtime.v1",
+            "channel": "${RELEASE_CHANNEL}",
+            "version": "${RELEASE_VERSION}",
+            "tag": "${RELEASE_TAG}",
+            "release_name": "${RELEASE_NAME}",
+            "prerelease": ${RELEASE_PRERELEASE},
+            "workspace_version": "${WORKSPACE_VERSION}",
+            "target": "${target}",
+            "binary_name": "${binary_name}",
+            "source_ref": "${GITHUB_REF}",
+            "source_sha": "${GITHUB_SHA}"
+          }
+          EOF
+
+          tar -czf "dist/${archive_name}" -C dist "${payload_dir}"
+          archive_sha256="$(python3 -c "import hashlib, pathlib; print(hashlib.sha256(pathlib.Path('dist/${archive_name}').read_bytes()).hexdigest())")"
+
+          cat >"dist/core-manifest-${target}.json" <<EOF
+          {
+            "schema": "roger.release-build-core.target.v1",
+            "target": "${target}",
+            "runner_os": "${{ runner.os }}",
+            "archive_name": "${archive_name}",
+            "archive_path": "dist/${archive_name}",
+            "archive_sha256": "${archive_sha256}",
+            "payload_dir": "${payload_dir}",
+            "binary_name": "${binary_name}"
+          }
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: core-${{ matrix.target }}
+          path: |
+            dist/${{ needs.derive-release-metadata.outputs.artifact_stem }}-core-${{ matrix.target }}.tar.gz
+            dist/core-manifest-${{ matrix.target }}.json
+          if-no-files-found: error
+          retention-days: 14
+
+  aggregate-core-manifest:
+    if: github.event_name != 'pull_request'
+    needs:
+      - derive-release-metadata
+      - build-core
+    runs-on: ubuntu-latest
+    outputs:
+      manifest_name: ${{ steps.aggregate.outputs.manifest_name }}
+      manifest_path: ${{ steps.aggregate.outputs.manifest_path }}
+      install_metadata_name: ${{ steps.aggregate.outputs.install_metadata_name }}
+      install_metadata_path: ${{ steps.aggregate.outputs.install_metadata_path }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-version-metadata
+          path: release-metadata
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: core-*
+          path: core-builds
+          merge-multiple: true
+
+      - id: aggregate
+        run: |
+          set -euo pipefail
+          matrix_scope="first_shipped_subset"
+          excluded_target="aarch64-pc-windows-msvc"
+          manifest_name="release-core-manifest-${{ needs.derive-release-metadata.outputs.version }}.json"
+          manifest_path="core-builds/${manifest_name}"
+          install_metadata_name="release-install-metadata-${{ needs.derive-release-metadata.outputs.version }}.json"
+          install_metadata_path="core-builds/${install_metadata_name}"
+
+          python3 scripts/release/build_core_manifest.py \
+            --version-metadata release-metadata/release-metadata.json \
+            --core-manifests-dir core-builds \
+            --matrix-scope "${matrix_scope}" \
+            --excluded-target "${excluded_target}" \
+            --output "${manifest_path}"
+
+          python3 scripts/release/build_install_metadata_bundle.py \
+            --version-metadata release-metadata/release-metadata.json \
+            --core-manifest "${manifest_path}" \
+            --output "${install_metadata_path}"
+
+          echo "manifest_name=${manifest_name}" >>"${GITHUB_OUTPUT}"
+          echo "manifest_path=${manifest_path}" >>"${GITHUB_OUTPUT}"
+          echo "install_metadata_name=${install_metadata_name}" >>"${GITHUB_OUTPUT}"
+          echo "install_metadata_path=${install_metadata_path}" >>"${GITHUB_OUTPUT}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-build-core-manifest
+          path: ${{ steps.aggregate.outputs.manifest_path }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: core-install-metadata
+          path: ${{ steps.aggregate.outputs.install_metadata_path }}
+          if-no-files-found: error
+          retention-days: 14
+
+  package-bridge:
+    if: github.event_name != 'pull_request'
+    needs: derive-release-metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            bundle_os: linux
+          - runner: macos-14
+            bundle_os: macos
+          - runner: windows-2022
+            bundle_os: windows
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-version-metadata
+          path: release-metadata
+
+      - name: Build bridge registration bundle for ${{ matrix.bundle_os }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/release/package_bridge_bundle.sh \
+            --version-metadata release-metadata/release-metadata.json \
+            --os "${{ matrix.bundle_os }}" \
+            --output-dir dist/bridge
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bridge-bundle-${{ matrix.bundle_os }}
+          path: |
+            dist/bridge/*-bridge-${{ matrix.bundle_os }}.tar.gz
+            dist/bridge/*-bridge-${{ matrix.bundle_os }}/bridge-bundle-manifest.json
+            dist/bridge/*-bridge-${{ matrix.bundle_os }}/asset-manifest.json
+            dist/bridge/*-bridge-${{ matrix.bundle_os }}/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-bridge-contract:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify bridge contract drift gate
+        run: cargo run -q -p roger-cli --bin rr -- bridge verify-contracts --robot > bridge-verify.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bridge-contract-verify
+          path: bridge-verify.json
+          if-no-files-found: error
+          retention-days: 14
+
+  package-extension:
+    if: github.event_name != 'pull_request'
+    needs:
+      - derive-release-metadata
+      - verify-bridge-contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-version-metadata
+          path: release-metadata
+
+      - name: Package extension lane output after contract verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/release/package_extension_bundle.sh \
+            --version-metadata release-metadata/release-metadata.json \
+            --output-dir dist/extension
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extension-bundle
+          path: |
+            dist/extension/*-extension.zip
+            dist/extension/extension-bundle-manifest.json
+            dist/extension/bridge-verify.json
+            dist/extension/pack-extension.json
+          if-no-files-found: error
+          retention-days: 14
+
+  summarize-optional-lanes:
+    if: github.event_name != 'pull_request'
+    needs:
+      - derive-release-metadata
+      - package-bridge
+      - package-extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-version-metadata
+          path: release-metadata
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bridge-bundle-*
+          path: optional-lanes/bridge
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: extension-bundle
+          path: optional-lanes/extension
+
+      - name: Build optional-lane summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=()
+
+          while IFS= read -r archive; do
+            args+=(--bridge-artifact "$(basename "$archive")")
+          done < <(find optional-lanes/bridge -type f -name '*.tar.gz' | sort)
+
+          while IFS= read -r archive; do
+            args+=(--extension-artifact "$(basename "$archive")")
+          done < <(find optional-lanes/extension -type f -name '*.zip' | sort)
+
+          python3 scripts/release/build_optional_lane_summary.py \
+            --version-metadata release-metadata/release-metadata.json \
+            --bridge-status built \
+            --extension-status built \
+            "${args[@]}" \
+            --output optional-lanes/release-optional-lanes.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-optional-lanes
+          path: optional-lanes/release-optional-lanes.json
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-release-assets:
+    if: github.event_name != 'pull_request'
+    needs:
+      - derive-release-metadata
+      - aggregate-core-manifest
+      - summarize-optional-lanes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-version-metadata
+          path: upstream/version-metadata
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-build-core-manifest
+          path: upstream/assets
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: core-install-metadata
+          path: upstream/assets
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: core-*
+          path: upstream/assets
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bridge-bundle-*
+          path: upstream/assets
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: extension-bundle
+          path: upstream/assets
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-optional-lanes
+          path: upstream/optional-summaries
+
+      - name: Verify release assets from in-workflow artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          version_metadata="$(find upstream/version-metadata -type f -name 'release-metadata.json' | head -n1)"
+          core_manifest="$(find upstream/assets -type f -name 'release-core-manifest-*.json' | head -n1)"
+          optional_summary="$(find upstream/optional-summaries -type f -name 'release-optional-lanes.json' | head -n1)"
+
+          python3 scripts/release/verify_release_assets.py \
+            --version-metadata "${version_metadata}" \
+            --core-manifest "${core_manifest}" \
+            --asset-root upstream/assets \
+            --optional-summary "${optional_summary}" \
+            --output-dir upstream/reverified
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-verify-assets-report
+          path: |
+            upstream/reverified/release-asset-manifest.json
+            upstream/reverified/SHA256SUMS
+            upstream/reverified/release-notes-signing.md
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-release:
+    if: github.event_name == 'workflow_dispatch'
+    needs:
+      - derive-release-metadata
+      - verify-release-assets
+    runs-on: ubuntu-latest
+    environment: release-publish-approval
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-version-metadata
+          path: upstream/version-metadata
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-build-core-manifest
+          path: upstream/assets
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: core-install-metadata
+          path: upstream/assets
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: core-*
+          path: upstream/assets
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bridge-bundle-*
+          path: upstream/assets
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: extension-bundle
+          path: upstream/assets
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-verify-assets-report
+          path: upstream/verify-report
+
+      - id: plan
+        name: Build release publication plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          version_metadata="$(find upstream/version-metadata -type f -name 'release-metadata.json' | head -n1)"
+          verified_manifest="$(find upstream/verify-report -type f -name 'release-asset-manifest.json' | head -n1)"
+          current_run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          smoke_ack_flag=()
+          if [[ "${{ inputs.operator_smoke_ack }}" == 'true' ]]; then
+            smoke_ack_flag+=(--operator-smoke-ack)
+          fi
+
+          python3 scripts/release/publish_release.py \
+            --version-metadata "${version_metadata}" \
+            --verified-manifest "${verified_manifest}" \
+            --upstream-verified-manifest "${verified_manifest}" \
+            --core-run-url "${current_run_url}" \
+            --verify-run-url "${current_run_url}" \
+            --bridge-run-url "${current_run_url}" \
+            --extension-run-url "${current_run_url}" \
+            --asset-root upstream/assets \
+            --checksums upstream/verify-report/SHA256SUMS \
+            --signing-notes upstream/verify-report/release-notes-signing.md \
+            --publish-mode "${{ inputs.publish_mode }}" \
+            "${smoke_ack_flag[@]}" \
+            --output-dir publish-plan
+
+          echo "tag=$(jq -r '.release.tag' publish-plan/release-plan.json)" >>"${GITHUB_OUTPUT}"
+
+      - name: Publish GitHub release from verified plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          plan_path="publish-plan/release-plan.json"
+          notes_path="$(jq -r '.notes_path' "${plan_path}")"
+          tag="$(jq -r '.release.tag' "${plan_path}")"
+          title="$(jq -r '.release.name' "${plan_path}")"
+          draft="$(jq -r '.release.draft' "${plan_path}")"
+          prerelease="$(jq -r '.release.prerelease' "${plan_path}")"
+
+          mapfile -t assets < <(jq -r '.assets[]' "${plan_path}")
+
+          gh_args=(--verify-tag --title "${title}" --notes-file "${notes_path}")
+          if [[ "${draft}" == 'true' ]]; then
+            gh_args+=(--draft)
+          fi
+          if [[ "${prerelease}" == 'true' ]]; then
+            gh_args+=(--prerelease)
+          fi
+
+          gh release create "${tag}" "${assets[@]}" "${gh_args[@]}"
+
+      - name: Upload publish-plan evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-publish-plan
+          path: |
+            publish-plan/release-plan.json
+            publish-plan/release-notes.md
+            upstream/verify-report/release-asset-manifest.json
+            upstream/verify-report/SHA256SUMS
+            upstream/verify-report/release-notes-signing.md
+          if-no-files-found: error
+          retention-days: 14
