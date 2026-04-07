@@ -15,8 +15,12 @@ The watcher:
 - creates or updates deduplicated `ci-failure-intake` beads
 - stores incremental state under `.beads/ci-failure-intake-state.json` so the
   same run does not rewrite the same bead every poll
+- sanitizes untrusted GitHub run text before it becomes bead description, notes,
+  or Agent Mail body content, and quarantines suspicious prompt-like fields
 - appends configurable follow-up instructions from
   [`.github/ci-failure-intake.json`](/Users/cdilga/Documents/dev/roger-reviewer/.github/ci-failure-intake.json)
+- sends Agent Mail notifications on topic `ci-failure` for create/update events
+  so active agents see failures without waiting for a manual `br ready`
 
 ### Default command
 
@@ -49,6 +53,24 @@ Supported knobs:
 - `workflow_prefixes`: workflow path prefixes to ingest
 - `instructions_md`: Markdown appended to the bead description so workers know
   the required follow-up protocol
+- `agent_mail.enabled`: turn Agent Mail broadcast on or off
+- `agent_mail.sender_name`: stable adjective+noun identity used by the watcher
+- `agent_mail.active_within_minutes`: only notify agents seen active within
+  this window unless explicit `recipients` are configured
+- `agent_mail.recipients`: optional explicit recipient list; leave empty to
+  auto-target recent active agents
+- `agent_mail.topic`: topic tag used for the failure announcement
+
+### Sanitization behavior
+
+The watcher treats GitHub run metadata as untrusted text.
+
+- control characters and multiline payloads are normalized before persistence
+- suspicious prompt-like content is quarantined instead of copied through
+- bead notes record `sanitization_reasons` and `quarantined_fields` when this
+  happens so agents can inspect the intake truthfully
+- dedupe still keys off workflow path, ref, and event; sanitization does not
+  create duplicate intake beads
 
 ### Triggering behavior
 

@@ -9,5 +9,20 @@
   "workflow_prefixes": [
     ".github/workflows/"
   ],
-  "instructions_md": "Required follow-up instructions:\n1. claim the failure or link it to an existing open repair bead within 15 minutes\n2. include the GitHub Actions run URL, workflow path, ref, and local owner bead in notes\n3. announce ownership or reuse on Agent Mail topic `ci-failure`\n4. dedupe against existing open/in-progress repair beads before creating a new one\n5. preserve remote closeout evidence with `scripts/swarm/check_ci_closeout_evidence.sh`"
+  "instructions_md": "Required follow-up instructions:\n1. claim the failure or link it to an existing open repair bead within 15 minutes\n2. include the GitHub Actions run URL, workflow path, ref, and local owner bead in notes\n3. announce ownership or reuse on Agent Mail topic `ci-failure`\n4. dedupe against existing open/in-progress repair beads before creating a new one\n5. preserve remote closeout evidence with `scripts/swarm/check_ci_closeout_evidence.sh`",
+  "agent_mail": {
+    "enabled": true,
+    "am_binary": "am",
+    "api_url": "http://127.0.0.1:8765/api/",
+    "sender_name": "BlueHarbor",
+    "sender_program": "ci-failure-watch",
+    "sender_model": "deterministic-script",
+    "sender_task": "CI failure intake watcher",
+    "topic": "ci-failure",
+    "importance": "high",
+    "ack_required": false,
+    "active_within_minutes": 180,
+    "max_recipients": 12,
+    "recipients": []
+  }
 }

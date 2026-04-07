@@ -12,8 +12,13 @@ import argparse
 import datetime as dt
 import json
 import pathlib
+import re
 import subprocess
 import sys
+import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,6 +37,32 @@ DEFAULT_INSTRUCTIONS = (
     "4. dedupe against existing open/in-progress repair beads before creating a new one\n"
     "5. preserve remote closeout evidence with scripts/swarm/check_ci_closeout_evidence.sh"
 )
+DEFAULT_AGENT_MAIL_API = "http://127.0.0.1:8765/api/"
+DEFAULT_AGENT_MAIL_TOKEN_PATHS = (
+    pathlib.Path("/Users/cdilga/Documents/dev/mcp_agent_mail/codex.mcp.json"),
+    pathlib.Path(
+        "/Users/cdilga/Documents/dev/roger-reviewer/mcp_agent_mail/codex.mcp.json"
+    ),
+)
+DEFAULT_AGENT_MAIL_SENDER = "BlueHarbor"
+DEFAULT_AGENT_MAIL_PROGRAM = "ci-failure-watch"
+DEFAULT_AGENT_MAIL_MODEL = "deterministic-script"
+DEFAULT_AGENT_MAIL_TASK = "CI failure intake watcher"
+DEFAULT_AGENT_MAIL_TOPIC = "ci-failure"
+DEFAULT_AGENT_MAIL_IMPORTANCE = "high"
+DEFAULT_AGENT_MAIL_ACTIVE_WITHIN_MINUTES = 180
+DEFAULT_AGENT_MAIL_MAX_RECIPIENTS = 12
+MAX_FIELD_LENGTH = 200
+SUSPICIOUS_FIELD_PATTERNS = (
+    "```",
+    "<script",
+    "<!--",
+    "ignore previous",
+    "ignore all previous",
+    "system prompt",
+    "assistant:",
+    "user:",
+)
 
 
 @dataclass
@@ -49,6 +80,9 @@ class FailureRun:
     created_at: str
     updated_at: str
     summary: str
+    sanitization_reasons: tuple[str, ...]
+    quarantined_fields: tuple[str, ...]
+    external_ref_url: str | None
 
     @property
     def ref_label(self) -> str:
@@ -73,6 +107,25 @@ class IntakeConfig:
     labels_csv: str
     workflow_prefixes: tuple[str, ...]
     instructions_md: str
+    agent_mail: "AgentMailConfig"
+
+
+@dataclass(frozen=True)
+class AgentMailConfig:
+    enabled: bool
+    am_binary: str
+    api_url: str
+    token_path: str | None
+    sender_name: str
+    sender_program: str
+    sender_model: str
+    sender_task: str
+    topic: str
+    importance: str
+    ack_required: bool
+    active_within_minutes: int
+    max_recipients: int
+    recipients: tuple[str, ...]
 
 
 def default_config() -> IntakeConfig:
@@ -81,6 +134,22 @@ def default_config() -> IntakeConfig:
         labels_csv=DEFAULT_LABELS,
         workflow_prefixes=DEFAULT_WORKFLOW_PREFIXES,
         instructions_md=DEFAULT_INSTRUCTIONS,
+        agent_mail=AgentMailConfig(
+            enabled=False,
+            am_binary="am",
+            api_url=DEFAULT_AGENT_MAIL_API,
+            token_path=None,
+            sender_name=DEFAULT_AGENT_MAIL_SENDER,
+            sender_program=DEFAULT_AGENT_MAIL_PROGRAM,
+            sender_model=DEFAULT_AGENT_MAIL_MODEL,
+            sender_task=DEFAULT_AGENT_MAIL_TASK,
+            topic=DEFAULT_AGENT_MAIL_TOPIC,
+            importance=DEFAULT_AGENT_MAIL_IMPORTANCE,
+            ack_required=False,
+            active_within_minutes=DEFAULT_AGENT_MAIL_ACTIVE_WITHIN_MINUTES,
+            max_recipients=DEFAULT_AGENT_MAIL_MAX_RECIPIENTS,
+            recipients=(),
+        ),
     )
 
 
@@ -194,32 +263,116 @@ def _workflow_path(run: dict[str, Any]) -> str:
     return ""
 
 
+def _sanitize_scalar(
+    raw: Any, *, field_name: str, max_len: int = MAX_FIELD_LENGTH
+) -> tuple[str, tuple[str, ...], bool]:
+    text = str(raw or "")
+    reasons: list[str] = []
+    normalized = unicodedata.normalize("NFKC", text)
+    normalized = normalized.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    cleaned = "".join(
+        ch
+        for ch in normalized
+        if ch.isprintable() or ch == " "
+    )
+    collapsed = re.sub(r"\s+", " ", cleaned).strip()
+    if collapsed != text.strip():
+        reasons.append(f"{field_name}:normalized")
+    lowered = collapsed.lower()
+    quarantined = any(marker in lowered for marker in SUSPICIOUS_FIELD_PATTERNS)
+    if quarantined:
+        reasons.append(f"{field_name}:quarantined")
+        return f"[quarantined {field_name}]", tuple(reasons), True
+    if len(collapsed) > max_len:
+        collapsed = collapsed[: max_len - 1].rstrip() + "…"
+        reasons.append(f"{field_name}:truncated")
+    return collapsed, tuple(reasons), False
+
+
+def _sanitize_url(raw: Any) -> tuple[str | None, tuple[str, ...]]:
+    value = str(raw or "").strip()
+    if not value:
+        return None, ()
+    parsed = urllib.parse.urlparse(value)
+    if (
+        parsed.scheme == "https"
+        and parsed.netloc == "github.com"
+        and parsed.path.startswith("/")
+    ):
+        return value, ()
+    return None, ("run_url:quarantined",)
+
+
 def _workflow_supported(path: str, prefixes: tuple[str, ...]) -> bool:
     return any(path.startswith(prefix) for prefix in prefixes)
 
 
 def _parse_run(repo: str, run: dict[str, Any], prefixes: tuple[str, ...]) -> FailureRun | None:
-    workflow_path = _workflow_path(run)
+    workflow_path_raw = _workflow_path(run)
+    workflow_path, workflow_path_reasons, _ = _sanitize_scalar(
+        workflow_path_raw, field_name="workflow_path"
+    )
     if not workflow_path or not _workflow_supported(workflow_path, prefixes):
         return None
 
     run_id = run.get("id")
-    run_url = run.get("html_url")
-    if not isinstance(run_id, int) or not isinstance(run_url, str) or not run_url:
+    run_url, run_url_reasons = _sanitize_url(run.get("html_url"))
+    if not isinstance(run_id, int) or run_url is None:
         return None
 
-    status = str(run.get("status") or "")
-    conclusion = str(run.get("conclusion") or "")
+    status, status_reasons, _ = _sanitize_scalar(run.get("status"), field_name="status")
+    conclusion, conclusion_reasons, _ = _sanitize_scalar(
+        run.get("conclusion"), field_name="conclusion"
+    )
     if conclusion != "failure":
         return None
 
-    workflow_name = str(run.get("name") or run.get("display_title") or "workflow")
-    head_branch = str(run.get("head_branch") or "")
-    head_sha = str(run.get("head_sha") or "")
-    event = str(run.get("event") or "unknown")
-    created_at = str(run.get("created_at") or "")
-    updated_at = str(run.get("updated_at") or "")
-    summary = str(run.get("display_title") or workflow_name)
+    workflow_name, workflow_name_reasons, workflow_name_quarantined = _sanitize_scalar(
+        run.get("name") or run.get("display_title") or "workflow",
+        field_name="workflow_name",
+    )
+    head_branch, head_branch_reasons, head_branch_quarantined = _sanitize_scalar(
+        run.get("head_branch"), field_name="head_branch"
+    )
+    head_sha, head_sha_reasons, _ = _sanitize_scalar(
+        run.get("head_sha"), field_name="head_sha"
+    )
+    event, event_reasons, _ = _sanitize_scalar(run.get("event") or "unknown", field_name="event")
+    created_at, created_at_reasons, _ = _sanitize_scalar(
+        run.get("created_at"), field_name="created_at"
+    )
+    updated_at, updated_at_reasons, _ = _sanitize_scalar(
+        run.get("updated_at"), field_name="updated_at"
+    )
+    summary, summary_reasons, summary_quarantined = _sanitize_scalar(
+        run.get("display_title") or workflow_name,
+        field_name="summary",
+    )
+    reasons = tuple(
+        reason
+        for reason in (
+            *workflow_path_reasons,
+            *workflow_name_reasons,
+            *head_branch_reasons,
+            *head_sha_reasons,
+            *event_reasons,
+            *status_reasons,
+            *conclusion_reasons,
+            *created_at_reasons,
+            *updated_at_reasons,
+            *summary_reasons,
+            *run_url_reasons,
+        )
+    )
+    quarantined_fields = tuple(
+        field
+        for field, active in (
+            ("workflow_name", workflow_name_quarantined),
+            ("head_branch", head_branch_quarantined),
+            ("summary", summary_quarantined),
+        )
+        if active
+    )
 
     return FailureRun(
         repo=repo,
@@ -235,6 +388,9 @@ def _parse_run(repo: str, run: dict[str, Any], prefixes: tuple[str, ...]) -> Fai
         created_at=created_at,
         updated_at=updated_at,
         summary=summary,
+        sanitization_reasons=reasons,
+        quarantined_fields=quarantined_fields,
+        external_ref_url=run_url,
     )
 
 
@@ -251,6 +407,7 @@ def _load_config(path: pathlib.Path | None) -> IntakeConfig:
     labels = payload.get("labels")
     workflow_prefixes = payload.get("workflow_prefixes")
     instructions_md = payload.get("instructions_md", config.instructions_md)
+    agent_mail_payload = payload.get("agent_mail", {})
 
     labels_csv = config.labels_csv
     if isinstance(labels, list):
@@ -272,11 +429,43 @@ def _load_config(path: pathlib.Path | None) -> IntakeConfig:
     if not isinstance(parent_id, str) or not parent_id.strip():
         parent_id = "none"
 
+    agent_mail = config.agent_mail
+    if isinstance(agent_mail_payload, dict):
+        recipients = agent_mail_payload.get("recipients", [])
+        token_path = agent_mail_payload.get("token_path", agent_mail.token_path)
+        agent_mail = AgentMailConfig(
+            enabled=bool(agent_mail_payload.get("enabled", agent_mail.enabled)),
+            am_binary=str(agent_mail_payload.get("am_binary", agent_mail.am_binary) or agent_mail.am_binary),
+            api_url=str(agent_mail_payload.get("api_url", agent_mail.api_url) or agent_mail.api_url),
+            token_path=str(token_path).strip() if isinstance(token_path, str) and token_path.strip() else None,
+            sender_name=str(agent_mail_payload.get("sender_name", agent_mail.sender_name) or agent_mail.sender_name),
+            sender_program=str(agent_mail_payload.get("sender_program", agent_mail.sender_program) or agent_mail.sender_program),
+            sender_model=str(agent_mail_payload.get("sender_model", agent_mail.sender_model) or agent_mail.sender_model),
+            sender_task=str(agent_mail_payload.get("sender_task", agent_mail.sender_task) or agent_mail.sender_task),
+            topic=str(agent_mail_payload.get("topic", agent_mail.topic) or agent_mail.topic),
+            importance=str(agent_mail_payload.get("importance", agent_mail.importance) or agent_mail.importance),
+            ack_required=bool(agent_mail_payload.get("ack_required", agent_mail.ack_required)),
+            active_within_minutes=max(
+                1,
+                int(agent_mail_payload.get("active_within_minutes", agent_mail.active_within_minutes)),
+            ),
+            max_recipients=max(
+                1,
+                int(agent_mail_payload.get("max_recipients", agent_mail.max_recipients)),
+            ),
+            recipients=tuple(
+                str(item).strip() for item in recipients if str(item).strip()
+            )
+            if isinstance(recipients, list)
+            else agent_mail.recipients,
+        )
+
     return IntakeConfig(
         parent_id=parent_id,
         labels_csv=labels_csv,
         workflow_prefixes=prefixes,
         instructions_md=instructions_md.strip(),
+        agent_mail=agent_mail,
     )
 
 
@@ -365,6 +554,12 @@ def _build_description(run: FailureRun, instructions_md: str) -> str:
         f"- event: {run.event}\n\n"
         "Duplicate failures for this workflow/ref/event key update this same issue."
     )
+    if run.quarantined_fields:
+        description = (
+            f"{description}\n\n"
+            f"Sanitization: quarantined untrusted run fields "
+            f"({', '.join(run.quarantined_fields)})."
+        )
     if instructions_md:
         description = f"{description}\n\n{instructions_md}"
     return description
@@ -390,6 +585,10 @@ def _build_notes(run: FailureRun) -> str:
         f"summary: {run.summary}",
         f"dedupe_key: {run.dedupe_key}",
     ]
+    if run.sanitization_reasons:
+        lines.append(f"sanitization_reasons: {', '.join(run.sanitization_reasons)}")
+    if run.quarantined_fields:
+        lines.append(f"quarantined_fields: {', '.join(run.quarantined_fields)}")
     return "\n".join(lines)
 
 
@@ -419,11 +618,11 @@ def _create_issue(
         labels_csv,
         "--description",
         _build_description(run, instructions_md),
-        "--external-ref",
-        run.run_url,
         "--silent",
         "--no-daemon",
     ]
+    if run.external_ref_url:
+        cmd.extend(["--external-ref", run.external_ref_url])
     if parent_id:
         cmd.extend(["--parent", parent_id])
     proc = _run(cmd, cwd=project_root)
@@ -437,12 +636,22 @@ def _create_issue(
             issue_id,
             "--notes",
             _build_notes(run),
-            "--external-ref",
-            run.run_url,
             "--no-daemon",
         ],
         cwd=project_root,
     )
+    if run.external_ref_url:
+        _run(
+            [
+                br_bin,
+                "update",
+                issue_id,
+                "--external-ref",
+                run.external_ref_url,
+                "--no-daemon",
+            ],
+            cwd=project_root,
+        )
     return issue_id
 
 
@@ -457,18 +666,218 @@ def _update_issue(
     if dry_run:
         return
     _run(
+        [br_bin, "update", issue_id, "--notes", _build_notes(run), "--no-daemon"],
+        cwd=project_root,
+    )
+    if run.external_ref_url:
+        _run(
+            [
+                br_bin,
+                "update",
+                issue_id,
+                "--external-ref",
+                run.external_ref_url,
+                "--no-daemon",
+            ],
+            cwd=project_root,
+        )
+
+
+def _parse_timestamp(raw: str) -> dt.datetime | None:
+    if not raw:
+        return None
+    value = raw.replace("Z", "+00:00")
+    try:
+        parsed = dt.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def _discover_agent_mail_token(explicit_token_path: str | None) -> str:
+    candidate_paths: list[pathlib.Path] = []
+    if explicit_token_path:
+        candidate_paths.append(pathlib.Path(explicit_token_path))
+    candidate_paths.extend(DEFAULT_AGENT_MAIL_TOKEN_PATHS)
+    for path in candidate_paths:
+        if not path.exists():
+            continue
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        header = payload["mcpServers"]["mcp-agent-mail"]["headers"]["Authorization"]
+        if isinstance(header, str) and header.startswith("Bearer "):
+            return header.split(" ", 1)[1]
+    raise RuntimeError("could not discover Agent Mail bearer token")
+
+
+def _call_agent_mail_tool(
+    *,
+    api_url: str,
+    token: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> Any:
+    payload = {
+        "jsonrpc": "2.0",
+        "id": str(int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)),
+        "method": "tools/call",
+        "params": {"name": tool_name, "arguments": arguments},
+    }
+    request = urllib.request.Request(
+        url=api_url,
+        method="POST",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            body = response.read()
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"agent mail request failed: {exc}") from exc
+    payload = json.loads(body.decode("utf-8"))
+    if payload.get("error"):
+        raise RuntimeError(f"agent mail error: {payload['error']}")
+    result = payload.get("result", {})
+    if isinstance(result, dict) and "structuredContent" in result:
+        return result["structuredContent"]
+    return result
+
+
+def _agent_mail_sender_ready(
+    *,
+    config: AgentMailConfig,
+    project_root: pathlib.Path,
+) -> None:
+    _run(
         [
-            br_bin,
-            "update",
-            issue_id,
-            "--notes",
-            _build_notes(run),
-            "--external-ref",
-            run.run_url,
-            "--no-daemon",
+            config.am_binary,
+            "macros",
+            "start-session",
+            "--project",
+            str(project_root),
+            "--program",
+            config.sender_program,
+            "--model",
+            config.sender_model,
+            "--agent-name",
+            config.sender_name,
+            "--task",
+            config.sender_task,
+            "--json",
         ],
         cwd=project_root,
     )
+
+
+def _notification_recipients(
+    *,
+    config: AgentMailConfig,
+    project_root: pathlib.Path,
+) -> list[str]:
+    if config.recipients:
+        return list(config.recipients[: config.max_recipients])
+    proc = _run(
+        [
+            config.am_binary,
+            "agents",
+            "list",
+            "--project",
+            str(project_root),
+            "--json",
+        ],
+        cwd=project_root,
+    )
+    payload = json.loads(proc.stdout)
+    if not isinstance(payload, list):
+        raise RuntimeError("agent list response was not a JSON array")
+    now = dt.datetime.now(dt.timezone.utc)
+    cutoff = now - dt.timedelta(minutes=config.active_within_minutes)
+    candidates: list[tuple[dt.datetime, str]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if not isinstance(name, str) or not name or name == config.sender_name:
+            continue
+        last_active = _parse_timestamp(str(item.get("last_active_ts") or ""))
+        if last_active is None or last_active < cutoff:
+            continue
+        candidates.append((last_active, name))
+    candidates.sort(reverse=True)
+    return [name for _, name in candidates[: config.max_recipients]]
+
+
+def _build_notification_body(run: FailureRun, *, issue_id: str, action: str, topic: str) -> str:
+    lines = [
+        f"topic: {topic}",
+        f"- intake_action: {action}",
+        f"- bead_id: {issue_id}",
+        f"- run_id: {run.run_id}",
+        f"- run_url: {run.run_url}",
+        f"- workflow_path: {run.workflow_path}",
+        f"- workflow_name: {run.workflow_name}",
+        f"- ref: {run.ref_label}",
+        f"- event: {run.event}",
+        f"- summary: {run.summary}",
+    ]
+    if run.quarantined_fields:
+        lines.append(f"- quarantined_fields: {', '.join(run.quarantined_fields)}")
+    return "\n".join(lines)
+
+
+def _notify_agent_mail(
+    *,
+    config: AgentMailConfig,
+    project_root: pathlib.Path,
+    run: FailureRun,
+    issue_id: str,
+    action: str,
+    dry_run: bool,
+) -> dict[str, Any]:
+    if not config.enabled:
+        return {"status": "disabled"}
+    recipients = _notification_recipients(config=config, project_root=project_root)
+    if not recipients:
+        return {"status": "skipped", "reason": "no_recent_recipients"}
+    if dry_run:
+        return {
+            "status": "dry-run",
+            "topic": config.topic,
+            "recipients": recipients,
+            "issue_id": issue_id,
+            "action": action,
+        }
+    _agent_mail_sender_ready(config=config, project_root=project_root)
+    token = _discover_agent_mail_token(config.token_path)
+    response = _call_agent_mail_tool(
+        api_url=config.api_url,
+        token=token,
+        tool_name="send_message",
+        arguments={
+            "project_key": str(project_root),
+            "sender_name": config.sender_name,
+            "to": recipients,
+            "subject": f"CI failure {action}: {run.workflow_path} [{run.ref_label}] -> {issue_id}",
+            "body_md": _build_notification_body(
+                run, issue_id=issue_id, action=action, topic=config.topic
+            ),
+            "importance": config.importance,
+            "ack_required": config.ack_required,
+            "topic": config.topic,
+        },
+    )
+    return {
+        "status": "sent",
+        "topic": config.topic,
+        "recipients": recipients,
+        "issue_id": issue_id,
+        "action": action,
+        "response": response,
+    }
 
 
 def main() -> int:
@@ -508,6 +917,7 @@ def main() -> int:
     created = []
     updated = []
     untouched = []
+    notifications = []
     for run in latest_runs:
         existing_id = existing.get(run.issue_title)
         state_key = run.dedupe_key
@@ -537,7 +947,18 @@ def main() -> int:
                     "title": run.issue_title,
                     "run_id": run.run_id,
                     "run_url": run.run_url,
+                    "quarantined_fields": list(run.quarantined_fields),
                 }
+            )
+            notifications.append(
+                _notify_agent_mail(
+                    config=config.agent_mail,
+                    project_root=project_root,
+                    run=run,
+                    issue_id=existing_id,
+                    action="updated",
+                    dry_run=args.dry_run,
+                )
             )
             state[state_key] = {
                 "issue_id": existing_id,
@@ -562,7 +983,18 @@ def main() -> int:
                 "title": run.issue_title,
                 "run_id": run.run_id,
                 "run_url": run.run_url,
+                "quarantined_fields": list(run.quarantined_fields),
             }
+        )
+        notifications.append(
+            _notify_agent_mail(
+                config=config.agent_mail,
+                project_root=project_root,
+                run=run,
+                issue_id=issue_id,
+                action="created",
+                dry_run=args.dry_run,
+            )
         )
         existing[run.issue_title] = issue_id
         state[state_key] = {
@@ -592,6 +1024,7 @@ def main() -> int:
         "created": created,
         "updated": updated,
         "untouched": untouched,
+        "notifications": notifications,
     }
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
