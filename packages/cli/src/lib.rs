@@ -3006,26 +3006,27 @@ fn handle_findings(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
     let provider_tier = provider_tier(&session.provider);
     let provider_warning = provider_support_warning(&session.provider, "rr findings");
 
-    let items: Vec<Value> = findings
-        .iter()
-        .map(|finding| {
-            let evidence_count = match store.count_code_evidence_locations_for_finding(&finding.id) {
-                Ok(count) => count as usize,
-                Err(err) => {
-                    return Err(error_response(format!("failed to count evidence locations for finding {}: {err}", finding.id)));
-                }
-            };
+    let mut items = Vec::with_capacity(findings.len());
+    for finding in &findings {
+        let evidence_count = match store.count_code_evidence_locations_for_finding(&finding.id) {
+            Ok(count) => count as usize,
+            Err(err) => {
+                return error_response(format!(
+                    "failed to count evidence locations for finding {}: {err}",
+                    finding.id
+                ));
+            }
+        };
 
-            Ok(json!({
-                "finding_id": finding.id,
-                "fingerprint": finding.fingerprint,
-                "title": finding.title,
-                "triage_state": finding.triage_state,
-                "outbound_state": finding.outbound_state,
-                "evidence_count": evidence_count,
-            }))
-        })
-        .collect::<Result<Vec<Value>, CommandResponse>>()?;
+        items.push(json!({
+            "finding_id": finding.id,
+            "fingerprint": finding.fingerprint,
+            "title": finding.title,
+            "triage_state": finding.triage_state,
+            "outbound_state": finding.outbound_state,
+            "evidence_count": evidence_count,
+        }));
+    }
 
     let count = items.len();
     CommandResponse {
