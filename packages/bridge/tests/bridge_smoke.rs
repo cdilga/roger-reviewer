@@ -4,8 +4,9 @@ use std::io::Cursor;
 use std::path::Path;
 
 use roger_bridge::{
-    BridgeLaunchIntent, BridgePreflight, BridgeResponse, NativeHostManifest, SupportedBrowser,
-    handle_bridge_intent, parse_custom_url, read_native_message, write_native_message,
+    BridgeLaunchIntent, BridgeLaunchPath, BridgePreflight, BridgeResponse, NativeHostManifest,
+    SupportedBrowser, choose_launch_path, handle_bridge_intent, parse_custom_url,
+    read_native_message, required_launch_artifacts, write_native_message,
 };
 
 #[test]
@@ -32,6 +33,27 @@ fn native_messaging_end_to_end() {
     assert_eq!(parsed.action, "resume_review");
     assert_eq!(parsed.pr_number, 99);
     assert_eq!(parsed.instance, Some("my-inst".to_owned()));
+}
+
+#[test]
+fn launch_path_prefers_native_messaging_over_custom_url_fallback() {
+    let launch_path = choose_launch_path(true, true).expect("native path should be selected");
+    assert_eq!(launch_path, BridgeLaunchPath::NativeMessaging);
+}
+
+#[test]
+fn launch_path_falls_back_to_custom_url_launch_only_when_native_unavailable() {
+    let launch_path = choose_launch_path(false, true).expect("custom-url fallback should work");
+    assert_eq!(launch_path, BridgeLaunchPath::CustomUrlLaunchOnly);
+}
+
+#[test]
+fn launch_path_fails_closed_when_no_bridge_registration_is_available() {
+    let err = choose_launch_path(false, false).expect_err("missing bridge registration must fail");
+    assert!(
+        err.to_string().contains("No supported bridge launch path"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]
@@ -67,6 +89,36 @@ fn custom_url_launch_flow() {
     let resp = handle_bridge_intent(&intent, &preflight, Path::new("/usr/local/bin/rr"));
     assert!(resp.ok);
     assert!(resp.message.contains("show_findings"));
+}
+
+#[test]
+fn native_path_artifacts_include_envelopes_and_transcript() {
+    let artifacts = required_launch_artifacts(BridgeLaunchPath::NativeMessaging);
+    assert_eq!(
+        artifacts,
+        [
+            "native_request_envelope.json",
+            "native_response_envelope.json",
+            "bridge_launch_transcript.json",
+        ]
+    );
+}
+
+#[test]
+fn launch_only_fallback_artifacts_include_transcript_without_native_envelope_claims() {
+    let artifacts = required_launch_artifacts(BridgeLaunchPath::CustomUrlLaunchOnly);
+    assert_eq!(
+        artifacts,
+        [
+            "custom_url_launch_intent.txt",
+            "bridge_response_envelope.json",
+            "bridge_launch_transcript.json",
+        ]
+    );
+    assert!(
+        !artifacts.contains(&"native_request_envelope.json"),
+        "launch-only fallback must not imply native-messaging envelope capture"
+    );
 }
 
 #[test]

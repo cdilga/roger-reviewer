@@ -344,6 +344,56 @@ pub fn parse_custom_url(url: &str) -> Result<BridgeLaunchIntent> {
     })
 }
 
+/// Launch path selected for browser → local bridge handoff.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BridgeLaunchPath {
+    NativeMessaging,
+    CustomUrlLaunchOnly,
+}
+
+const NATIVE_MESSAGING_LAUNCH_ARTIFACTS: [&str; 3] = [
+    "native_request_envelope.json",
+    "native_response_envelope.json",
+    "bridge_launch_transcript.json",
+];
+
+const CUSTOM_URL_LAUNCH_ARTIFACTS: [&str; 3] = [
+    "custom_url_launch_intent.txt",
+    "bridge_response_envelope.json",
+    "bridge_launch_transcript.json",
+];
+
+/// Resolve the launch path from local bridge registration state.
+///
+/// Native Messaging is preferred for the serious companion tier. Custom URL
+/// remains a truthful launch-only fallback.
+pub fn choose_launch_path(
+    native_messaging_registered: bool,
+    custom_url_registered: bool,
+) -> Result<BridgeLaunchPath> {
+    if native_messaging_registered {
+        return Ok(BridgeLaunchPath::NativeMessaging);
+    }
+    if custom_url_registered {
+        return Ok(BridgeLaunchPath::CustomUrlLaunchOnly);
+    }
+    Err(BridgeError::LocalStateMissing {
+        detail: "No supported bridge launch path is registered. Install Native Messaging host support or configure custom URL launch fallback.".to_owned(),
+    })
+}
+
+/// Return artifact filenames expected for bridge launch smoke/failure capture.
+///
+/// Browser-smoke runners can use this helper to assert transcript and envelope
+/// capture requirements without relying on docs-only guidance.
+pub fn required_launch_artifacts(path: BridgeLaunchPath) -> &'static [&'static str] {
+    match path {
+        BridgeLaunchPath::NativeMessaging => &NATIVE_MESSAGING_LAUNCH_ARTIFACTS,
+        BridgeLaunchPath::CustomUrlLaunchOnly => &CUSTOM_URL_LAUNCH_ARTIFACTS,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Bridge host preflight
 // ---------------------------------------------------------------------------
