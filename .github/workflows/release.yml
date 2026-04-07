@@ -488,6 +488,17 @@ jobs:
           version_metadata="$(find upstream/version-metadata -type f -name 'release-metadata.json' | head -n1)"
           core_manifest="$(find upstream/assets -type f -name 'release-core-manifest-*.json' | head -n1)"
           optional_summary="$(find upstream/optional-summaries -type f -name 'release-optional-lanes.json' | head -n1)"
+          installer_sh="$(find upstream/assets -type f -name 'rr-install.sh' | head -n1)"
+          installer_ps1="$(find upstream/assets -type f -name 'rr-install.ps1' | head -n1)"
+
+          if [[ -z "${installer_sh}" || -z "${installer_ps1}" ]]; then
+            echo "missing installer artifacts under upstream/assets"
+            find upstream/assets -maxdepth 4 -type f | sort
+            exit 1
+          fi
+
+          cp "${installer_sh}" upstream/assets/rr-install.sh
+          cp "${installer_ps1}" upstream/assets/rr-install.ps1
 
           python3 scripts/release/verify_release_assets.py \
             --version-metadata "${version_metadata}" \
@@ -561,6 +572,17 @@ jobs:
           version_metadata="$(find upstream/version-metadata -type f -name 'release-metadata.json' | head -n1)"
           verified_manifest="$(find upstream/verify-report -type f -name 'release-asset-manifest.json' | head -n1)"
           current_run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          installer_sh="$(find upstream/assets -type f -name 'rr-install.sh' | head -n1)"
+          installer_ps1="$(find upstream/assets -type f -name 'rr-install.ps1' | head -n1)"
+
+          if [[ -z "${installer_sh}" || -z "${installer_ps1}" ]]; then
+            echo "missing installer artifacts under upstream/assets"
+            find upstream/assets -maxdepth 4 -type f | sort
+            exit 1
+          fi
+
+          cp "${installer_sh}" upstream/assets/rr-install.sh
+          cp "${installer_ps1}" upstream/assets/rr-install.ps1
 
           smoke_ack_flag=()
           if [[ "${{ inputs.operator_smoke_ack }}" == 'true' ]]; then
