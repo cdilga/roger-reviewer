@@ -2,7 +2,6 @@
 import argparse
 import json
 import pathlib
-import shlex
 import sys
 
 
@@ -26,7 +25,7 @@ def main() -> int:
     print(f"retention_days={tier['retention_days']}")
     print(f"upload_mode={tier['upload_mode']}")
     print(f"budget_guard_mode={tier['budget_guard_mode']}")
-    print(f"command={shlex.quote(command)}")
+    print(f"command={command}")
     return 0
 
 
