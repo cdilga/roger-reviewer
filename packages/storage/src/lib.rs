@@ -3,6 +3,8 @@ use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod semantic_embedder;
+
 use roger_app_core::{
     ProviderContinuityCapability, ResumeAttemptOutcome, ResumeBundle, ResumeDecision,
     ResumeSessionState, ReviewTarget, SessionLocator, Surface, decide_resume_strategy, time,
@@ -10,6 +12,8 @@ use roger_app_core::{
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+pub use semantic_embedder::{SemanticEmbedderStatus, semantic_embedder_status};
 
 const CURRENT_SCHEMA_VERSION: i64 = 9;
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
@@ -817,6 +821,15 @@ pub struct SemanticAssetVerification {
     pub manifest: Option<SemanticAssetManifest>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticComponentState {
+    pub assets_verified: bool,
+    pub embedder_available: bool,
+    pub embedder_backend: Option<String>,
+    pub operational: bool,
+    pub degraded_reasons: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PriorReviewLookupQuery<'a> {
     pub scope_key: &'a str,
@@ -1012,6 +1025,32 @@ impl RogerStore {
             verified: true,
             reason: None,
             manifest: Some(manifest),
+        })
+    }
+
+    pub fn semantic_component_state(&self) -> Result<SemanticComponentState> {
+        let assets = self.verify_semantic_asset_manifest()?;
+        let embedder = semantic_embedder_status();
+        let mut degraded_reasons = Vec::new();
+
+        if !assets.verified {
+            degraded_reasons.push(assets.reason.clone().unwrap_or_else(|| {
+                "semantic assets are missing or unverified; verification failed".to_owned()
+            }));
+        }
+
+        if !embedder.available {
+            degraded_reasons.push(embedder.reason.clone().unwrap_or_else(|| {
+                "semantic embedder unavailable; FastEmbed integration disabled".to_owned()
+            }));
+        }
+
+        Ok(SemanticComponentState {
+            assets_verified: assets.verified,
+            embedder_available: embedder.available,
+            embedder_backend: embedder.backend,
+            operational: assets.verified && embedder.available,
+            degraded_reasons,
         })
     }
 
@@ -1804,6 +1843,16 @@ impl RogerStore {
                   AND COALESCE(last_seen_run_id, first_run_id) = ?2
                   AND outbound_state = ?3",
                 params![session_id, run_id, outbound_state],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::from)
+    }
+
+    pub fn count_code_evidence_locations_for_finding(&self, finding_id: &str) -> Result<i64> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM code_evidence_locations WHERE finding_id = ?1",
+                params![finding_id],
                 |row| row.get(0),
             )
             .map_err(StorageError::from)
