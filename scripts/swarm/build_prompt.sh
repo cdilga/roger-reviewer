@@ -80,7 +80,9 @@ EOF
   cat <<EOF
 
 Persistent swarm identity rules:
-- This pane already has a stable Agent Mail identity provisioned by upstream NTM. Reuse that exact identity. Do not register a new one or rename yourself.
+- This pane already has a stable Agent Mail identity chosen for it. Reuse that exact identity and do not rename yourself.
+- If Agent Mail says the project or your identity does not exist yet, repair that by calling \`ensure_project\` for the repo path and then \`register_agent\` with this pane's existing identity before proceeding.
+- If Codex shows the directory trust prompt, choose \`Yes, continue\` immediately.
 - Start each cycle with Agent Mail inbox + ack checks, then \`br ready -> br show -> claim -> reserve files\`.
 - Do not treat launcher text as a bead assignment; self-select from \`br ready\` (use \`bv\` only for ranking context).
 - Record exact validation commands when closing beads and run \`br sync --flush-only\` after bead state/note changes.

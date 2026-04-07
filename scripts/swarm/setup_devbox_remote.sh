@@ -5,4 +5,4 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/agent_swarm_kit_env.sh"
 
-exec "${SWARM_KIT_ROOT}/bin/control_plane_ensure.sh" "$@"
+exec "${SWARM_KIT_ROOT}/bin/setup_devbox_remote.sh" "$@"

@@ -1,5 +1,12 @@
 Read `AGENTS.md`, then `README.md`.
 
+If Codex asks whether to trust this directory, choose `Yes, continue` immediately and proceed.
+If Agent Mail is reachable but says the project or your identity is missing, bootstrap it before claiming work:
+
+- call `ensure_project` for the current repo path
+- register yourself with Agent Mail using the stable pane identity already attached to this session
+- then continue with the normal worker loop
+
 Before claiming your first bead, skim `docs/PLAN_FOR_ROGER_REVIEWER.md` only far enough to confirm the current phase, architecture direction, and safety model. Do not spend your first turn on a full line-by-line plan read while the live queue is waiting. Once you choose a bead, read the relevant plan sections and `br show <id>` in full.
 
 Implementation is active. Work from live queue truth (`br ready`), not launcher hints.
