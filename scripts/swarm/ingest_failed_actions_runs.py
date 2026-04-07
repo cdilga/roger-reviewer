@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
-import os
 import pathlib
 import subprocess
 import sys
@@ -19,12 +18,20 @@ from dataclasses import dataclass
 from typing import Any
 
 
-WORKFLOW_PREFIXES = (
+DEFAULT_WORKFLOW_PREFIXES = (
     ".github/workflows/release-",
     ".github/workflows/validation-",
 )
 DEFAULT_LABELS = "ci,github-actions,triage,ci-failure-intake"
 DEFAULT_PARENT = "rr-aip"
+DEFAULT_INSTRUCTIONS = (
+    "Required follow-up instructions:\n"
+    "1. claim the failure or link it to an existing open repair bead within 15 minutes\n"
+    "2. include the GitHub Actions run URL, workflow path, ref, and local owner bead in notes\n"
+    "3. announce ownership or reuse on Agent Mail topic `ci-failure`\n"
+    "4. dedupe against existing open/in-progress repair beads before creating a new one\n"
+    "5. preserve remote closeout evidence with scripts/swarm/check_ci_closeout_evidence.sh"
+)
 
 
 @dataclass
@@ -60,6 +67,23 @@ class FailureRun:
         return f"CI failure intake: {self.workflow_path} [{self.ref_label}]"
 
 
+@dataclass(frozen=True)
+class IntakeConfig:
+    parent_id: str
+    labels_csv: str
+    workflow_prefixes: tuple[str, ...]
+    instructions_md: str
+
+
+def default_config() -> IntakeConfig:
+    return IntakeConfig(
+        parent_id=DEFAULT_PARENT,
+        labels_csv=DEFAULT_LABELS,
+        workflow_prefixes=DEFAULT_WORKFLOW_PREFIXES,
+        instructions_md=DEFAULT_INSTRUCTIONS,
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -89,8 +113,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--parent-id",
-        default=DEFAULT_PARENT,
+        default=None,
         help="Optional parent issue id; pass 'none' to disable parent linking.",
+    )
+    parser.add_argument(
+        "--config",
+        help="Optional JSON config with parent_id, labels, workflow_prefixes, and instructions_md.",
+    )
+    parser.add_argument(
+        "--state-file",
+        help="Optional JSON state file used to avoid rewriting unchanged failed-run intake.",
     )
     parser.add_argument(
         "--dry-run",
@@ -162,13 +194,13 @@ def _workflow_path(run: dict[str, Any]) -> str:
     return ""
 
 
-def _workflow_supported(path: str) -> bool:
-    return any(path.startswith(prefix) for prefix in WORKFLOW_PREFIXES)
+def _workflow_supported(path: str, prefixes: tuple[str, ...]) -> bool:
+    return any(path.startswith(prefix) for prefix in prefixes)
 
 
-def _parse_run(repo: str, run: dict[str, Any]) -> FailureRun | None:
+def _parse_run(repo: str, run: dict[str, Any], prefixes: tuple[str, ...]) -> FailureRun | None:
     workflow_path = _workflow_path(run)
-    if not workflow_path or not _workflow_supported(workflow_path):
+    if not workflow_path or not _workflow_supported(workflow_path, prefixes):
         return None
 
     run_id = run.get("id")
@@ -204,6 +236,68 @@ def _parse_run(repo: str, run: dict[str, Any]) -> FailureRun | None:
         updated_at=updated_at,
         summary=summary,
     )
+
+
+def _load_config(path: pathlib.Path | None) -> IntakeConfig:
+    config = default_config()
+    if path is None:
+        return config
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("config must be a JSON object")
+
+    parent_id = payload.get("parent_id", config.parent_id)
+    labels = payload.get("labels")
+    workflow_prefixes = payload.get("workflow_prefixes")
+    instructions_md = payload.get("instructions_md", config.instructions_md)
+
+    labels_csv = config.labels_csv
+    if isinstance(labels, list):
+        labels_csv = ",".join(str(item).strip() for item in labels if str(item).strip())
+    elif isinstance(labels, str) and labels.strip():
+        labels_csv = labels.strip()
+
+    prefixes = config.workflow_prefixes
+    if isinstance(workflow_prefixes, list):
+        prefixes = tuple(
+            str(item).strip() for item in workflow_prefixes if str(item).strip()
+        )
+        if not prefixes:
+            prefixes = config.workflow_prefixes
+
+    if not isinstance(instructions_md, str) or not instructions_md.strip():
+        instructions_md = config.instructions_md
+
+    if not isinstance(parent_id, str) or not parent_id.strip():
+        parent_id = "none"
+
+    return IntakeConfig(
+        parent_id=parent_id,
+        labels_csv=labels_csv,
+        workflow_prefixes=prefixes,
+        instructions_md=instructions_md.strip(),
+    )
+
+
+def _load_state(path: pathlib.Path | None) -> dict[str, dict[str, Any]]:
+    if path is None or not path.exists():
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("state file must contain a JSON object")
+    state: dict[str, dict[str, Any]] = {}
+    for key, value in payload.items():
+        if isinstance(key, str) and isinstance(value, dict):
+            state[key] = value
+    return state
+
+
+def _save_state(path: pathlib.Path | None, state: dict[str, dict[str, Any]]) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _choose_latest(entries: list[FailureRun]) -> list[FailureRun]:
@@ -261,8 +355,8 @@ def _active_intake_issues(*, project_root: pathlib.Path, br_bin: str) -> dict[st
     return issues_by_title
 
 
-def _build_description(run: FailureRun) -> str:
-    return (
+def _build_description(run: FailureRun, instructions_md: str) -> str:
+    description = (
         "Auto-generated from failing GitHub Actions run ingestion.\n\n"
         f"- repo: {run.repo}\n"
         f"- workflow_path: {run.workflow_path}\n"
@@ -271,6 +365,9 @@ def _build_description(run: FailureRun) -> str:
         f"- event: {run.event}\n\n"
         "Duplicate failures for this workflow/ref/event key update this same issue."
     )
+    if instructions_md:
+        description = f"{description}\n\n{instructions_md}"
+    return description
 
 
 def _build_notes(run: FailureRun) -> str:
@@ -302,6 +399,8 @@ def _create_issue(
     project_root: pathlib.Path,
     br_bin: str,
     parent_id: str | None,
+    labels_csv: str,
+    instructions_md: str,
     dry_run: bool,
 ) -> str:
     if dry_run:
@@ -317,9 +416,9 @@ def _create_issue(
         "-p",
         "0",
         "--labels",
-        DEFAULT_LABELS,
+        labels_csv,
         "--description",
-        _build_description(run),
+        _build_description(run, instructions_md),
         "--external-ref",
         run.run_url,
         "--silent",
@@ -376,8 +475,12 @@ def main() -> int:
     args = parse_args()
     project_root = pathlib.Path(args.project_root).resolve()
     br_bin = args.br_binary
+    config_path = pathlib.Path(args.config).resolve() if args.config else None
+    state_path = pathlib.Path(args.state_file).resolve() if args.state_file else None
     if not pathlib.Path(br_bin).is_absolute():
         br_bin = str((project_root / br_bin).resolve())
+    config = _load_config(config_path)
+    state = _load_state(state_path)
 
     if args.runs_json:
         runs = _load_runs_fixture(pathlib.Path(args.runs_json))
@@ -389,7 +492,7 @@ def main() -> int:
     parsed = []
     skipped = 0
     for run in runs:
-        parsed_run = _parse_run(args.repo, run)
+        parsed_run = _parse_run(args.repo, run, config.workflow_prefixes)
         if parsed_run is None:
             skipped += 1
             continue
@@ -397,8 +500,9 @@ def main() -> int:
 
     latest_runs = _choose_latest(parsed)
     parent_id: str | None = None
-    if _parent_exists(args.parent_id, project_root=project_root, br_bin=br_bin):
-        parent_id = args.parent_id
+    requested_parent = args.parent_id if args.parent_id is not None else config.parent_id
+    if _parent_exists(requested_parent, project_root=project_root, br_bin=br_bin):
+        parent_id = requested_parent
 
     existing = _active_intake_issues(project_root=project_root, br_bin=br_bin)
     created = []
@@ -406,6 +510,19 @@ def main() -> int:
     untouched = []
     for run in latest_runs:
         existing_id = existing.get(run.issue_title)
+        state_key = run.dedupe_key
+        previous = state.get(state_key, {})
+        previous_run_id = previous.get("run_id")
+        if existing_id and previous_run_id == run.run_id:
+            untouched.append(
+                {
+                    "issue_id": existing_id,
+                    "title": run.issue_title,
+                    "run_id": run.run_id,
+                    "reason": "already_ingested",
+                }
+            )
+            continue
         if existing_id:
             _update_issue(
                 existing_id,
@@ -422,6 +539,12 @@ def main() -> int:
                     "run_url": run.run_url,
                 }
             )
+            state[state_key] = {
+                "issue_id": existing_id,
+                "run_id": run.run_id,
+                "run_url": run.run_url,
+                "updated_at": run.updated_at,
+            }
             continue
 
         issue_id = _create_issue(
@@ -429,6 +552,8 @@ def main() -> int:
             project_root=project_root,
             br_bin=br_bin,
             parent_id=parent_id,
+            labels_csv=config.labels_csv,
+            instructions_md=config.instructions_md,
             dry_run=args.dry_run,
         )
         created.append(
@@ -440,14 +565,25 @@ def main() -> int:
             }
         )
         existing[run.issue_title] = issue_id
+        state[state_key] = {
+            "issue_id": issue_id,
+            "run_id": run.run_id,
+            "run_url": run.run_url,
+            "updated_at": run.updated_at,
+        }
 
     if not latest_runs:
         untouched.append("no release/validation failures found")
+
+    if not args.dry_run:
+        _save_state(state_path, state)
 
     result = {
         "source": source,
         "repo": args.repo,
         "dry_run": args.dry_run,
+        "config_path": str(config_path) if config_path else None,
+        "state_file": str(state_path) if state_path else None,
         "parent_linked": parent_id is not None,
         "candidates_total": len(runs),
         "candidates_supported": len(parsed),

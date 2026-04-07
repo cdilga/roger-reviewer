@@ -16,6 +16,18 @@ cd "${workdir}"
 
 "${BR_BIN}" init --no-daemon >/dev/null
 
+cat >intake-config.json <<'EOF'
+{
+  "parent_id": "none",
+  "labels": ["ci", "github-actions", "triage", "ci-failure-intake"],
+  "workflow_prefixes": [
+    ".github/workflows/release-",
+    ".github/workflows/validation-"
+  ],
+  "instructions_md": "Required follow-up instructions:\n1. investigate this failure\n2. link the owning repair bead"
+}
+EOF
+
 cat >runs-1.json <<'EOF'
 {
   "workflow_runs": [
@@ -82,6 +94,8 @@ EOF
 python3 "${SCRIPT}" \
   --repo cdilga/roger-reviewer \
   --project-root "${workdir}" \
+  --config intake-config.json \
+  --state-file "${workdir}/state.json" \
   --runs-json runs-1.json \
   --br-binary "${BR_BIN}" \
   --parent-id none >out-1.json
@@ -103,6 +117,7 @@ release_issue_id=$("${BR_BIN}" list --status open --json --no-daemon | jq -r '.i
 }
 
 "${BR_BIN}" show "${release_issue_id}" --json --no-daemon | jq -r '.[0].notes' | rg -n "run_id: 102" >/dev/null
+"${BR_BIN}" show "${release_issue_id}" --json --no-daemon | jq -r '.[0].description' | rg -n "investigate this failure" >/dev/null
 
 cat >runs-2.json <<'EOF'
 {
@@ -128,6 +143,8 @@ EOF
 python3 "${SCRIPT}" \
   --repo cdilga/roger-reviewer \
   --project-root "${workdir}" \
+  --config intake-config.json \
+  --state-file "${workdir}/state.json" \
   --runs-json runs-2.json \
   --br-binary "${BR_BIN}" \
   --parent-id none >out-2.json
@@ -142,5 +159,18 @@ count_after_second=$("${BR_BIN}" list --status open --json --no-daemon | jq '.is
 }
 
 "${BR_BIN}" show "${release_issue_id}" --json --no-daemon | jq -r '.[0].notes' | rg -n "run_id: 103" >/dev/null
+
+python3 "${SCRIPT}" \
+  --repo cdilga/roger-reviewer \
+  --project-root "${workdir}" \
+  --config intake-config.json \
+  --state-file "${workdir}/state.json" \
+  --runs-json runs-2.json \
+  --br-binary "${BR_BIN}" \
+  --parent-id none >out-3.json
+
+jq -e '.created | length == 0' out-3.json >/dev/null
+jq -e '.updated | length == 0' out-3.json >/dev/null
+jq -e '.untouched | map(select(type == "object" and .reason == "already_ingested")) | length == 1' out-3.json >/dev/null
 
 echo "test_ingest_failed_actions_runs: PASS"
