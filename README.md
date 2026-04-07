@@ -192,10 +192,23 @@ Current panel actions on GitHub PR pages:
 - `Findings`
 - `Refresh`
 
+Guided setup contract (normal path):
+
+1. run `rr extension setup --browser <edge|chrome|brave>`
+2. load the unpacked extension package in your browser
+3. run `rr extension doctor --browser <edge|chrome|brave>` to verify identity,
+   host registration, and helper reachability
+
+Normal onboarding should not require manual `rr bridge install`. Keep
+`rr bridge install [--extension-id <id>] [--bridge-binary <path>]` as a
+repair/admin path only (for example: newly added browser profile, local
+registration drift, or explicit dev override), and keep those override flags
+out of first-time setup instructions.
+
 Bridge dispatch order:
 
 1. Native Messaging (`com.roger_reviewer.bridge`)
-2. `roger://launch/...` fallback
+2. Fail closed when Native Messaging is unavailable; rerun `rr extension setup` and `rr extension doctor`
 
 Launch-only honesty in this slice:
 
@@ -248,7 +261,7 @@ raw SSE/MCP endpoint directly.
 | `packages/cli` | `rr` command implementation |
 | `packages/app-core` | Domain model, finding lifecycle, approval/posting contracts |
 | `packages/session-opencode` | OpenCode session linkage and return model |
-| `packages/bridge` | Native Messaging + URL launch bridge |
+| `packages/bridge` | Native Messaging bridge |
 | `apps/extension` | GitHub PR launch panel |
 | `packages/storage` | Canonical local store and retrieval |
 

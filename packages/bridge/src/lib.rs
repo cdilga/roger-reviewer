@@ -1,15 +1,11 @@
 //! Roger browser-to-local launch bridge.
 //!
 //! Implements the daemonless bridge for browser extension → local Roger
-//! handoff. Two bridge families:
+//! handoff. `0.1.0` bridge support is Native Messaging only:
 //!
-//! 1. **Native Messaging** (primary): Chrome/Edge/Brave Native Messaging
-//!    host that receives structured launch intents and returns bounded
-//!    readback-only responses. No persistent daemon.
-//!
-//! 2. **Custom URL** (fallback): `roger://` URL scheme handler for
-//!    thin launch-only handoff when Native Messaging is unavailable.
-//!    Recovery/convenience path only, not the primary bridge.
+//! **Native Messaging**: Chrome/Edge/Brave Native Messaging host that receives
+//! structured launch intents and returns bounded readback-only responses. No
+//! persistent daemon.
 //!
 //! Design constraints (per AGENTS.md / canonical plan):
 //! - No persistent daemon or local HTTP/WebSocket server
@@ -253,103 +249,11 @@ pub fn native_host_install_path_for(
     .join(manifest_name)
 }
 
-/// Return the per-OS location for the custom URL registration helper asset.
-pub fn custom_url_helper_path_for(os: SupportedOs, home_dir: &Path) -> PathBuf {
-    match os {
-        SupportedOs::Macos => home_dir
-            .join("Library/Application Support/RogerReviewer/bridge/register-roger-url.command"),
-        SupportedOs::Windows => {
-            home_dir.join("AppData/Local/RogerReviewer/bridge/register-roger-url.reg")
-        }
-        SupportedOs::Linux => {
-            home_dir.join(".local/share/roger-reviewer/bridge/register-roger-url.desktop")
-        }
-    }
-}
-
-/// Render the OS-specific custom-URL registration helper content.
-pub fn render_custom_url_helper(os: SupportedOs, rr_binary_path: &Path) -> String {
-    match os {
-        SupportedOs::Macos => format!(
-            "#!/bin/sh\n# Roger custom URL registration helper (manual apply)\n# target: macOS\n# Binary: {binary}\n# Register a roger:// handler that launches Roger.\n# This helper is intentionally explicit and does not auto-run.\n",
-            binary = rr_binary_path.to_string_lossy()
-        ),
-        SupportedOs::Windows => format!(
-            "Windows Registry Editor Version 5.00\n\n[HKEY_CURRENT_USER\\\\Software\\\\Classes\\\\roger]\n@=\"URL:Roger Protocol\"\n\"URL Protocol\"=\"\"\n\n[HKEY_CURRENT_USER\\\\Software\\\\Classes\\\\roger\\\\shell\\\\open\\\\command]\n@=\"\\\"{binary}\\\" \\\"%1\\\"\"\n",
-            binary = rr_binary_path.to_string_lossy().replace('\\', "\\\\")
-        ),
-        SupportedOs::Linux => format!(
-            "[Desktop Entry]\nName=Roger Reviewer URL Handler\nType=Application\nNoDisplay=true\nMimeType=x-scheme-handler/roger;\nExec={binary} %u\n",
-            binary = rr_binary_path.to_string_lossy()
-        ),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Custom URL scheme fallback
-// ---------------------------------------------------------------------------
-
-/// Parse a `roger://` custom URL into a launch intent.
-///
-/// Format: `roger://launch/<owner>/<repo>/<pr_number>[?action=<action>&instance=<name>]`
-///
-/// This is a thin convenience/recovery path only. The primary bridge
-/// is Native Messaging.
-pub fn parse_custom_url(url: &str) -> Result<BridgeLaunchIntent> {
-    let stripped = url
-        .strip_prefix("roger://launch/")
-        .ok_or_else(|| BridgeError::InvalidRequest(format!("invalid roger URL: {url}")))?;
-
-    let (path_part, query_part) = if let Some(idx) = stripped.find('?') {
-        (&stripped[..idx], Some(&stripped[idx + 1..]))
-    } else {
-        (stripped, None)
-    };
-
-    let parts: Vec<&str> = path_part.split('/').collect();
-    if parts.len() < 3 {
-        return Err(BridgeError::InvalidRequest(format!(
-            "expected roger://launch/<owner>/<repo>/<pr>, got: {url}"
-        )));
-    }
-
-    let owner = parts[0].to_owned();
-    let repo = parts[1].to_owned();
-    let pr_number: u64 = parts[2]
-        .parse()
-        .map_err(|_| BridgeError::InvalidRequest(format!("invalid PR number: {}", parts[2])))?;
-
-    let mut action = "start_review".to_owned();
-    let mut instance = None;
-
-    if let Some(query) = query_part {
-        for pair in query.split('&') {
-            if let Some((key, value)) = pair.split_once('=') {
-                match key {
-                    "action" => action = value.to_owned(),
-                    "instance" => instance = Some(value.to_owned()),
-                    _ => {} // Ignore unknown params.
-                }
-            }
-        }
-    }
-
-    Ok(BridgeLaunchIntent {
-        action,
-        owner,
-        repo,
-        pr_number,
-        head_ref: None,
-        instance,
-    })
-}
-
 /// Launch path selected for browser → local bridge handoff.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BridgeLaunchPath {
     NativeMessaging,
-    CustomUrlLaunchOnly,
 }
 
 const NATIVE_MESSAGING_LAUNCH_ARTIFACTS: [&str; 3] = [
@@ -358,28 +262,18 @@ const NATIVE_MESSAGING_LAUNCH_ARTIFACTS: [&str; 3] = [
     "bridge_launch_transcript.json",
 ];
 
-const CUSTOM_URL_LAUNCH_ARTIFACTS: [&str; 3] = [
-    "custom_url_launch_intent.txt",
-    "bridge_response_envelope.json",
-    "bridge_launch_transcript.json",
-];
-
 /// Resolve the launch path from local bridge registration state.
 ///
-/// Native Messaging is preferred for the serious companion tier. Custom URL
-/// remains a truthful launch-only fallback.
+/// Native Messaging is required for the supported browser launch path.
 pub fn choose_launch_path(
     native_messaging_registered: bool,
-    custom_url_registered: bool,
+    _legacy_fallback_registered: bool,
 ) -> Result<BridgeLaunchPath> {
     if native_messaging_registered {
         return Ok(BridgeLaunchPath::NativeMessaging);
     }
-    if custom_url_registered {
-        return Ok(BridgeLaunchPath::CustomUrlLaunchOnly);
-    }
     Err(BridgeError::LocalStateMissing {
-        detail: "No supported bridge launch path is registered. Install Native Messaging host support or configure custom URL launch fallback.".to_owned(),
+        detail: "Native Messaging host registration is missing. Run `rr extension setup` and rerun `rr extension doctor`.".to_owned(),
     })
 }
 
@@ -390,7 +284,6 @@ pub fn choose_launch_path(
 pub fn required_launch_artifacts(path: BridgeLaunchPath) -> &'static [&'static str] {
     match path {
         BridgeLaunchPath::NativeMessaging => &NATIVE_MESSAGING_LAUNCH_ARTIFACTS,
-        BridgeLaunchPath::CustomUrlLaunchOnly => &CUSTOM_URL_LAUNCH_ARTIFACTS,
     }
 }
 
@@ -544,32 +437,6 @@ mod tests {
     }
 
     #[test]
-    fn custom_url_parse_basic() {
-        let intent = parse_custom_url("roger://launch/acme/widgets/42").unwrap();
-        assert_eq!(intent.owner, "acme");
-        assert_eq!(intent.repo, "widgets");
-        assert_eq!(intent.pr_number, 42);
-        assert_eq!(intent.action, "start_review");
-    }
-
-    #[test]
-    fn custom_url_parse_with_params() {
-        let intent = parse_custom_url(
-            "roger://launch/acme/widgets/42?action=resume_review&instance=my-inst",
-        )
-        .unwrap();
-        assert_eq!(intent.action, "resume_review");
-        assert_eq!(intent.instance, Some("my-inst".to_owned()));
-    }
-
-    #[test]
-    fn custom_url_parse_invalid() {
-        assert!(parse_custom_url("roger://bad").is_err());
-        assert!(parse_custom_url("https://github.com/foo").is_err());
-        assert!(parse_custom_url("roger://launch/acme/widgets/notanumber").is_err());
-    }
-
-    #[test]
     fn host_manifest_for_roger() {
         let manifest =
             NativeHostManifest::for_roger(Path::new("/usr/local/bin/rr-bridge"), "abcdef123456");
@@ -629,37 +496,6 @@ mod tests {
                 path.display()
             );
         }
-    }
-
-    #[test]
-    fn custom_url_helper_assets_cover_supported_os_matrix() {
-        let home = Path::new("/home/tester");
-        let binary = Path::new("/usr/local/bin/rr");
-
-        let mac = custom_url_helper_path_for(SupportedOs::Macos, home);
-        assert!(
-            mac.to_string_lossy()
-                .ends_with("register-roger-url.command")
-        );
-        assert!(render_custom_url_helper(SupportedOs::Macos, binary).contains("macOS"));
-
-        let windows = custom_url_helper_path_for(SupportedOs::Windows, home);
-        assert!(
-            windows
-                .to_string_lossy()
-                .ends_with("register-roger-url.reg")
-        );
-        assert!(render_custom_url_helper(SupportedOs::Windows, binary).contains("URL Protocol"));
-
-        let linux = custom_url_helper_path_for(SupportedOs::Linux, home);
-        assert!(
-            linux
-                .to_string_lossy()
-                .ends_with("register-roger-url.desktop")
-        );
-        assert!(
-            render_custom_url_helper(SupportedOs::Linux, binary).contains("x-scheme-handler/roger")
-        );
     }
 
     #[test]

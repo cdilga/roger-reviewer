@@ -1368,11 +1368,123 @@ fn bridge_pack_extension_emits_checksum_artifacts_in_smoke() {
 }
 
 #[test]
+fn extension_setup_blocks_without_discovered_identity_in_smoke() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = CliRuntime {
+        cwd: workspace_root(),
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: "opencode".to_owned(),
+    };
+    let install_root = temp.path().join("install-root");
+
+    let setup = run(
+        &[
+            "extension".to_owned(),
+            "setup".to_owned(),
+            "--browser".to_owned(),
+            "chrome".to_owned(),
+            "--install-root".to_owned(),
+            install_root.to_string_lossy().to_string(),
+            "--robot".to_owned(),
+        ],
+        &runtime,
+    );
+    assert_eq!(setup.exit_code, 3, "{}", setup.stderr);
+    let payload = parse_robot_payload(&setup.stdout);
+    assert_eq!(payload["schema_id"], "rr.robot.extension.v1");
+    assert_eq!(payload["outcome"], "blocked");
+    assert_eq!(payload["data"]["subcommand"], "setup");
+    assert_eq!(payload["data"]["reason_code"], "extension_identity_missing");
+    assert_eq!(payload["data"]["browser"], "chrome");
+    assert!(
+        payload["data"]["manual_browser_step"]
+            .as_str()
+            .expect("manual browser step")
+            .contains("chrome://extensions")
+    );
+}
+
+#[test]
+fn extension_setup_and_doctor_emit_complete_envelopes_in_smoke() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = CliRuntime {
+        cwd: workspace_root(),
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: "opencode".to_owned(),
+    };
+    let install_root = temp.path().join("install-root");
+    let extension_id = "abcdefghijklmnopabcdefghijklmnop";
+    let registry_path = runtime.store_root.join("bridge/extension-id");
+    fs::create_dir_all(
+        registry_path
+            .parent()
+            .expect("extension-id registry parent path"),
+    )
+    .expect("create extension-id registry parent");
+    fs::write(&registry_path, format!("{extension_id}\n")).expect("write extension-id registry");
+
+    let setup = run(
+        &[
+            "extension".to_owned(),
+            "setup".to_owned(),
+            "--browser".to_owned(),
+            "edge".to_owned(),
+            "--install-root".to_owned(),
+            install_root.to_string_lossy().to_string(),
+            "--robot".to_owned(),
+        ],
+        &runtime,
+    );
+    assert_eq!(setup.exit_code, 0, "{}", setup.stderr);
+    let setup_payload = parse_robot_payload(&setup.stdout);
+    assert_eq!(setup_payload["schema_id"], "rr.robot.extension.v1");
+    assert_eq!(setup_payload["outcome"], "complete");
+    assert_eq!(setup_payload["data"]["subcommand"], "setup");
+    assert_eq!(setup_payload["data"]["browser"], "edge");
+    assert_eq!(setup_payload["data"]["extension_id"], extension_id);
+    assert_eq!(
+        setup_payload["data"]["doctor"]["subcommand"],
+        "doctor",
+        "setup should embed doctor result envelope"
+    );
+    assert!(
+        setup_payload["data"]["doctor"]["checks"]
+            .as_array()
+            .expect("setup doctor checks")
+            .iter()
+            .all(|entry| entry["ok"] == true)
+    );
+
+    let doctor = run(
+        &[
+            "extension".to_owned(),
+            "doctor".to_owned(),
+            "--browser".to_owned(),
+            "edge".to_owned(),
+            "--install-root".to_owned(),
+            install_root.to_string_lossy().to_string(),
+            "--robot".to_owned(),
+        ],
+        &runtime,
+    );
+    assert_eq!(doctor.exit_code, 0, "{}", doctor.stderr);
+    let doctor_payload = parse_robot_payload(&doctor.stdout);
+    assert_eq!(doctor_payload["schema_id"], "rr.robot.extension.v1");
+    assert_eq!(doctor_payload["outcome"], "complete");
+    assert_eq!(doctor_payload["data"]["subcommand"], "doctor");
+    assert_eq!(doctor_payload["data"]["browser"], "edge");
+    assert!(
+        doctor_payload["data"]["checks"]
+            .as_array()
+            .expect("doctor checks")
+            .iter()
+            .all(|entry| entry["ok"] == true)
+    );
+}
+
+#[test]
 fn bridge_install_uninstall_is_failure_closed_and_reports_asset_checksums_in_smoke() {
     let temp = tempdir().expect("tempdir");
-    let bridge_binary = temp.path().join("rr-bridge");
-    fs::write(&bridge_binary, b"#!/bin/sh\nexit 0\n").expect("write mock bridge binary");
-
     let runtime = CliRuntime {
         cwd: workspace_root(),
         store_root: temp.path().join("roger-store"),
@@ -1384,8 +1496,6 @@ fn bridge_install_uninstall_is_failure_closed_and_reports_asset_checksums_in_smo
         &[
             "bridge".to_owned(),
             "install".to_owned(),
-            "--bridge-binary".to_owned(),
-            bridge_binary.to_string_lossy().to_string(),
             "--install-root".to_owned(),
             install_root.to_string_lossy().to_string(),
             "--robot".to_owned(),
@@ -1397,17 +1507,23 @@ fn bridge_install_uninstall_is_failure_closed_and_reports_asset_checksums_in_smo
     assert_eq!(blocked_payload["outcome"], "blocked");
     assert_eq!(
         blocked_payload["data"]["reason_code"],
-        "extension_id_required"
+        "extension_id_discovery_failed"
     );
+
+    let extension_registry = runtime.store_root.join("bridge/extension-id");
+    fs::create_dir_all(
+        extension_registry
+            .parent()
+            .expect("extension registry parent"),
+    )
+    .expect("create extension registry parent");
+    fs::write(&extension_registry, "abcdefghijklmnopabcdefghijklmnop\n")
+        .expect("write extension identity registry");
 
     let install = run(
         &[
             "bridge".to_owned(),
             "install".to_owned(),
-            "--extension-id".to_owned(),
-            "abcdefghijklmnopabcdefghijklmnop".to_owned(),
-            "--bridge-binary".to_owned(),
-            bridge_binary.to_string_lossy().to_string(),
             "--install-root".to_owned(),
             install_root.to_string_lossy().to_string(),
             "--robot".to_owned(),
@@ -1417,6 +1533,11 @@ fn bridge_install_uninstall_is_failure_closed_and_reports_asset_checksums_in_smo
     assert_eq!(install.exit_code, 0, "{}", install.stderr);
     let install_payload = parse_robot_payload(&install.stdout);
     assert_eq!(install_payload["outcome"], "complete");
+    assert_eq!(install_payload["data"]["extension_id_source"], "store_registry");
+    assert_eq!(
+        install_payload["data"]["bridge_binary_source"],
+        "installed_rr_current_exe"
+    );
     let assets = install_payload["data"]["assets"]
         .as_array()
         .expect("assets array");

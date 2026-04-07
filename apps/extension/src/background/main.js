@@ -14,16 +14,6 @@ const CANONICAL_ATTENTION_STATES = new Set([
 ]);
 const MAX_MIRROR_FRESHNESS_SECONDS = 300;
 
-function buildCustomUrl(intent) {
-  const base = `roger://launch/${encodeURIComponent(intent.owner)}/${encodeURIComponent(intent.repo)}/${intent.pr_number}`;
-  const params = new URLSearchParams();
-  params.set('action', intent.action);
-  if (intent.instance) {
-    params.set('instance', intent.instance);
-  }
-  return `${base}?${params.toString()}`;
-}
-
 function dispatchNative(intent) {
   return new Promise((resolve) => {
     chrome.runtime.sendNativeMessage(BRIDGE_HOST, intent, (response) => {
@@ -138,19 +128,6 @@ function dispatchNativeStatus(intent) {
   });
 }
 
-async function launchViaCustomUrl(intent, fallbackReason) {
-  const url = buildCustomUrl(intent);
-  await chrome.tabs.create({ url });
-  return {
-    ok: true,
-    mode: 'custom_url_fallback',
-    action: intent.action,
-    message:
-      'Native Messaging unavailable; launched via custom URL fallback. Open Roger locally for authoritative status.',
-    guidance: fallbackReason,
-  };
-}
-
 async function handleLaunchMessage(payload) {
   const intent = payload?.intent;
   if (!intent || typeof intent !== 'object') {
@@ -176,7 +153,16 @@ async function handleLaunchMessage(payload) {
     return nativeResult;
   }
 
-  return launchViaCustomUrl(intent, nativeResult.message || nativeResult.guidance || null);
+  return {
+    ok: false,
+    mode: 'native_unavailable',
+    action: intent.action,
+    message: 'Native Messaging unavailable; launch blocked.',
+    guidance:
+      nativeResult.message ||
+      nativeResult.guidance ||
+      'Run `rr extension setup --browser <edge|chrome|brave>` and rerun `rr extension doctor`.',
+  };
 }
 
 async function handleStatusMessage(payload, statusProbe = dispatchNativeStatus) {
@@ -232,6 +218,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     CANONICAL_ATTENTION_STATES,
     MAX_MIRROR_FRESHNESS_SECONDS,
+    handleLaunchMessage,
     handleStatusMessage,
     launchOnlyStatusEnvelope,
     normalizeBoundedStatus,

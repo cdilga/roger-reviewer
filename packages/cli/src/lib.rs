@@ -7,8 +7,7 @@ use roger_app_core::{
     route_harness_command, safe_harness_command_bindings, FindingTriageState, FindingOutboundState,
 };
 use roger_bridge::{
-    NativeHostManifest, SupportedBrowser, SupportedOs, custom_url_helper_path_for,
-    native_host_install_path_for, render_custom_url_helper,
+    NativeHostManifest, SupportedBrowser, SupportedOs, native_host_install_path_for,
 };
 use roger_config::cli_defaults::{DEFAULT_OPENCODE_BIN, ENV_OPENCODE_BIN, ENV_STORE_ROOT};
 use roger_session_codex::{CodexAdapter, CodexSessionPath};
@@ -84,6 +83,7 @@ enum CommandKind {
     Search,
     Update,
     Bridge,
+    Extension,
     RobotDocs,
     Findings,
     Status,
@@ -102,6 +102,7 @@ impl CommandKind {
             (Self::Search, _) => "rr search",
             (Self::Update, _) => "rr update",
             (Self::Bridge, _) => "rr bridge",
+            (Self::Extension, _) => "rr extension",
             (Self::RobotDocs, _) => "rr robot-docs",
             (Self::Findings, _) => "rr findings",
             (Self::Status, _) => "rr status",
@@ -118,6 +119,7 @@ impl CommandKind {
             Self::Search => "rr.robot.search.v1",
             Self::Update => "rr.robot.update.v1",
             Self::Bridge => "rr.robot.bridge.v1",
+            Self::Extension => "rr.robot.extension.v1",
             Self::RobotDocs => "rr.robot.robot_docs.v1",
             Self::Findings => "rr.robot.findings.v1",
             Self::Status => "rr.robot.status.v1",
@@ -133,6 +135,12 @@ enum BridgeCommandKind {
     PackExtension,
     Install,
     Uninstall,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExtensionCommandKind {
+    Setup,
+    Doctor,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,6 +164,8 @@ impl RobotFormat {
 struct ParsedArgs {
     command: CommandKind,
     bridge_command: Option<BridgeCommandKind>,
+    extension_command: Option<ExtensionCommandKind>,
+    extension_browser: Option<SupportedBrowser>,
     bridge_extension_id: Option<String>,
     bridge_binary_path: Option<PathBuf>,
     bridge_install_root: Option<PathBuf>,
@@ -496,6 +506,7 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         "search" => CommandKind::Search,
         "update" => CommandKind::Update,
         "bridge" => CommandKind::Bridge,
+        "extension" => CommandKind::Extension,
         "robot-docs" => CommandKind::RobotDocs,
         "findings" => CommandKind::Findings,
         "status" => CommandKind::Status,
@@ -509,6 +520,8 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
     let mut parsed = ParsedArgs {
         command,
         bridge_command: None,
+        extension_command: None,
+        extension_browser: None,
         bridge_extension_id: None,
         bridge_binary_path: None,
         bridge_install_root: None,
@@ -672,6 +685,13 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
                 parsed.bridge_output_dir = Some(PathBuf::from(value));
                 i += 2;
             }
+            "--browser" => {
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--browser requires edge, chrome, or brave".to_owned())?;
+                parsed.extension_browser = Some(parse_supported_browser(value)?);
+                i += 2;
+            }
             "--robot" => {
                 parsed.robot = true;
                 i += 1;
@@ -706,6 +726,16 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
                             "uninstall" => Some(BridgeCommandKind::Uninstall),
                             other => {
                                 return Err(format!("unknown bridge subcommand: {other}"));
+                            }
+                        };
+                        i += 1;
+                    }
+                    CommandKind::Extension if parsed.extension_command.is_none() => {
+                        parsed.extension_command = match positional {
+                            "setup" => Some(ExtensionCommandKind::Setup),
+                            "doctor" => Some(ExtensionCommandKind::Doctor),
+                            other => {
+                                return Err(format!("unknown extension subcommand: {other}"));
                             }
                         };
                         i += 1;
@@ -757,16 +787,29 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         );
     }
 
+    if parsed.command == CommandKind::Extension && parsed.extension_command.is_none() {
+        return Err("rr extension requires a subcommand: setup or doctor".to_owned());
+    }
+
     if parsed.command != CommandKind::Bridge
         && (parsed.bridge_extension_id.is_some()
             || parsed.bridge_binary_path.is_some()
-            || parsed.bridge_install_root.is_some()
             || parsed.bridge_output_dir.is_some())
     {
         return Err(
-            "--extension-id/--bridge-binary/--install-root/--output-dir are bridge-only flags"
+            "--extension-id/--bridge-binary/--output-dir are bridge-only flags"
                 .to_owned(),
         );
+    }
+
+    if !matches!(parsed.command, CommandKind::Bridge | CommandKind::Extension)
+        && parsed.bridge_install_root.is_some()
+    {
+        return Err("--install-root is only supported by rr bridge and rr extension".to_owned());
+    }
+
+    if parsed.command != CommandKind::Extension && parsed.extension_browser.is_some() {
+        return Err("--browser is only supported by rr extension".to_owned());
     }
 
     if parsed.command != CommandKind::Update
@@ -797,6 +840,8 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
             || parsed.robot_docs_topic.is_some()
             || parsed.provider != "opencode"
             || parsed.bridge_command.is_some()
+            || parsed.extension_command.is_some()
+            || parsed.extension_browser.is_some()
             || parsed.bridge_extension_id.is_some()
             || parsed.bridge_binary_path.is_some()
             || parsed.bridge_install_root.is_some()
@@ -822,12 +867,429 @@ fn execute_command(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
         CommandKind::Search => handle_search(parsed, runtime),
         CommandKind::Update => handle_update(parsed, runtime),
         CommandKind::Bridge => handle_bridge(parsed, runtime),
+        CommandKind::Extension => handle_extension(parsed, runtime),
         CommandKind::RobotDocs => handle_robot_docs(parsed),
         CommandKind::Findings => handle_findings(parsed, runtime),
         CommandKind::Status => handle_status(parsed, runtime),
         CommandKind::Refresh => {
             handle_resume_or_refresh(parsed, runtime, LaunchAction::RefreshFindings)
         }
+    }
+}
+
+fn parse_supported_browser(value: &str) -> Result<SupportedBrowser, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "chrome" => Ok(SupportedBrowser::Chrome),
+        "edge" => Ok(SupportedBrowser::Edge),
+        "brave" => Ok(SupportedBrowser::Brave),
+        other => Err(format!(
+            "unsupported --browser value: {other} (expected edge, chrome, or brave)"
+        )),
+    }
+}
+
+fn supported_browser_label(browser: SupportedBrowser) -> &'static str {
+    match browser {
+        SupportedBrowser::Chrome => "chrome",
+        SupportedBrowser::Edge => "edge",
+        SupportedBrowser::Brave => "brave",
+    }
+}
+
+fn extension_id_registry_path(store_root: &Path) -> PathBuf {
+    store_root.join("bridge/extension-id")
+}
+
+fn normalize_extension_id(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+fn discover_extension_id(parsed: &ParsedArgs, runtime: &CliRuntime) -> Option<(String, &'static str)> {
+    if let Some(value) = parsed
+        .bridge_extension_id
+        .as_deref()
+        .and_then(normalize_extension_id)
+    {
+        return Some((value, "explicit_flag"));
+    }
+
+    let registry_path = extension_id_registry_path(&runtime.store_root);
+    if let Ok(contents) = fs::read_to_string(&registry_path) {
+        if let Some(value) = normalize_extension_id(&contents) {
+            return Some((value, "store_registry"));
+        }
+    }
+
+    if let Ok(value) = std::env::var("RR_BRIDGE_EXTENSION_ID") {
+        if let Some(value) = normalize_extension_id(&value) {
+            return Some((value, "env_rr_bridge_extension_id"));
+        }
+    }
+
+    None
+}
+
+fn extension_browser_url(browser: SupportedBrowser) -> &'static str {
+    match browser {
+        SupportedBrowser::Chrome => "chrome://extensions",
+        SupportedBrowser::Edge => "edge://extensions",
+        SupportedBrowser::Brave => "brave://extensions",
+    }
+}
+
+fn persist_extension_id(runtime: &CliRuntime, extension_id: &str) -> Result<(), String> {
+    let path = extension_id_registry_path(&runtime.store_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create extension identity registry directory {}: {err}",
+                parent.display()
+            )
+        })?;
+    }
+    fs::write(&path, format!("{extension_id}\n"))
+        .map_err(|err| format!("failed to write extension identity registry: {err}"))
+}
+
+fn resolve_extension_package_dir(workspace_root: &Path) -> Result<PathBuf, String> {
+    let manifest_template_path = workspace_root.join("apps/extension/manifest.template.json");
+    let manifest_template = fs::read_to_string(&manifest_template_path).map_err(|err| {
+        format!(
+            "failed to read extension manifest template {}: {err}",
+            manifest_template_path.display()
+        )
+    })?;
+    let manifest_json: Value = serde_json::from_str(&manifest_template)
+        .map_err(|err| format!("failed to parse extension manifest template: {err}"))?;
+    let version = manifest_json
+        .get("version")
+        .and_then(Value::as_str)
+        .unwrap_or("0.0.0");
+    Ok(workspace_root
+        .join("target/bridge/extension")
+        .join(format!("roger-extension-{version}-unpacked")))
+}
+
+fn handle_extension(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
+    let Some(subcommand) = parsed.extension_command else {
+        return error_response("rr extension missing subcommand".to_owned());
+    };
+
+    let Some(workspace_root) = find_workspace_root(&runtime.cwd) else {
+        return blocked_response(
+            "failed to resolve Roger workspace root for extension setup commands".to_owned(),
+            vec!["run rr extension from the Roger repository root (or a child directory)".to_owned()],
+            json!({"reason_code": "workspace_root_not_found"}),
+        );
+    };
+
+    match subcommand {
+        ExtensionCommandKind::Setup => handle_extension_setup(parsed, runtime, &workspace_root),
+        ExtensionCommandKind::Doctor => handle_extension_doctor(parsed, runtime, &workspace_root),
+    }
+}
+
+fn handle_extension_setup(
+    parsed: &ParsedArgs,
+    runtime: &CliRuntime,
+    workspace_root: &Path,
+) -> CommandResponse {
+    let browser = parsed
+        .extension_browser
+        .clone()
+        .unwrap_or(SupportedBrowser::Chrome);
+
+    let mut pack_parsed = parsed.clone();
+    pack_parsed.command = CommandKind::Bridge;
+    pack_parsed.bridge_command = Some(BridgeCommandKind::PackExtension);
+    pack_parsed.bridge_extension_id = None;
+    pack_parsed.bridge_binary_path = None;
+    let pack = handle_bridge(&pack_parsed, runtime);
+    if pack.outcome != OutcomeKind::Complete {
+        return pack;
+    }
+
+    let package_dir = match pack
+        .data
+        .get("package_dir")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+    {
+        Some(path) => path,
+        None => {
+            return error_response(
+                "extension setup failed to resolve package path from pack-extension output"
+                    .to_owned(),
+            );
+        }
+    };
+
+    let load_step = format!(
+        "open {} and load unpacked extension from {}",
+        extension_browser_url(browser.clone()),
+        package_dir
+    );
+
+    let Some((extension_id, extension_id_source)) = discover_extension_id(parsed, runtime) else {
+        return CommandResponse {
+            outcome: OutcomeKind::Blocked,
+            data: json!({
+                "subcommand": "setup",
+                "reason_code": "extension_identity_missing",
+                "browser": supported_browser_label(browser.clone()),
+                "package_dir": package_dir,
+                "extension_id_registry_path": extension_id_registry_path(&runtime.store_root)
+                    .to_string_lossy()
+                    .to_string(),
+                "manual_browser_step": load_step,
+            }),
+            warnings: vec![
+                "extension identity has not been discovered yet".to_owned(),
+                "normal setup stays fail-closed until Roger can discover extension identity".to_owned(),
+            ],
+            repair_actions: vec![
+                load_step,
+                "rerun rr extension setup after the extension registers identity".to_owned(),
+            ],
+            message: "extension setup blocked until extension identity is discovered".to_owned(),
+        };
+    };
+
+    if let Err(err) = persist_extension_id(runtime, &extension_id) {
+        return error_response(err);
+    }
+
+    let Some(host_os) = SupportedOs::current() else {
+        return blocked_response(
+            "rr extension setup supports macOS, Windows, and Linux only".to_owned(),
+            vec!["run setup from a supported OS".to_owned()],
+            json!({"reason_code": "unsupported_host_os"}),
+        );
+    };
+
+    let install_root = parsed
+        .bridge_install_root
+        .clone()
+        .or_else(|| std::env::var("HOME").ok().map(PathBuf::from));
+    let Some(install_root) = install_root else {
+        return blocked_response(
+            "failed to determine install root; HOME is missing".to_owned(),
+            vec!["pass --install-root <path> for recovery".to_owned()],
+            json!({"reason_code": "install_root_missing"}),
+        );
+    };
+
+    let bridge_binary = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(err) => {
+            return blocked_response(
+                format!("failed to resolve installed rr binary path: {err}"),
+                vec!["rerun from an installed rr binary path".to_owned()],
+                json!({"reason_code": "rr_binary_unresolved"}),
+            );
+        }
+    };
+
+    let manifest_path = native_host_install_path_for(&browser, host_os, &install_root);
+    let manifest = NativeHostManifest::for_roger(&bridge_binary, &extension_id);
+    let manifest_bytes = match serde_json::to_vec_pretty(&manifest) {
+        Ok(mut bytes) => {
+            bytes.push(b'\n');
+            bytes
+        }
+        Err(err) => {
+            return error_response(format!(
+                "failed to serialize native host manifest for {}: {err}",
+                supported_browser_label(browser.clone())
+            ));
+        }
+    };
+    if let Some(parent) = manifest_path.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            return error_response(format!(
+                "failed to create native host directory {}: {err}",
+                parent.display()
+            ));
+        }
+    }
+    if let Err(err) = fs::write(&manifest_path, &manifest_bytes) {
+        return error_response(format!(
+            "failed to write native host manifest {}: {err}",
+            manifest_path.display()
+        ));
+    }
+
+    let mut doctor_args = parsed.clone();
+    doctor_args.command = CommandKind::Extension;
+    doctor_args.extension_command = Some(ExtensionCommandKind::Doctor);
+    doctor_args.extension_browser = Some(browser.clone());
+    doctor_args.bridge_install_root = Some(install_root.clone());
+    let doctor = handle_extension_doctor(&doctor_args, runtime, workspace_root);
+    if doctor.outcome != OutcomeKind::Complete {
+        return CommandResponse {
+            outcome: doctor.outcome,
+            data: json!({
+                "subcommand": "setup",
+                "browser": supported_browser_label(browser.clone()),
+                "package_dir": package_dir,
+                "install_root": install_root.to_string_lossy().to_string(),
+                "doctor": doctor.data,
+            }),
+            warnings: doctor.warnings,
+            repair_actions: doctor.repair_actions,
+            message: "extension setup completed with follow-up doctor failures".to_owned(),
+        };
+    }
+
+    CommandResponse {
+        outcome: OutcomeKind::Complete,
+        data: json!({
+            "subcommand": "setup",
+            "browser": supported_browser_label(browser.clone()),
+            "package_dir": package_dir,
+            "extension_id": extension_id,
+            "extension_id_source": extension_id_source,
+            "install_root": install_root.to_string_lossy().to_string(),
+            "host_binary": bridge_binary.to_string_lossy().to_string(),
+            "native_manifest_path": manifest_path.to_string_lossy().to_string(),
+            "doctor": doctor.data,
+        }),
+        warnings: Vec::new(),
+        repair_actions: vec![format!(
+            "rerun rr extension doctor --browser {} after browser or install changes",
+            supported_browser_label(browser)
+        )],
+        message: "extension setup completed".to_owned(),
+    }
+}
+
+fn handle_extension_doctor(
+    parsed: &ParsedArgs,
+    runtime: &CliRuntime,
+    workspace_root: &Path,
+) -> CommandResponse {
+    let browser = parsed
+        .extension_browser
+        .clone()
+        .unwrap_or(SupportedBrowser::Chrome);
+    let browser_label = supported_browser_label(browser.clone());
+
+    let package_dir = match resolve_extension_package_dir(workspace_root) {
+        Ok(path) => path,
+        Err(err) => return error_response(err),
+    };
+    let extension_id = discover_extension_id(parsed, runtime).map(|(value, _source)| value);
+    let Some(host_os) = SupportedOs::current() else {
+        return blocked_response(
+            "rr extension doctor supports macOS, Windows, and Linux only".to_owned(),
+            vec!["run doctor from a supported OS".to_owned()],
+            json!({"reason_code": "unsupported_host_os"}),
+        );
+    };
+    let install_root = parsed
+        .bridge_install_root
+        .clone()
+        .or_else(|| std::env::var("HOME").ok().map(PathBuf::from));
+    let Some(install_root) = install_root else {
+        return blocked_response(
+            "failed to determine install root; HOME is missing".to_owned(),
+            vec!["pass --install-root <path> for recovery".to_owned()],
+            json!({"reason_code": "install_root_missing"}),
+        );
+    };
+
+    let manifest_path = native_host_install_path_for(&browser, host_os, &install_root);
+    let mut checks: Vec<Value> = Vec::new();
+    let package_exists = package_dir.exists();
+    checks.push(json!({
+        "name": "extension_package_present",
+        "ok": package_exists,
+        "detail": package_dir.to_string_lossy().to_string(),
+    }));
+
+    let extension_id_present = extension_id.as_deref().is_some_and(|id| !id.is_empty());
+    checks.push(json!({
+        "name": "extension_identity_discovered",
+        "ok": extension_id_present,
+        "detail": extension_id.clone(),
+    }));
+
+    let manifest_exists = manifest_path.exists();
+    checks.push(json!({
+        "name": "native_host_manifest_present",
+        "ok": manifest_exists,
+        "detail": manifest_path.to_string_lossy().to_string(),
+    }));
+
+    let mut manifest_allows_origin = false;
+    let mut host_binary_exists = false;
+    if manifest_exists {
+        if let Ok(text) = fs::read_to_string(&manifest_path) {
+            if let Ok(manifest) = serde_json::from_str::<NativeHostManifest>(&text) {
+                host_binary_exists = Path::new(&manifest.path).exists();
+                if let Some(extension_id) = extension_id.as_ref() {
+                    let expected_origin = format!("chrome-extension://{extension_id}/");
+                    manifest_allows_origin =
+                        manifest.allowed_origins.iter().any(|origin| origin == &expected_origin);
+                }
+            }
+        }
+    }
+    checks.push(json!({
+        "name": "native_host_binary_present",
+        "ok": host_binary_exists,
+        "detail": manifest_path.to_string_lossy().to_string(),
+    }));
+    checks.push(json!({
+        "name": "native_host_origin_matches_extension_id",
+        "ok": manifest_allows_origin,
+        "detail": browser_label,
+    }));
+
+    let all_ok = checks
+        .iter()
+        .all(|entry| entry.get("ok").and_then(Value::as_bool).unwrap_or(false));
+
+    if !all_ok {
+        return CommandResponse {
+            outcome: OutcomeKind::Blocked,
+            data: json!({
+                "subcommand": "doctor",
+                "reason_code": "extension_setup_incomplete",
+                "browser": browser_label,
+                "package_dir": package_dir.to_string_lossy().to_string(),
+                "install_root": install_root.to_string_lossy().to_string(),
+                "checks": checks,
+            }),
+            warnings: vec![
+                "extension doctor detected missing or inconsistent setup prerequisites".to_owned(),
+            ],
+            repair_actions: vec![
+                format!("rerun rr extension setup --browser {browser_label}"),
+                "if setup remains blocked, complete the one browser load step and rerun setup"
+                    .to_owned(),
+            ],
+            message: "extension doctor failed closed".to_owned(),
+        };
+    }
+
+    CommandResponse {
+        outcome: OutcomeKind::Complete,
+        data: json!({
+            "subcommand": "doctor",
+            "browser": browser_label,
+            "package_dir": package_dir.to_string_lossy().to_string(),
+            "install_root": install_root.to_string_lossy().to_string(),
+            "checks": checks,
+        }),
+        warnings: Vec::new(),
+        repair_actions: Vec::new(),
+        message: "extension doctor checks passed".to_owned(),
     }
 }
 
@@ -1099,44 +1561,79 @@ fn handle_bridge(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 );
             };
 
-            let extension_id = parsed
-                .bridge_extension_id
-                .clone()
-                .or_else(|| std::env::var("RR_BRIDGE_EXTENSION_ID").ok())
-                .filter(|value| !value.trim().is_empty());
-            let Some(extension_id) = extension_id else {
+            let registry_path = extension_id_registry_path(&runtime.store_root);
+            let Some((extension_id, extension_id_source)) = discover_extension_id(parsed, runtime) else {
                 return blocked_response(
-                    "rr bridge install requires an explicit extension id".to_owned(),
+                    "rr bridge install could not discover extension identity for setup".to_owned(),
                     vec![
-                        "pass --extension-id <chrome-extension-id>".to_owned(),
-                        "or set RR_BRIDGE_EXTENSION_ID".to_owned(),
+                        "run rr extension setup to prepare unpacked extension guidance and register identity".to_owned(),
+                        format!(
+                            "or write the discovered id to {}",
+                            registry_path.to_string_lossy()
+                        ),
+                        "or pass --extension-id <chrome-extension-id> as a repair/dev override".to_owned(),
+                        "or set RR_BRIDGE_EXTENSION_ID for non-interactive environments".to_owned(),
                     ],
-                    json!({"reason_code": "extension_id_required"}),
+                    json!({
+                        "reason_code": "extension_id_discovery_failed",
+                        "extension_id_registry_path": registry_path.to_string_lossy().to_string(),
+                    }),
                 );
             };
 
-            let bridge_binary = parsed
-                .bridge_binary_path
-                .clone()
-                .or_else(|| {
-                    std::env::var("RR_BRIDGE_HOST_BINARY")
-                        .ok()
-                        .map(PathBuf::from)
-                })
-                .unwrap_or_else(|| workspace_root.join("target/release/rr-bridge"));
+            let (bridge_binary, bridge_binary_source) = if let Some(path) =
+                parsed.bridge_binary_path.clone()
+            {
+                (path, "explicit_flag")
+            } else if let Some(path) = std::env::var("RR_BRIDGE_HOST_BINARY")
+                .ok()
+                .map(PathBuf::from)
+            {
+                (path, "env_rr_bridge_host_binary")
+            } else {
+                let installed_rr = match std::env::current_exe() {
+                    Ok(path) => path,
+                    Err(err) => {
+                        return blocked_response(
+                            format!("failed to resolve installed rr binary path: {err}"),
+                            vec![
+                                "rerun from an installed rr binary path".to_owned(),
+                                "or pass --bridge-binary <path-to-rr-binary> as a repair/dev override"
+                                    .to_owned(),
+                            ],
+                            json!({"reason_code": "rr_binary_unresolved"}),
+                        );
+                    }
+                };
+                (installed_rr, "installed_rr_current_exe")
+            };
             if !bridge_binary.exists() {
                 return blocked_response(
                     format!(
                         "bridge host binary was not found at {}",
                         bridge_binary.display()
                     ),
-                    vec![
-                        "pass --bridge-binary <path-to-rr-bridge>".to_owned(),
-                        "or set RR_BRIDGE_HOST_BINARY".to_owned(),
-                    ],
+                    {
+                        let mut actions = vec![
+                            "omit --bridge-binary to use installed rr host mode".to_owned(),
+                            "or pass --bridge-binary <path-to-rr-binary> as a repair/dev override"
+                                .to_owned(),
+                        ];
+                        if bridge_binary_source == "installed_rr_current_exe" {
+                            actions.insert(0, "rerun from an installed rr binary path".to_owned());
+                        } else {
+                            actions.insert(
+                                0,
+                                "verify RR_BRIDGE_HOST_BINARY/--bridge-binary points to an installed rr binary"
+                                    .to_owned(),
+                            );
+                        }
+                        actions
+                    },
                     json!({
                         "reason_code": "bridge_binary_missing",
                         "bridge_binary": bridge_binary.to_string_lossy().to_string(),
+                        "bridge_binary_source": bridge_binary_source,
                     }),
                 );
             }
@@ -1195,29 +1692,20 @@ fn handle_bridge(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 }));
             }
 
-            let helper_path = custom_url_helper_path_for(host_os, &install_root);
-            let helper_contents = render_custom_url_helper(host_os, &bridge_binary);
-            if let Some(parent) = helper_path.parent() {
-                if let Err(err) = fs::create_dir_all(parent) {
-                    return error_response(format!(
-                        "failed to create custom URL helper directory {}: {err}",
-                        parent.display()
-                    ));
-                }
+            let mut warnings = vec![
+                "bridge install registers host assets only; browser extension install remains manual"
+                    .to_owned(),
+            ];
+            if bridge_binary_source != "installed_rr_current_exe" {
+                warnings.push(
+                    "manual --bridge-binary/RR_BRIDGE_HOST_BINARY override is repair/dev-only; normal setup uses installed rr host mode".to_owned(),
+                );
             }
-            if let Err(err) = fs::write(&helper_path, helper_contents.as_bytes()) {
-                return error_response(format!(
-                    "failed to write custom URL helper {}: {err}",
-                    helper_path.display()
-                ));
+            if extension_id_source == "explicit_flag" {
+                warnings.push(
+                    "manual --extension-id override is repair/dev-only; prefer discovered identity from rr extension setup".to_owned(),
+                );
             }
-            installed_assets.push(json!({
-                "asset_kind": "custom_url_helper",
-                "platform": host_os.as_str(),
-                "path": helper_path.to_string_lossy().to_string(),
-                "sha256": sha256_hex(helper_contents.as_bytes()),
-                "bytes": helper_contents.len(),
-            }));
 
             CommandResponse {
                 outcome: OutcomeKind::Complete,
@@ -1225,12 +1713,13 @@ fn handle_bridge(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                     "subcommand": "install",
                     "platform": host_os.as_str(),
                     "install_root": install_root.to_string_lossy().to_string(),
+                    "extension_id_source": extension_id_source,
+                    "bridge_binary_source": bridge_binary_source,
+                    "bridge_host_binary": bridge_binary.to_string_lossy().to_string(),
                     "assets": installed_assets,
                     "installs_browser_extension": false,
                 }),
-                warnings: vec![
-                    "bridge install registers host assets only; browser extension install remains manual".to_owned(),
-                ],
+                warnings,
                 repair_actions: Vec::new(),
                 message: "bridge registration assets installed".to_owned(),
             }
@@ -1276,21 +1765,6 @@ fn handle_bridge(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 } else {
                     missing.push(path.to_string_lossy().to_string());
                 }
-            }
-
-            let helper_path = custom_url_helper_path_for(host_os, &install_root);
-            if helper_path.exists() {
-                match fs::remove_file(&helper_path) {
-                    Ok(()) => removed.push(helper_path.to_string_lossy().to_string()),
-                    Err(err) => {
-                        return error_response(format!(
-                            "failed to remove custom URL helper {}: {err}",
-                            helper_path.display()
-                        ));
-                    }
-                }
-            } else {
-                missing.push(helper_path.to_string_lossy().to_string());
             }
 
             CommandResponse {
@@ -2748,7 +3222,9 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                 json!({"command": "rr search --query <text> --robot", "purpose": "prior-review lookup"}),
                 json!({"command": "rr bridge verify-contracts --robot", "purpose": "bridge contract drift check"}),
                 json!({"command": "rr bridge pack-extension --robot", "purpose": "assemble unpacked browser sideload artifact"}),
-                json!({"command": "rr bridge install --extension-id <id> --robot", "purpose": "register native host + custom-url helper assets"}),
+                json!({"command": "rr extension setup --browser <edge|chrome|brave> --robot", "purpose": "guided package/setup flow with fail-closed identity + host checks"}),
+                json!({"command": "rr extension doctor --browser <edge|chrome|brave> --robot", "purpose": "verify package, identity, native host registration, and bridge reachability"}),
+                json!({"command": "rr bridge install [--extension-id <id>] --robot", "purpose": "repair/dev host registration override when guided setup cannot discover identity"}),
                 json!({"command": "rr bridge uninstall --robot", "purpose": "remove bridge registration assets"}),
                 json!({"command": "rr robot-docs schemas --robot", "purpose": "schema inventory"}),
             ],
@@ -2765,6 +3241,8 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                 json!({"command": "rr bridge export-contracts", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr bridge verify-contracts", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr bridge pack-extension", "required_formats": ["json"], "optional_formats": []}),
+                json!({"command": "rr extension setup", "required_formats": ["json"], "optional_formats": []}),
+                json!({"command": "rr extension doctor", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr bridge install", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr bridge uninstall", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr robot-docs guide", "required_formats": ["json"], "optional_formats": ["compact"]}),
@@ -2782,6 +3260,7 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                 json!({"command": "rr sessions", "schema_id": "rr.robot.sessions.v1"}),
                 json!({"command": "rr search", "schema_id": "rr.robot.search.v1"}),
                 json!({"command": "rr bridge", "schema_id": "rr.robot.bridge.v1"}),
+                json!({"command": "rr extension", "schema_id": "rr.robot.extension.v1"}),
                 json!({"command": "rr findings", "schema_id": "rr.robot.findings.v1"}),
                 json!({"command": "rr status", "schema_id": "rr.robot.status.v1"}),
                 json!({"command": "rr refresh", "schema_id": "rr.robot.refresh.v1"}),
@@ -3672,7 +4151,7 @@ fn next_id(prefix: &str) -> String {
 }
 
 fn usage_text() -> &'static str {
-    "Usage:\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--repo owner/repo] [--limit <n>] [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--dry-run] [--robot]\n  rr bridge export-contracts [--robot]\n  rr bridge verify-contracts [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge install --extension-id <id> [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr refresh [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]"
+    "Usage:\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--repo owner/repo] [--limit <n>] [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--dry-run] [--robot]\n  rr bridge export-contracts [--robot]\n  rr bridge verify-contracts [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge install [--extension-id <id>] [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr extension setup [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr extension doctor [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr refresh [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]"
 }
 
 #[cfg(test)]
@@ -3814,20 +4293,12 @@ mod tests {
         (tmp, runtime, generated)
     }
 
-    fn write_mock_bridge_binary(root: &Path) -> PathBuf {
-        let bridge_binary = root.join("target/release/rr-bridge");
-        fs::create_dir_all(
-            bridge_binary
-                .parent()
-                .expect("bridge binary parent should exist"),
-        )
-        .expect("mkdir bridge binary parent");
-        fs::write(&bridge_binary, b"#!/bin/sh\nexit 0\n").expect("write bridge binary");
-        bridge_binary
-    }
-
     fn parse_robot(stdout: &str) -> Value {
         serde_json::from_str(stdout).expect("robot payload")
+    }
+
+    fn write_extension_identity_state(runtime: &CliRuntime, extension_id: &str) {
+        persist_extension_id(runtime, extension_id).expect("persist extension identity");
     }
 
     #[test]
@@ -3934,17 +4405,14 @@ mod tests {
     }
 
     #[test]
-    fn bridge_install_fails_closed_without_extension_id() {
+    fn bridge_install_blocks_when_extension_id_discovery_is_missing() {
         let (tmp, runtime, _generated) = setup_bridge_workspace();
         let install_root = tmp.path().join("install-root");
-        let bridge_binary = write_mock_bridge_binary(&runtime.cwd);
 
         let result = run(
             &[
                 "bridge".to_owned(),
                 "install".to_owned(),
-                "--bridge-binary".to_owned(),
-                bridge_binary.to_string_lossy().to_string(),
                 "--install-root".to_owned(),
                 install_root.to_string_lossy().to_string(),
                 "--robot".to_owned(),
@@ -3954,14 +4422,50 @@ mod tests {
         assert_eq!(result.exit_code, 3, "{}", result.stderr);
         let payload = parse_robot(&result.stdout);
         assert_eq!(payload["outcome"], "blocked");
-        assert_eq!(payload["data"]["reason_code"], "extension_id_required");
+        assert_eq!(
+            payload["data"]["reason_code"],
+            "extension_id_discovery_failed"
+        );
+    }
+
+    #[test]
+    fn bridge_install_uses_discovered_identity_without_manual_flag() {
+        let (tmp, runtime, _generated) = setup_bridge_workspace();
+        let install_root = tmp.path().join("install-root");
+        write_extension_identity_state(&runtime, "abcdefghijklmnopabcdefghijklmnop");
+
+        let install = run(
+            &[
+                "bridge".to_owned(),
+                "install".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(install.exit_code, 0, "{}", install.stderr);
+        let payload = parse_robot(&install.stdout);
+        assert_eq!(payload["outcome"], "complete");
+        assert_eq!(payload["data"]["extension_id_source"], "store_registry");
+        assert_eq!(
+            payload["data"]["bridge_binary_source"],
+            "installed_rr_current_exe"
+        );
+        let host_binary = payload["data"]["bridge_host_binary"]
+            .as_str()
+            .expect("bridge host binary path should exist");
+        assert!(
+            Path::new(host_binary).exists(),
+            "expected installed rr host binary to exist at {}",
+            host_binary
+        );
     }
 
     #[test]
     fn bridge_install_and_uninstall_manage_assets_with_checksums() {
         let (tmp, runtime, _generated) = setup_bridge_workspace();
         let install_root = tmp.path().join("install-root");
-        let bridge_binary = write_mock_bridge_binary(&runtime.cwd);
 
         let install = run(
             &[
@@ -3969,8 +4473,6 @@ mod tests {
                 "install".to_owned(),
                 "--extension-id".to_owned(),
                 "abcdefghijklmnopabcdefghijklmnop".to_owned(),
-                "--bridge-binary".to_owned(),
-                bridge_binary.to_string_lossy().to_string(),
                 "--install-root".to_owned(),
                 install_root.to_string_lossy().to_string(),
                 "--robot".to_owned(),
@@ -3985,7 +4487,7 @@ mod tests {
         let assets = install_payload["data"]["assets"]
             .as_array()
             .expect("install assets should be an array");
-        assert!(assets.len() >= 4);
+        assert!(assets.len() >= 3);
         assert!(assets.iter().all(|asset| {
             asset["sha256"]
                 .as_str()
@@ -4005,9 +4507,6 @@ mod tests {
                 manifest_path.display()
             );
         }
-        let helper_path = custom_url_helper_path_for(os, &install_root);
-        assert!(helper_path.exists(), "missing {}", helper_path.display());
-
         let uninstall = run(
             &[
                 "bridge".to_owned(),
@@ -4025,7 +4524,7 @@ mod tests {
         let removed = uninstall_payload["data"]["removed"]
             .as_array()
             .expect("removed list");
-        assert!(removed.len() >= 4);
+        assert!(removed.len() >= 3);
 
         for browser in [
             SupportedBrowser::Chrome,
@@ -4039,10 +4538,92 @@ mod tests {
                 manifest_path.display()
             );
         }
+    }
+
+    #[test]
+    fn extension_setup_blocks_without_discovered_identity() {
+        let (tmp, runtime, _generated) = setup_bridge_workspace();
+        let install_root = tmp.path().join("install-root");
+        let result = run(
+            &[
+                "extension".to_owned(),
+                "setup".to_owned(),
+                "--browser".to_owned(),
+                "edge".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(result.exit_code, 3, "{}", result.stderr);
+        let payload = parse_robot(&result.stdout);
+        assert_eq!(payload["outcome"], "blocked");
+        assert_eq!(payload["data"]["subcommand"], "setup");
+        assert_eq!(payload["data"]["reason_code"], "extension_identity_missing");
+        assert_eq!(payload["data"]["browser"], "edge");
+        let repair_actions = payload["repair_actions"]
+            .as_array()
+            .expect("repair actions should be an array");
+        assert!(repair_actions.iter().all(|action| {
+            !action
+                .as_str()
+                .unwrap_or_default()
+                .contains("--extension-id")
+        }));
+    }
+
+    #[test]
+    fn extension_setup_and_doctor_succeed_with_discovered_identity() {
+        let (tmp, runtime, _generated) = setup_bridge_workspace();
+        let install_root = tmp.path().join("install-root");
+        write_extension_identity_state(&runtime, "abcdefghijklmnopabcdefghijklmnop");
+
+        let setup = run(
+            &[
+                "extension".to_owned(),
+                "setup".to_owned(),
+                "--browser".to_owned(),
+                "chrome".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(setup.exit_code, 0, "{}", setup.stderr);
+        let setup_payload = parse_robot(&setup.stdout);
+        assert_eq!(setup_payload["outcome"], "complete");
+        assert_eq!(setup_payload["data"]["subcommand"], "setup");
+        assert_eq!(setup_payload["data"]["browser"], "chrome");
+        assert_eq!(setup_payload["data"]["doctor"]["subcommand"], "doctor");
+
+        let os = SupportedOs::current().expect("supported host os");
+        let chrome_manifest_path =
+            native_host_install_path_for(&SupportedBrowser::Chrome, os, &install_root);
+        assert!(chrome_manifest_path.exists(), "{}", chrome_manifest_path.display());
+        let doctor = run(
+            &[
+                "extension".to_owned(),
+                "doctor".to_owned(),
+                "--browser".to_owned(),
+                "chrome".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(doctor.exit_code, 0, "{}", doctor.stderr);
+        let doctor_payload = parse_robot(&doctor.stdout);
+        assert_eq!(doctor_payload["outcome"], "complete");
+        assert_eq!(doctor_payload["data"]["subcommand"], "doctor");
         assert!(
-            !helper_path.exists(),
-            "still present {}",
-            helper_path.display()
+            doctor_payload["data"]["checks"]
+                .as_array()
+                .expect("doctor checks")
+                .iter()
+                .all(|entry| entry["ok"].as_bool().unwrap_or(false))
         );
     }
 

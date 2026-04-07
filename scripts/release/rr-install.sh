@@ -417,11 +417,11 @@ verify_manifest_target \
 checksums_url="${download_root}/${tag}/${checksums_name}"
 checksums_path="${tmp_dir}/${checksums_name}"
 
-if ! curl -fsSL "$checksums_url" -o "$checksums_path"; then
+if ! curl -fsSL "$checksums_url" -o "$checksums_path" 2>/dev/null; then
   fallback_checksums_name="SHA256SUMS"
   fallback_checksums_url="${download_root}/${tag}/${fallback_checksums_name}"
   fallback_checksums_path="${tmp_dir}/${fallback_checksums_name}"
-  if curl -fsSL "$fallback_checksums_url" -o "$fallback_checksums_path"; then
+  if curl -fsSL "$fallback_checksums_url" -o "$fallback_checksums_path" 2>/dev/null; then
     checksums_name="${fallback_checksums_name}"
     checksums_url="${fallback_checksums_url}"
     checksums_path="${fallback_checksums_path}"

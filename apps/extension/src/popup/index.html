@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Roger Reviewer</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      body {
+        margin: 0;
+        width: 320px;
+        background: #f6f8fa;
+        color: #1f2328;
+      }
+
+      main {
+        padding: 12px;
+      }
+
+      .card {
+        background: #ffffff;
+        border: 1px solid #d0d7de;
+        border-radius: 10px;
+        padding: 12px;
+        box-shadow: 0 1px 2px rgba(27, 31, 36, 0.04);
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 14px;
+        line-height: 1.3;
+      }
+
+      p {
+        margin: 8px 0 0;
+        font-size: 12px;
+        line-height: 1.4;
+        color: #57606a;
+      }
+
+      .actions {
+        margin-top: 12px;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      button {
+        border: 1px solid #d0d7de;
+        border-radius: 6px;
+        background: #f6f8fa;
+        color: #1f2328;
+        font-size: 12px;
+        padding: 7px 8px;
+        cursor: pointer;
+      }
+
+      button:hover:enabled {
+        background: #eff2f5;
+      }
+
+      button:disabled {
+        cursor: default;
+        opacity: 0.55;
+      }
+
+      .status-error {
+        color: #cf222e;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="card" aria-live="polite">
+        <h1 id="popup-title">Roger Reviewer</h1>
+        <p id="popup-subtitle">Checking active tab context…</p>
+        <div class="actions">
+          <button type="button" data-action="start_review" disabled>Start</button>
+          <button type="button" data-action="resume_review" disabled>Resume</button>
+          <button type="button" data-action="show_findings" disabled>Findings</button>
+          <button type="button" data-action="refresh_review" disabled>Refresh</button>
+        </div>
+      </section>
+    </main>
+    <script src="./main.js"></script>
+  </body>
+</html>

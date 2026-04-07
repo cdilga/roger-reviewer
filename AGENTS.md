@@ -111,6 +111,7 @@ Read these to understand the full plan before touching code.
 | [`docs/ATTENTION_EVENT_AND_NOTIFICATION_CONTRACT.md`](docs/ATTENTION_EVENT_AND_NOTIFICATION_CONTRACT.md) | Support contract for the canonical Roger attention-state model across CLI, TUI, and extension surfaces |
 | [`docs/TUI_RUNTIME_SUPERVISOR_POLICY.md`](docs/TUI_RUNTIME_SUPERVISOR_POLICY.md) | Support contract for in-process queue classes, cancellation rules, and bounded refresh cadence |
 | [`docs/EXTENSION_PACKAGING_AND_RELEASE_CONTRACT.md`](docs/EXTENSION_PACKAGING_AND_RELEASE_CONTRACT.md) | Support contract for the minimal extension toolchain, contract export, and bridge/extension release ownership |
+| [`docs/PLAN_FOR_EXTENSION_SETUP_AND_HAPPY_PATH_VALIDATION.md`](docs/PLAN_FOR_EXTENSION_SETUP_AND_HAPPY_PATH_VALIDATION.md) | Recovery plan for command-surface reconciliation and happy-path/browser validation uplift |
 | [`docs/ROBOT_CLI_CONTRACT.md`](docs/ROBOT_CLI_CONTRACT.md) | Support contract for the `0.1.0` `--robot` command shortlist and stable machine-readable output envelopes |
 | [`docs/HARNESS_SESSION_LINKAGE_CONTRACT.md`](docs/HARNESS_SESSION_LINKAGE_CONTRACT.md) | Implementation-facing contract for the Roger-to-harness session boundary, `SessionLocator`, `ResumeBundle`, and adapter obligations (closes `rr-015`) |
 | [`docs/SEARCH_MEMORY_LIFECYCLE_AND_SEMANTIC_ASSET_POLICY.md`](docs/SEARCH_MEMORY_LIFECYCLE_AND_SEMANTIC_ASSET_POLICY.md) | Support contract for prior-review search, semantic asset lifecycle, memory promotion rules, and `0.1.0` scope fence before `rr-024` |

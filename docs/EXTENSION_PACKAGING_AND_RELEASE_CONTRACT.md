@@ -23,7 +23,6 @@ the bridge-family decision was already settled:
 It does not reopen the broader architecture:
 
 - Native Messaging remains the serious `0.1.0` bridge
-- custom URL launch remains a convenience and recovery path only
 - the extension remains optional relative to the local CLI/TUI product
 
 ## `0.1.0` Packaging Baseline
@@ -156,9 +155,9 @@ Command roles:
 - `extension setup` is the primary user-facing flow: it prepares the unpacked
   extension artifact, guides the one required manual browser load step, learns
   the extension id through Roger-owned discovery or extension self-registration,
-  and then registers the Native Messaging host manifest and any thin custom-URL
-  launch assets for the current OS using the installed `rr` binary in host mode
-  rather than a normal-path separate `rr-bridge` binary
+  and then registers the Native Messaging host manifest for the current OS
+  using the installed `rr` binary in host mode rather than a normal-path
+  separate `rr-bridge` binary
 - `extension doctor` verifies that the extension package, extension identity,
   local host registration, and bridge reachability are present and truthful
 - `uninstall` removes Roger-owned bridge registration state for the current OS
@@ -171,6 +170,9 @@ Rules:
   browser extension itself; the browser load/enable step remains explicit
 - the normal user-facing flow must not require a manually typed extension id or
   a user-facing separate bridge-host binary path
+- explicit bridge-install flags such as `--extension-id` and `--bridge-binary`
+  are repair/development levers only and must not appear in normal onboarding
+  steps
 - the base one-line Roger install flow remains local-product-only and does not
   imply bridge registration or extension packaging
 
@@ -184,9 +186,9 @@ Normal-path contract:
 3. Roger learns extension identity through discovery or extension-side
    self-registration; the normal user path must not ask for manually typed
    extension ids
-4. Roger registers Native Messaging/custom-URL launch assets for the current OS
-   against the installed `rr` binary in host mode (no normal-path separate
-   `rr-bridge` binary workflow)
+4. Roger registers Native Messaging launch assets for the current OS against
+   the installed `rr` binary in host mode (no normal-path separate `rr-bridge`
+   binary workflow)
 5. Roger runs the same bounded checks exposed by `rr extension doctor` and
    reports readiness truthfully
 
@@ -197,7 +199,8 @@ Doctor contract:
 - doctor output must fail closed if any check is missing or inconsistent
 - doctor output must include bounded repair guidance: rerun `rr extension setup`
   for normal-path recovery, and reserve low-level bridge commands for
-  development/repair workflows
+  development/repair workflows (including explicit `rr bridge install`
+  overrides only when guided setup cannot recover cleanly)
 
 ## Artifact Ownership
 

@@ -1593,11 +1593,10 @@ Packaging and platform requirements:
   and `arm64`, and Linux `x86_64` at a minimum
 - Roger `0.1.0` artifact classes should be explicit rather than inferred:
   versioned core binary archives, bridge registration assets for Native
-  Messaging and thin launch handlers, optional browser-extension packages, and
+  Messaging, optional browser-extension packages, and
   release metadata such as checksums and install instructions
 - the release/devops flow should own checksums, versioned artifacts, and the
-  platform-specific registration/install steps for custom URL handlers and
-  Native Messaging manifests
+  platform-specific registration/install steps for Native Messaging manifests
 - browser-extension packages and Native Messaging host assets should be treated
   as separate release lanes from the core local product so Roger can ship an
   honest CLI/TUI release without pretending extension publication is automatic
@@ -1684,9 +1683,10 @@ Accepted `0.1.0` contract:
   return bounded repair guidance (for example rerun `rr extension setup` for
   normal-path recovery, or use low-level bridge commands only for explicit
   development/repair workflows)
-- lower-level commands such as `rr bridge pack-extension` or host-registration
-  subcommands may still exist for development and repair work, but they are not
-  the intended primary user-facing setup flow
+- lower-level commands such as `rr bridge pack-extension`,
+  `rr bridge install --extension-id <id> --bridge-binary <path>`, or
+  host-registration subcommands may still exist for development and repair
+  work, but they are not the intended primary user-facing setup flow
 
 Non-goal for `0.1.0`:
 
@@ -1699,8 +1699,9 @@ At minimum, Roger must launch a targeted local review from a GitHub PR page.
 That is the floor, not necessarily the full v1 ceiling.
 
 For `0.1.0`, the accepted bridge choice is Native Messaging for serious
-extension interaction. Custom URL launch may still exist as a convenience
-handoff path, but it is not the primary v1 bridge.
+extension interaction. URL-scheme launch fallback is intentionally removed from
+the supported `0.1.0` path; browser launch should fail closed when Native
+Messaging is unavailable.
 
 ### Candidate v1/v2 split
 
@@ -1749,7 +1750,7 @@ The extension should mirror the TUI selectively rather than imitate it fully:
 
 Plan extension features in two explicit capability tiers:
 
-**Launch tier** (works with custom URL):
+**Launch tier** (Native Messaging launch-only handoff):
 
 - start, resume, or refresh a review from a PR page
 - choose a bounded launch mode or preset
@@ -1771,8 +1772,8 @@ Any feature that requires state readback or local-target focusing should be
 planned in the companion tier, not assumed to fit into the launch tier.
 
 Decision for `0.1.0`: Roger should implement the companion tier in v1 via
-Native Messaging. Custom URL launch may remain as a convenience and fallback
-path, but it is not sufficient for the full planned v1 extension contract.
+Native Messaging only. URL-scheme launch fallback is out of the supported
+product path and should fail closed with setup guidance.
 
 ### Contract and packaging discipline
 
@@ -1804,7 +1805,7 @@ The extension should not become:
 The extension-to-local bridge must stay daemonless in steady state. Two
 mechanisms have been evaluated:
 
-**Option A: Custom URL protocol handler**
+**Option A: Custom URL protocol handler (historical, not supported in `0.1.0`)**
 
 Register `roger://` as a URL scheme on the host OS (macOS: `LSURLTypes` in an
 app bundle `Info.plist`, or a lightweight helper registered with
@@ -1816,8 +1817,9 @@ roger://launch?repo=owner/repo&pr=123&action=start
 
 The OS launches the `rr` CLI with those args. No daemon. No manifest. One-shot.
 
-This is the simplest possible daemonless bridge and requires zero changes to
-the Chrome extension security model.
+This was the simplest daemonless bridge candidate and required zero changes to
+the Chrome extension security model, but it is intentionally out of the
+supported `0.1.0` product path.
 
 **Option B: Native Messaging**
 
@@ -1836,8 +1838,8 @@ Chosen v1 direction:
 - implement Native Messaging as the primary serious bridge
 - start with the Rust `rr` binary as the first host executable unless packaging
   constraints later justify a tiny helper binary
-- retain custom URL launch as a convenience/bootstrap path, not as the only
-  bridge
+- remove browser URL-scheme launch from the supported product path; if Native
+  Messaging is unavailable, return bounded setup guidance and fail closed
 
 WebSocket / local HTTP is explicitly rejected for the bridge: it requires a
 daemon and introduces a background service as the architectural center.
@@ -1847,7 +1849,7 @@ Chosen direction:
 - Native Messaging is the primary v1 bridge because Roger wants bounded
   readback, multi-instance disambiguation, and targeted local actions from the
   PR page.
-- custom URL launch may remain as a convenience/bootstrap path
+- URL-scheme launch fallback is not a supported `0.1.0` bridge mode
 - do not count clipboard/manual command copying as a core-functional fallback
 
 ### Trigger and notification model
@@ -2891,8 +2893,8 @@ Do not advance phases casually.
 Mitigation:
 
 - treat bridge validation as an early spike
-- define the supported bridge contract up front; if a custom URL path remains,
-  keep it as convenience rather than a required core workflow
+- define the supported bridge contract up front: Native Messaging only, with
+  fail-closed setup guidance when registration is missing
 - reject designs that quietly move core state into a background service
 
 ### Risk: OpenCode fallback becomes fake
@@ -3008,7 +3010,8 @@ settled enough for implementation:
   browser extension is the main expected JS/TS exception.
 - ~~Daemonless bridge family~~: WebSocket/local HTTP remain rejected as the
   architectural center because they imply a daemon. The remaining candidates
-  are custom URL launch and Native Messaging.
+  were custom URL launch and Native Messaging; `0.1.0` support is now narrowed
+  to Native Messaging only.
 - ~~Search direction~~: Roger should target Tantivy + FastEmbed from the first
   Roger search slice rather than planning a text-only launch followed by a
   semantic retrofit.
