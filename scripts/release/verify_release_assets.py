@@ -26,6 +26,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 CORE_MANIFEST_SCHEMA = "roger.release-build-core.v1"
 INSTALL_METADATA_SCHEMA = "roger.release.install-metadata.v1"
+INSTALL_BOOTSTRAP_ASSETS = ("rr-install.sh", "rr-install.ps1")
 
 
 @dataclass(frozen=True)
@@ -550,6 +551,45 @@ def _verify_install_metadata_bundle(
     )
 
 
+def _verify_install_bootstrap_assets(
+    asset_root: pathlib.Path,
+    errors: List[str],
+) -> List[VerifiedAsset]:
+    assets: List[VerifiedAsset] = []
+    for asset_name in INSTALL_BOOTSTRAP_ASSETS:
+        path = _resolve_asset(
+            descriptor=asset_name,
+            asset_root=asset_root,
+            errors=errors,
+            label="release bootstrap installer",
+        )
+        if path is None:
+            continue
+
+        if path.name != asset_name:
+            errors.append(
+                "release bootstrap installer asset naming mismatch: "
+                f"expected {asset_name!r}, got {path.name!r}"
+            )
+            continue
+
+        if path.stat().st_size <= 0:
+            errors.append(f"release bootstrap installer asset is empty: {asset_name}")
+            continue
+
+        assets.append(
+            VerifiedAsset(
+                lane="release-build-core",
+                kind="install_bootstrap",
+                label=path.name,
+                path=path,
+                sha256=_sha256_file(path),
+                bytes=path.stat().st_size,
+            )
+        )
+    return assets
+
+
 def _collect_lane_entries(
     summaries: Iterable[Tuple[pathlib.Path, Dict[str, Any]]]
 ) -> Dict[str, Dict[str, Any]]:
@@ -702,8 +742,18 @@ def main() -> int:
         errors=errors,
     )
     install_assets = [install_metadata_asset] if install_metadata_asset is not None else []
+    install_bootstrap_assets = _verify_install_bootstrap_assets(
+        asset_root=asset_root,
+        errors=errors,
+    )
     optional_assets, lane_summary = _verify_optional_lane_assets(summaries, asset_root, errors)
-    all_assets = core_assets + core_manifest_assets + install_assets + optional_assets
+    all_assets = (
+        core_assets
+        + core_manifest_assets
+        + install_assets
+        + install_bootstrap_assets
+        + optional_assets
+    )
 
     unsigned_targets = sorted(
         str(target.get("target"))
@@ -761,6 +811,7 @@ def main() -> int:
                     "bytes": asset.bytes,
                 }
                 for asset in (core_assets + core_manifest_assets + install_assets)
+                + install_bootstrap_assets
             ],
         },
         "optional_lanes": {

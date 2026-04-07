@@ -47,6 +47,8 @@ required_pr_paths = [
   ".github/workflows/release-publish.yml",
   "scripts/release/publish_release.py",
   "scripts/release/test_release_publish_workflow.sh",
+  "scripts/release/release_publish_trigger.sh",
+  "scripts/release/test_release_publish_trigger.sh",
   "scripts/release/test_publish_release.sh",
   "scripts/release/validate_upstream_run.sh",
   "scripts/release/test_validate_upstream_run.sh",
@@ -103,6 +105,7 @@ required_download_tokens = [
   "--name release-version-metadata",
   "--name release-build-core-manifest",
   "--name core-install-metadata",
+  "--name core-install-bootstrap",
 ]
 required_download_tokens.each do |token|
   unless download_run.include?(token)
@@ -117,6 +120,9 @@ unless download_run.include?("--name release-build-core-manifest") && download_r
 end
 unless download_run.include?("--name core-install-metadata") && download_run.include?("--dir upstream/assets")
   fail!("core-install-metadata must be downloaded into upstream/assets")
+end
+unless download_run.include?("--name core-install-bootstrap") && download_run.include?("--dir upstream/assets")
+  fail!("core-install-bootstrap must be downloaded into upstream/assets")
 end
 
 reverify_step = steps.find { |step| step["name"] == "Re-verify downloaded upstream assets" }
@@ -176,6 +182,7 @@ fail!("fixture-rehearsal must execute test_release_publish_workflow.sh") if fixt
 fixture_run = fixture_script_step["run"]
 required_fixture_commands = [
   "bash scripts/release/test_release_publish_workflow.sh",
+  "bash scripts/release/test_release_publish_trigger.sh",
   "bash scripts/release/test_validate_upstream_run.sh",
   "bash scripts/release/test_publish_release.sh",
 ]

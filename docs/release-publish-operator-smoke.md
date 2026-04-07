@@ -8,6 +8,8 @@ Purpose: provide the minimum truthful manual smoke checklist that must be comple
 2. `release-verify-assets` run completed successfully and reports `publish_gate.publish_allowed=true`.
 3. If optional lanes are claimed as shipped, corresponding `release-package-bridge` and/or `release-package-extension` runs completed successfully.
 4. You have the run IDs for all lanes being referenced.
+   - `scripts/release/release_publish_trigger.sh` can discover required run IDs
+     for a tag when `core_run_id` / `verify_run_id` are omitted.
 
 ## Required Checks
 
@@ -28,12 +30,20 @@ Purpose: provide the minimum truthful manual smoke checklist that must be comple
 
 3. Dry-run publication path as draft first (recommended):
 ```bash
-# Example: draft rehearsal
-# (replace IDs with real upstream run IDs)
-gh workflow run release-publish.yml \
-  -f core_run_id=<core_run_id> \
-  -f verify_run_id=<verify_run_id> \
-  -f publish_mode=draft
+# Recommended scripted trigger path:
+# - discovers core/verify run IDs from the tag
+# - validates workflow identity + success state before dispatch
+bash scripts/release/release_publish_trigger.sh \
+  --repo <owner>/<repo> \
+  --tag <stable-or-rc-tag> \
+  --publish-mode draft
+
+# Optional explicit-ID path when IDs are already known:
+bash scripts/release/release_publish_trigger.sh \
+  --repo <owner>/<repo> \
+  --core-run-id <core_run_id> \
+  --verify-run-id <verify_run_id> \
+  --publish-mode draft
 ```
 
 4. Inspect draft output:
@@ -43,7 +53,16 @@ gh workflow run release-publish.yml \
 
 5. Stable publish confirmation:
 - only after steps 1-4 pass, run with `publish_mode=publish`
-- set `operator_smoke_ack=true`
+- publish mode must pass `--operator-smoke-ack`
+- example:
+```bash
+bash scripts/release/release_publish_trigger.sh \
+  --repo <owner>/<repo> \
+  --core-run-id <core_run_id> \
+  --verify-run-id <verify_run_id> \
+  --publish-mode publish \
+  --operator-smoke-ack
+```
 
 6. Post-publish live installer proof (required for stable readiness):
 - `curl -fsSL https://api.github.com/repos/<owner>/<repo>/releases/latest` must

@@ -147,6 +147,17 @@ write_optional_summary() {
 EOF
 }
 
+write_installer_bootstrap_assets() {
+  local asset_root="$1"
+  cat >"${asset_root}/rr-install.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "rr install"
+EOF
+  cat >"${asset_root}/rr-install.ps1" <<'EOF'
+Write-Output "rr install"
+EOF
+}
+
 run_verify() {
   local metadata="$1"
   local core_manifest="$2"
@@ -170,6 +181,7 @@ create_core_archive_fixture "${pass_dir}/assets/roger-reviewer-2026.04.01-core-x
 sha="$(archive_sha256 "${pass_dir}/assets/roger-reviewer-2026.04.01-core-x86_64-unknown-linux-gnu.tar.gz")"
 write_core_manifest "${pass_dir}/core-manifest.json" "${sha}"
 write_install_metadata "${pass_dir}/assets/release-install-metadata-2026.04.01.json" "${sha}"
+write_installer_bootstrap_assets "${pass_dir}/assets"
 echo "bridge lane artifact payload" >"${pass_dir}/assets/roger-reviewer-2026.04.01-bridge-linux.tar.gz"
 write_optional_summary \
   "${pass_dir}/optional-summary.json" \
@@ -200,7 +212,15 @@ jq -e '
       )
     )
 ' "${pass_dir}/out/release-asset-manifest.json" >/dev/null
+jq -e '
+  .core.assets
+  | map(select(.kind == "install_bootstrap") | .label)
+  | sort
+  == ["rr-install.ps1","rr-install.sh"]
+' "${pass_dir}/out/release-asset-manifest.json" >/dev/null
 grep -q "core-manifest.json$" "${pass_dir}/out/SHA256SUMS"
+grep -q "rr-install.sh$" "${pass_dir}/out/SHA256SUMS"
+grep -q "rr-install.ps1$" "${pass_dir}/out/SHA256SUMS"
 
 # FAIL CASE 1: missing archive
 missing_dir="${workdir}/missing"
@@ -208,6 +228,7 @@ mkdir -p "${missing_dir}/assets" "${missing_dir}/out"
 write_release_metadata "${missing_dir}/release-metadata.json"
 write_core_manifest "${missing_dir}/core-manifest.json" "deadbeef"
 write_install_metadata "${missing_dir}/assets/release-install-metadata-2026.04.01.json" "deadbeef"
+write_installer_bootstrap_assets "${missing_dir}/assets"
 write_optional_summary \
   "${missing_dir}/optional-summary.json" \
   "skipped" \
@@ -233,6 +254,7 @@ write_release_metadata "${checksum_dir}/release-metadata.json"
 create_core_archive_fixture "${checksum_dir}/assets/roger-reviewer-2026.04.01-core-x86_64-unknown-linux-gnu.tar.gz"
 write_core_manifest "${checksum_dir}/core-manifest.json" "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 write_install_metadata "${checksum_dir}/assets/release-install-metadata-2026.04.01.json" "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+write_installer_bootstrap_assets "${checksum_dir}/assets"
 write_optional_summary \
   "${checksum_dir}/optional-summary.json" \
   "skipped" \
@@ -259,6 +281,7 @@ create_core_archive_fixture "${drift_dir}/assets/roger-reviewer-2026.04.01-core-
 sha_drift="$(archive_sha256 "${drift_dir}/assets/roger-reviewer-2026.04.01-core-x86_64-unknown-linux-gnu.tar.gz")"
 write_core_manifest "${drift_dir}/core-manifest.json" "${sha_drift}"
 write_install_metadata "${drift_dir}/assets/release-install-metadata-2026.04.01.json" "${sha_drift}"
+write_installer_bootstrap_assets "${drift_dir}/assets"
 echo "bridge lane artifact payload" >"${drift_dir}/assets/roger-reviewer-2026.04.01-bridge-linux.tar.gz"
 write_optional_summary \
   "${drift_dir}/optional-summary.json" \
@@ -289,6 +312,7 @@ write_install_metadata \
   "${metadata_drift_dir}/assets/release-install-metadata-2026.04.01.json" \
   "${sha_metadata_drift}" \
   "2026.04.99"
+write_installer_bootstrap_assets "${metadata_drift_dir}/assets"
 write_optional_summary \
   "${metadata_drift_dir}/optional-summary.json" \
   "skipped" \
@@ -304,6 +328,32 @@ if run_verify \
   "${metadata_drift_dir}/optional-summary.json" \
   "${metadata_drift_dir}/out"; then
   echo "expected install metadata release mismatch failure" >&2
+  exit 1
+fi
+
+# FAIL CASE 5: missing installer bootstrap assets
+missing_installer_dir="${workdir}/missing-installer"
+mkdir -p "${missing_installer_dir}/assets" "${missing_installer_dir}/out"
+write_release_metadata "${missing_installer_dir}/release-metadata.json"
+create_core_archive_fixture "${missing_installer_dir}/assets/roger-reviewer-2026.04.01-core-x86_64-unknown-linux-gnu.tar.gz"
+sha_missing_installer="$(archive_sha256 "${missing_installer_dir}/assets/roger-reviewer-2026.04.01-core-x86_64-unknown-linux-gnu.tar.gz")"
+write_core_manifest "${missing_installer_dir}/core-manifest.json" "${sha_missing_installer}"
+write_install_metadata "${missing_installer_dir}/assets/release-install-metadata-2026.04.01.json" "${sha_missing_installer}"
+write_optional_summary \
+  "${missing_installer_dir}/optional-summary.json" \
+  "skipped" \
+  "skipped" \
+  '["bridge_registration_unshipped","extension_sideload_unshipped"]' \
+  '[]' \
+  '[]'
+
+if run_verify \
+  "${missing_installer_dir}/release-metadata.json" \
+  "${missing_installer_dir}/core-manifest.json" \
+  "${missing_installer_dir}/assets" \
+  "${missing_installer_dir}/optional-summary.json" \
+  "${missing_installer_dir}/out"; then
+  echo "expected missing installer bootstrap verification failure" >&2
   exit 1
 fi
 

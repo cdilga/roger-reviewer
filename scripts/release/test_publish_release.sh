@@ -33,6 +33,17 @@ with tempfile.TemporaryDirectory() as tmp:
 PY
 }
 
+write_installer_bootstrap_assets() {
+  local asset_root="$1"
+  cat >"${asset_root}/rr-install.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "rr install"
+EOF
+  cat >"${asset_root}/rr-install.ps1" <<'EOF'
+Write-Output "rr install"
+EOF
+}
+
 write_version_metadata() {
   local path="$1"
   local channel="$2"
@@ -94,6 +105,22 @@ write_verified_manifest() {
         "path": "${core_archive_name}",
         "sha256": "${core_archive_sha}",
         "bytes": 1
+      },
+      {
+        "lane": "release-build-core",
+        "kind": "install_bootstrap",
+        "label": "rr-install.sh",
+        "path": "rr-install.sh",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bytes": 1
+      },
+      {
+        "lane": "release-build-core",
+        "kind": "install_bootstrap",
+        "label": "rr-install.ps1",
+        "path": "rr-install.ps1",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bytes": 1
       }
     ]
   },
@@ -128,6 +155,7 @@ pass_dir="${workdir}/pass"
 mkdir -p "${pass_dir}/assets" "${pass_dir}/out"
 create_core_archive "${pass_dir}/assets/roger-reviewer-2026.04.01-rc.2-core-x86_64-unknown-linux-gnu.tar.gz"
 echo "bridge payload" >"${pass_dir}/assets/roger-reviewer-2026.04.01-rc.2-bridge-linux.tar.gz"
+write_installer_bootstrap_assets "${pass_dir}/assets"
 core_sha="$(sha256_file "${pass_dir}/assets/roger-reviewer-2026.04.01-rc.2-core-x86_64-unknown-linux-gnu.tar.gz")"
 write_version_metadata \
   "${pass_dir}/release-metadata.json" \
@@ -176,12 +204,42 @@ jq -e '.release.publish_mode == "draft" and .release.draft == true and .release.
 jq -e '.verification.upstream_runs.core == "https://github.com/example/repo/actions/runs/2001"' "${pass_dir}/out/release-plan.json" >/dev/null
 jq -e '.verification.upstream_runs.verify == "https://github.com/example/repo/actions/runs/2002"' "${pass_dir}/out/release-plan.json" >/dev/null
 jq -e '.verification.upstream_runs.bridge == "https://github.com/example/repo/actions/runs/2003"' "${pass_dir}/out/release-plan.json" >/dev/null
+jq -e '
+  .assets
+  | map(split("/")[-1])
+  | index("rr-install.sh")
+  and index("rr-install.ps1")
+' "${pass_dir}/out/release-plan.json" >/dev/null
 grep -q 'Shipped optional lanes: `release-package-bridge`' "${pass_dir}/out/release-notes.md"
 grep -q 'Checksums: `SHA256SUMS`' "${pass_dir}/out/release-notes.md"
 grep -q 'Core build run: `https://github.com/example/repo/actions/runs/2001`' "${pass_dir}/out/release-notes.md"
 grep -q 'Verify-assets run: `https://github.com/example/repo/actions/runs/2002`' "${pass_dir}/out/release-notes.md"
 grep -q 'Bridge package run: `https://github.com/example/repo/actions/runs/2003`' "${pass_dir}/out/release-notes.md"
 grep -q 'docs/release-publish-operator-smoke.md' "${pass_dir}/out/release-notes.md"
+
+# FAIL CASE: verified manifest missing install bootstrap entries must fail
+missing_install_entries_dir="${workdir}/missing-install-bootstrap-entries"
+mkdir -p "${missing_install_entries_dir}"
+cp "${pass_dir}/release-metadata.json" "${missing_install_entries_dir}/release-metadata.json"
+cp "${pass_dir}/release-asset-manifest.json" "${missing_install_entries_dir}/release-asset-manifest.json"
+cp "${pass_dir}/SHA256SUMS" "${missing_install_entries_dir}/SHA256SUMS"
+cp "${pass_dir}/release-notes-signing.md" "${missing_install_entries_dir}/release-notes-signing.md"
+jq '
+  .core.assets |= map(select(.kind != "install_bootstrap"))
+' "${missing_install_entries_dir}/release-asset-manifest.json" >"${missing_install_entries_dir}/tmp.json"
+mv "${missing_install_entries_dir}/tmp.json" "${missing_install_entries_dir}/release-asset-manifest.json"
+
+if python3 scripts/release/publish_release.py \
+  --version-metadata "${missing_install_entries_dir}/release-metadata.json" \
+  --verified-manifest "${missing_install_entries_dir}/release-asset-manifest.json" \
+  --asset-root "${pass_dir}/assets" \
+  --checksums "${missing_install_entries_dir}/SHA256SUMS" \
+  --signing-notes "${missing_install_entries_dir}/release-notes-signing.md" \
+  --publish-mode draft \
+  --output-dir "${missing_install_entries_dir}/out"; then
+  echo "expected missing install bootstrap entry failure" >&2
+  exit 1
+fi
 
 # FAIL CASE: publish mode cannot ship rc
 if python3 scripts/release/publish_release.py \
@@ -614,6 +672,7 @@ fi
 stable_dir="${workdir}/stable"
 mkdir -p "${stable_dir}/assets" "${stable_dir}/out"
 create_core_archive "${stable_dir}/assets/roger-reviewer-2026.04.01-core-x86_64-unknown-linux-gnu.tar.gz"
+write_installer_bootstrap_assets "${stable_dir}/assets"
 stable_sha="$(sha256_file "${stable_dir}/assets/roger-reviewer-2026.04.01-core-x86_64-unknown-linux-gnu.tar.gz")"
 write_version_metadata \
   "${stable_dir}/release-metadata.json" \
