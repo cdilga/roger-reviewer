@@ -353,6 +353,9 @@ Rules:
   real blocker
 - announce new or split beads in Agent Mail so other agents can pick them up
 - every new implementation bead should include an explicit validation contract
+- docs, metadata, and planning cleanups may clarify truth, but they do not
+  satisfy an implementation bead whose acceptance criteria require executable
+  code, runnable suites, or live user-facing behavior
 
 ### Beads are proof units, not work buckets
 
@@ -389,6 +392,9 @@ Do not close a bead if:
 - acceptance criteria were not checked one by one
 - no validation was run for implementation work
 - the behavior was inferred from code instead of exercised
+- docs-only or metadata-only changes were used as a substitute for missing
+  executable implementation, missing runnable validation, or missing surfaced
+  behavior
 - obvious missing child beads or dependency gaps were discovered but left
   untracked
 - the close reason would overstate provider, browser, setup, E2E, or approval
@@ -399,6 +405,9 @@ When a bead cannot yet be closed honestly:
 - leave it open
 - add a note describing the exact remaining gap
 - create a child bead if the remaining work is separable
+- if docs must be corrected before implementation lands, keep the
+  implementation bead open and create a separate docs-truthfulness child only
+  when the documentation fix is independently useful
 
 ### Validation contract is part of the task
 
@@ -578,6 +587,9 @@ Current repo honesty rule:
   repo, say so plainly
 - do not close a bead with wording that implies end-to-end coverage when only
   unit or integration coverage exists
+- do not treat suite metadata, budget registration, lane wiring, or doc wording
+  as evidence that a validation suite exists or that an implementation bead is
+  complete
 - docs, planning, and bead-shaping tasks may close without code tests, but
   implementation beads normally should not
 

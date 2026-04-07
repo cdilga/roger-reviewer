@@ -59,6 +59,8 @@ Do not close a bead when:
 
 - behavior was inferred from code instead of exercised
 - no validation ran for implementation work
+- docs-only, metadata-only, or lane-wiring-only edits were used to stand in for
+  missing implementation or missing runnable validation
 - obvious remaining sub-work exists but is untracked
 - the close reason would overstate support, coverage, or completeness
 
@@ -67,6 +69,9 @@ If the bead is not honestly closeable:
 - keep it open
 - add a note
 - create child beads for the remaining separable work
+- if documentation needs correction before implementation lands, track that as
+  a separate docs-truthfulness slice rather than using it to satisfy the
+  implementation bead
 
 ## 3. Support Claims Must Be Earned
 
@@ -85,6 +90,8 @@ Rules:
 - bounded or degraded support must be labeled as bounded or degraded
 - setup/install claims must match a fresh-user path that was actually exercised
 - E2E claims require executable suites that exist and were run
+- suite metadata, budget slots, CI lane references, and contract docs are not
+  themselves implementation evidence
 
 When live probing contradicts docs or beads, reality wins.
 
