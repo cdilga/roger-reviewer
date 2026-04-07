@@ -260,6 +260,9 @@ jobs:
             --core-manifest "${manifest_path}" \
             --output "${install_metadata_path}"
 
+          cp scripts/release/rr-install.sh core-builds/rr-install.sh
+          cp scripts/release/rr-install.ps1 core-builds/rr-install.ps1
+
           echo "manifest_name=${manifest_name}" >>"${GITHUB_OUTPUT}"
           echo "manifest_path=${manifest_path}" >>"${GITHUB_OUTPUT}"
           echo "install_metadata_name=${install_metadata_name}" >>"${GITHUB_OUTPUT}"
@@ -275,7 +278,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: core-install-metadata
-          path: ${{ steps.aggregate.outputs.install_metadata_path }}
+          path: |
+            ${{ steps.aggregate.outputs.install_metadata_path }}
+            core-builds/rr-install.sh
+            core-builds/rr-install.ps1
           if-no-files-found: error
           retention-days: 14
 
