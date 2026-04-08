@@ -23,6 +23,12 @@ do
   fi
 done
 
+echo "[smoke] verify detached floating fallback was removed"
+if rg -n "roger-panel--floating|mode: 'floating'|mode === 'floating'" apps/extension/src/content/main.js >/dev/null; then
+  echo "unexpected floating fallback contract still present in content script" >&2
+  exit 1
+fi
+
 cat <<'EOF'
 [smoke] caveat
 This script validates Roger entry UX at content/popup test seams.

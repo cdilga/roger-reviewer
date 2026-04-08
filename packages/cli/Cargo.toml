@@ -15,6 +15,7 @@ roger-config = { path = "../config" }
 roger-session-codex = { path = "../session-codex" }
 roger-session-opencode = { path = "../session-opencode" }
 roger-storage = { path = "../storage" }
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

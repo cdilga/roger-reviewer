@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 
 pub use semantic_embedder::{SemanticEmbedderStatus, semantic_embedder_status};
 
-const CURRENT_SCHEMA_VERSION: i64 = 9;
+const CURRENT_SCHEMA_VERSION: i64 = 10;
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_session_ledger.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_launch_binding_context.sql");
@@ -26,6 +26,12 @@ const MIGRATION_0007: &str =
     include_str!("../migrations/0007_prior_review_lookup_memory_hooks.sql");
 const MIGRATION_0008: &str = include_str!("../migrations/0008_worktree_preflight_plans.sql");
 const MIGRATION_0009: &str = include_str!("../migrations/0009_outcome_event_usefulness.sql");
+const MIGRATION_0010: &str = include_str!("../migrations/0010_migration_journal.sql");
+
+const MIGRATION_TERMINAL_STARTED: &str = "started";
+const MIGRATION_TERMINAL_COMMITTED: &str = "committed";
+const MIGRATION_TERMINAL_FAILED_PRE_COMMIT: &str = "failed_pre_commit";
+const MIGRATION_TERMINAL_NEEDS_OPERATOR_RECOVERY: &str = "needs_operator_recovery";
 
 #[derive(Debug)]
 pub enum StorageError {
@@ -185,6 +191,27 @@ impl StorageLayout {
     pub fn semantic_asset_manifest_path(&self) -> PathBuf {
         self.semantic_asset_root().join("active_manifest.json")
     }
+
+    pub fn backup_root(&self) -> PathBuf {
+        self.root.join("backups")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct MigrationCheckpointManifest {
+    release_version: String,
+    schema_from: i64,
+    schema_to: i64,
+    migration_class: String,
+    checkpoint_created_at: i64,
+    checkpoint_db_path: String,
+    sidecar_root_path: String,
+    recovery_guidance: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct MigrationAttemptContext {
+    id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -3767,6 +3794,154 @@ impl RogerStore {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
+    fn ensure_migration_journal_table(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS migration_journal (
+                id TEXT PRIMARY KEY,
+                release_version TEXT NOT NULL,
+                schema_from INTEGER NOT NULL,
+                schema_to INTEGER NOT NULL,
+                migration_class TEXT NOT NULL,
+                checkpoint_path TEXT,
+                terminal_state TEXT NOT NULL,
+                failure_reason TEXT,
+                started_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_migration_journal_started_at
+            ON migration_journal(started_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_migration_journal_terminal_state
+            ON migration_journal(terminal_state, updated_at DESC);",
+        )?;
+        Ok(())
+    }
+
+    fn mark_interrupted_migrations(&self) -> Result<()> {
+        let now = time::now_ts();
+        self.conn.execute(
+            "UPDATE migration_journal
+             SET terminal_state = ?1, updated_at = ?2
+             WHERE terminal_state = ?3",
+            params![
+                MIGRATION_TERMINAL_NEEDS_OPERATOR_RECOVERY,
+                now,
+                MIGRATION_TERMINAL_STARTED
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn create_migration_checkpoint(
+        &self,
+        schema_from: i64,
+        schema_to: i64,
+        migration_class: &str,
+        started_at: i64,
+    ) -> Result<String> {
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+
+        let checkpoint_dir = self
+            .layout
+            .backup_root()
+            .join(started_at.to_string())
+            .join(format!(
+                "pre-migration-schema-v{schema_from}-to-v{schema_to}"
+            ));
+        fs::create_dir_all(&checkpoint_dir)?;
+
+        let checkpoint_db_path = checkpoint_dir.join("roger.db");
+        fs::copy(&self.layout.db_path, &checkpoint_db_path)?;
+
+        let checkpoint_db_path_rel = path_relative_to(&self.layout.root, &checkpoint_db_path);
+        let sidecar_root_rel = path_relative_to(&self.layout.root, &self.layout.sidecar_root);
+        let manifest = MigrationCheckpointManifest {
+            release_version: env!("CARGO_PKG_VERSION").to_owned(),
+            schema_from,
+            schema_to,
+            migration_class: migration_class.to_owned(),
+            checkpoint_created_at: started_at,
+            checkpoint_db_path: checkpoint_db_path_rel,
+            sidecar_root_path: sidecar_root_rel,
+            recovery_guidance: vec![
+                "If migration fails before commit, reopen against the pre-migration checkpoint."
+                    .to_owned(),
+                "If migration does not reach committed state, keep the checkpoint and require operator recovery."
+                    .to_owned(),
+            ],
+        };
+
+        let manifest_path = checkpoint_dir.join("checkpoint_manifest.json");
+        fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
+
+        Ok(path_relative_to(&self.layout.root, &checkpoint_dir))
+    }
+
+    fn begin_migration_attempt(
+        &self,
+        schema_from: i64,
+        schema_to: i64,
+        migration_class: &str,
+        checkpoint_path: &str,
+        started_at: i64,
+    ) -> Result<MigrationAttemptContext> {
+        let id = format!("migration-{started_at}-v{schema_from}-to-v{schema_to}");
+        self.conn.execute(
+            "INSERT INTO migration_journal(
+                id, release_version, schema_from, schema_to, migration_class,
+                checkpoint_path, terminal_state, failure_reason, started_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?8)",
+            params![
+                id,
+                env!("CARGO_PKG_VERSION"),
+                schema_from,
+                schema_to,
+                migration_class,
+                checkpoint_path,
+                MIGRATION_TERMINAL_STARTED,
+                started_at
+            ],
+        )?;
+        Ok(MigrationAttemptContext { id })
+    }
+
+    fn finalize_migration_attempt(
+        &self,
+        id: &str,
+        terminal_state: &str,
+        failure_reason: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE migration_journal
+             SET terminal_state = ?1, failure_reason = ?2, updated_at = ?3
+             WHERE id = ?4",
+            params![terminal_state, failure_reason, time::now_ts(), id],
+        )?;
+        Ok(())
+    }
+
+    fn invalidate_sidecars_for_migration(&self) -> Result<()> {
+        let now = time::now_ts();
+        self.conn.execute(
+            "UPDATE index_states
+             SET generation = generation + 1,
+                 status = 'migration_rebuild_required',
+                 artifact_digest = NULL,
+                 row_version = row_version + 1,
+                 updated_at = ?1",
+            params![now],
+        )?;
+
+        let manifest_path = self.layout.semantic_asset_manifest_path();
+        if manifest_path.exists() {
+            fs::remove_file(&manifest_path)?;
+        }
+
+        Ok(())
+    }
+
     fn apply_migrations(&self) -> Result<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -3775,103 +3950,224 @@ impl RogerStore {
                 applied_at INTEGER NOT NULL
             );",
         )?;
+        self.ensure_migration_journal_table()?;
+        self.mark_interrupted_migrations()?;
 
         let version = self.schema_version()?;
         if version >= CURRENT_SCHEMA_VERSION {
             return Ok(());
         }
 
-        if version < 1 {
-            self.conn.execute_batch(MIGRATION_0001)?;
-            self.conn.execute(
-                "INSERT INTO schema_migrations(version, name, applied_at)
-                VALUES (1, 'initial_storage_foundation', ?1)",
-                params![time::now_ts()],
-            )?;
-            self.conn.pragma_update(None, "user_version", 1)?;
+        let migration_class = if version > 0 {
+            classify_store_migration_class(version, CURRENT_SCHEMA_VERSION)
+        } else {
+            StoreMigrationClass::ClassA
+        };
+        if version > 0 && !migration_class.supports_auto() {
+            return Err(StorageError::Conflict {
+                entity: "store_migration_policy",
+                id: format!(
+                    "unsupported automatic migration class {} from schema v{} to v{}; run explicit operator gate/export before retrying",
+                    migration_class.as_str(),
+                    version,
+                    CURRENT_SCHEMA_VERSION
+                ),
+            });
         }
 
-        if version < 2 {
-            self.conn.execute_batch(MIGRATION_0002)?;
-            self.conn.execute(
-                "INSERT INTO schema_migrations(version, name, applied_at)
-                VALUES (2, 'session_ledger_foundation', ?1)",
-                params![time::now_ts()],
+        let migration_attempt = if version > 0 {
+            let started_at = time::now_ts();
+            let checkpoint_path = self.create_migration_checkpoint(
+                version,
+                CURRENT_SCHEMA_VERSION,
+                migration_class.as_str(),
+                started_at,
             )?;
-            self.conn.pragma_update(None, "user_version", 2)?;
-        }
+            Some(self.begin_migration_attempt(
+                version,
+                CURRENT_SCHEMA_VERSION,
+                migration_class.as_str(),
+                &checkpoint_path,
+                started_at,
+            )?)
+        } else {
+            None
+        };
 
-        if version < 3 {
-            self.conn.execute_batch(MIGRATION_0003)?;
-            self.conn.execute(
-                "INSERT INTO schema_migrations(version, name, applied_at)
-                VALUES (3, 'launch_binding_context', ?1)",
-                params![time::now_ts()],
-            )?;
-            self.conn.pragma_update(None, "user_version", 3)?;
-        }
+        let migration_result: Result<()> = (|| {
+            if version < 1 {
+                self.conn.execute_batch(MIGRATION_0001)?;
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at)
+                    VALUES (1, 'initial_storage_foundation', ?1)",
+                    params![time::now_ts()],
+                )?;
+                self.conn.pragma_update(None, "user_version", 1)?;
+            }
 
-        if version < 4 {
-            self.conn.execute_batch(MIGRATION_0004)?;
-            self.conn.execute(
-                "INSERT INTO schema_migrations(version, name, applied_at)
-                VALUES (4, 'launch_profile_routing', ?1)",
-                params![time::now_ts()],
-            )?;
-            self.conn.pragma_update(None, "user_version", 4)?;
-        }
+            if version < 2 {
+                self.conn.execute_batch(MIGRATION_0002)?;
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at)
+                    VALUES (2, 'session_ledger_foundation', ?1)",
+                    params![time::now_ts()],
+                )?;
+                self.conn.pragma_update(None, "user_version", 2)?;
+            }
 
-        if version < 5 {
-            self.conn.execute_batch(MIGRATION_0005)?;
-            self.conn.execute(
-                "INSERT INTO schema_migrations(version, name, applied_at)
-                VALUES (5, 'prompt_invocation_and_outcome_events', ?1)",
-                params![time::now_ts()],
-            )?;
-            self.conn.pragma_update(None, "user_version", 5)?;
-        }
+            if version < 3 {
+                self.conn.execute_batch(MIGRATION_0003)?;
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at)
+                    VALUES (3, 'launch_binding_context', ?1)",
+                    params![time::now_ts()],
+                )?;
+                self.conn.pragma_update(None, "user_version", 3)?;
+            }
 
-        if version < 6 {
-            self.conn.execute_batch(MIGRATION_0006)?;
-            self.conn.execute(
-                "INSERT INTO schema_migrations(version, name, applied_at)
-                VALUES (6, 'finding_materialization_with_provenance', ?1)",
-                params![time::now_ts()],
-            )?;
-            self.conn.pragma_update(None, "user_version", 6)?;
-        }
+            if version < 4 {
+                self.conn.execute_batch(MIGRATION_0004)?;
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at)
+                    VALUES (4, 'launch_profile_routing', ?1)",
+                    params![time::now_ts()],
+                )?;
+                self.conn.pragma_update(None, "user_version", 4)?;
+            }
 
-        if version < 7 {
-            self.conn.execute_batch(MIGRATION_0007)?;
-            self.conn.execute(
-                "INSERT INTO schema_migrations(version, name, applied_at)
-                VALUES (7, 'prior_review_lookup_memory_hooks', ?1)",
-                params![time::now_ts()],
-            )?;
-            self.conn.pragma_update(None, "user_version", 7)?;
-        }
+            if version < 5 {
+                self.conn.execute_batch(MIGRATION_0005)?;
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at)
+                    VALUES (5, 'prompt_invocation_and_outcome_events', ?1)",
+                    params![time::now_ts()],
+                )?;
+                self.conn.pragma_update(None, "user_version", 5)?;
+            }
 
-        if version < 8 {
-            self.conn.execute_batch(MIGRATION_0008)?;
-            self.conn.execute(
-                "INSERT INTO schema_migrations(version, name, applied_at)
-                VALUES (8, 'launch_preflight_plan_persistence', ?1)",
-                params![time::now_ts()],
-            )?;
-            self.conn.pragma_update(None, "user_version", 8)?;
-        }
+            if version < 6 {
+                self.conn.execute_batch(MIGRATION_0006)?;
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at)
+                    VALUES (6, 'finding_materialization_with_provenance', ?1)",
+                    params![time::now_ts()],
+                )?;
+                self.conn.pragma_update(None, "user_version", 6)?;
+            }
 
-        if version < 9 {
-            self.conn.execute_batch(MIGRATION_0009)?;
-            self.conn.execute(
-                "INSERT INTO schema_migrations(version, name, applied_at)
-                VALUES (9, 'outcome_event_usefulness_links', ?1)",
-                params![time::now_ts()],
-            )?;
-            self.conn.pragma_update(None, "user_version", 9)?;
-        }
+            if version < 7 {
+                self.conn.execute_batch(MIGRATION_0007)?;
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at)
+                    VALUES (7, 'prior_review_lookup_memory_hooks', ?1)",
+                    params![time::now_ts()],
+                )?;
+                self.conn.pragma_update(None, "user_version", 7)?;
+            }
 
-        Ok(())
+            if version < 8 {
+                self.conn.execute_batch(MIGRATION_0008)?;
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at)
+                    VALUES (8, 'launch_preflight_plan_persistence', ?1)",
+                    params![time::now_ts()],
+                )?;
+                self.conn.pragma_update(None, "user_version", 8)?;
+            }
+
+            if version < 9 {
+                self.conn.execute_batch(MIGRATION_0009)?;
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at)
+                    VALUES (9, 'outcome_event_usefulness_links', ?1)",
+                    params![time::now_ts()],
+                )?;
+                self.conn.pragma_update(None, "user_version", 9)?;
+            }
+
+            if version < 10 {
+                self.conn.execute_batch(MIGRATION_0010)?;
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at)
+                    VALUES (10, 'migration_journal', ?1)",
+                    params![time::now_ts()],
+                )?;
+                self.conn.pragma_update(None, "user_version", 10)?;
+            }
+
+            if migration_class.requires_sidecar_invalidation() {
+                self.invalidate_sidecars_for_migration()?;
+            }
+
+            Ok(())
+        })();
+
+        match migration_result {
+            Ok(()) => {
+                if let Some(context) = migration_attempt {
+                    self.finalize_migration_attempt(
+                        &context.id,
+                        MIGRATION_TERMINAL_COMMITTED,
+                        None,
+                    )?;
+                }
+                Ok(())
+            }
+            Err(err) => {
+                if let Some(context) = migration_attempt {
+                    let failure = err.to_string();
+                    self.finalize_migration_attempt(
+                        &context.id,
+                        MIGRATION_TERMINAL_FAILED_PRE_COMMIT,
+                        Some(&failure),
+                    )?;
+                }
+                Err(err)
+            }
+        }
+    }
+}
+
+fn path_relative_to(base: &Path, path: &Path) -> String {
+    path.strip_prefix(base)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StoreMigrationClass {
+    ClassA,
+    ClassB,
+    ClassD,
+}
+
+impl StoreMigrationClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ClassA => "class_a",
+            Self::ClassB => "class_b",
+            Self::ClassD => "class_d",
+        }
+    }
+
+    fn supports_auto(self) -> bool {
+        !matches!(self, Self::ClassD)
+    }
+
+    fn requires_sidecar_invalidation(self) -> bool {
+        matches!(self, Self::ClassB)
+    }
+}
+
+fn classify_store_migration_class(schema_from: i64, schema_to: i64) -> StoreMigrationClass {
+    let delta = schema_to.saturating_sub(schema_from);
+    if delta <= 1 {
+        StoreMigrationClass::ClassA
+    } else if delta == 2 {
+        StoreMigrationClass::ClassB
+    } else {
+        StoreMigrationClass::ClassD
     }
 }
 

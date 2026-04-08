@@ -1662,10 +1662,18 @@ Accepted `0.1.0` contract:
 - local installation paths, PATH guidance, and overwrite semantics may vary by
   OS, but they must be Roger-owned and documented in release instructions rather
   than delegated to Homebrew, winget, npm, or another external package manager
-- the browser extension remains a separate optional workflow after the local
-  product is installed; if a user wants browser launch, Roger should expose a
-  guided Roger-owned setup flow rather than requiring the user to manually
-  manage extension ids or host-binary paths
+- the browser extension remains an optional guided setup lane after the local
+  product is installed; browser launch onboarding should run through
+  `rr extension setup` plus `rr extension doctor` with Native Messaging in the
+  normal path, rather than requiring users to manually manage extension ids or
+  host-binary paths
+- `0.1.x` should keep the unpacked extension artifact as the truthful local
+  setup surface while preserving a real path toward future packed/shippable
+  extension artifacts that reuse the same setup and identity-registration
+  contract
+- `1.0.0` should aim to remove dev-labelled extension artifacts from published
+  release output so release assets represent only user-facing packaged
+  deliverables and their supporting metadata
 - the intended follow-on shape is a guided command such as
   `rr extension setup [--browser edge|chrome|brave]` that prepares the
   unpacked/browser-loadable extension artifact, tells the user the one required
@@ -1679,6 +1687,11 @@ Accepted `0.1.0` contract:
   extension identity, host registration, and bridge reachability without
   pretending browser launch support is healthy when one of those pieces is
   missing
+- `rr extension setup` and `rr extension doctor` are not sufficient proof of
+  browser-launch support on their own; Roger must also prove that the actual
+  registered `rr` binary can complete a Native Messaging request/response round
+  trip as a host process rather than relying only on in-process bridge helper
+  calls or manifest presence
 - `rr extension doctor` should fail closed when any of those checks fail and
   return bounded repair guidance (for example rerun `rr extension setup` for
   normal-path recovery, or use low-level bridge commands only for explicit
@@ -1687,6 +1700,101 @@ Accepted `0.1.0` contract:
   `rr bridge install --extension-id <id> --bridge-binary <path>`, or
   host-registration subcommands may still exist for development and repair
   work, but they are not the intended primary user-facing setup flow
+
+`0.1.x` implementation-facing PR-page extension entry contract (follow-on UX
+hardening after `rr-r3dt`):
+
+- the primary PR-page happy path should feel GitHub-native rather than like a
+  floating foreign card
+- the happy path should minimize clicks: the core 4-action set (`Start`,
+  `Resume`, `Findings`, `Refresh`) should be available directly on the PR page
+  without forcing a toolbar popup or intermediate launcher when page seams are
+  healthy
+- preferred placement order:
+  1. attach Roger entry controls into stable PR-page action seams using GitHub-
+     native button styling and spacing comparable to first-party actions
+  2. when header-style action placement is not stable or not visually coherent,
+     render a bounded Roger pane directly in the page DOM above the right-rail
+     reviewers card
+  3. when neither page seam can be attached truthfully because of DOM drift or
+     incompatible layouts, fall back to a Roger modal launched from the page
+- Roger entry controls must be additive and must not replace or evict first-
+  party GitHub actions such as `New issue`; if no additive seam exists, Roger
+  should use the right rail or modal fallback instead of stealing an existing
+  action slot
+- the browser-action popup remains an explicit manual fallback, not the normal
+  first-class PR-page happy path
+- the extension must not default back to a floating detached panel when the
+  intended GitHub-native seams are unavailable; degraded entry must still feel
+  deliberate and bounded
+- Roger-owned extension controls should visually borrow from GitHub/Primer
+  button patterns and rail-card structure rather than inventing a parallel
+  chrome inside the page
+- Roger should also develop a distinct brand layer inside those constraints:
+  purposeful logo/wordmark work, repeatable accent treatment, and a coherent
+  identity that can be embedded across popup, in-page entry, and future Roger
+  surfaces without degrading GitHub-native usability
+- the extension should expose first-class operator ergonomics rather than
+  hiding them in repo docs: safe keyboard shortcuts for primary actions,
+  explicit extension configuration, and an in-extension help surface that
+  explains actions, shortcuts, setup state, and fallback paths
+- where Roger already has enough local state to infer the next safe move, the
+  extension and CLI should prefer that over avoidable extra clicks or rerun
+  prompts
+- practical `0.1.x` examples:
+  - demote `Refresh` from an always-visible primary action into a contextual
+    action shown when Roger state makes refresh relevant
+  - infer one primary CTA from session and attention state instead of treating
+    every action as equally likely
+  - continue guided extension setup automatically when browser-side identity
+    registration is observed rather than forcing an extra setup or doctor
+    command when Roger can finish truthfully
+  - narrow resume or refresh disambiguation prompts to cases of real ambiguity
+    rather than blocking when a single strongest target is already known
+- these inferences must remain read-safe and launch-safe only; posting,
+  approval, code mutation, and other elevated actions remain explicitly
+  user-triggered
+
+`0.1.x` implementation-facing in-place update contract (`rr-5urd.1`):
+
+- command surface: use `rr update` as the canonical self-update entrypoint for
+  the installed binary in this repo
+- default interaction: `rr update` must require explicit confirmation before
+  mutating the installed binary when running interactively on a TTY
+- non-interactive guard: when no TTY is present and `--yes`/`-y` is not
+  provided, `rr update` must fail closed with machine-readable blocked output
+  rather than guessing consent
+- `--yes` / `-y` semantics: bypass only the confirmation prompt; they must not
+  bypass release metadata, checksum, provenance, target-resolution, or install
+  safety checks
+- `--dry-run` semantics: perform metadata/provenance/target validation only and
+  never mutate the installed binary
+- `--robot` semantics: remain machine-readable and truthful; robot output must
+  clearly distinguish `blocked`, `complete`, and `dry-run` without hidden
+  interactive prompts
+- install provenance boundary: in-place apply is allowed only for published
+  release installs with embedded release metadata; local/unpublished binaries
+  remain fail-closed and must report reinstall guidance
+- apply strategy: download target archive, verify checksum, stage replacement in
+  a temporary path, validate binary candidate, then perform explicit
+  replace-with-rollback behavior so a failed apply does not leave a half-updated
+  install
+- rollback expectation: if replacement fails after backup/rename begins, Roger
+  must attempt immediate restore of the prior binary and report final state
+  truthfully
+- migration posture for `0.1.x`: automatic local-state/schema migrations are
+  deferred. `rr update` applies binary updates only and must not claim migration
+  support. If update or first-run detects a migration-required boundary, Roger
+  must fail closed with explicit backup/export + reinstall guidance instead of
+  attempting unscoped in-place state mutation
+- migration-envelope contract source: the concrete envelope fields, migration
+  class boundaries, `rr update --dry-run` reporting obligations, and first-run
+  auto-migration limits are defined in
+  [`STORE_MIGRATION_COMPATIBILITY_AND_OPERATOR_CONTRACT.md`](STORE_MIGRATION_COMPATIBILITY_AND_OPERATOR_CONTRACT.md)
+  for the `rr-1xhg` lane
+- explicit out-of-scope for this slice: no silent cross-major upgrades, no
+  package-manager handoff masquerading as in-place update, and no implicit data
+  migration during apply
 
 Non-goal for `0.1.0`:
 
@@ -1802,26 +1910,9 @@ The extension should not become:
 
 ### Bridge strategy
 
-The extension-to-local bridge must stay daemonless in steady state. Two
-mechanisms have been evaluated:
+The extension-to-local bridge must stay daemonless in steady state.
 
-**Option A: Custom URL protocol handler (historical, not supported in `0.1.0`)**
-
-Register `roger://` as a URL scheme on the host OS (macOS: `LSURLTypes` in an
-app bundle `Info.plist`, or a lightweight helper registered with
-`NSWorkspace`). The extension navigates to:
-
-```
-roger://launch?repo=owner/repo&pr=123&action=start
-```
-
-The OS launches the `rr` CLI with those args. No daemon. No manifest. One-shot.
-
-This was the simplest daemonless bridge candidate and required zero changes to
-the Chrome extension security model, but it is intentionally out of the
-supported `0.1.0` product path.
-
-**Option B: Native Messaging**
+Current `0.1.0` product contract: Native Messaging only.
 
 Chrome's Native Messaging API launches a registered native executable on demand
 via stdin/stdout JSON messages. It is bidirectional, daemonless (Chrome spawns
@@ -1838,8 +1929,14 @@ Chosen v1 direction:
 - implement Native Messaging as the primary serious bridge
 - start with the Rust `rr` binary as the first host executable unless packaging
   constraints later justify a tiny helper binary
+- treat actual host-runtime execution as part of the product contract: Roger
+  does not earn browser-launch support merely by writing a host manifest or
+  passing `rr extension doctor`; the registered `rr` binary must answer a real
+  Native Messaging launch intent over stdin/stdout without hanging
 - remove browser URL-scheme launch from the supported product path; if Native
   Messaging is unavailable, return bounded setup guidance and fail closed
+- keep URL-scheme launch discussion in historical critique documents only, not
+  active setup/current-truth sections
 
 WebSocket / local HTTP is explicitly rejected for the bridge: it requires a
 daemon and introduces a background service as the architectural center.

@@ -5,15 +5,20 @@ use roger_app_core::{
     ResumeBundle, ResumeBundleProfile, ReviewTarget, RogerCommand, RogerCommandId,
     RogerCommandInvocationSurface, RogerCommandRouteStatus, Surface, route_harness_command,
 };
+use roger_bridge::{BridgeLaunchIntent, BridgePreflight, BridgeResponse, handle_bridge_intent};
 use roger_cli::{CliRuntime, HarnessCommandInvocation, run, run_harness_command};
 use roger_session_opencode::OpenCodeAdapter;
 use roger_storage::{CreateReviewSession, CreateSessionLaunchBinding, LaunchSurface, RogerStore};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::Duration;
 use tempfile::{TempDir, tempdir};
 
 fn sample_target(pr_number: u64) -> ReviewTarget {
@@ -100,6 +105,59 @@ fn run_rr_process(args: &[&str], runtime: &CliRuntime) -> std::process::Output {
     cmd.output().expect("run rr process via cargo run fallback")
 }
 
+fn run_rr_process_with_stdin(
+    args: &[&str],
+    runtime: &CliRuntime,
+    stdin_bytes: &[u8],
+) -> std::process::Output {
+    let mut cmd = if let Ok(rr_bin) = std::env::var("CARGO_BIN_EXE_rr") {
+        let mut cmd = Command::new(rr_bin);
+        cmd.current_dir(&runtime.cwd)
+            .env("RR_STORE_ROOT", &runtime.store_root)
+            .env("RR_OPENCODE_BIN", &runtime.opencode_bin);
+        cmd
+    } else {
+        let workspace = workspace_root();
+        let local_rr = workspace.join("target/debug/rr");
+        if local_rr.exists() {
+            let mut cmd = Command::new(local_rr);
+            cmd.current_dir(&runtime.cwd)
+                .env("RR_STORE_ROOT", &runtime.store_root)
+                .env("RR_OPENCODE_BIN", &runtime.opencode_bin);
+            cmd
+        } else {
+            let mut cmd = Command::new("cargo");
+            cmd.arg("run")
+                .arg("-q")
+                .arg("-p")
+                .arg("roger-cli")
+                .arg("--bin")
+                .arg("rr")
+                .arg("--")
+                .current_dir(workspace)
+                .env("RR_STORE_ROOT", &runtime.store_root)
+                .env("RR_OPENCODE_BIN", &runtime.opencode_bin);
+            cmd
+        }
+    };
+
+    cmd.args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn rr process");
+    {
+        let stdin = child.stdin.as_mut().expect("child stdin");
+        stdin
+            .write_all(stdin_bytes)
+            .expect("write native messaging request");
+    }
+    child
+        .wait_with_output()
+        .expect("wait for rr process output")
+}
+
 fn run_harness(
     command_id: RogerCommandId,
     provider: &str,
@@ -127,6 +185,30 @@ fn parse_toon_payload(stdout: &str) -> Value {
     toon_format::decode_default(stdout).expect("robot payload toon")
 }
 
+fn encode_native_intent(intent: &BridgeLaunchIntent) -> Vec<u8> {
+    let json = serde_json::to_vec(intent).expect("serialize native intent");
+    let len = json.len() as u32;
+    let mut wire = Vec::with_capacity(4 + json.len());
+    wire.extend_from_slice(&len.to_le_bytes());
+    wire.extend_from_slice(&json);
+    wire
+}
+
+fn decode_native_response(stdout: &[u8]) -> BridgeResponse {
+    assert!(
+        stdout.len() >= 4,
+        "native host output missing length prefix: {} bytes",
+        stdout.len()
+    );
+    let len = u32::from_le_bytes([stdout[0], stdout[1], stdout[2], stdout[3]]) as usize;
+    assert_eq!(
+        stdout.len(),
+        4 + len,
+        "native host output length prefix mismatch"
+    );
+    serde_json::from_slice(&stdout[4..]).expect("decode native host response payload")
+}
+
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -134,6 +216,94 @@ fn workspace_root() -> PathBuf {
         .parent()
         .expect("workspace root")
         .to_path_buf()
+}
+
+fn extension_pack_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn write_guided_profile_discovery_state(runtime: &CliRuntime, browser: &str, extension_id: &str) {
+    let package_dir = workspace_root().join("target/bridge/extension/roger-extension-unpacked");
+    let preferences_path = runtime
+        .store_root
+        .join("bridge/browser-profiles")
+        .join(browser)
+        .join("Default/Secure Preferences");
+    fs::create_dir_all(
+        preferences_path
+            .parent()
+            .expect("profile preferences parent directory"),
+    )
+    .expect("create profile preferences parent");
+    let preferences = serde_json::json!({
+        "extensions": {
+            "settings": {
+                extension_id: {
+                    "path": package_dir.to_string_lossy().to_string()
+                }
+            }
+        }
+    });
+    fs::write(
+        &preferences_path,
+        serde_json::to_vec_pretty(&preferences).expect("serialize preferences"),
+    )
+    .expect("write secure preferences");
+}
+
+fn register_extension_identity_via_bridge(runtime: &CliRuntime, browser: &str, extension_id: &str) {
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _env_guard = ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("env lock");
+
+    let previous_store_root = std::env::var_os("RR_STORE_ROOT");
+    // SAFETY: tests serialize RR_STORE_ROOT mutation via ENV_LOCK and restore it before return.
+    unsafe {
+        std::env::set_var("RR_STORE_ROOT", &runtime.store_root);
+    }
+
+    let response = handle_bridge_intent(
+        &BridgeLaunchIntent {
+            action: "register_extension_identity".to_owned(),
+            owner: "roger".to_owned(),
+            repo: "roger-reviewer".to_owned(),
+            pr_number: 0,
+            head_ref: None,
+            instance: None,
+            extension_id: Some(extension_id.to_owned()),
+            browser: Some(browser.to_owned()),
+        },
+        &BridgePreflight {
+            roger_binary_found: false,
+            roger_data_dir_exists: false,
+            gh_available: false,
+        },
+        Path::new("rr"),
+    );
+
+    match previous_store_root {
+        Some(value) => {
+            // SAFETY: tests serialize RR_STORE_ROOT mutation via ENV_LOCK and restore it before return.
+            unsafe {
+                std::env::set_var("RR_STORE_ROOT", value);
+            }
+        }
+        None => {
+            // SAFETY: tests serialize RR_STORE_ROOT mutation via ENV_LOCK and restore it before return.
+            unsafe {
+                std::env::remove_var("RR_STORE_ROOT");
+            }
+        }
+    }
+
+    assert!(
+        response.ok,
+        "bridge registration intent failed: {} / {:?}",
+        response.message, response.guidance
+    );
 }
 
 fn init_repo(temp: &TempDir) -> PathBuf {
@@ -246,6 +416,127 @@ fn help_forms_exit_cleanly_for_quickstart_probe() {
             result.stderr.trim().is_empty(),
             "args={args:?} stderr={}",
             result.stderr
+        );
+    }
+}
+
+#[test]
+fn rr_binary_accepts_native_host_registration_intents_via_stdio_envelope() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = CliRuntime {
+        cwd: temp.path().to_path_buf(),
+        store_root: temp.path().join(".roger"),
+        opencode_bin: "opencode".to_owned(),
+    };
+
+    let intent = BridgeLaunchIntent {
+        action: "register_extension_identity".to_owned(),
+        owner: "roger".to_owned(),
+        repo: "roger-reviewer".to_owned(),
+        pr_number: 0,
+        head_ref: None,
+        instance: None,
+        extension_id: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()),
+        browser: Some("chrome".to_owned()),
+    };
+    let output = run_rr_process_with_stdin(&[], &runtime, &encode_native_intent(&intent));
+
+    assert!(
+        output.status.success(),
+        "native host registration should exit cleanly: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response = decode_native_response(&output.stdout);
+    assert!(response.ok, "response should be ok: {:?}", response);
+    assert_eq!(response.action, "register_extension_identity");
+}
+
+#[test]
+fn rr_binary_native_host_path_returns_bridge_response_for_launch_intents() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = CliRuntime {
+        cwd: temp.path().to_path_buf(),
+        store_root: temp.path().join(".roger-missing"),
+        opencode_bin: "opencode".to_owned(),
+    };
+
+    let intent = BridgeLaunchIntent {
+        action: "start_review".to_owned(),
+        owner: "owner".to_owned(),
+        repo: "repo".to_owned(),
+        pr_number: 42,
+        head_ref: None,
+        instance: None,
+        extension_id: None,
+        browser: None,
+    };
+    let output = run_rr_process_with_stdin(&[], &runtime, &encode_native_intent(&intent));
+
+    assert!(
+        !output.status.success(),
+        "preflight failure should fail closed with non-zero exit"
+    );
+    let response = decode_native_response(&output.stdout);
+    assert!(!response.ok);
+    assert_eq!(response.action, "start_review");
+    assert!(
+        response.message.contains("Roger is not ready"),
+        "unexpected response message: {}",
+        response.message
+    );
+}
+
+#[test]
+fn rr_binary_native_host_path_handles_all_primary_launch_actions_without_hanging() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = CliRuntime {
+        cwd: temp.path().to_path_buf(),
+        store_root: temp.path().join(".roger-missing"),
+        opencode_bin: "opencode".to_owned(),
+    };
+
+    for action in [
+        "start_review",
+        "resume_review",
+        "show_findings",
+        "refresh_review",
+    ] {
+        let intent = BridgeLaunchIntent {
+            action: action.to_owned(),
+            owner: "owner".to_owned(),
+            repo: "repo".to_owned(),
+            pr_number: 42,
+            head_ref: None,
+            instance: None,
+            extension_id: None,
+            browser: None,
+        };
+        let output = run_rr_process_with_stdin(&[], &runtime, &encode_native_intent(&intent));
+        assert!(
+            !output.stdout.is_empty(),
+            "expected Native Messaging envelope output for action={action}"
+        );
+        let response = decode_native_response(&output.stdout);
+
+        assert!(
+            !output.status.success(),
+            "preflight should fail closed for action={action}"
+        );
+        assert!(
+            !response.ok,
+            "response should fail closed for action={action}"
+        );
+        assert_eq!(response.action, action);
+        assert!(
+            response.message.contains("Roger is not ready"),
+            "unexpected message for action={action}: {}",
+            response.message
+        );
+        let guidance = response.guidance.as_deref().unwrap_or_default();
+        assert!(
+            guidance.contains("Run `rr init`") || guidance.contains("Run `rr extension setup`"),
+            "expected setup guidance for action={action}: {:?}",
+            response.guidance
         );
     }
 }
@@ -644,7 +935,10 @@ fn return_with_explicit_session_bypasses_repo_ambiguity() {
     let explicit_payload = parse_robot_payload(&explicit_return.stdout);
     assert_eq!(explicit_payload["outcome"], "complete");
     assert_eq!(explicit_payload["data"]["session_id"], session_42);
-    assert_eq!(explicit_payload["data"]["return_path"], "rebound_existing_session");
+    assert_eq!(
+        explicit_payload["data"]["return_path"],
+        "rebound_existing_session"
+    );
 
     let ambiguous_return = run_rr(&["return", "--robot"], &runtime);
     assert_eq!(ambiguous_return.exit_code, 3, "{}", ambiguous_return.stderr);
@@ -1306,6 +1600,11 @@ fn robot_docs_surfaces_schema_inventory_and_blocks_unknown_topics() {
             .iter()
             .any(|item| item["schema_id"] == "rr.robot.search.v1")
     );
+    assert!(
+        items
+            .iter()
+            .any(|item| item["schema_id"] == "rr.robot.update.v1")
+    );
 
     let compact = run_rr(
         &[
@@ -1322,6 +1621,14 @@ fn robot_docs_surfaces_schema_inventory_and_blocks_unknown_topics() {
     assert_eq!(compact_payload["schema_id"], "rr.robot.robot_docs.v1");
     assert_eq!(compact_payload["robot_format"], "compact");
     assert_eq!(compact_payload["data"]["topic"], "commands");
+    let command_items = compact_payload["data"]["items"]
+        .as_array()
+        .expect("command items");
+    assert!(
+        command_items
+            .iter()
+            .any(|item| item["command"] == "rr update")
+    );
 
     let blocked = run_rr(&["robot-docs", "unknown-topic", "--robot"], &runtime);
     assert_eq!(blocked.exit_code, 3, "{}", blocked.stderr);
@@ -1336,6 +1643,9 @@ fn robot_docs_surfaces_schema_inventory_and_blocks_unknown_topics() {
 
 #[test]
 fn bridge_pack_extension_emits_checksum_artifacts_in_smoke() {
+    let _lock = extension_pack_test_lock()
+        .lock()
+        .expect("acquire extension pack smoke lock");
     let temp = tempdir().expect("tempdir");
     let runtime = CliRuntime {
         cwd: workspace_root(),
@@ -1358,6 +1668,8 @@ fn bridge_pack_extension_emits_checksum_artifacts_in_smoke() {
     assert_eq!(payload["outcome"], "complete");
     assert_eq!(payload["data"]["subcommand"], "pack-extension");
     assert_eq!(payload["data"]["installs_browser_extension"], false);
+    assert!(payload["data"]["version"].as_str().is_some());
+    assert!(payload["data"]["version_name"].as_str().is_some());
     let package_dir = PathBuf::from(
         payload["data"]["package_dir"]
             .as_str()
@@ -1365,10 +1677,20 @@ fn bridge_pack_extension_emits_checksum_artifacts_in_smoke() {
     );
     assert!(package_dir.join("SHA256SUMS").exists());
     assert!(package_dir.join("asset-manifest.json").exists());
+    let manifest = fs::read_to_string(package_dir.join("manifest.json")).expect("read manifest");
+    let manifest_json: serde_json::Value = serde_json::from_str(&manifest).expect("parse manifest");
+    assert_eq!(manifest_json["version"], payload["data"]["version"]);
+    assert_eq!(
+        manifest_json["version_name"],
+        payload["data"]["version_name"]
+    );
 }
 
 #[test]
 fn extension_setup_blocks_without_discovered_identity_in_smoke() {
+    let _lock = extension_pack_test_lock()
+        .lock()
+        .expect("acquire extension pack smoke lock");
     let temp = tempdir().expect("tempdir");
     let runtime = CliRuntime {
         cwd: workspace_root(),
@@ -1394,7 +1716,10 @@ fn extension_setup_blocks_without_discovered_identity_in_smoke() {
     assert_eq!(payload["schema_id"], "rr.robot.extension.v1");
     assert_eq!(payload["outcome"], "blocked");
     assert_eq!(payload["data"]["subcommand"], "setup");
-    assert_eq!(payload["data"]["reason_code"], "extension_identity_missing");
+    assert_eq!(
+        payload["data"]["reason_code"],
+        "extension_registration_missing"
+    );
     assert_eq!(payload["data"]["browser"], "chrome");
     assert!(
         payload["data"]["manual_browser_step"]
@@ -1406,6 +1731,9 @@ fn extension_setup_blocks_without_discovered_identity_in_smoke() {
 
 #[test]
 fn extension_setup_and_doctor_emit_complete_envelopes_in_smoke() {
+    let _lock = extension_pack_test_lock()
+        .lock()
+        .expect("acquire extension pack smoke lock");
     let temp = tempdir().expect("tempdir");
     let runtime = CliRuntime {
         cwd: workspace_root(),
@@ -1414,14 +1742,7 @@ fn extension_setup_and_doctor_emit_complete_envelopes_in_smoke() {
     };
     let install_root = temp.path().join("install-root");
     let extension_id = "abcdefghijklmnopabcdefghijklmnop";
-    let registry_path = runtime.store_root.join("bridge/extension-id");
-    fs::create_dir_all(
-        registry_path
-            .parent()
-            .expect("extension-id registry parent path"),
-    )
-    .expect("create extension-id registry parent");
-    fs::write(&registry_path, format!("{extension_id}\n")).expect("write extension-id registry");
+    write_guided_profile_discovery_state(&runtime, "edge", extension_id);
 
     let setup = run(
         &[
@@ -1443,8 +1764,11 @@ fn extension_setup_and_doctor_emit_complete_envelopes_in_smoke() {
     assert_eq!(setup_payload["data"]["browser"], "edge");
     assert_eq!(setup_payload["data"]["extension_id"], extension_id);
     assert_eq!(
-        setup_payload["data"]["doctor"]["subcommand"],
-        "doctor",
+        setup_payload["data"]["extension_id_source"],
+        "browser_profile_preferences"
+    );
+    assert_eq!(
+        setup_payload["data"]["doctor"]["subcommand"], "doctor",
         "setup should embed doctor result envelope"
     );
     assert!(
@@ -1483,7 +1807,194 @@ fn extension_setup_and_doctor_emit_complete_envelopes_in_smoke() {
 }
 
 #[test]
+fn extension_setup_and_doctor_succeed_after_bridge_registration_event_in_smoke() {
+    let _lock = extension_pack_test_lock()
+        .lock()
+        .expect("acquire extension pack smoke lock");
+    let temp = tempdir().expect("tempdir");
+    let runtime = CliRuntime {
+        cwd: workspace_root(),
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: "opencode".to_owned(),
+    };
+    let install_root = temp.path().join("install-root");
+    let extension_id = "abcdefghijklmnopabcdefghijklmnop";
+
+    let blocked = run(
+        &[
+            "extension".to_owned(),
+            "setup".to_owned(),
+            "--browser".to_owned(),
+            "brave".to_owned(),
+            "--install-root".to_owned(),
+            install_root.to_string_lossy().to_string(),
+            "--robot".to_owned(),
+        ],
+        &runtime,
+    );
+    assert_eq!(blocked.exit_code, 3, "{}", blocked.stderr);
+    let blocked_payload = parse_robot_payload(&blocked.stdout);
+    assert_eq!(blocked_payload["outcome"], "blocked");
+    assert_eq!(
+        blocked_payload["data"]["reason_code"],
+        "extension_registration_missing"
+    );
+
+    register_extension_identity_via_bridge(&runtime, "brave", extension_id);
+
+    let setup = run(
+        &[
+            "extension".to_owned(),
+            "setup".to_owned(),
+            "--browser".to_owned(),
+            "brave".to_owned(),
+            "--install-root".to_owned(),
+            install_root.to_string_lossy().to_string(),
+            "--robot".to_owned(),
+        ],
+        &runtime,
+    );
+    assert_eq!(setup.exit_code, 0, "{}", setup.stderr);
+    let setup_payload = parse_robot_payload(&setup.stdout);
+    assert_eq!(setup_payload["outcome"], "complete");
+    assert_eq!(setup_payload["data"]["browser"], "brave");
+    assert_eq!(setup_payload["data"]["extension_id"], extension_id);
+    assert_eq!(
+        setup_payload["data"]["extension_id_source"],
+        "store_registry"
+    );
+
+    let doctor = run(
+        &[
+            "extension".to_owned(),
+            "doctor".to_owned(),
+            "--browser".to_owned(),
+            "brave".to_owned(),
+            "--install-root".to_owned(),
+            install_root.to_string_lossy().to_string(),
+            "--robot".to_owned(),
+        ],
+        &runtime,
+    );
+    assert_eq!(doctor.exit_code, 0, "{}", doctor.stderr);
+    let doctor_payload = parse_robot_payload(&doctor.stdout);
+    assert_eq!(doctor_payload["outcome"], "complete");
+    assert!(
+        doctor_payload["data"]["checks"]
+            .as_array()
+            .expect("doctor checks")
+            .iter()
+            .all(|entry| entry["ok"] == true)
+    );
+}
+
+#[test]
+fn extension_setup_auto_completes_when_identity_is_observed_during_wait_in_smoke() {
+    let _lock = extension_pack_test_lock()
+        .lock()
+        .expect("acquire extension pack smoke lock");
+    let temp = tempdir().expect("tempdir");
+    let runtime = CliRuntime {
+        cwd: workspace_root(),
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: "opencode".to_owned(),
+    };
+    let install_root = temp.path().join("install-root");
+    let extension_id = "abcdefghijklmnopabcdefghijklmnop";
+    let runtime_for_observer = runtime.clone();
+    let extension_id_for_observer = extension_id.to_owned();
+    let observer = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(900));
+        write_guided_profile_discovery_state(
+            &runtime_for_observer,
+            "chrome",
+            &extension_id_for_observer,
+        );
+    });
+
+    let setup = run(
+        &[
+            "extension".to_owned(),
+            "setup".to_owned(),
+            "--browser".to_owned(),
+            "chrome".to_owned(),
+            "--install-root".to_owned(),
+            install_root.to_string_lossy().to_string(),
+            "--robot".to_owned(),
+        ],
+        &runtime,
+    );
+    observer
+        .join()
+        .expect("join guided-profile registration observer");
+    assert_eq!(setup.exit_code, 0, "{}", setup.stderr);
+    let setup_payload = parse_robot_payload(&setup.stdout);
+    assert_eq!(setup_payload["outcome"], "complete");
+    assert_eq!(setup_payload["data"]["subcommand"], "setup");
+    assert_eq!(setup_payload["data"]["browser"], "chrome");
+    assert_eq!(setup_payload["data"]["extension_id"], extension_id);
+    assert_eq!(
+        setup_payload["data"]["extension_id_source"],
+        "browser_profile_preferences"
+    );
+    assert_eq!(
+        setup_payload["data"]["registration_observed_during_setup_wait"],
+        true
+    );
+    assert!(
+        setup_payload["data"]["doctor"]["checks"]
+            .as_array()
+            .expect("doctor checks")
+            .iter()
+            .all(|entry| entry["ok"] == true)
+    );
+}
+
+#[test]
+fn extension_setup_discovers_identity_from_guided_profile_preferences_in_smoke() {
+    let _lock = extension_pack_test_lock()
+        .lock()
+        .expect("acquire extension pack smoke lock");
+    let temp = tempdir().expect("tempdir");
+    let runtime = CliRuntime {
+        cwd: workspace_root(),
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: "opencode".to_owned(),
+    };
+    let install_root = temp.path().join("install-root");
+    let extension_id = "abcdefghijklmnopabcdefghijklmnop";
+    write_guided_profile_discovery_state(&runtime, "chrome", extension_id);
+
+    let setup = run(
+        &[
+            "extension".to_owned(),
+            "setup".to_owned(),
+            "--browser".to_owned(),
+            "chrome".to_owned(),
+            "--install-root".to_owned(),
+            install_root.to_string_lossy().to_string(),
+            "--robot".to_owned(),
+        ],
+        &runtime,
+    );
+    assert_eq!(setup.exit_code, 0, "{}", setup.stderr);
+    let setup_payload = parse_robot_payload(&setup.stdout);
+    assert_eq!(setup_payload["outcome"], "complete");
+    assert_eq!(
+        setup_payload["data"]["extension_id_source"],
+        "browser_profile_preferences"
+    );
+    assert_eq!(setup_payload["data"]["extension_id"], extension_id);
+    let registry_path = runtime.store_root.join("bridge/extension-id");
+    let persisted = fs::read_to_string(registry_path).expect("persisted extension id");
+    assert_eq!(persisted.trim(), extension_id);
+}
+
+#[test]
 fn bridge_install_uninstall_is_failure_closed_and_reports_asset_checksums_in_smoke() {
+    let _lock = extension_pack_test_lock()
+        .lock()
+        .expect("acquire extension pack smoke lock");
     let temp = tempdir().expect("tempdir");
     let runtime = CliRuntime {
         cwd: workspace_root(),
@@ -1533,7 +2044,10 @@ fn bridge_install_uninstall_is_failure_closed_and_reports_asset_checksums_in_smo
     assert_eq!(install.exit_code, 0, "{}", install.stderr);
     let install_payload = parse_robot_payload(&install.stdout);
     assert_eq!(install_payload["outcome"], "complete");
-    assert_eq!(install_payload["data"]["extension_id_source"], "store_registry");
+    assert_eq!(
+        install_payload["data"]["extension_id_source"],
+        "store_registry"
+    );
     assert_eq!(
         install_payload["data"]["bridge_binary_source"],
         "installed_rr_current_exe"

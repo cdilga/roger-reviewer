@@ -53,7 +53,7 @@ expected exception because it is web-native.
 | TUI | Rust | FrankenTUI `Model` trait; in-process with Roger app-core in `0.1.x`; one primary `rr` binary, supervised background execution, and stable envelopes at external edges |
 | CLI (`rr`) | Rust default | Session-aware commands, harness adapter, GitHub adapter |
 | App core | Rust default | Domain logic, storage, finding lifecycle |
-| Browser extension | TypeScript/JS | WebExtension; Native Messaging is the primary v1 bridge, custom URL launch may remain as a convenience path; keep runtime deps near zero and allow only a small typed toolchain |
+| Browser extension | TypeScript/JS | WebExtension; Native Messaging is the only supported `0.1.x` browser bridge, with the installed `rr` binary as the intended host runtime; keep runtime deps near zero and allow only a small typed toolchain |
 | Search | Rust | Tantivy + FastEmbed hybrid targeted for the first Roger search slice |
 
 ## Repo Layout (Current High-Level Shape)
@@ -112,6 +112,8 @@ Read these to understand the full plan before touching code.
 | [`docs/TUI_RUNTIME_SUPERVISOR_POLICY.md`](docs/TUI_RUNTIME_SUPERVISOR_POLICY.md) | Support contract for in-process queue classes, cancellation rules, and bounded refresh cadence |
 | [`docs/EXTENSION_PACKAGING_AND_RELEASE_CONTRACT.md`](docs/EXTENSION_PACKAGING_AND_RELEASE_CONTRACT.md) | Support contract for the minimal extension toolchain, contract export, and bridge/extension release ownership |
 | [`docs/PLAN_FOR_EXTENSION_SETUP_AND_HAPPY_PATH_VALIDATION.md`](docs/PLAN_FOR_EXTENSION_SETUP_AND_HAPPY_PATH_VALIDATION.md) | Recovery plan for command-surface reconciliation and happy-path/browser validation uplift |
+| [`docs/PLAN_FOR_SCHEMA_MIGRATIONS_AND_UPDATE_COMPATIBILITY.md`](docs/PLAN_FOR_SCHEMA_MIGRATIONS_AND_UPDATE_COMPATIBILITY.md) | Focused plan for introducing safe Roger store schema migrations, update compatibility envelopes, backup/journal recovery, and release validation |
+| [`docs/STORE_MIGRATION_COMPATIBILITY_AND_OPERATOR_CONTRACT.md`](docs/STORE_MIGRATION_COMPATIBILITY_AND_OPERATOR_CONTRACT.md) | Implementation-facing migration/update compatibility contract: envelope fields, migration classes, fail-closed boundaries, updater preflight output, and first-run auto-migration limits (closes `rr-1xhg.1`) |
 | [`docs/ROBOT_CLI_CONTRACT.md`](docs/ROBOT_CLI_CONTRACT.md) | Support contract for the `0.1.0` `--robot` command shortlist and stable machine-readable output envelopes |
 | [`docs/HARNESS_SESSION_LINKAGE_CONTRACT.md`](docs/HARNESS_SESSION_LINKAGE_CONTRACT.md) | Implementation-facing contract for the Roger-to-harness session boundary, `SessionLocator`, `ResumeBundle`, and adapter obligations (closes `rr-015`) |
 | [`docs/SEARCH_MEMORY_LIFECYCLE_AND_SEMANTIC_ASSET_POLICY.md`](docs/SEARCH_MEMORY_LIFECYCLE_AND_SEMANTIC_ASSET_POLICY.md) | Support contract for prior-review search, semantic asset lifecycle, memory promotion rules, and `0.1.0` scope fence before `rr-024` |

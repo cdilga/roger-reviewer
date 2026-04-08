@@ -94,6 +94,8 @@ Required families:
 - CLI session binding and robot-output stability
 - TUI controller tests with fake runtime services
 - Native Messaging envelope handling and host-mode failure paths
+- Native Messaging host-runtime execution against the actual registered `rr`
+  binary, not just in-process bridge helper calls
 - GitHub adapter behavior with Roger-owned doubles
 - multi-instance and worktree routing
 - index rebuild and artifact lookup
@@ -216,6 +218,15 @@ Must have at least one real boundary path somewhere in the overall suite:
 - blessed provider path
 - Native Messaging bridge path
 - local CLI launch and resume path
+
+Bridge-runtime rule:
+
+- install/setup/doctor checks do not by themselves prove browser launch works
+- at least one automated suite must spawn the actual registered host binary,
+  feed it a Native Messaging request envelope over stdin, and assert a bounded
+  response envelope on stdout
+- browser-launch smoke must treat "button click dispatches" and "host manifest
+  exists" as insufficient unless a host-runtime round trip is also proven
 
 ## Test Artifact Layout
 

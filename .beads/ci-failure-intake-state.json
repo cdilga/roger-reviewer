@@ -1,0 +1,44 @@
+{
+  ".github/workflows/release-publish.yml|main|workflow_dispatch": {
+    "issue_id": "rr-aip.10",
+    "run_id": 24075440186,
+    "run_url": "https://github.com/cdilga/roger-reviewer/actions/runs/24075440186",
+    "updated_at": "2026-04-07T09:54:58Z"
+  },
+  ".github/workflows/release.yml|main|workflow_dispatch": {
+    "issue_id": "rr-aip.11",
+    "run_id": 24081346354,
+    "run_url": "https://github.com/cdilga/roger-reviewer/actions/runs/24081346354",
+    "updated_at": "2026-04-07T12:31:26Z"
+  },
+  ".github/workflows/release.yml|v2026.04.08|push": {
+    "issue_id": "rr-aip.12",
+    "run_id": 24081174500,
+    "run_url": "https://github.com/cdilga/roger-reviewer/actions/runs/24081174500",
+    "updated_at": "2026-04-07T12:27:31Z"
+  },
+  ".github/workflows/validation-gated.yml|main|push": {
+    "issue_id": "rr-aip.13",
+    "run_id": 24076189119,
+    "run_url": "https://github.com/cdilga/roger-reviewer/actions/runs/24076189119",
+    "updated_at": "2026-04-07T10:13:48Z"
+  },
+  ".github/workflows/validation-main.yml|main|push": {
+    "issue_id": "rr-aip.14",
+    "run_id": 24081417430,
+    "run_url": "https://github.com/cdilga/roger-reviewer/actions/runs/24081417430",
+    "updated_at": "2026-04-07T12:31:45Z"
+  },
+  ".github/workflows/validation-nightly.yml|main|push": {
+    "issue_id": "rr-aip.15",
+    "run_id": 24076189052,
+    "run_url": "https://github.com/cdilga/roger-reviewer/actions/runs/24076189052",
+    "updated_at": "2026-04-07T10:13:50Z"
+  },
+  ".github/workflows/validation-pr.yml|hotfix/semantic-embedder-module|pull_request": {
+    "issue_id": "rr-aip.16",
+    "run_id": 24075153434,
+    "run_url": "https://github.com/cdilga/roger-reviewer/actions/runs/24075153434",
+    "updated_at": "2026-04-07T09:47:47Z"
+  }
+}

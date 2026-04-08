@@ -58,6 +58,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          bash scripts/release/test_release_migration_gate_workflow.sh
           bash scripts/release/test_release_build_core_workflow.sh
           bash scripts/release/test_release_publish_workflow.sh
           bash scripts/release/test_publish_release.sh
@@ -66,8 +67,23 @@ jobs:
           bash scripts/release/test_build_install_metadata_bundle.sh
           bash scripts/release/test_derive_calver_version.sh
 
+  migration-rehearsal:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Rehearse prior-schema store migration before release generation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p roger-storage --test release_migration_gate
+
   derive-release-metadata:
     if: github.event_name != 'pull_request'
+    needs: migration-rehearsal
     runs-on: ubuntu-latest
     outputs:
       channel: ${{ steps.derive.outputs.channel }}

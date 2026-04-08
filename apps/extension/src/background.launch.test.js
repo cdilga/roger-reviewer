@@ -50,40 +50,47 @@ test('handleLaunchMessage fails closed when Native Messaging is unavailable', as
     assert.equal(response.mode, 'native_unavailable');
     assert.equal(response.action, 'start_review');
     assert.match(response.message, /launch blocked/i);
-    assert.match(response.guidance, /native messaging host not found/i);
+    assert.match(response.guidance, /host is not registered/i);
+    assert.match(response.guidance, /rr extension setup --browser <edge\|chrome\|brave>/i);
+    assert.match(response.guidance, /rr extension doctor --browser <edge\|chrome\|brave>/i);
+    assert.match(response.guidance, /reload the browser extension/i);
+    assert.match(response.guidance, /RR_STORE_ROOT/i);
     assert.equal(tabCreateCalled, false);
   });
 });
 
-test('handleLaunchMessage preserves native messaging success envelope', async () => {
-  const chromeStub = {
-    runtime: {
-      lastError: null,
-      onMessage: { addListener: () => {} },
-      sendNativeMessage(_host, _intent, callback) {
-        callback({
-          ok: true,
-          action: 'resume_review',
-          message: 'Dispatching resume_review for acme/widgets#42',
-          guidance: null,
-          session_id: null,
-        });
+for (const action of ['start_review', 'resume_review', 'show_findings', 'refresh_review']) {
+  test(`handleLaunchMessage preserves native messaging success envelope for ${action}`, async () => {
+    const chromeStub = {
+      runtime: {
+        lastError: null,
+        onMessage: { addListener: () => {} },
+        sendNativeMessage(_host, _intent, callback) {
+          callback({
+            ok: true,
+            action,
+            message: `Dispatching ${action} for acme/widgets#42`,
+            guidance: null,
+            session_id: null,
+          });
+        },
       },
-    },
-  };
+    };
 
-  await withChromeStub(chromeStub, async () => {
-    const response = await handleLaunchMessage({
-      intent: {
-        action: 'resume_review',
-        owner: 'acme',
-        repo: 'widgets',
-        pr_number: 42,
-      },
+    await withChromeStub(chromeStub, async () => {
+      const response = await handleLaunchMessage({
+        intent: {
+          action,
+          owner: 'acme',
+          repo: 'widgets',
+          pr_number: 42,
+        },
+      });
+
+      assert.equal(response.ok, true);
+      assert.equal(response.mode, 'native_messaging');
+      assert.equal(response.action, action);
+      assert.match(response.message, new RegExp(`Dispatching ${action}`));
     });
-
-    assert.equal(response.ok, true);
-    assert.equal(response.mode, 'native_messaging');
-    assert.equal(response.action, 'resume_review');
   });
-});
+}

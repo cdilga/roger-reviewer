@@ -41,6 +41,8 @@ If `br ready` is empty but useful work exists, run `./scripts/swarm/audit_bead_b
 ## Non-negotiables
 
 - Preserve Roger approval safety: no automatic GitHub posting and no direct GitHub write bypasses.
+- Do not use a PR-based development workflow for this swarm run. Work directly in the checked-out repo/worktree using beads, local commits, and the current branch unless the user explicitly asks for branches or PRs.
+- Do not open, update, or manage GitHub pull requests for your own swarm work. No `gh pr`, no PR creation, no PR review/comment workflow, and no "I'll open a PR next" closeout language unless the user explicitly redirects you there.
 - Do not mutate external/dev/test environments without explicit user authorization.
 - Keep Agent Mail + file reservations in sync with real work.
 - Use Frankenterm (`ft`) as the observer default when available; if absent, install via `scripts/swarm/install_frankenterm.sh` or declare explicit degraded `--no-ft` mode.

@@ -18,6 +18,8 @@ fn native_messaging_end_to_end() {
         pr_number: 99,
         head_ref: None,
         instance: Some("my-inst".to_owned()),
+        extension_id: None,
+        browser: None,
     };
 
     // Encode as Native Messaging.
@@ -99,6 +101,8 @@ fn fail_closed_when_roger_not_installed() {
         pr_number: 1,
         head_ref: None,
         instance: None,
+        extension_id: None,
+        browser: None,
     };
     let preflight = BridgePreflight {
         roger_binary_found: false,
@@ -129,7 +133,7 @@ fn manifest_covers_all_supported_browsers() {
     }
 
     let manifest =
-        NativeHostManifest::for_roger(Path::new("/usr/local/bin/rr-bridge"), "test-extension-id");
+        NativeHostManifest::for_roger(Path::new("/usr/local/bin/rr"), "test-extension-id");
     assert_eq!(manifest.host_type, "stdio");
     assert!(manifest.allowed_origins[0].contains("test-extension-id"));
 }
@@ -143,6 +147,8 @@ fn unknown_action_rejected() {
         pr_number: 1,
         head_ref: None,
         instance: None,
+        extension_id: None,
+        browser: None,
     };
     let preflight = BridgePreflight {
         roger_binary_found: true,
@@ -163,6 +169,8 @@ fn refresh_review_action_is_accepted() {
         pr_number: 7,
         head_ref: None,
         instance: None,
+        extension_id: None,
+        browser: None,
     };
     let preflight = BridgePreflight {
         roger_binary_found: true,
@@ -183,6 +191,8 @@ fn bridge_launch_response_stays_launch_only_without_posting_readiness_signals() 
         pr_number: 12,
         head_ref: None,
         instance: None,
+        extension_id: None,
+        browser: None,
     };
     let preflight = BridgePreflight {
         roger_binary_found: true,
@@ -210,6 +220,8 @@ fn bridge_not_ready_guidance_is_setup_only_not_approval_or_posting_status() {
         pr_number: 13,
         head_ref: None,
         instance: None,
+        extension_id: None,
+        browser: None,
     };
     let preflight = BridgePreflight {
         roger_binary_found: true,

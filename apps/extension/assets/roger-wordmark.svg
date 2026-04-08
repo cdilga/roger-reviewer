@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 96" role="img" aria-labelledby="title desc">
+  <title id="title">Roger Reviewer Wordmark</title>
+  <desc id="desc">Roger Reviewer wordmark paired with the Roger badge mark.</desc>
+  <defs>
+    <linearGradient id="rogerWordmarkBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#12314a" />
+      <stop offset="100%" stop-color="#1d5f87" />
+    </linearGradient>
+    <linearGradient id="rogerWordmarkRibbon" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#8be0ff" />
+      <stop offset="100%" stop-color="#4ac4f8" />
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="96" height="96" rx="20" fill="url(#rogerWordmarkBg)" />
+  <path d="M6 70 L70 6 H86 L22 70 Z" fill="url(#rogerWordmarkRibbon)" opacity="0.9" />
+  <path
+    d="M28 24 H45 C55 24 63 32 63 42 C63 50 57 58 50 60 L64 74 H53 L40 62 H35 V74 H28 Z M35 31 V54 H45 C50 54 54 49 54 42 C54 36 50 31 45 31 Z"
+    fill="#ffffff"
+  />
+
+  <text
+    x="122"
+    y="44"
+    font-family="'Segoe UI', 'SF Pro Text', -apple-system, BlinkMacSystemFont, sans-serif"
+    font-size="34"
+    font-weight="700"
+    fill="#12314a"
+    letter-spacing="0.2"
+  >
+    Roger
+  </text>
+  <text
+    x="122"
+    y="78"
+    font-family="'Segoe UI', 'SF Pro Text', -apple-system, BlinkMacSystemFont, sans-serif"
+    font-size="30"
+    font-weight="600"
+    fill="#1d5f87"
+    letter-spacing="0.1"
+  >
+    Reviewer
+  </text>
+</svg>

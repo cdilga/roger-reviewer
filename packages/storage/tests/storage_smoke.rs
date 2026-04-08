@@ -53,7 +53,7 @@ fn storage_smoke_persists_resume_and_approval_state_across_restart() -> Result<(
 
     {
         let store = RogerStore::open(&root)?;
-        assert_eq!(store.schema_version()?, 9);
+        assert_eq!(store.schema_version()?, 10);
 
         store.put_launch_profile(CreateLaunchProfile {
             id: "profile-open-pr",

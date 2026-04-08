@@ -23,6 +23,7 @@ the bridge-family decision was already settled:
 It does not reopen the broader architecture:
 
 - Native Messaging remains the serious `0.1.0` bridge
+- custom URL launch is historical-only and is not part of active setup/current-truth guidance
 - the extension remains optional relative to the local CLI/TUI product
 
 ## `0.1.0` Packaging Baseline
@@ -38,6 +39,32 @@ The default `0.1.0` extension build toolchain is:
 - `chrome-types` for browser API typings
 - Roger-owned scripts for manifest rendering, static asset staging, packaging,
   and archive naming
+
+Artifact stance:
+
+- `0.1.x` keeps the unpacked extension artifact as the primary truthful setup
+  output for local testing and Native Messaging onboarding
+- Roger should still preserve a real path toward packed/shippable extension
+  artifacts so future store or signed-distribution work does not require a
+  second setup contract
+- packed artifacts must reuse the same extension identity registration and
+  Native Messaging setup model as the unpacked/dev path
+- `1.0.0` should aim to remove dev-labelled extension artifacts from published
+  release output; release artifacts at that point should represent only
+  user-facing packaged deliverables and their supporting metadata
+
+Versioning rule for packaged extension manifests:
+
+- `manifest.version` must remain browser-safe numeric-only and be derived by
+  Roger-owned packaging
+- tagged release builds map CalVer tags into numeric extension versions so each
+  shipped extension artifact has a distinct manifest version
+- tagged stable builds must sort above same-day RC builds in browser version
+  ordering
+- untagged local/dev builds may keep the numeric manifest version anchored to
+  workspace semver compatibility, but must stamp a distinct human-readable
+  `version_name` with a dev postfix and local provenance so reloads are visible
+  without pretending a real release bump occurred
 
 The default build pipeline is intentionally small:
 
@@ -152,6 +179,12 @@ Command roles:
 - `verify-contracts` enforces freshness and drift detection
 - `pack-extension` builds the browser-installable extension artifact from the
   extension source tree and Roger-owned manifest rendering
+- `pack-extension` is responsible for stamping both the numeric browser-safe
+  `manifest.version` and the human-readable `version_name`
+- `pack-extension` is the current `0.1.x` artifact owner for the unpacked/dev
+  setup path; if Roger adds packed extension outputs, they must be produced by
+  the same Roger-owned packaging surface or an adjacent Roger-owned command
+  with shared versioning and setup contracts
 - `extension setup` is the primary user-facing flow: it prepares the unpacked
   extension artifact, guides the one required manual browser load step, learns
   the extension id through Roger-owned discovery or extension self-registration,
@@ -160,12 +193,19 @@ Command roles:
   separate `rr-bridge` binary
 - `extension doctor` verifies that the extension package, extension identity,
   local host registration, and bridge reachability are present and truthful
+- `extension setup` / `extension doctor` do not by themselves prove that Roger
+  can service browser launches; the contract also requires at least one named
+  validation layer that spawns the registered `rr` host binary and proves a
+  bounded Native Messaging request/response round trip
 - `uninstall` removes Roger-owned bridge registration state for the current OS
 
 Rules:
 
 - `pack-extension` packages a local installable artifact; browser-store
   submission remains outside the `0.1.0` contract
+- any future packed extension artifact must be a real built output with named
+  validation and must not be represented only by docs or aspirational release
+  language
 - `extension setup` and `uninstall` must not silently install or update the
   browser extension itself; the browser load/enable step remains explicit
 - the normal user-facing flow must not require a manually typed extension id or
@@ -201,6 +241,9 @@ Doctor contract:
   for normal-path recovery, and reserve low-level bridge commands for
   development/repair workflows (including explicit `rr bridge install`
   overrides only when guided setup cannot recover cleanly)
+- browser-launch support is only truthful once Roger also proves the runtime
+  host path: the registered `rr` binary must answer a Native Messaging request
+  over stdin/stdout in a named integration or smoke suite
 
 ## Artifact Ownership
 

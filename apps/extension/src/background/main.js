@@ -1,4 +1,5 @@
 const BRIDGE_HOST = 'com.roger_reviewer.bridge';
+const EXTENSION_REGISTRATION_ACTION = 'register_extension_identity';
 const SUPPORTED_ACTIONS = new Set([
   'start_review',
   'resume_review',
@@ -55,6 +56,65 @@ function dispatchNative(intent) {
   });
 }
 
+function detectBrowserLabel(userAgent = null) {
+  const rawUserAgent =
+    userAgent ||
+    (typeof navigator !== 'undefined' && typeof navigator.userAgent === 'string'
+      ? navigator.userAgent
+      : '');
+  const normalized = String(rawUserAgent).toLowerCase();
+
+  if (normalized.includes('edg/')) {
+    return 'edge';
+  }
+  if (normalized.includes('brave')) {
+    return 'brave';
+  }
+  return 'chrome';
+}
+
+function buildRegistrationIntent(extensionId, browser) {
+  return {
+    action: EXTENSION_REGISTRATION_ACTION,
+    owner: 'roger',
+    repo: 'roger-reviewer',
+    pr_number: 0,
+    extension_id: extensionId,
+    browser,
+  };
+}
+
+async function registerRuntimeIdentity(dispatch = dispatchNative) {
+  if (typeof chrome === 'undefined' || !chrome?.runtime?.id || typeof dispatch !== 'function') {
+    return {
+      ok: false,
+      mode: 'registration_unavailable',
+      message: 'Extension runtime identity registration unavailable in this context.',
+    };
+  }
+
+  const extensionId = chrome.runtime.id;
+  const browser = detectBrowserLabel();
+  return dispatch(buildRegistrationIntent(extensionId, browser));
+}
+
+function nativeUnavailableGuidance(nativeResult) {
+  const rawMessage =
+    nativeResult?.message || nativeResult?.guidance || 'Native Messaging is unavailable.';
+  const normalized = String(rawMessage).toLowerCase();
+
+  if (normalized.includes('specified native messaging host not found')) {
+    return [
+      'Roger Native Messaging host is not registered for this browser yet.',
+      'Run `rr extension setup --browser <edge|chrome|brave>` to install the host manifest.',
+      'Then run `rr extension doctor --browser <edge|chrome|brave>` and reload the browser extension.',
+      'If you already ran setup, make sure you are using the same Roger install and `RR_STORE_ROOT` that setup used.',
+    ].join(' ');
+  }
+
+  return rawMessage;
+}
+
 function parseFreshnessSeconds(response) {
   if (typeof response.freshness_seconds === 'number' && Number.isFinite(response.freshness_seconds)) {
     return Math.max(0, Math.round(response.freshness_seconds));
@@ -101,7 +161,7 @@ function launchOnlyStatusEnvelope(reason = null) {
   return {
     ok: true,
     mode: 'launch_only',
-    message: 'Launch-only mode. Live local status is not available in-extension.',
+    message: 'Ready to launch Roger actions for this pull request.',
     guidance: reason || 'Open Roger locally (`rr status`) for authoritative session state.',
   };
 }
@@ -158,10 +218,7 @@ async function handleLaunchMessage(payload) {
     mode: 'native_unavailable',
     action: intent.action,
     message: 'Native Messaging unavailable; launch blocked.',
-    guidance:
-      nativeResult.message ||
-      nativeResult.guidance ||
-      'Run `rr extension setup --browser <edge|chrome|brave>` and rerun `rr extension doctor`.',
+    guidance: nativeUnavailableGuidance(nativeResult),
   };
 }
 
@@ -213,15 +270,20 @@ function registerRuntimeHandlers() {
 }
 
 registerRuntimeHandlers();
+registerRuntimeIdentity().catch(() => null);
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     CANONICAL_ATTENTION_STATES,
     MAX_MIRROR_FRESHNESS_SECONDS,
+    buildRegistrationIntent,
+    detectBrowserLabel,
     handleLaunchMessage,
     handleStatusMessage,
     launchOnlyStatusEnvelope,
+    nativeUnavailableGuidance,
     normalizeBoundedStatus,
     parseFreshnessSeconds,
+    registerRuntimeIdentity,
   };
 }

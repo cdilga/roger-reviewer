@@ -118,6 +118,27 @@ Preferred model:
 - leave a small repo-local config or thin wrapper only when needed
 - keep AGENTS/product docs focused on Roger, not on a personal operating system
 
+## 5. Surface Inference Questions During Planning, Not Just During Polish
+
+Roger should not wait until mid-implementation to ask whether a click, prompt,
+or rerun step was avoidable.
+
+Planning and bead-shaping should explicitly ask:
+
+- what user actions are actually required by safety or ambiguity
+- what choices Roger can infer safely from local state
+- which surfaces should minimize clicks in the happy path
+- which explicit prompts should be reserved for elevated or ambiguous flows only
+
+Rules:
+
+- if a feature introduces a new user click, prompt, or rerun step, planning
+  should justify why that action is required
+- if the product already has enough state to infer the next safe action, that
+  should be considered in the plan and bead graph before implementation starts
+- this does not override explicit-safety boundaries for posting, approval,
+  mutation, or other elevated flows
+
 ## Practical Operating Rules
 
 Before starting work:

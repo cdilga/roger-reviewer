@@ -50,12 +50,15 @@ rr bridge install --extension-id <id> [--bridge-binary <path>] ...
 rr bridge uninstall
 ```
 
-and does not yet expose the intended primary product commands:
+and now also exposes the intended primary product commands:
 
 - `rr extension setup`
 - `rr extension doctor`
 
-That means the implemented UX is still low-level and repair-oriented.
+That means the repo has the right top-level command names, but the
+implementation is still not truthful enough: setup/doctor can pass while the
+registered `rr` binary still fails to act as a Native Messaging host at
+runtime.
 
 ### What the current blessed automated E2E actually covers
 
@@ -118,6 +121,15 @@ Today we have:
 
 - one local-review E2E
 - some bridge/CLI smoke tests
+- setup/doctor and host-manifest checks
+
+What we still did not have until live probing:
+
+- a named proof that the actual registered `rr` process answers a Native
+  Messaging request over stdin/stdout when launched by the browser contract
+
+That is why a real PR-page `Start` click could hang even after setup guidance
+and doctor checks appeared healthy.
 - browser launch smoke ids in metadata
 - release proof and install proof in separate lanes
 
@@ -352,8 +364,7 @@ The current `rr-jj1e` / release-proof direction is correct and should remain.
 | Setup truth and repair | `rr extension doctor` | `int_cli_extension_command_surface`, `accept_extension_setup_guided` | gated/nightly |
 | Browser panel render | GitHub PR content script | `int_extension_panel_render_contract` | pr/gated |
 | Browser panel readability | GitHub PR content script | `int_extension_panel_theme_readability` + manual smoke | pr/release |
-| Launch with Native Messaging | extension -> local Roger | existing `int_bridge_*` + browser smoke suites | gated/release |
-| Launch fallback honesty | custom URL fallback / no-status mode | existing `int_bridge_*` + panel-state tests | gated/release |
+| Launch with Native Messaging | extension -> local Roger | existing `int_bridge_*` + host-runtime round-trip smoke + browser smoke suites | gated/release |
 | Public install path | release assets + `rr-install` | release-proof lanes + live installer proof | release |
 
 ---

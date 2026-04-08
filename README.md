@@ -17,7 +17,7 @@ What is real in this repo right now:
 What is not fully shipped yet:
 
 - no GA signed installer distribution channel yet
-- no automatic in-place binary mutation path from `rr update` (manual install step remains explicit)
+- no GA local-state/schema migration automation in `rr update` (migration-capable updates are deferred/fail-closed in `0.1.x`)
 - no in-extension approval or posting controls
 
 ## Who This Is For
@@ -60,8 +60,14 @@ Installer/update metadata contracts now exist in-repo:
 
 - `scripts/release/rr-install.sh` and `scripts/release/rr-install.ps1` consume
   `release-install-metadata-<version>.json` plus matching core/checksum assets
-- `rr update` validates published release metadata and fails closed for
-  local/unpublished builds without embedded release markers
+- `rr update` is the Roger-owned updater for published releases and applies the
+  replacement in place after metadata, target, and checksum verification
+- default interactive apply is confirmation-gated; `--yes` / `-y` bypasses
+  only the confirmation prompt and does not skip provenance or safety checks
+- `--dry-run` remains a non-mutating metadata/preflight path, and `--robot`
+  apply is blocked unless `--yes` / `-y` is also provided
+- local/unpublished builds fail closed without embedded release markers; local
+  state/schema migrations remain deferred in `0.1.x`
 
 Public one-line installer entrypoints (CLI base product):
 
@@ -79,6 +85,9 @@ Optional follow-on workflow (separate from base CLI install):
 - bridge and extension packaging assets are optional; base `rr` install does not require them
 - use optional lanes only when browser launch/helper integration is needed
 - the browser extension is not shipped as a release artifact in this slice; pack/sideload it from source if you need the PR-page launch panel
+- when browser integration is needed, use `rr extension setup --browser <edge|chrome|brave>` followed by
+  `rr extension doctor --browser <edge|chrome|brave>`; normal setup should provision bridge registration
+  without requiring manual `rr bridge install`
 
 Safe isolated install example:
 
@@ -192,6 +201,14 @@ Current panel actions on GitHub PR pages:
 - `Findings`
 - `Refresh`
 
+Current UX reality:
+
+- the extension is a bounded launch surface, not the source of truth for Roger state
+- PR-page entry is under active UX refinement toward a right-rail `Roger Reviewer`
+  host, lower-click primary actions, and more contextual secondary actions
+- `Refresh` exists as a real Roger command today, but its long-term UX direction
+  is contextual rather than always-primary
+
 Guided setup contract (normal path):
 
 1. run `rr extension setup --browser <edge|chrome|brave>`
@@ -204,6 +221,13 @@ Normal onboarding should not require manual `rr bridge install`. Keep
 repair/admin path only (for example: newly added browser profile, local
 registration drift, or explicit dev override), and keep those override flags
 out of first-time setup instructions.
+
+Current artifact truth:
+
+- `0.1.x` uses the unpacked extension artifact as the primary setup/testing
+  surface
+- Roger still intends to keep a real path to future packed/shippable extension
+  artifacts without changing the setup contract
 
 Bridge dispatch order:
 
@@ -248,8 +272,14 @@ raw SSE/MCP endpoint directly.
 
 ## Known Boundaries
 
-- `rr update` currently validates metadata and emits a manual install command;
-  fully automatic binary replacement is intentionally deferred
+- `rr update` now performs Roger-owned in-place replacement for published
+  releases, gated by explicit confirmation on an interactive TTY or `--yes` /
+  `-y` for non-interactive apply
+- local/unpublished builds still fail closed and require reinstall from a
+  published release
+- migration-capable update steps are intentionally deferred in `0.1.x`; future
+  migration-required releases must fail closed with explicit backup/export +
+  reinstall guidance
 - extension readback/status parity is not shipped yet
 - support claims prioritize the OpenCode continuity lane
 - degraded continuity states are expected to fail closed where ambiguity exists

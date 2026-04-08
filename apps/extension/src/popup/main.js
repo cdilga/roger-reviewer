@@ -4,6 +4,10 @@ const ACTIONS = [
   { id: 'show_findings', label: 'Findings' },
   { id: 'refresh_review', label: 'Refresh' },
 ];
+const NON_PR_SUBTITLE =
+  'Manual backup only: open a GitHub pull request tab and use this popup only when in-page Roger controls are unavailable.';
+const PR_SUBTITLE =
+  'Manual backup only for this pull request. Prefer in-page Roger controls and in-page modal fallback when available.';
 
 const SUPPORTED_ACTIONS = new Set(ACTIONS.map((action) => action.id));
 
@@ -42,7 +46,7 @@ function buildPopupViewModel(rawUrl) {
       mode: 'non_pr',
       context: null,
       title: 'Roger Reviewer',
-      subtitle: 'Open a GitHub pull request tab to launch Roger actions from this popup.',
+      subtitle: NON_PR_SUBTITLE,
     };
   }
 
@@ -50,7 +54,7 @@ function buildPopupViewModel(rawUrl) {
     mode: 'pr',
     context,
     title: `Roger: ${context.owner}/${context.repo}#${context.pr_number}`,
-    subtitle: 'Choose a launch action for this pull request.',
+    subtitle: PR_SUBTITLE,
   };
 }
 
@@ -146,6 +150,35 @@ function sendRuntimeMessage(payload) {
   });
 }
 
+function readExtensionBuildLabel(manifestProvider = null) {
+  const provider = manifestProvider || (() => chrome.runtime.getManifest());
+  try {
+    const manifest = provider();
+    if (!manifest || typeof manifest !== 'object') {
+      return '';
+    }
+    return manifest.version_name || manifest.version || '';
+  } catch {
+    return '';
+  }
+}
+
+function renderBuildLabel(label) {
+  const buildNode = document.getElementById('popup-build');
+  if (!buildNode) {
+    return;
+  }
+
+  if (!label) {
+    buildNode.hidden = true;
+    buildNode.textContent = '';
+    return;
+  }
+
+  buildNode.hidden = false;
+  buildNode.textContent = `Build ${label}`;
+}
+
 function setSubtitle(text, isError = false) {
   const subtitle = document.getElementById('popup-subtitle');
   if (!subtitle) {
@@ -208,6 +241,7 @@ function renderViewModel(viewModel) {
 
 async function bootstrapPopup() {
   try {
+    renderBuildLabel(readExtensionBuildLabel());
     const activeTab = await queryActiveTab();
     const viewModel = buildPopupViewModel(activeTab?.url || '');
     renderViewModel(viewModel);
@@ -224,11 +258,15 @@ if (typeof document !== 'undefined' && typeof chrome !== 'undefined') {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     ACTIONS,
+    NON_PR_SUBTITLE,
+    PR_SUBTITLE,
     SUPPORTED_ACTIONS,
     buildLaunchMessage,
     buildPopupViewModel,
     describeLaunchResponse,
     parsePullRequestContextFromUrl,
+    readExtensionBuildLabel,
+    renderBuildLabel,
     routePopupAction,
   };
 }

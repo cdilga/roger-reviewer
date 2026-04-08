@@ -13,6 +13,7 @@
 //! - No mutation or approval side-effects through the bridge
 //! - Bridge host is a separate binary entrypoint, not the TUI
 
+use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -60,6 +61,12 @@ pub struct BridgeLaunchIntent {
     pub head_ref: Option<String>,
     /// Optional explicit instance name.
     pub instance: Option<String>,
+    /// Optional browser extension runtime ID for identity-registration events.
+    #[serde(default)]
+    pub extension_id: Option<String>,
+    /// Optional browser label for identity-registration events.
+    #[serde(default)]
+    pub browser: Option<String>,
 }
 
 /// Response sent back to the extension via Native Messaging.
@@ -351,6 +358,10 @@ pub fn handle_bridge_intent(
     preflight: &BridgePreflight,
     roger_binary_path: &Path,
 ) -> BridgeResponse {
+    if intent.action == "register_extension_identity" {
+        return handle_extension_registration_intent(intent);
+    }
+
     if !preflight.is_ready() {
         let guidance = preflight
             .guidance(roger_binary_path)
@@ -377,10 +388,88 @@ pub fn handle_bridge_intent(
     }
 }
 
+fn normalize_extension_id(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.len() == 32 && trimmed.chars().all(|ch| ch.is_ascii_lowercase()) {
+        Some(trimmed.to_owned())
+    } else {
+        None
+    }
+}
+
+fn resolve_store_root() -> PathBuf {
+    std::env::var("RR_STORE_ROOT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".roger")
+        })
+}
+
+fn extension_registry_path(store_root: &Path) -> PathBuf {
+    store_root.join("bridge/extension-id")
+}
+
+fn persist_extension_identity(store_root: &Path, extension_id: &str) -> Result<PathBuf> {
+    let registry_path = extension_registry_path(store_root);
+    if let Some(parent) = registry_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&registry_path, format!("{extension_id}\n"))?;
+    Ok(registry_path)
+}
+
+fn handle_extension_registration_intent(intent: &BridgeLaunchIntent) -> BridgeResponse {
+    let action = "register_extension_identity";
+    let Some(raw_extension_id) = intent.extension_id.as_deref() else {
+        return BridgeResponse::failure(
+            action,
+            "Missing extension identity in registration intent.",
+            "Reload the unpacked extension and rerun `rr extension setup --browser <edge|chrome|brave>`.",
+        );
+    };
+    let Some(extension_id) = normalize_extension_id(raw_extension_id) else {
+        return BridgeResponse::failure(
+            action,
+            "Invalid extension identity format in registration intent.",
+            "Expected a 32-character lowercase extension runtime ID.",
+        );
+    };
+
+    let store_root = resolve_store_root();
+    match persist_extension_identity(&store_root, &extension_id) {
+        Ok(registry_path) => {
+            let browser = intent.browser.as_deref().unwrap_or("unknown");
+            BridgeResponse::success(
+                action,
+                &format!(
+                    "Registered extension identity for {browser} at {}",
+                    registry_path.display()
+                ),
+                None,
+            )
+        }
+        Err(err) => BridgeResponse::failure(
+            action,
+            "Failed to persist extension identity registration.",
+            &format!(
+                "Could not write extension-id registry: {err}. Rerun `rr extension setup --browser <edge|chrome|brave>` and reload the extension."
+            ),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Cursor;
+    use std::sync::{Mutex, OnceLock};
 
     fn sample_intent() -> BridgeLaunchIntent {
         BridgeLaunchIntent {
@@ -390,6 +479,8 @@ mod tests {
             pr_number: 42,
             head_ref: Some("feat/frob".to_owned()),
             instance: None,
+            extension_id: None,
+            browser: None,
         }
     }
 
@@ -439,7 +530,7 @@ mod tests {
     #[test]
     fn host_manifest_for_roger() {
         let manifest =
-            NativeHostManifest::for_roger(Path::new("/usr/local/bin/rr-bridge"), "abcdef123456");
+            NativeHostManifest::for_roger(Path::new("/usr/local/bin/rr"), "abcdef123456");
         assert_eq!(manifest.name, "com.roger_reviewer.bridge");
         assert_eq!(manifest.host_type, "stdio");
         assert!(manifest.allowed_origins[0].contains("abcdef123456"));
@@ -569,5 +660,81 @@ mod tests {
         let parsed: BridgeResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.ok, false);
         assert_eq!(parsed.guidance, Some("install Roger first".to_owned()));
+    }
+
+    #[test]
+    fn persist_extension_identity_writes_standard_registry_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store_root = temp.path().join(".roger");
+        let extension_id = "abcdefghijklmnopabcdefghijklmnop";
+
+        let path =
+            persist_extension_identity(&store_root, extension_id).expect("persisted extension id");
+
+        assert_eq!(path, store_root.join("bridge/extension-id"));
+        let contents = fs::read_to_string(path).expect("registry file contents");
+        assert_eq!(contents.trim(), extension_id);
+    }
+
+    #[test]
+    fn registration_action_is_accepted_without_launch_preflight() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        static CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = CWD_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("lock current_dir guard");
+        let previous_dir = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(temp.path()).expect("set current dir");
+
+        let intent = BridgeLaunchIntent {
+            action: "register_extension_identity".to_owned(),
+            owner: "roger".to_owned(),
+            repo: "roger-reviewer".to_owned(),
+            pr_number: 0,
+            head_ref: None,
+            instance: None,
+            extension_id: Some("abcdefghijklmnopabcdefghijklmnop".to_owned()),
+            browser: Some("chrome".to_owned()),
+        };
+        let preflight = BridgePreflight {
+            roger_binary_found: false,
+            roger_data_dir_exists: false,
+            gh_available: false,
+        };
+
+        let resp = handle_bridge_intent(&intent, &preflight, Path::new("/missing/rr"));
+        std::env::set_current_dir(previous_dir).expect("restore current dir");
+
+        assert!(resp.ok);
+        assert_eq!(resp.action, "register_extension_identity");
+    }
+
+    #[test]
+    fn registration_action_fails_closed_on_invalid_extension_id() {
+        let intent = BridgeLaunchIntent {
+            action: "register_extension_identity".to_owned(),
+            owner: "roger".to_owned(),
+            repo: "roger-reviewer".to_owned(),
+            pr_number: 0,
+            head_ref: None,
+            instance: None,
+            extension_id: Some("INVALID-ID".to_owned()),
+            browser: Some("chrome".to_owned()),
+        };
+        let preflight = BridgePreflight {
+            roger_binary_found: true,
+            roger_data_dir_exists: true,
+            gh_available: true,
+        };
+        let resp = handle_bridge_intent(&intent, &preflight, Path::new("/usr/local/bin/rr"));
+
+        assert!(!resp.ok);
+        assert_eq!(resp.action, "register_extension_identity");
+        assert!(
+            resp.guidance
+                .as_deref()
+                .is_some_and(|guidance| guidance.contains("32-character lowercase"))
+        );
     }
 }

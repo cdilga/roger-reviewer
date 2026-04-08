@@ -1,10 +1,10 @@
 use roger_app_core::cli_config;
 use roger_app_core::time;
 use roger_app_core::{
-    AppError, ContinuityQuality, HarnessAdapter, LaunchAction, LaunchIntent, ResumeAttemptOutcome,
-    ResumeBundle, ResumeBundleProfile, ReviewTarget, RogerCommand, RogerCommandId,
-    RogerCommandInvocationSurface, RogerCommandResult, RogerCommandRouteStatus, Surface,
-    route_harness_command, safe_harness_command_bindings, FindingTriageState, FindingOutboundState,
+    AppError, ContinuityQuality, FindingOutboundState, FindingTriageState, HarnessAdapter,
+    LaunchAction, LaunchIntent, ResumeAttemptOutcome, ResumeBundle, ResumeBundleProfile,
+    ReviewTarget, RogerCommand, RogerCommandId, RogerCommandInvocationSurface, RogerCommandResult,
+    RogerCommandRouteStatus, Surface, route_harness_command, safe_harness_command_bindings,
 };
 use roger_bridge::{
     NativeHostManifest, SupportedBrowser, SupportedOs, native_host_install_path_for,
@@ -18,18 +18,22 @@ use roger_storage::{
     CreateReviewRun, CreateReviewSession, CreateSessionLaunchBinding, LaunchSurface,
     PriorReviewLookupQuery, PriorReviewRetrievalMode, ResolveSessionLaunchBinding,
     ResolveSessionReentry, RogerStore, SessionFinderEntry, SessionFinderQuery,
-    SessionReentryResolution,
+    SessionBindingResolution, SessionLaunchBindingRecord, SessionReentryResolution, StorageLayout,
 };
+use rusqlite::Connection as SqliteConnection;
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::result::Result; // Added this line
 use std::process::Command as ProcessCommand;
+use std::result::Result;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
 use toon_format::encode_default as encode_toon_default;
 
 static ID_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -178,6 +182,7 @@ struct ParsedArgs {
     update_api_root: Option<String>,
     update_download_root: Option<String>,
     update_target: Option<String>,
+    update_yes: bool,
     attention_states: Vec<String>,
     limit: Option<usize>,
     query_text: Option<String>,
@@ -534,6 +539,7 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         update_api_root: None,
         update_download_root: None,
         update_target: None,
+        update_yes: false,
         attention_states: Vec::new(),
         limit: None,
         query_text: None,
@@ -606,6 +612,10 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
                     .ok_or_else(|| "--target requires a value".to_owned())?;
                 parsed.update_target = Some(value.clone());
                 i += 2;
+            }
+            "--yes" | "-y" => {
+                parsed.update_yes = true;
+                i += 1;
             }
             "--attention" => {
                 let value = argv
@@ -796,10 +806,7 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
             || parsed.bridge_binary_path.is_some()
             || parsed.bridge_output_dir.is_some())
     {
-        return Err(
-            "--extension-id/--bridge-binary/--output-dir are bridge-only flags"
-                .to_owned(),
-        );
+        return Err("--extension-id/--bridge-binary/--output-dir are bridge-only flags".to_owned());
     }
 
     if !matches!(parsed.command, CommandKind::Bridge | CommandKind::Extension)
@@ -817,10 +824,11 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
             || parsed.update_version.is_some()
             || parsed.update_api_root.is_some()
             || parsed.update_download_root.is_some()
-            || parsed.update_target.is_some())
+            || parsed.update_target.is_some()
+            || parsed.update_yes)
     {
         return Err(
-            "--channel/--version/--api-root/--download-root/--target are update-only flags"
+            "--channel/--version/--api-root/--download-root/--target/--yes are update-only flags"
                 .to_owned(),
         );
     }
@@ -848,7 +856,7 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
             || parsed.bridge_output_dir.is_some()
         {
             return Err(
-                "rr update only supports --repo, --channel, --version, --api-root, --download-root, --target, --dry-run, and --robot".to_owned(),
+                "rr update only supports --repo, --channel, --version, --api-root, --download-root, --target, --yes/-y, --dry-run, and --robot".to_owned(),
             );
         }
     }
@@ -909,7 +917,10 @@ fn normalize_extension_id(value: &str) -> Option<String> {
     }
 }
 
-fn discover_extension_id(parsed: &ParsedArgs, runtime: &CliRuntime) -> Option<(String, &'static str)> {
+fn discover_extension_id(
+    parsed: &ParsedArgs,
+    runtime: &CliRuntime,
+) -> Option<(String, &'static str)> {
     if let Some(value) = parsed
         .bridge_extension_id
         .as_deref()
@@ -934,6 +945,237 @@ fn discover_extension_id(parsed: &ParsedArgs, runtime: &CliRuntime) -> Option<(S
     None
 }
 
+fn extension_id_looks_valid(value: &str) -> bool {
+    value.len() == 32 && value.chars().all(|ch| ch.is_ascii_lowercase())
+}
+
+fn extension_guided_profile_root(runtime: &CliRuntime, browser: &SupportedBrowser) -> PathBuf {
+    runtime
+        .store_root
+        .join("bridge/browser-profiles")
+        .join(supported_browser_label(browser.clone()))
+}
+
+const DEFAULT_EXTENSION_SETUP_REGISTRATION_WAIT_MS: u64 = 2000;
+const EXTENSION_SETUP_REGISTRATION_POLL_MS: u64 = 100;
+
+fn extension_setup_registration_wait_ms() -> u64 {
+    std::env::var("RR_EXTENSION_SETUP_REGISTRATION_WAIT_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_EXTENSION_SETUP_REGISTRATION_WAIT_MS)
+}
+
+fn extension_default_profile_root(browser: &SupportedBrowser) -> Option<PathBuf> {
+    let host_os = SupportedOs::current()?;
+    let home = std::env::var("HOME").ok().map(PathBuf::from);
+    let local_app_data = std::env::var("LOCALAPPDATA").ok().map(PathBuf::from);
+    match (host_os, browser) {
+        (SupportedOs::Macos, SupportedBrowser::Chrome) => {
+            home.map(|path| path.join("Library/Application Support/Google/Chrome"))
+        }
+        (SupportedOs::Macos, SupportedBrowser::Edge) => {
+            home.map(|path| path.join("Library/Application Support/Microsoft Edge"))
+        }
+        (SupportedOs::Macos, SupportedBrowser::Brave) => {
+            home.map(|path| path.join("Library/Application Support/BraveSoftware/Brave-Browser"))
+        }
+        (SupportedOs::Windows, SupportedBrowser::Chrome) => {
+            local_app_data.map(|path| path.join("Google/Chrome/User Data"))
+        }
+        (SupportedOs::Windows, SupportedBrowser::Edge) => {
+            local_app_data.map(|path| path.join("Microsoft/Edge/User Data"))
+        }
+        (SupportedOs::Windows, SupportedBrowser::Brave) => {
+            local_app_data.map(|path| path.join("BraveSoftware/Brave-Browser/User Data"))
+        }
+        (SupportedOs::Linux, SupportedBrowser::Chrome) => {
+            home.map(|path| path.join(".config/google-chrome"))
+        }
+        (SupportedOs::Linux, SupportedBrowser::Edge) => {
+            home.map(|path| path.join(".config/microsoft-edge"))
+        }
+        (SupportedOs::Linux, SupportedBrowser::Brave) => {
+            home.map(|path| path.join(".config/BraveSoftware/Brave-Browser"))
+        }
+    }
+}
+
+fn extension_profile_roots_for_discovery(
+    browser: &SupportedBrowser,
+    runtime: &CliRuntime,
+) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(path) = std::env::var("RR_EXTENSION_PROFILE_ROOT") {
+        if let Some(trimmed) = normalize_extension_id(&path) {
+            roots.push(PathBuf::from(trimmed));
+        }
+    }
+    roots.push(extension_guided_profile_root(runtime, browser));
+    if let Some(default_root) = extension_default_profile_root(browser) {
+        if !roots.iter().any(|existing| existing == &default_root) {
+            roots.push(default_root);
+        }
+    }
+    roots
+}
+
+fn extension_profile_preference_files(profile_root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for name in ["Secure Preferences", "Preferences"] {
+        let candidate = profile_root.join(name);
+        if candidate.is_file() {
+            files.push(candidate);
+        }
+    }
+    if let Ok(entries) = fs::read_dir(profile_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            for name in ["Secure Preferences", "Preferences"] {
+                let candidate = path.join(name);
+                if candidate.is_file() {
+                    files.push(candidate);
+                }
+            }
+        }
+    }
+    files.sort();
+    files.dedup();
+    files
+}
+
+fn normalize_path_for_compare(path: &Path) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if cfg!(windows) {
+        normalized.to_ascii_lowercase()
+    } else {
+        normalized
+    }
+}
+
+fn extension_path_matches_package_dir(
+    value: &str,
+    preference_file: &Path,
+    package_dir: &Path,
+) -> bool {
+    let package_path = fs::canonicalize(package_dir).unwrap_or_else(|_| package_dir.to_path_buf());
+    let candidate_path = PathBuf::from(value);
+    let resolved_candidate = if candidate_path.is_absolute() {
+        candidate_path
+    } else {
+        preference_file
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(candidate_path)
+    };
+    let resolved_candidate =
+        fs::canonicalize(&resolved_candidate).unwrap_or_else(|_| resolved_candidate.to_path_buf());
+    normalize_path_for_compare(&resolved_candidate) == normalize_path_for_compare(&package_path)
+}
+
+fn discover_extension_id_from_preferences_file(
+    preference_file: &Path,
+    package_dir: &Path,
+) -> Option<String> {
+    let contents = fs::read_to_string(preference_file).ok()?;
+    let parsed: Value = serde_json::from_str(&contents).ok()?;
+    let settings = parsed.get("extensions")?.get("settings")?.as_object()?;
+    for (extension_id, entry) in settings {
+        if !extension_id_looks_valid(extension_id) {
+            continue;
+        }
+        let Some(path_value) = entry.get("path").and_then(Value::as_str) else {
+            continue;
+        };
+        if extension_path_matches_package_dir(path_value, preference_file, package_dir) {
+            return Some(extension_id.to_owned());
+        }
+    }
+    None
+}
+
+fn discover_extension_id_from_browser_profiles(
+    browser: &SupportedBrowser,
+    runtime: &CliRuntime,
+    package_dir: &Path,
+) -> Option<String> {
+    for profile_root in extension_profile_roots_for_discovery(browser, runtime) {
+        for preference_file in extension_profile_preference_files(&profile_root) {
+            if let Some(extension_id) =
+                discover_extension_id_from_preferences_file(&preference_file, package_dir)
+            {
+                return Some(extension_id);
+            }
+        }
+    }
+    None
+}
+
+fn discover_extension_id_for_extension_setup(
+    parsed: &ParsedArgs,
+    runtime: &CliRuntime,
+    browser: &SupportedBrowser,
+    package_dir: &Path,
+) -> Option<(String, &'static str)> {
+    if let Some(discovered) = discover_extension_id(parsed, runtime) {
+        return Some(discovered);
+    }
+    discover_extension_id_from_browser_profiles(browser, runtime, package_dir)
+        .map(|value| (value, "browser_profile_preferences"))
+}
+
+fn discover_extension_id_for_extension_setup_with_wait(
+    parsed: &ParsedArgs,
+    runtime: &CliRuntime,
+    browser: &SupportedBrowser,
+    package_dir: &Path,
+    wait_budget_ms: u64,
+) -> Option<(String, &'static str, bool)> {
+    if let Some((extension_id, source)) =
+        discover_extension_id_for_extension_setup(parsed, runtime, browser, package_dir)
+    {
+        return Some((extension_id, source, false));
+    }
+    if wait_budget_ms == 0 {
+        return None;
+    }
+
+    let deadline = Instant::now() + Duration::from_millis(wait_budget_ms);
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let sleep_for = remaining.min(Duration::from_millis(EXTENSION_SETUP_REGISTRATION_POLL_MS));
+        thread::sleep(sleep_for);
+        if let Some((extension_id, source)) =
+            discover_extension_id_for_extension_setup(parsed, runtime, browser, package_dir)
+        {
+            return Some((extension_id, source, true));
+        }
+    }
+
+    None
+}
+
+fn extension_profile_launch_hint(
+    browser: &SupportedBrowser,
+    profile_root: &Path,
+    package_dir: &str,
+) -> String {
+    let browser_label = supported_browser_label(browser.clone());
+    format!(
+        "launch {browser_label} once with --user-data-dir {} --load-extension {} --disable-extensions-except {}, then rerun rr extension setup",
+        profile_root.display(),
+        package_dir,
+        package_dir
+    )
+}
+
 fn extension_browser_url(browser: SupportedBrowser) -> &'static str {
     match browser {
         SupportedBrowser::Chrome => "chrome://extensions",
@@ -956,23 +1198,163 @@ fn persist_extension_id(runtime: &CliRuntime, extension_id: &str) -> Result<(), 
         .map_err(|err| format!("failed to write extension identity registry: {err}"))
 }
 
-fn resolve_extension_package_dir(workspace_root: &Path) -> Result<PathBuf, String> {
-    let manifest_template_path = workspace_root.join("apps/extension/manifest.template.json");
-    let manifest_template = fs::read_to_string(&manifest_template_path).map_err(|err| {
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ExtensionVersionProbe {
+    exact_tag: Option<String>,
+    rev_count: Option<String>,
+    short_sha: Option<String>,
+    dirty_fingerprint: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExtensionBuildVersion {
+    manifest_version: String,
+    version_name: String,
+}
+
+fn read_extension_manifest_template(manifest_template_path: &Path) -> Result<Value, String> {
+    let manifest_template = fs::read_to_string(manifest_template_path).map_err(|err| {
         format!(
             "failed to read extension manifest template {}: {err}",
             manifest_template_path.display()
         )
     })?;
-    let manifest_json: Value = serde_json::from_str(&manifest_template)
-        .map_err(|err| format!("failed to parse extension manifest template: {err}"))?;
-    let version = manifest_json
+    serde_json::from_str(&manifest_template)
+        .map_err(|err| format!("failed to parse extension manifest template: {err}"))
+}
+
+fn normalize_extension_manifest_version(base_version: &str) -> String {
+    let mut segments = base_version
+        .split('.')
+        .map(|segment| segment.parse::<u32>().ok())
+        .collect::<Vec<_>>();
+    while segments.len() < 4 {
+        segments.push(Some(0));
+    }
+    segments
+        .into_iter()
+        .take(4)
+        .map(|segment| segment.unwrap_or(0).to_string())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn parse_release_calendar_tag(tag: &str) -> Option<(u32, u32, u32, Option<u32>, String)> {
+    let raw = tag.strip_prefix('v')?;
+    let (date_part, rc_part) = match raw.split_once("-rc.") {
+        Some((date, rc)) => (date, Some(rc)),
+        None => (raw, None),
+    };
+    let mut date_segments = date_part.split('.');
+    let year = date_segments.next()?.parse::<u32>().ok()?;
+    let month = date_segments.next()?.parse::<u32>().ok()?;
+    let day = date_segments.next()?.parse::<u32>().ok()?;
+    if date_segments.next().is_some() {
+        return None;
+    }
+    let rc_number = match rc_part {
+        Some(raw_rc) => Some(raw_rc.parse::<u32>().ok()?),
+        None => None,
+    };
+    Some((year, month, day, rc_number, raw.to_owned()))
+}
+
+fn derive_extension_build_version_from_probe(
+    template_version: &str,
+    probe: &ExtensionVersionProbe,
+) -> ExtensionBuildVersion {
+    if let Some(tag) = probe.exact_tag.as_deref() {
+        if let Some((year, month, day, rc_number, version_name)) = parse_release_calendar_tag(tag) {
+            let build_number = rc_number.unwrap_or(1000);
+            return ExtensionBuildVersion {
+                manifest_version: format!("{year}.{month}.{day}.{build_number}"),
+                version_name,
+            };
+        }
+    }
+
+    let manifest_version = normalize_extension_manifest_version(template_version);
+    let rev_count = probe.rev_count.as_deref().unwrap_or("0");
+    let short_sha = probe.short_sha.as_deref().unwrap_or("nogit");
+    let mut version_name = format!("{template_version}-dev.{rev_count}+{short_sha}");
+    if let Some(dirty_fingerprint) = probe.dirty_fingerprint.as_deref() {
+        if !dirty_fingerprint.is_empty() {
+            version_name.push_str(&format!(".dirty.{dirty_fingerprint}"));
+        }
+    }
+    ExtensionBuildVersion {
+        manifest_version,
+        version_name,
+    }
+}
+
+fn git_output_trimmed(workspace_root: &Path, args: &[&str]) -> Option<String> {
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(workspace_root)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+fn collect_extension_version_probe(workspace_root: &Path) -> ExtensionVersionProbe {
+    let dirty_fingerprint = git_output_trimmed(workspace_root, &["status", "--porcelain"])
+        .and_then(|status| {
+            if status.is_empty() {
+                None
+            } else {
+                Some(sha256_hex(status.as_bytes())[0..8].to_owned())
+            }
+        });
+
+    ExtensionVersionProbe {
+        exact_tag: git_output_trimmed(
+            workspace_root,
+            &[
+                "describe",
+                "--tags",
+                "--exact-match",
+                "--match",
+                "v*",
+                "HEAD",
+            ],
+        ),
+        rev_count: git_output_trimmed(workspace_root, &["rev-list", "--count", "HEAD"]),
+        short_sha: git_output_trimmed(workspace_root, &["rev-parse", "--short=12", "HEAD"]),
+        dirty_fingerprint,
+    }
+}
+
+fn derive_extension_build_version(
+    workspace_root: &Path,
+    manifest_json: &Value,
+) -> ExtensionBuildVersion {
+    let template_version = manifest_json
         .get("version")
         .and_then(Value::as_str)
         .unwrap_or("0.0.0");
+    derive_extension_build_version_from_probe(
+        template_version,
+        &collect_extension_version_probe(workspace_root),
+    )
+}
+
+fn extension_package_dir_name(manifest_json: &Value) -> String {
+    let _ = manifest_json;
+    "roger-extension-unpacked".to_owned()
+}
+
+fn resolve_extension_package_dir(workspace_root: &Path) -> Result<PathBuf, String> {
+    let manifest_template_path = workspace_root.join("apps/extension/manifest.template.json");
+    let manifest_json = read_extension_manifest_template(&manifest_template_path)?;
     Ok(workspace_root
         .join("target/bridge/extension")
-        .join(format!("roger-extension-{version}-unpacked")))
+        .join(extension_package_dir_name(&manifest_json)))
 }
 
 fn handle_extension(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
@@ -983,7 +1365,9 @@ fn handle_extension(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRespons
     let Some(workspace_root) = find_workspace_root(&runtime.cwd) else {
         return blocked_response(
             "failed to resolve Roger workspace root for extension setup commands".to_owned(),
-            vec!["run rr extension from the Roger repository root (or a child directory)".to_owned()],
+            vec![
+                "run rr extension from the Roger repository root (or a child directory)".to_owned(),
+            ],
             json!({"reason_code": "workspace_root_not_found"}),
         );
     };
@@ -1034,29 +1418,53 @@ fn handle_extension_setup(
         extension_browser_url(browser.clone()),
         package_dir
     );
+    let guided_profile_root = extension_guided_profile_root(runtime, &browser);
+    let profile_hint_step =
+        extension_profile_launch_hint(&browser, &guided_profile_root, &package_dir);
 
-    let Some((extension_id, extension_id_source)) = discover_extension_id(parsed, runtime) else {
+    let registration_wait_budget_ms = extension_setup_registration_wait_ms();
+    let Some((extension_id, extension_id_source, observed_during_setup_wait)) =
+        discover_extension_id_for_extension_setup_with_wait(
+            parsed,
+            runtime,
+            &browser,
+            Path::new(&package_dir),
+            registration_wait_budget_ms,
+        )
+    else {
         return CommandResponse {
             outcome: OutcomeKind::Blocked,
             data: json!({
                 "subcommand": "setup",
-                "reason_code": "extension_identity_missing",
+                "reason_code": "extension_registration_missing",
                 "browser": supported_browser_label(browser.clone()),
                 "package_dir": package_dir,
                 "extension_id_registry_path": extension_id_registry_path(&runtime.store_root)
                     .to_string_lossy()
                     .to_string(),
+                "guided_profile_root": guided_profile_root.to_string_lossy().to_string(),
+                "registration_event": "browser_profile_identity_registered",
+                "registration_wait_budget_ms": registration_wait_budget_ms,
                 "manual_browser_step": load_step,
             }),
             warnings: vec![
-                "extension identity has not been discovered yet".to_owned(),
-                "normal setup stays fail-closed until Roger can discover extension identity".to_owned(),
+                format!(
+                    "extension identity registration has not been observed yet after waiting {registration_wait_budget_ms}ms"
+                ),
+                "guided setup needs one browser load/reload step before Roger can learn extension identity"
+                    .to_owned(),
             ],
             repair_actions: vec![
                 load_step,
-                "rerun rr extension setup after the extension registers identity".to_owned(),
+                profile_hint_step,
+                "reload the browser extension while rr extension setup is running; if setup exits blocked, rerun rr extension setup"
+                    .to_owned(),
+                "if identity is still missing, this build still requires a repair/dev override via RR_BRIDGE_EXTENSION_ID or rr bridge install --extension-id <id>"
+                    .to_owned(),
             ],
-            message: "extension setup blocked until extension identity is discovered".to_owned(),
+            message:
+                "extension setup blocked because Roger has not observed extension identity registration yet"
+                    .to_owned(),
         };
     };
 
@@ -1154,6 +1562,8 @@ fn handle_extension_setup(
             "package_dir": package_dir,
             "extension_id": extension_id,
             "extension_id_source": extension_id_source,
+            "registration_wait_budget_ms": registration_wait_budget_ms,
+            "registration_observed_during_setup_wait": observed_during_setup_wait,
             "install_root": install_root.to_string_lossy().to_string(),
             "host_binary": bridge_binary.to_string_lossy().to_string(),
             "native_manifest_path": manifest_path.to_string_lossy().to_string(),
@@ -1183,7 +1593,14 @@ fn handle_extension_doctor(
         Ok(path) => path,
         Err(err) => return error_response(err),
     };
-    let extension_id = discover_extension_id(parsed, runtime).map(|(value, _source)| value);
+    let discovered_identity = discover_extension_id(parsed, runtime).or_else(|| {
+        discover_extension_id_from_browser_profiles(&browser, runtime, &package_dir)
+            .map(|value| (value, "browser_profile_preferences"))
+    });
+    let extension_id = discovered_identity
+        .as_ref()
+        .map(|(value, _source)| value.clone());
+    let extension_id_source = discovered_identity.as_ref().map(|(_value, source)| *source);
     let Some(host_os) = SupportedOs::current() else {
         return blocked_response(
             "rr extension doctor supports macOS, Windows, and Linux only".to_owned(),
@@ -1216,7 +1633,10 @@ fn handle_extension_doctor(
     checks.push(json!({
         "name": "extension_identity_discovered",
         "ok": extension_id_present,
-        "detail": extension_id.clone(),
+        "detail": {
+            "extension_id": extension_id.clone(),
+            "source": extension_id_source,
+        },
     }));
 
     let manifest_exists = manifest_path.exists();
@@ -1234,8 +1654,10 @@ fn handle_extension_doctor(
                 host_binary_exists = Path::new(&manifest.path).exists();
                 if let Some(extension_id) = extension_id.as_ref() {
                     let expected_origin = format!("chrome-extension://{extension_id}/");
-                    manifest_allows_origin =
-                        manifest.allowed_origins.iter().any(|origin| origin == &expected_origin);
+                    manifest_allows_origin = manifest
+                        .allowed_origins
+                        .iter()
+                        .any(|origin| origin == &expected_origin);
                 }
             }
         }
@@ -1256,24 +1678,72 @@ fn handle_extension_doctor(
         .all(|entry| entry.get("ok").and_then(Value::as_bool).unwrap_or(false));
 
     if !all_ok {
+        let (reason_code, warning, repair_actions) = if !extension_id_present {
+            (
+                "extension_registration_missing",
+                "extension doctor did not observe browser-side extension identity registration"
+                    .to_owned(),
+                vec![
+                    format!("rerun rr extension setup --browser {browser_label}"),
+                    format!(
+                        "open {} and reload the unpacked extension, then rerun setup",
+                        extension_browser_url(browser.clone())
+                    ),
+                ],
+            )
+        } else if !manifest_exists {
+            (
+                "native_host_manifest_missing",
+                "extension doctor did not find the Native Messaging host manifest".to_owned(),
+                vec![
+                    format!("rerun rr extension setup --browser {browser_label}"),
+                    "verify rr is installed and writable under the selected install root"
+                        .to_owned(),
+                ],
+            )
+        } else if !host_binary_exists {
+            (
+                "native_host_binary_missing",
+                "extension doctor found a host manifest but the referenced rr binary is missing"
+                    .to_owned(),
+                vec![
+                    format!("rerun rr extension setup --browser {browser_label}"),
+                    "if the install moved, rerun setup from the active rr install".to_owned(),
+                ],
+            )
+        } else if !manifest_allows_origin {
+            (
+                "native_host_origin_mismatch",
+                "extension doctor found a host manifest whose allowed origin does not match discovered extension identity".to_owned(),
+                vec![
+                    format!("rerun rr extension setup --browser {browser_label}"),
+                    "reload the extension and rerun doctor to confirm matching identity".to_owned(),
+                ],
+            )
+        } else {
+            (
+                "extension_setup_incomplete",
+                "extension doctor detected missing or inconsistent setup prerequisites".to_owned(),
+                vec![
+                    format!("rerun rr extension setup --browser {browser_label}"),
+                    "if setup remains blocked, complete the one browser load step and rerun setup"
+                        .to_owned(),
+                ],
+            )
+        };
+
         return CommandResponse {
             outcome: OutcomeKind::Blocked,
             data: json!({
                 "subcommand": "doctor",
-                "reason_code": "extension_setup_incomplete",
+                "reason_code": reason_code,
                 "browser": browser_label,
                 "package_dir": package_dir.to_string_lossy().to_string(),
                 "install_root": install_root.to_string_lossy().to_string(),
                 "checks": checks,
             }),
-            warnings: vec![
-                "extension doctor detected missing or inconsistent setup prerequisites".to_owned(),
-            ],
-            repair_actions: vec![
-                format!("rerun rr extension setup --browser {browser_label}"),
-                "if setup remains blocked, complete the one browser load step and rerun setup"
-                    .to_owned(),
-            ],
+            warnings: vec![warning],
+            repair_actions,
             message: "extension doctor failed closed".to_owned(),
         };
     }
@@ -1416,33 +1886,22 @@ fn handle_bridge(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             }
 
             let manifest_template_path = extension_root.join("manifest.template.json");
-            let manifest_template = match fs::read_to_string(&manifest_template_path) {
-                Ok(text) => text,
-                Err(err) => {
-                    return error_response(format!(
-                        "failed to read extension manifest template: {err}"
-                    ));
-                }
-            };
-            let manifest_json: Value = match serde_json::from_str(&manifest_template) {
+            let mut manifest_json = match read_extension_manifest_template(&manifest_template_path)
+            {
                 Ok(value) => value,
-                Err(err) => {
-                    return error_response(format!(
-                        "failed to parse extension manifest template: {err}"
-                    ));
-                }
+                Err(err) => return error_response(err),
             };
-            let version = manifest_json
-                .get("version")
-                .and_then(Value::as_str)
-                .unwrap_or("0.0.0")
-                .to_owned();
+            let build_version = derive_extension_build_version(&workspace_root, &manifest_json);
+            let package_dir_name = extension_package_dir_name(&manifest_json);
+            manifest_json["version"] = Value::String(build_version.manifest_version.clone());
+            manifest_json["version_name"] = Value::String(build_version.version_name.clone());
+            let version = build_version.manifest_version.clone();
 
             let output_root = parsed
                 .bridge_output_dir
                 .clone()
                 .unwrap_or_else(|| workspace_root.join("target/bridge/extension"));
-            let package_dir = output_root.join(format!("roger-extension-{version}-unpacked"));
+            let package_dir = output_root.join(package_dir_name);
             if package_dir.exists() {
                 let _ = fs::remove_dir_all(&package_dir);
             }
@@ -1516,6 +1975,7 @@ fn handle_bridge(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             let asset_manifest = json!({
                 "artifact_name": format!("roger-extension-{version}-unpacked"),
                 "version": version,
+                "version_name": build_version.version_name,
                 "package_digest_sha256": package_digest,
                 "checksums_path": checksum_manifest_path.to_string_lossy().to_string(),
                 "files": checksums,
@@ -1539,6 +1999,8 @@ fn handle_bridge(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                     "asset_manifest_path": asset_manifest_path.to_string_lossy().to_string(),
                     "checksums_path": checksum_manifest_path.to_string_lossy().to_string(),
                     "package_digest_sha256": package_digest,
+                    "version": build_version.manifest_version,
+                    "version_name": build_version.version_name,
                     "install_mode": "unpacked_sideload",
                     "installs_browser_extension": false,
                 }),
@@ -1562,7 +2024,8 @@ fn handle_bridge(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             };
 
             let registry_path = extension_id_registry_path(&runtime.store_root);
-            let Some((extension_id, extension_id_source)) = discover_extension_id(parsed, runtime) else {
+            let Some((extension_id, extension_id_source)) = discover_extension_id(parsed, runtime)
+            else {
                 return blocked_response(
                     "rr bridge install could not discover extension identity for setup".to_owned(),
                     vec![
@@ -2014,6 +2477,143 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReentryInferenceScore {
+    pr_match_rank: u8,
+    binding_quality_rank: u8,
+    continuity_quality_rank: u8,
+    updated_at: i64,
+}
+
+fn continuity_inference_rank(continuity_state: &str) -> u8 {
+    let normalized = continuity_state.to_ascii_lowercase();
+    if normalized.contains("unusable")
+        || normalized.contains("stale")
+        || normalized.contains("missing")
+        || normalized.contains("invalid")
+    {
+        0
+    } else if normalized.contains("degraded") || normalized.contains("reseed") {
+        1
+    } else {
+        2
+    }
+}
+
+fn select_unique_strongest_score_index(scores: &[ReentryInferenceScore]) -> Option<usize> {
+    if scores.is_empty() {
+        return None;
+    }
+
+    let mut best_index = 0usize;
+    let mut best_score = scores[0];
+    let mut best_is_tied = false;
+
+    for (index, score) in scores.iter().enumerate().skip(1) {
+        let ordering = (
+            score.pr_match_rank,
+            score.binding_quality_rank,
+            score.continuity_quality_rank,
+            score.updated_at,
+        )
+            .cmp(&(
+                best_score.pr_match_rank,
+                best_score.binding_quality_rank,
+                best_score.continuity_quality_rank,
+                best_score.updated_at,
+            ));
+        if ordering.is_gt() {
+            best_index = index;
+            best_score = *score;
+            best_is_tied = false;
+        } else if ordering.is_eq() {
+            best_is_tied = true;
+        }
+    }
+
+    if best_is_tied {
+        None
+    } else {
+        Some(best_index)
+    }
+}
+
+fn picker_reason_supports_auto_selection(reason: &str, candidates: &[SessionFinderEntry]) -> bool {
+    if candidates.len() < 2 {
+        return false;
+    }
+    reason.contains("ambiguous repo-local session match")
+        || reason.contains("multiple repo-local sessions")
+}
+
+fn infer_strongest_reentry_selection(
+    store: &RogerStore,
+    candidates: &[SessionFinderEntry],
+    requested_pull_request: Option<u64>,
+    source_surface: LaunchSurface,
+    ui_target: Option<&str>,
+    instance_preference: Option<&str>,
+) -> std::result::Result<Option<(String, Option<SessionLaunchBindingRecord>, ReentryInferenceScore)>, String> {
+    let mut ranked = Vec::new();
+    for candidate in candidates {
+        let Some(session) = store
+            .review_session(&candidate.session_id)
+            .map_err(|err| format!("failed to load candidate session {}: {err}", candidate.session_id))?
+        else {
+            continue;
+        };
+
+        let binding_resolution = store
+            .resolve_session_launch_binding(ResolveSessionLaunchBinding {
+                explicit_session_id: Some(&session.id),
+                surface: source_surface,
+                repo_locator: &session.review_target.repository,
+                review_target: Some(&session.review_target),
+                ui_target,
+                instance_preference,
+            })
+            .map_err(|err| format!("failed to resolve launch binding for {}: {err}", session.id))?;
+
+        let (binding_quality_rank, binding) = match binding_resolution {
+            SessionBindingResolution::Resolved(binding) => (2, Some(binding)),
+            SessionBindingResolution::NotFound => (1, None),
+            SessionBindingResolution::Ambiguous { .. } | SessionBindingResolution::Stale { .. } => {
+                (0, None)
+            }
+        };
+
+        let score = ReentryInferenceScore {
+            pr_match_rank: u8::from(
+                requested_pull_request
+                    .map(|value| value == session.review_target.pull_request_number)
+                    .unwrap_or(false),
+            ),
+            binding_quality_rank,
+            continuity_quality_rank: continuity_inference_rank(&session.continuity_state),
+            updated_at: candidate.updated_at,
+        };
+        ranked.push((session.id, binding, score));
+    }
+
+    if ranked.is_empty() {
+        return Ok(None);
+    }
+
+    let scores: Vec<ReentryInferenceScore> = ranked.iter().map(|(_, _, score)| *score).collect();
+    let Some(best_index) = select_unique_strongest_score_index(&scores) else {
+        return Ok(None);
+    };
+    let (session_id, binding, score) = ranked
+        .into_iter()
+        .nth(best_index)
+        .expect("best index should exist");
+    if score.binding_quality_rank == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some((session_id, binding, score)))
+}
+
 fn handle_resume_or_refresh(
     parsed: &ParsedArgs,
     runtime: &CliRuntime,
@@ -2037,10 +2637,47 @@ fn handle_resume_or_refresh(
         Err(err) => return error_response(format!("failed to resolve session re-entry: {err}")),
     };
 
+    let mut inferred_selection_warning: Option<String> = None;
     let (session, binding) = match resolution {
         SessionReentryResolution::Resolved { session, binding } => (session, binding),
         SessionReentryResolution::PickerRequired { reason, candidates } => {
-            return blocked_picker_response(reason, candidates);
+            if !picker_reason_supports_auto_selection(&reason, &candidates) {
+                return blocked_picker_response(reason, candidates);
+            }
+
+            match infer_strongest_reentry_selection(
+                &store,
+                &candidates,
+                parsed.pr,
+                LaunchSurface::Cli,
+                Some(cli_config::UI_TARGET),
+                Some(cli_config::INSTANCE_PREFERENCE),
+            ) {
+                Ok(Some((session_id, binding, score))) => {
+                    let Some(session) = (match store.review_session(&session_id) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            return error_response(format!(
+                                "failed to load inferred session {session_id}: {err}"
+                            ));
+                        }
+                    }) else {
+                        return blocked_picker_response(reason, candidates);
+                    };
+                    inferred_selection_warning = Some(format!(
+                        "auto-selected session {} from {} candidates (pr_rank={}, binding_rank={}, continuity_rank={}, updated_at={})",
+                        session.id,
+                        candidates.len(),
+                        score.pr_match_rank,
+                        score.binding_quality_rank,
+                        score.continuity_quality_rank,
+                        score.updated_at
+                    ));
+                    (session, binding)
+                }
+                Ok(None) => return blocked_picker_response(reason, candidates),
+                Err(err) => return error_response(err),
+            }
         }
     };
 
@@ -2106,9 +2743,12 @@ fn handle_resume_or_refresh(
                 "continuity_quality": continuity_quality,
                 "continuity_state_snapshot": session.continuity_state,
             }),
-            warnings: provider_support_warning(&session.provider, command_name)
-                .into_iter()
-                .collect(),
+            warnings: {
+                let mut warnings: Vec<String> =
+                    inferred_selection_warning.iter().cloned().collect();
+                warnings.extend(provider_support_warning(&session.provider, command_name));
+                warnings
+            },
             repair_actions: Vec::new(),
             message: format!("{command_name} completed in robot non-interactive mode"),
         };
@@ -2124,9 +2764,12 @@ fn handle_resume_or_refresh(
                 "pull_request": session.review_target.pull_request_number,
                 "command": if matches!(action, LaunchAction::RefreshFindings) { "refresh" } else { "resume" },
             }),
-            warnings: provider_support_warning(&session.provider, command_name)
-                .into_iter()
-                .collect(),
+            warnings: {
+                let mut warnings: Vec<String> =
+                    inferred_selection_warning.iter().cloned().collect();
+                warnings.extend(provider_support_warning(&session.provider, command_name));
+                warnings
+            },
             repair_actions: Vec::new(),
             message: "resume/refresh plan generated (dry-run)".to_owned(),
         };
@@ -2148,7 +2791,7 @@ fn handle_resume_or_refresh(
         None => None,
     };
 
-    let (resume_path, continuity_quality, decision_reason, warnings) = match session
+    let (resume_path, continuity_quality, decision_reason, mut warnings) = match session
         .provider
         .as_str()
     {
@@ -2226,6 +2869,9 @@ fn handle_resume_or_refresh(
         }
         _ => unreachable!("provider validated above"),
     };
+    if let Some(warning) = inferred_selection_warning {
+        warnings.insert(0, warning);
+    }
 
     let run_kind = if matches!(action, LaunchAction::RefreshFindings) {
         "refresh"
@@ -2823,7 +3469,611 @@ fn checksums_entry_for_archive(checksums_text: &str, archive_name: &str) -> Resu
     Ok(matches.remove(0))
 }
 
-fn handle_update(parsed: &ParsedArgs, _runtime: &CliRuntime) -> CommandResponse {
+fn download_url_to_path(url: &str, destination: &Path) -> Result<(), String> {
+    let output = ProcessCommand::new("curl")
+        .arg("-fsSL")
+        .arg(url)
+        .arg("-o")
+        .arg(destination)
+        .output()
+        .map_err(|err| format!("failed to execute curl for {url}: {err}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(format!(
+            "curl failed for {url} (status {}): {}",
+            output.status,
+            if stderr.is_empty() {
+                "no stderr output".to_owned()
+            } else {
+                stderr
+            }
+        ));
+    }
+    Ok(())
+}
+
+fn sha256_for_file(path: &Path) -> Result<String, String> {
+    let bytes =
+        fs::read(path).map_err(|err| format!("failed to read file {}: {err}", path.display()))?;
+    Ok(sha256_hex(&bytes))
+}
+
+fn extract_targz_archive(archive_path: &Path, destination: &Path) -> Result<(), String> {
+    let output = ProcessCommand::new("tar")
+        .arg("-xzf")
+        .arg(archive_path)
+        .arg("-C")
+        .arg(destination)
+        .output()
+        .map_err(|err| {
+            format!(
+                "failed to execute tar extraction for {}: {err}",
+                archive_path.display()
+            )
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(format!(
+            "tar extraction failed for {} (status {}): {}",
+            archive_path.display(),
+            output.status,
+            if stderr.is_empty() {
+                "no stderr output".to_owned()
+            } else {
+                stderr
+            }
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_update_install_path(
+    current_exe: &Path,
+    expected_binary_name: &str,
+) -> Result<PathBuf, String> {
+    let metadata = fs::symlink_metadata(current_exe).map_err(|err| {
+        format!(
+            "failed to inspect current executable {}: {err}",
+            current_exe.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "unsupported install layout: {} is a symlink; rerun install on a direct binary path",
+            current_exe.display()
+        ));
+    }
+    if !metadata.is_file() {
+        return Err(format!(
+            "unsupported install layout: current executable is not a regular file ({})",
+            current_exe.display()
+        ));
+    }
+
+    let Some(file_name) = current_exe.file_name().and_then(|value| value.to_str()) else {
+        return Err(format!(
+            "unsupported install layout: executable file name is not UTF-8 ({})",
+            current_exe.display()
+        ));
+    };
+    if file_name != expected_binary_name {
+        return Err(format!(
+            "unsupported install layout: running binary name {file_name} does not match expected release binary {expected_binary_name}"
+        ));
+    }
+    if current_exe.parent().is_none() {
+        return Err(format!(
+            "unsupported install layout: executable has no parent directory ({})",
+            current_exe.display()
+        ));
+    }
+    Ok(current_exe.to_path_buf())
+}
+
+fn stage_candidate_binary(
+    extract_root: &Path,
+    payload_dir: &str,
+    binary_name: &str,
+    staged_binary_path: &Path,
+) -> Result<(), String> {
+    let candidate_binary = extract_root.join(payload_dir).join(binary_name);
+    if !candidate_binary.is_file() {
+        return Err(format!(
+            "archive missing expected binary path {}/{}",
+            payload_dir, binary_name
+        ));
+    }
+
+    fs::copy(&candidate_binary, staged_binary_path).map_err(|err| {
+        format!(
+            "failed to stage candidate binary from {} to {}: {err}",
+            candidate_binary.display(),
+            staged_binary_path.display()
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(staged_binary_path)
+            .map_err(|err| {
+                format!(
+                    "failed to stat staged candidate binary {}: {err}",
+                    staged_binary_path.display()
+                )
+            })?
+            .permissions();
+        permissions.set_mode(permissions.mode() | 0o755);
+        fs::set_permissions(staged_binary_path, permissions).map_err(|err| {
+            format!(
+                "failed to make staged candidate executable {}: {err}",
+                staged_binary_path.display()
+            )
+        })?;
+    }
+
+    let staged_metadata = fs::metadata(staged_binary_path).map_err(|err| {
+        format!(
+            "failed to stat staged candidate binary {}: {err}",
+            staged_binary_path.display()
+        )
+    })?;
+    if staged_metadata.len() == 0 {
+        return Err(format!(
+            "staged candidate binary is empty: {}",
+            staged_binary_path.display()
+        ));
+    }
+
+    Ok(())
+}
+
+fn apply_binary_replacement_with_rollback(
+    install_path: &Path,
+    staged_binary_path: &Path,
+    backup_suffix: &str,
+) -> Result<PathBuf, String> {
+    let install_dir = install_path.parent().ok_or_else(|| {
+        format!(
+            "unsupported install layout: executable has no parent directory ({})",
+            install_path.display()
+        )
+    })?;
+    let install_file_name = install_path
+        .file_name()
+        .ok_or_else(|| format!("invalid install path: {}", install_path.display()))?
+        .to_string_lossy()
+        .to_string();
+    let backup_path = install_dir.join(format!("{install_file_name}.backup-{backup_suffix}"));
+    if backup_path.exists() {
+        return Err(format!(
+            "refusing to apply update because backup path already exists: {}",
+            backup_path.display()
+        ));
+    }
+
+    fs::rename(install_path, &backup_path).map_err(|err| {
+        format!(
+            "failed to move current binary to backup {}: {err}",
+            backup_path.display()
+        )
+    })?;
+
+    match fs::rename(staged_binary_path, install_path) {
+        Ok(_) => {
+            let _ = fs::remove_file(&backup_path);
+            Ok(backup_path)
+        }
+        Err(apply_err) => {
+            let rollback = fs::rename(&backup_path, install_path);
+            if let Err(rollback_err) = rollback {
+                return Err(format!(
+                    "failed to replace binary ({apply_err}); rollback failed ({rollback_err}); backup left at {}",
+                    backup_path.display()
+                ));
+            }
+            Err(format!(
+                "failed to replace binary ({apply_err}); rollback restored previous binary"
+            ))
+        }
+    }
+}
+
+#[derive(Debug)]
+struct UpdateApplyOutcome {
+    install_path: PathBuf,
+    backup_path: PathBuf,
+}
+
+fn apply_update_archive_in_place(
+    archive_url: &str,
+    archive_name: &str,
+    expected_archive_sha256: &str,
+    payload_dir: &str,
+    binary_name: &str,
+    install_path: &Path,
+    target_version: &str,
+) -> Result<UpdateApplyOutcome, String> {
+    let update_tmp_root = std::env::temp_dir().join(format!("rr-update-{}", next_id("apply")));
+    let outcome = (|| {
+        fs::create_dir_all(&update_tmp_root).map_err(|err| {
+            format!(
+                "failed to create update staging directory {}: {err}",
+                update_tmp_root.display()
+            )
+        })?;
+
+        let archive_path = update_tmp_root.join(archive_name);
+        download_url_to_path(archive_url, &archive_path)?;
+        let archive_sha = sha256_for_file(&archive_path)?;
+        if archive_sha != expected_archive_sha256.to_ascii_lowercase() {
+            return Err(format!(
+                "archive checksum mismatch for {archive_name}: expected {}, got {}",
+                expected_archive_sha256.to_ascii_lowercase(),
+                archive_sha
+            ));
+        }
+
+        let extract_root = update_tmp_root.join("extract");
+        fs::create_dir_all(&extract_root).map_err(|err| {
+            format!(
+                "failed to create extract directory {}: {err}",
+                extract_root.display()
+            )
+        })?;
+        extract_targz_archive(&archive_path, &extract_root)?;
+
+        let staged_binary_path = update_tmp_root.join(format!("{binary_name}.staged"));
+        stage_candidate_binary(&extract_root, payload_dir, binary_name, &staged_binary_path)?;
+
+        let backup_suffix = target_version
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+            .collect::<String>();
+        let backup_path = apply_binary_replacement_with_rollback(
+            install_path,
+            &staged_binary_path,
+            &backup_suffix,
+        )?;
+
+        Ok(UpdateApplyOutcome {
+            install_path: install_path.to_path_buf(),
+            backup_path,
+        })
+    })();
+
+    let _ = fs::remove_dir_all(&update_tmp_root);
+    outcome
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdateConfirmationRequirement {
+    NotRequired(&'static str),
+    BypassedByYes,
+    NeedsPrompt,
+    BlockedRobotMode,
+    BlockedNonInteractive,
+}
+
+fn confirmation_response_is_affirmative(raw: &str) -> bool {
+    matches!(raw.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+fn evaluate_update_confirmation_requirement(
+    parsed: &ParsedArgs,
+    interactive_tty: bool,
+) -> UpdateConfirmationRequirement {
+    if parsed.dry_run {
+        return UpdateConfirmationRequirement::NotRequired("dry_run");
+    }
+    if parsed.update_yes {
+        return UpdateConfirmationRequirement::BypassedByYes;
+    }
+    if parsed.robot {
+        return UpdateConfirmationRequirement::BlockedRobotMode;
+    }
+    if !interactive_tty {
+        return UpdateConfirmationRequirement::BlockedNonInteractive;
+    }
+    UpdateConfirmationRequirement::NeedsPrompt
+}
+
+fn prompt_for_update_confirmation(target_version: &str, target_tag: &str) -> Result<bool, String> {
+    eprint!(
+        "rr update will replace the installed rr binary with {target_tag} ({target_version}). Continue? [y/N]: "
+    );
+    io::stderr()
+        .flush()
+        .map_err(|err| format!("failed to flush confirmation prompt: {err}"))?;
+
+    let mut response = String::new();
+    io::stdin()
+        .read_line(&mut response)
+        .map_err(|err| format!("failed to read confirmation response: {err}"))?;
+    Ok(confirmation_response_is_affirmative(&response))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StoreCompatibilityEnvelope {
+    envelope_version: i64,
+    store_schema_version: i64,
+    min_supported_store_schema: i64,
+    auto_migrate_from: i64,
+    migration_policy: String,
+    migration_class_max_auto: String,
+    sidecar_generation: String,
+    backup_required: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MigrationPreflight {
+    status: &'static str,
+    classification: &'static str,
+    apply_allowed: bool,
+    blocked_reason: Option<String>,
+}
+
+fn embedded_store_compatibility_envelope() -> StoreCompatibilityEnvelope {
+    StoreCompatibilityEnvelope {
+        envelope_version: 1,
+        store_schema_version: 10,
+        min_supported_store_schema: 0,
+        auto_migrate_from: 0,
+        migration_policy: "binary_only".to_owned(),
+        migration_class_max_auto: "none".to_owned(),
+        sidecar_generation: "v1".to_owned(),
+        backup_required: true,
+    }
+}
+
+fn parse_store_compatibility_envelope(
+    install_metadata: &Value,
+) -> Result<StoreCompatibilityEnvelope, String> {
+    let Some(compat) = install_metadata
+        .get("store_compatibility")
+        .and_then(Value::as_object)
+    else {
+        return Err("install metadata missing store_compatibility envelope".to_owned());
+    };
+
+    let parse_i64 = |field: &str| -> Result<i64, String> {
+        compat.get(field).and_then(Value::as_i64).ok_or_else(|| {
+            format!("install metadata store_compatibility.{field} must be an integer")
+        })
+    };
+    let parse_string = |field: &str| -> Result<String, String> {
+        compat
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                format!("install metadata store_compatibility.{field} must be a non-empty string")
+            })
+    };
+
+    let envelope = StoreCompatibilityEnvelope {
+        envelope_version: parse_i64("envelope_version")?,
+        store_schema_version: parse_i64("store_schema_version")?,
+        min_supported_store_schema: parse_i64("min_supported_store_schema")?,
+        auto_migrate_from: parse_i64("auto_migrate_from")?,
+        migration_policy: parse_string("migration_policy")?,
+        migration_class_max_auto: parse_string("migration_class_max_auto")?,
+        sidecar_generation: parse_string("sidecar_generation")?,
+        backup_required: compat
+            .get("backup_required")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| {
+                "install metadata store_compatibility.backup_required must be a boolean".to_owned()
+            })?,
+    };
+
+    if envelope.envelope_version < 1 {
+        return Err(
+            "install metadata store_compatibility.envelope_version must be >= 1".to_owned(),
+        );
+    }
+    if envelope.min_supported_store_schema > envelope.store_schema_version {
+        return Err(
+            "install metadata store_compatibility.min_supported_store_schema cannot exceed store_schema_version"
+                .to_owned(),
+        );
+    }
+    if envelope.auto_migrate_from > envelope.store_schema_version {
+        return Err(
+            "install metadata store_compatibility.auto_migrate_from cannot exceed store_schema_version"
+                .to_owned(),
+        );
+    }
+    if !matches!(
+        envelope.migration_policy.as_str(),
+        "binary_only" | "auto_safe" | "explicit_operator_gate" | "unsupported"
+    ) {
+        return Err(
+            "install metadata store_compatibility.migration_policy must be one of binary_only, auto_safe, explicit_operator_gate, unsupported"
+                .to_owned(),
+        );
+    }
+    if !matches!(
+        envelope.migration_class_max_auto.as_str(),
+        "class_a" | "class_b" | "none"
+    ) {
+        return Err(
+            "install metadata store_compatibility.migration_class_max_auto must be one of class_a, class_b, none"
+                .to_owned(),
+        );
+    }
+
+    Ok(envelope)
+}
+
+fn read_local_store_schema_for_update(
+    runtime: &CliRuntime,
+    target_store_schema: i64,
+) -> Result<i64, String> {
+    let layout = StorageLayout::under(&runtime.store_root);
+    if !layout.db_path.exists() {
+        return Ok(target_store_schema);
+    }
+    let conn = SqliteConnection::open(&layout.db_path).map_err(|err| {
+        format!(
+            "failed to open local store for migration preflight ({}): {err}",
+            layout.db_path.display()
+        )
+    })?;
+    conn.pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|err| {
+            format!(
+                "failed to read local store schema version from {}: {err}",
+                layout.db_path.display()
+            )
+        })
+}
+
+fn assess_migration_preflight(
+    current_store_schema: i64,
+    published: &StoreCompatibilityEnvelope,
+    embedded_matches_published: bool,
+) -> MigrationPreflight {
+    if !embedded_matches_published {
+        return MigrationPreflight {
+            status: "migration_unsupported",
+            classification: "class_d",
+            apply_allowed: false,
+            blocked_reason: Some("embedded_and_published_envelope_mismatch".to_owned()),
+        };
+    }
+
+    if current_store_schema == published.store_schema_version {
+        return MigrationPreflight {
+            status: "no_migration_needed",
+            classification: "none",
+            apply_allowed: true,
+            blocked_reason: None,
+        };
+    }
+
+    if current_store_schema < published.min_supported_store_schema {
+        return MigrationPreflight {
+            status: "migration_unsupported",
+            classification: "class_d",
+            apply_allowed: false,
+            blocked_reason: Some("local_store_schema_below_min_supported".to_owned()),
+        };
+    }
+
+    if current_store_schema > published.store_schema_version {
+        return MigrationPreflight {
+            status: "migration_unsupported",
+            classification: "class_d",
+            apply_allowed: false,
+            blocked_reason: Some("local_store_schema_newer_than_target_release".to_owned()),
+        };
+    }
+
+    match published.migration_policy.as_str() {
+        "auto_safe" => {
+            if current_store_schema >= published.auto_migrate_from {
+                let classification = match published.migration_class_max_auto.as_str() {
+                    "class_a" => "class_a",
+                    "class_b" => "class_b",
+                    _ => {
+                        return MigrationPreflight {
+                            status: "migration_requires_explicit_operator_gate",
+                            classification: "class_c",
+                            apply_allowed: false,
+                            blocked_reason: Some(
+                                "auto_safe_policy_missing_auto_migration_class".to_owned(),
+                            ),
+                        };
+                    }
+                };
+                MigrationPreflight {
+                    status: "auto_safe_migration_after_update",
+                    classification,
+                    apply_allowed: true,
+                    blocked_reason: None,
+                }
+            } else {
+                MigrationPreflight {
+                    status: "migration_requires_explicit_operator_gate",
+                    classification: "class_c",
+                    apply_allowed: false,
+                    blocked_reason: Some(
+                        "local_store_schema_outside_auto_migrate_window".to_owned(),
+                    ),
+                }
+            }
+        }
+        "explicit_operator_gate" => MigrationPreflight {
+            status: "migration_requires_explicit_operator_gate",
+            classification: "class_c",
+            apply_allowed: false,
+            blocked_reason: Some("target_release_requires_explicit_operator_gate".to_owned()),
+        },
+        "unsupported" => MigrationPreflight {
+            status: "migration_unsupported",
+            classification: "class_d",
+            apply_allowed: false,
+            blocked_reason: Some("target_release_declares_unsupported_migration_policy".to_owned()),
+        },
+        "binary_only" => MigrationPreflight {
+            status: "migration_unsupported",
+            classification: "class_d",
+            apply_allowed: false,
+            blocked_reason: Some("binary_only_policy_blocks_schema_migration".to_owned()),
+        },
+        _ => MigrationPreflight {
+            status: "migration_unsupported",
+            classification: "class_d",
+            apply_allowed: false,
+            blocked_reason: Some("unknown_migration_policy".to_owned()),
+        },
+    }
+}
+
+fn migration_preflight_payload(
+    runtime: &CliRuntime,
+    published: &StoreCompatibilityEnvelope,
+    embedded: &StoreCompatibilityEnvelope,
+) -> Result<Value, String> {
+    let current_store_schema =
+        read_local_store_schema_for_update(runtime, published.store_schema_version)?;
+    let embedded_matches_published = embedded == published;
+    let preflight =
+        assess_migration_preflight(current_store_schema, published, embedded_matches_published);
+
+    let mut payload = json!({
+        "status": preflight.status,
+        "current_store_schema": current_store_schema,
+        "target_store_schema": published.store_schema_version,
+        "min_supported_store_schema": published.min_supported_store_schema,
+        "auto_migrate_from": published.auto_migrate_from,
+        "policy": published.migration_policy,
+        "classification": preflight.classification,
+        "backup_required": published.backup_required,
+        "apply_allowed": preflight.apply_allowed,
+        "migration_class_max_auto": published.migration_class_max_auto,
+        "sidecar_generation": published.sidecar_generation,
+        "envelope_version": published.envelope_version,
+        "embedded_envelope_matches_metadata": embedded_matches_published,
+    });
+    if let Some(reason) = preflight.blocked_reason {
+        payload["blocked_reason"] = Value::String(reason);
+    }
+    Ok(payload)
+}
+
+fn migration_policy_payload() -> Value {
+    json!({
+        "policy": "binary_only",
+        "schema_migrations_supported": false,
+        "status": "deferred_in_0_1_x",
+        "guidance": "if a future release requires local-state/schema migration, fail closed and use explicit backup/export + reinstall guidance",
+    })
+}
+
+fn handle_update(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let Some(current_version) = option_env!("ROGER_RELEASE_VERSION").map(str::to_owned) else {
         return blocked_response(
             "rr update is disabled for local/unpublished builds without embedded release metadata"
@@ -2835,6 +4085,7 @@ fn handle_update(parsed: &ParsedArgs, _runtime: &CliRuntime) -> CommandResponse 
             ],
             json!({
                 "reason_code": "local_or_unpublished_build",
+                "migration": migration_policy_payload(),
             }),
         );
     };
@@ -3145,6 +4396,38 @@ fn handle_update(parsed: &ParsedArgs, _runtime: &CliRuntime) -> CommandResponse 
         );
     }
 
+    let published_envelope = match parse_store_compatibility_envelope(&install_metadata) {
+        Ok(value) => value,
+        Err(err) => {
+            return blocked_response(
+                format!("install metadata store compatibility envelope is invalid: {err}"),
+                vec!["rebuild release install metadata for this tag".to_owned()],
+                json!({"reason_code": "install_metadata_store_compatibility_invalid"}),
+            );
+        }
+    };
+    let embedded_envelope = embedded_store_compatibility_envelope();
+    let migration_policy =
+        match migration_preflight_payload(runtime, &published_envelope, &embedded_envelope) {
+            Ok(value) => value,
+            Err(err) => {
+                return blocked_response(
+                    format!("failed to inspect local store migration posture: {err}"),
+                    vec![
+                        "repair or remove the local Roger store, then re-run rr update --dry-run"
+                            .to_owned(),
+                        "or run scripts/release/rr-install.sh directly after backing up local state"
+                            .to_owned(),
+                    ],
+                    json!({"reason_code": "store_schema_probe_failed"}),
+                );
+            }
+        };
+    let migration_apply_allowed = migration_policy
+        .get("apply_allowed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
     if current_version == target_version {
         return CommandResponse {
             outcome: OutcomeKind::Empty,
@@ -3156,6 +4439,12 @@ fn handle_update(parsed: &ParsedArgs, _runtime: &CliRuntime) -> CommandResponse 
                 "target_tag": target_tag,
                 "target": target,
                 "up_to_date": true,
+                "migration": migration_policy.clone(),
+                "confirmation": {
+                    "required": false,
+                    "confirmed": false,
+                    "mode": "not_required_up_to_date",
+                },
             }),
             warnings: Vec::new(),
             repair_actions: Vec::new(),
@@ -3163,6 +4452,7 @@ fn handle_update(parsed: &ParsedArgs, _runtime: &CliRuntime) -> CommandResponse 
         };
     }
 
+    let archive_url = format!("{download_root}/{target_tag}/{archive_name}");
     let recommended_command = if cfg!(target_os = "windows") {
         format!(
             "powershell -ExecutionPolicy Bypass -File scripts/release/rr-install.ps1 -Version {target_version} -Repo {repo}"
@@ -3171,10 +4461,204 @@ fn handle_update(parsed: &ParsedArgs, _runtime: &CliRuntime) -> CommandResponse 
         format!("bash scripts/release/rr-install.sh --version {target_version} --repo {repo}")
     };
 
-    let message = if parsed.dry_run {
-        "rr update dry-run metadata validation complete".to_owned()
-    } else {
-        "rr update metadata validation complete (manual install step required)".to_owned()
+    if parsed.dry_run {
+        return CommandResponse {
+            outcome: OutcomeKind::Complete,
+            data: json!({
+                "current_release": {
+                    "version": current_version,
+                    "channel": current_channel,
+                    "tag": current_tag,
+                },
+                "target_release": {
+                    "version": target_version,
+                    "channel": channel,
+                    "tag": target_tag,
+                },
+                "target": target,
+                "metadata_urls": {
+                    "install_metadata": install_metadata_url,
+                    "core_manifest": core_manifest_url,
+                    "checksums": checksums_url,
+                },
+                "archive": {
+                    "name": archive_name,
+                    "sha256": archive_sha256,
+                    "payload_dir": payload_dir,
+                    "binary_name": binary_name,
+                    "url": archive_url,
+                },
+                "migration": migration_policy.clone(),
+                "confirmation": {
+                    "required": false,
+                    "confirmed": false,
+                    "mode": "dry_run",
+                },
+                "mode": "dry_run",
+                "recommended_install_command": recommended_command,
+            }),
+            warnings: Vec::new(),
+            repair_actions: vec!["run the recommended_install_command to apply update".to_owned()],
+            message: "rr update dry-run metadata validation complete".to_owned(),
+        };
+    }
+
+    if !migration_apply_allowed {
+        let blocked_reason = migration_policy
+            .get("blocked_reason")
+            .and_then(Value::as_str)
+            .unwrap_or("migration_preflight_blocked");
+        return blocked_response(
+            format!("rr update apply blocked by migration posture: {blocked_reason}"),
+            vec![
+                "run rr update --dry-run --robot to inspect migration posture details".to_owned(),
+                "apply is allowed only when migration.apply_allowed=true".to_owned(),
+            ],
+            json!({
+                "reason_code": "migration_preflight_blocked",
+                "target_version": target_version,
+                "target_tag": target_tag,
+                "target": target,
+                "migration": migration_policy.clone(),
+            }),
+        );
+    }
+
+    let interactive_tty = io::stdin().is_terminal() && io::stdout().is_terminal();
+    let confirmation = match evaluate_update_confirmation_requirement(parsed, interactive_tty) {
+        UpdateConfirmationRequirement::NotRequired(mode) => json!({
+            "required": false,
+            "confirmed": false,
+            "mode": mode,
+        }),
+        UpdateConfirmationRequirement::BypassedByYes => json!({
+            "required": true,
+            "confirmed": true,
+            "mode": "yes_flag",
+        }),
+        UpdateConfirmationRequirement::BlockedRobotMode => {
+            return blocked_response(
+                "rr update in --robot mode requires --yes/-y to confirm non-interactive apply"
+                    .to_owned(),
+                vec![
+                    "re-run rr update --robot --yes once preflight checks are acceptable"
+                        .to_owned(),
+                    "or run rr update interactively to confirm at the prompt".to_owned(),
+                ],
+                json!({
+                    "reason_code": "update_confirmation_required_robot",
+                    "target_version": target_version,
+                    "target_tag": target_tag,
+                    "target": target,
+                    "confirmation": {
+                        "required": true,
+                        "confirmed": false,
+                        "mode": "robot_blocked",
+                    },
+                }),
+            );
+        }
+        UpdateConfirmationRequirement::BlockedNonInteractive => {
+            return blocked_response(
+                "rr update requires explicit confirmation on a TTY or --yes/-y".to_owned(),
+                vec![
+                    "re-run rr update in an interactive terminal and confirm".to_owned(),
+                    "or pass --yes / -y for non-interactive confirmation".to_owned(),
+                ],
+                json!({
+                    "reason_code": "update_confirmation_required_non_tty",
+                    "target_version": target_version,
+                    "target_tag": target_tag,
+                    "target": target,
+                    "confirmation": {
+                        "required": true,
+                        "confirmed": false,
+                        "mode": "non_interactive_blocked",
+                    },
+                }),
+            );
+        }
+        UpdateConfirmationRequirement::NeedsPrompt => {
+            match prompt_for_update_confirmation(&target_version, &target_tag) {
+                Ok(true) => json!({
+                    "required": true,
+                    "confirmed": true,
+                    "mode": "interactive_prompt",
+                }),
+                Ok(false) => {
+                    return blocked_response(
+                        "rr update cancelled before apply".to_owned(),
+                        vec![
+                            "re-run rr update and confirm when ready".to_owned(),
+                            "or pass --yes / -y for non-interactive confirmation".to_owned(),
+                        ],
+                        json!({
+                            "reason_code": "update_cancelled",
+                            "target_version": target_version,
+                            "target_tag": target_tag,
+                            "target": target,
+                            "confirmation": {
+                                "required": true,
+                                "confirmed": false,
+                                "mode": "interactive_prompt_declined",
+                            },
+                        }),
+                    );
+                }
+                Err(err) => {
+                    return error_response(format!("failed to read update confirmation: {err}"));
+                }
+            }
+        }
+    };
+
+    let current_exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(err) => {
+            return blocked_response(
+                format!("failed to resolve current executable path: {err}"),
+                vec!["run scripts/release/rr-install.sh with an explicit --version".to_owned()],
+                json!({"reason_code": "current_exe_resolution_failed"}),
+            );
+        }
+    };
+    let install_path = match resolve_update_install_path(&current_exe, &binary_name) {
+        Ok(path) => path,
+        Err(err) => {
+            return blocked_response(
+                err,
+                vec![
+                    "install Roger to a direct rr binary path before running rr update".to_owned(),
+                    "or run scripts/release/rr-install.sh with an explicit --version".to_owned(),
+                ],
+                json!({"reason_code": "unsupported_install_layout"}),
+            );
+        }
+    };
+
+    let apply_outcome = match apply_update_archive_in_place(
+        &archive_url,
+        &archive_name,
+        &archive_sha256,
+        &payload_dir,
+        &binary_name,
+        &install_path,
+        &target_version,
+    ) {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            return blocked_response(
+                format!("failed to apply in-place update: {err}"),
+                vec![
+                    "re-run rr update after resolving install path and permissions".to_owned(),
+                    format!("or run {recommended_command}"),
+                ],
+                json!({
+                    "reason_code": "in_place_apply_failed",
+                    "install_path": install_path.to_string_lossy(),
+                }),
+            );
+        }
     };
 
     CommandResponse {
@@ -3201,12 +4685,21 @@ fn handle_update(parsed: &ParsedArgs, _runtime: &CliRuntime) -> CommandResponse 
                 "sha256": archive_sha256,
                 "payload_dir": payload_dir,
                 "binary_name": binary_name,
+                "url": archive_url,
+            },
+            "migration": migration_policy,
+            "confirmation": confirmation,
+            "mode": "in_place_apply",
+            "apply": {
+                "install_path": apply_outcome.install_path.to_string_lossy(),
+                "backup_path": apply_outcome.backup_path.to_string_lossy(),
+                "rollback_strategy": "rename_with_immediate_restore_on_failure",
             },
             "recommended_install_command": recommended_command,
         }),
         warnings: Vec::new(),
-        repair_actions: vec!["run the recommended_install_command to apply update".to_owned()],
-        message,
+        repair_actions: Vec::new(),
+        message: format!("rr updated from {} to {}", current_version, target_version),
     }
 }
 
@@ -3220,6 +4713,8 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                 json!({"command": "rr sessions --robot", "purpose": "global session finder"}),
                 json!({"command": "rr findings --robot", "purpose": "structured findings list"}),
                 json!({"command": "rr search --query <text> --robot", "purpose": "prior-review lookup"}),
+                json!({"command": "rr update --channel stable --dry-run --robot", "purpose": "update metadata preflight (non-mutating)"}),
+                json!({"command": "rr update --channel stable --yes --robot", "purpose": "non-interactive in-place apply after explicit confirmation bypass"}),
                 json!({"command": "rr bridge verify-contracts --robot", "purpose": "bridge contract drift check"}),
                 json!({"command": "rr bridge pack-extension --robot", "purpose": "assemble unpacked browser sideload artifact"}),
                 json!({"command": "rr extension setup --browser <edge|chrome|brave> --robot", "purpose": "guided package/setup flow with fail-closed identity + host checks"}),
@@ -3236,6 +4731,7 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                 json!({"command": "rr sessions", "required_formats": ["json"], "optional_formats": ["compact"]}),
                 json!({"command": "rr findings", "required_formats": ["json"], "optional_formats": ["compact"]}),
                 json!({"command": "rr search", "required_formats": ["json"], "optional_formats": ["compact"]}),
+                json!({"command": "rr update", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr review --dry-run", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr resume --dry-run", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr bridge export-contracts", "required_formats": ["json"], "optional_formats": []}),
@@ -3259,6 +4755,7 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                 json!({"command": "rr return", "schema_id": "rr.robot.return.v1"}),
                 json!({"command": "rr sessions", "schema_id": "rr.robot.sessions.v1"}),
                 json!({"command": "rr search", "schema_id": "rr.robot.search.v1"}),
+                json!({"command": "rr update", "schema_id": "rr.robot.update.v1"}),
                 json!({"command": "rr bridge", "schema_id": "rr.robot.bridge.v1"}),
                 json!({"command": "rr extension", "schema_id": "rr.robot.extension.v1"}),
                 json!({"command": "rr findings", "schema_id": "rr.robot.findings.v1"}),
@@ -3357,7 +4854,9 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             FindingTriageState::NeedsFollowUp.as_str(),
         ) {
             Ok(count) => count as usize,
-            Err(err) => return error_response(format!("failed to count needs follow up findings: {err}")),
+            Err(err) => {
+                return error_response(format!("failed to count needs follow up findings: {err}"));
+            }
         }
     } else {
         0
@@ -3370,7 +4869,11 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             FindingOutboundState::Approved.as_str(),
         ) {
             Ok(count) => count as usize,
-            Err(err) => return error_response(format!("failed to count awaiting approval findings: {err}")),
+            Err(err) => {
+                return error_response(format!(
+                    "failed to count awaiting approval findings: {err}"
+                ));
+            }
         }
     } else {
         0
@@ -4151,7 +5654,7 @@ fn next_id(prefix: &str) -> String {
 }
 
 fn usage_text() -> &'static str {
-    "Usage:\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--repo owner/repo] [--limit <n>] [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--dry-run] [--robot]\n  rr bridge export-contracts [--robot]\n  rr bridge verify-contracts [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge install [--extension-id <id>] [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr extension setup [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr extension doctor [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr refresh [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]"
+    "Usage:\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--repo owner/repo] [--limit <n>] [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--yes|-y] [--dry-run] [--robot]\n  rr bridge export-contracts [--robot]\n  rr bridge verify-contracts [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge install [--extension-id <id>] [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr extension setup [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr extension doctor [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr refresh [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n\nUpdate notes:\n  - default rr update apply prompts for confirmation on interactive TTY\n  - pass --yes/-y for non-interactive apply confirmation; --robot apply requires --yes/-y\n  - --dry-run and --robot without --yes are non-mutating metadata checks\n  - local/unpublished builds fail closed; migration-capable updates are deferred in 0.1.x"
 }
 
 #[cfg(test)]
@@ -4297,8 +5800,285 @@ mod tests {
         serde_json::from_str(stdout).expect("robot payload")
     }
 
+    #[test]
+    fn continuity_inference_rank_prefers_usable_over_degraded_and_unusable() {
+        assert_eq!(continuity_inference_rank("review:usable"), 2);
+        assert_eq!(continuity_inference_rank("resume:degraded"), 1);
+        assert_eq!(continuity_inference_rank("resume:reseeded"), 1);
+        assert_eq!(continuity_inference_rank("resume:unusable"), 0);
+        assert_eq!(continuity_inference_rank("resume:stale_locator"), 0);
+    }
+
+    #[test]
+    fn select_unique_strongest_score_index_returns_none_for_tied_best_candidates() {
+        let scores = vec![
+            ReentryInferenceScore {
+                pr_match_rank: 0,
+                binding_quality_rank: 2,
+                continuity_quality_rank: 2,
+                updated_at: 200,
+            },
+            ReentryInferenceScore {
+                pr_match_rank: 0,
+                binding_quality_rank: 2,
+                continuity_quality_rank: 2,
+                updated_at: 200,
+            },
+        ];
+
+        assert_eq!(select_unique_strongest_score_index(&scores), None);
+    }
+
+    #[test]
+    fn select_unique_strongest_score_index_prefers_binding_then_continuity_then_freshness() {
+        let scores = vec![
+            ReentryInferenceScore {
+                pr_match_rank: 0,
+                binding_quality_rank: 1,
+                continuity_quality_rank: 2,
+                updated_at: 300,
+            },
+            ReentryInferenceScore {
+                pr_match_rank: 0,
+                binding_quality_rank: 2,
+                continuity_quality_rank: 1,
+                updated_at: 100,
+            },
+            ReentryInferenceScore {
+                pr_match_rank: 0,
+                binding_quality_rank: 2,
+                continuity_quality_rank: 2,
+                updated_at: 250,
+            },
+        ];
+
+        assert_eq!(select_unique_strongest_score_index(&scores), Some(2));
+    }
+
+    fn review_target(repository: &str, pull_request: u64) -> ReviewTarget {
+        ReviewTarget {
+            repository: repository.to_owned(),
+            pull_request_number: pull_request,
+            base_ref: "main".to_owned(),
+            head_ref: format!("feature-{pull_request}"),
+            base_commit: "aaa".to_owned(),
+            head_commit: "bbb".to_owned(),
+        }
+    }
+
+    #[test]
+    fn infer_strongest_reentry_selection_prefers_binding_and_continuity_quality() {
+        let tmp = tempdir().expect("tempdir");
+        let store = RogerStore::open(tmp.path()).expect("open store");
+
+        let weaker_target = review_target("owner/repo", 40);
+        store
+            .create_review_session(CreateReviewSession {
+                id: "session-weaker",
+                review_target: &weaker_target,
+                provider: "opencode",
+                session_locator: None,
+                resume_bundle_artifact_id: None,
+                continuity_state: "resume:degraded",
+                attention_state: "awaiting_user_input",
+                launch_profile_id: None,
+            })
+            .expect("create weaker session");
+
+        let stronger_target = review_target("owner/repo", 41);
+        store
+            .create_review_session(CreateReviewSession {
+                id: "session-stronger",
+                review_target: &stronger_target,
+                provider: "opencode",
+                session_locator: None,
+                resume_bundle_artifact_id: None,
+                continuity_state: "resume:usable",
+                attention_state: "awaiting_user_input",
+                launch_profile_id: None,
+            })
+            .expect("create stronger session");
+        store
+            .put_session_launch_binding(CreateSessionLaunchBinding {
+                id: "binding-stronger",
+                session_id: "session-stronger",
+                repo_locator: &stronger_target.repository,
+                review_target: Some(&stronger_target),
+                surface: LaunchSurface::Cli,
+                launch_profile_id: Some(cli_config::PROFILE_ID),
+                ui_target: Some(cli_config::UI_TARGET),
+                instance_preference: Some(cli_config::INSTANCE_PREFERENCE),
+                cwd: Some("/tmp/repo"),
+                worktree_root: None,
+            })
+            .expect("bind stronger session");
+
+        let candidates = store
+            .session_finder(SessionFinderQuery {
+                repository: Some("owner/repo".to_owned()),
+                pull_request_number: None,
+                attention_states: Vec::new(),
+                limit: 25,
+            })
+            .expect("session finder");
+
+        let inferred = infer_strongest_reentry_selection(
+            &store,
+            &candidates,
+            None,
+            LaunchSurface::Cli,
+            Some(cli_config::UI_TARGET),
+            Some(cli_config::INSTANCE_PREFERENCE),
+        )
+        .expect("infer strongest")
+        .expect("expected strongest candidate");
+
+        assert_eq!(inferred.0, "session-stronger");
+        assert_eq!(inferred.1.expect("binding").id, "binding-stronger");
+        assert_eq!(inferred.2.binding_quality_rank, 2);
+        assert_eq!(inferred.2.continuity_quality_rank, 2);
+    }
+
+    #[test]
+    fn infer_strongest_reentry_selection_returns_none_when_scores_are_tied() {
+        let tmp = tempdir().expect("tempdir");
+        let store = RogerStore::open(tmp.path()).expect("open store");
+
+        for session_id in ["session-a", "session-b"] {
+            let target = review_target("owner/repo", 42);
+            store
+                .create_review_session(CreateReviewSession {
+                    id: session_id,
+                    review_target: &target,
+                    provider: "opencode",
+                    session_locator: None,
+                    resume_bundle_artifact_id: None,
+                    continuity_state: "resume:usable",
+                    attention_state: "awaiting_user_input",
+                    launch_profile_id: None,
+                })
+                .expect("create tied session");
+        }
+
+        let candidates = vec![
+            SessionFinderEntry {
+                session_id: "session-a".to_owned(),
+                repository: "owner/repo".to_owned(),
+                pull_request_number: 42,
+                attention_state: "awaiting_user_input".to_owned(),
+                provider: "opencode".to_owned(),
+                updated_at: 123,
+            },
+            SessionFinderEntry {
+                session_id: "session-b".to_owned(),
+                repository: "owner/repo".to_owned(),
+                pull_request_number: 42,
+                attention_state: "awaiting_user_input".to_owned(),
+                provider: "opencode".to_owned(),
+                updated_at: 123,
+            },
+        ];
+
+        let inferred = infer_strongest_reentry_selection(
+            &store,
+            &candidates,
+            None,
+            LaunchSurface::Cli,
+            Some(cli_config::UI_TARGET),
+            Some(cli_config::INSTANCE_PREFERENCE),
+        )
+        .expect("infer strongest");
+
+        assert_eq!(inferred, None);
+    }
+
     fn write_extension_identity_state(runtime: &CliRuntime, extension_id: &str) {
         persist_extension_id(runtime, extension_id).expect("persist extension identity");
+    }
+
+    fn register_extension_identity_via_bridge(
+        runtime: &CliRuntime,
+        browser: &str,
+        extension_id: &str,
+    ) {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _env_guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock");
+
+        let previous_store_root = std::env::var_os("RR_STORE_ROOT");
+        // SAFETY: tests serialize RR_STORE_ROOT mutation via ENV_LOCK and restore it before return.
+        unsafe {
+            std::env::set_var("RR_STORE_ROOT", &runtime.store_root);
+        }
+
+        let intent = roger_bridge::BridgeLaunchIntent {
+            action: "register_extension_identity".to_owned(),
+            owner: "roger".to_owned(),
+            repo: "roger-reviewer".to_owned(),
+            pr_number: 0,
+            head_ref: None,
+            instance: None,
+            extension_id: Some(extension_id.to_owned()),
+            browser: Some(browser.to_owned()),
+        };
+        let preflight = roger_bridge::BridgePreflight {
+            roger_binary_found: false,
+            roger_data_dir_exists: false,
+            gh_available: false,
+        };
+
+        let response = roger_bridge::handle_bridge_intent(&intent, &preflight, Path::new("rr"));
+
+        match previous_store_root {
+            Some(value) => {
+                // SAFETY: tests serialize RR_STORE_ROOT mutation via ENV_LOCK and restore it before return.
+                unsafe {
+                    std::env::set_var("RR_STORE_ROOT", value);
+                }
+            }
+            None => {
+                // SAFETY: tests serialize RR_STORE_ROOT mutation via ENV_LOCK and restore it before return.
+                unsafe {
+                    std::env::remove_var("RR_STORE_ROOT");
+                }
+            }
+        }
+
+        assert!(
+            response.ok,
+            "bridge registration intent failed: {} / {:?}",
+            response.message, response.guidance
+        );
+    }
+
+    fn write_extension_profile_discovery_state(
+        runtime: &CliRuntime,
+        browser: SupportedBrowser,
+        extension_id: &str,
+    ) {
+        let profile_root = extension_guided_profile_root(runtime, &browser);
+        let preferences_path = profile_root.join("Default/Secure Preferences");
+        fs::create_dir_all(preferences_path.parent().expect("preferences parent"))
+            .expect("create preferences parent");
+        let package_dir = runtime
+            .cwd
+            .join("target/bridge/extension/roger-extension-unpacked");
+        let preferences = json!({
+            "extensions": {
+                "settings": {
+                    extension_id: {
+                        "path": package_dir.to_string_lossy().to_string()
+                    }
+                }
+            }
+        });
+        fs::write(
+            preferences_path,
+            serde_json::to_vec_pretty(&preferences).expect("serialize preferences"),
+        )
+        .expect("write secure preferences");
     }
 
     #[test]
@@ -4397,11 +6177,75 @@ mod tests {
                 .as_str()
                 .expect("package dir should be present"),
         );
+        assert_eq!(
+            package_dir.file_name().and_then(|value| value.to_str()),
+            Some("roger-extension-unpacked")
+        );
+        let manifest: Value = serde_json::from_str(
+            &fs::read_to_string(package_dir.join("manifest.json")).expect("read packaged manifest"),
+        )
+        .expect("parse packaged manifest");
+        assert_eq!(manifest["version"], "0.1.0.0");
+        assert_eq!(manifest["version_name"], "0.1.0-dev.0+nogit");
+        assert_eq!(payload["data"]["version"], "0.1.0.0");
+        assert_eq!(payload["data"]["version_name"], "0.1.0-dev.0+nogit");
         assert!(package_dir.exists());
         assert!(package_dir.join("manifest.json").exists());
         assert!(package_dir.join("src/background/main.js").exists());
         assert!(package_dir.join("SHA256SUMS").exists());
         assert!(package_dir.join("asset-manifest.json").exists());
+
+        let asset_manifest: Value = serde_json::from_str(
+            &fs::read_to_string(package_dir.join("asset-manifest.json"))
+                .expect("read asset manifest"),
+        )
+        .expect("parse asset manifest");
+        assert_eq!(asset_manifest["version"], "0.1.0.0");
+        assert_eq!(asset_manifest["version_name"], "0.1.0-dev.0+nogit");
+    }
+
+    #[test]
+    fn extension_build_version_uses_release_tag_for_stable() {
+        let build = derive_extension_build_version_from_probe(
+            "0.1.0",
+            &ExtensionVersionProbe {
+                exact_tag: Some("v2026.04.08".to_owned()),
+                ..ExtensionVersionProbe::default()
+            },
+        );
+        assert_eq!(build.manifest_version, "2026.4.8.1000");
+        assert_eq!(build.version_name, "2026.04.08");
+    }
+
+    #[test]
+    fn extension_build_version_uses_release_tag_for_rc() {
+        let build = derive_extension_build_version_from_probe(
+            "0.1.0",
+            &ExtensionVersionProbe {
+                exact_tag: Some("v2026.04.08-rc.3".to_owned()),
+                ..ExtensionVersionProbe::default()
+            },
+        );
+        assert_eq!(build.manifest_version, "2026.4.8.3");
+        assert_eq!(build.version_name, "2026.04.08-rc.3");
+    }
+
+    #[test]
+    fn extension_build_version_uses_local_dev_postfix_for_dirty_worktree() {
+        let build = derive_extension_build_version_from_probe(
+            "0.1.0",
+            &ExtensionVersionProbe {
+                rev_count: Some("42".to_owned()),
+                short_sha: Some("abc123def456".to_owned()),
+                dirty_fingerprint: Some("deadbeef".to_owned()),
+                ..ExtensionVersionProbe::default()
+            },
+        );
+        assert_eq!(build.manifest_version, "0.1.0.0");
+        assert_eq!(
+            build.version_name,
+            "0.1.0-dev.42+abc123def456.dirty.deadbeef"
+        );
     }
 
     #[test]
@@ -4560,16 +6404,26 @@ mod tests {
         let payload = parse_robot(&result.stdout);
         assert_eq!(payload["outcome"], "blocked");
         assert_eq!(payload["data"]["subcommand"], "setup");
-        assert_eq!(payload["data"]["reason_code"], "extension_identity_missing");
+        assert_eq!(
+            payload["data"]["reason_code"],
+            "extension_registration_missing"
+        );
         assert_eq!(payload["data"]["browser"], "edge");
         let repair_actions = payload["repair_actions"]
             .as_array()
             .expect("repair actions should be an array");
-        assert!(repair_actions.iter().all(|action| {
-            !action
+        assert!(
+            repair_actions
+                .first()
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .contains("open edge://extensions")
+        );
+        assert!(repair_actions.iter().any(|action| {
+            action
                 .as_str()
                 .unwrap_or_default()
-                .contains("--extension-id")
+                .contains("RR_BRIDGE_EXTENSION_ID")
         }));
     }
 
@@ -4577,7 +6431,11 @@ mod tests {
     fn extension_setup_and_doctor_succeed_with_discovered_identity() {
         let (tmp, runtime, _generated) = setup_bridge_workspace();
         let install_root = tmp.path().join("install-root");
-        write_extension_identity_state(&runtime, "abcdefghijklmnopabcdefghijklmnop");
+        write_extension_profile_discovery_state(
+            &runtime,
+            SupportedBrowser::Chrome,
+            "abcdefghijklmnopabcdefghijklmnop",
+        );
 
         let setup = run(
             &[
@@ -4596,12 +6454,20 @@ mod tests {
         assert_eq!(setup_payload["outcome"], "complete");
         assert_eq!(setup_payload["data"]["subcommand"], "setup");
         assert_eq!(setup_payload["data"]["browser"], "chrome");
+        assert_eq!(
+            setup_payload["data"]["extension_id_source"],
+            "browser_profile_preferences"
+        );
         assert_eq!(setup_payload["data"]["doctor"]["subcommand"], "doctor");
 
         let os = SupportedOs::current().expect("supported host os");
         let chrome_manifest_path =
             native_host_install_path_for(&SupportedBrowser::Chrome, os, &install_root);
-        assert!(chrome_manifest_path.exists(), "{}", chrome_manifest_path.display());
+        assert!(
+            chrome_manifest_path.exists(),
+            "{}",
+            chrome_manifest_path.display()
+        );
         let doctor = run(
             &[
                 "extension".to_owned(),
@@ -4628,6 +6494,176 @@ mod tests {
     }
 
     #[test]
+    fn extension_setup_and_doctor_succeed_after_bridge_registration_event() {
+        let (tmp, runtime, _generated) = setup_bridge_workspace();
+        let install_root = tmp.path().join("install-root");
+        let extension_id = "abcdefghijklmnopabcdefghijklmnop";
+
+        let blocked_setup = run(
+            &[
+                "extension".to_owned(),
+                "setup".to_owned(),
+                "--browser".to_owned(),
+                "edge".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(blocked_setup.exit_code, 3, "{}", blocked_setup.stderr);
+        let blocked_payload = parse_robot(&blocked_setup.stdout);
+        assert_eq!(blocked_payload["outcome"], "blocked");
+        assert_eq!(
+            blocked_payload["data"]["reason_code"],
+            "extension_registration_missing"
+        );
+
+        register_extension_identity_via_bridge(&runtime, "edge", extension_id);
+
+        let setup = run(
+            &[
+                "extension".to_owned(),
+                "setup".to_owned(),
+                "--browser".to_owned(),
+                "edge".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(setup.exit_code, 0, "{}", setup.stderr);
+        let setup_payload = parse_robot(&setup.stdout);
+        assert_eq!(setup_payload["outcome"], "complete");
+        assert_eq!(setup_payload["data"]["extension_id"], extension_id);
+        assert_eq!(
+            setup_payload["data"]["extension_id_source"],
+            "store_registry"
+        );
+
+        let doctor = run(
+            &[
+                "extension".to_owned(),
+                "doctor".to_owned(),
+                "--browser".to_owned(),
+                "edge".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(doctor.exit_code, 0, "{}", doctor.stderr);
+        let doctor_payload = parse_robot(&doctor.stdout);
+        assert_eq!(doctor_payload["outcome"], "complete");
+        assert!(
+            doctor_payload["data"]["checks"]
+                .as_array()
+                .expect("doctor checks")
+                .iter()
+                .all(|entry| entry["ok"].as_bool().unwrap_or(false))
+        );
+    }
+
+    #[test]
+    fn extension_doctor_distinguishes_registration_missing_from_manifest_missing() {
+        let (tmp, runtime, _generated) = setup_bridge_workspace();
+        let install_root = tmp.path().join("install-root");
+
+        let blocked_missing_registration = run(
+            &[
+                "extension".to_owned(),
+                "doctor".to_owned(),
+                "--browser".to_owned(),
+                "chrome".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(
+            blocked_missing_registration.exit_code, 3,
+            "{}",
+            blocked_missing_registration.stderr
+        );
+        let blocked_registration_payload = parse_robot(&blocked_missing_registration.stdout);
+        assert_eq!(blocked_registration_payload["outcome"], "blocked");
+        assert_eq!(
+            blocked_registration_payload["data"]["reason_code"],
+            "extension_registration_missing"
+        );
+
+        let pack = run(
+            &[
+                "bridge".to_owned(),
+                "pack-extension".to_owned(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(pack.exit_code, 0, "{}", pack.stderr);
+        write_extension_identity_state(&runtime, "abcdefghijklmnopabcdefghijklmnop");
+
+        let blocked_missing_manifest = run(
+            &[
+                "extension".to_owned(),
+                "doctor".to_owned(),
+                "--browser".to_owned(),
+                "chrome".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(
+            blocked_missing_manifest.exit_code, 3,
+            "{}",
+            blocked_missing_manifest.stderr
+        );
+        let blocked_manifest_payload = parse_robot(&blocked_missing_manifest.stdout);
+        assert_eq!(blocked_manifest_payload["outcome"], "blocked");
+        assert_eq!(
+            blocked_manifest_payload["data"]["reason_code"],
+            "native_host_manifest_missing"
+        );
+    }
+
+    #[test]
+    fn extension_setup_discovers_identity_from_guided_profile_preferences() {
+        let (tmp, runtime, _generated) = setup_bridge_workspace();
+        let install_root = tmp.path().join("install-root");
+        let extension_id = "abcdefghijklmnopabcdefghijklmnop";
+        write_extension_profile_discovery_state(&runtime, SupportedBrowser::Chrome, extension_id);
+
+        let setup = run(
+            &[
+                "extension".to_owned(),
+                "setup".to_owned(),
+                "--browser".to_owned(),
+                "chrome".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(setup.exit_code, 0, "{}", setup.stderr);
+        let setup_payload = parse_robot(&setup.stdout);
+        assert_eq!(setup_payload["outcome"], "complete");
+        assert_eq!(
+            setup_payload["data"]["extension_id_source"],
+            "browser_profile_preferences"
+        );
+        assert_eq!(setup_payload["data"]["extension_id"], extension_id);
+        let persisted = fs::read_to_string(extension_id_registry_path(&runtime.store_root))
+            .expect("persisted extension identity should exist");
+        assert_eq!(persisted.trim(), extension_id);
+    }
+
+    #[test]
     fn update_rejects_non_update_flags() {
         let runtime = CliRuntime {
             cwd: PathBuf::from("."),
@@ -4647,6 +6683,16 @@ mod tests {
     }
 
     #[test]
+    fn update_usage_text_lists_yes_confirmation_flags() {
+        assert!(
+            usage_text().contains("rr update")
+                && usage_text().contains("[--yes|-y] [--dry-run] [--robot]"),
+            "{}",
+            usage_text()
+        );
+    }
+
+    #[test]
     fn update_fails_closed_for_local_build_without_release_metadata() {
         let runtime = CliRuntime {
             cwd: PathBuf::from("."),
@@ -4658,5 +6704,323 @@ mod tests {
         let payload = parse_robot(&result.stdout);
         assert_eq!(payload["outcome"], "blocked");
         assert_eq!(payload["data"]["reason_code"], "local_or_unpublished_build");
+        assert_eq!(payload["data"]["migration"]["policy"], "binary_only");
+        assert_eq!(
+            payload["data"]["migration"]["schema_migrations_supported"],
+            false
+        );
+        assert_eq!(payload["data"]["migration"]["status"], "deferred_in_0_1_x");
+    }
+
+    #[test]
+    fn yes_flag_is_update_only() {
+        let runtime = CliRuntime {
+            cwd: PathBuf::from("."),
+            store_root: PathBuf::from(".roger-test"),
+            opencode_bin: "opencode".to_owned(),
+        };
+        let result = run(&["status".to_owned(), "--yes".to_owned()], &runtime);
+        assert_eq!(result.exit_code, 2);
+        assert!(
+            result
+                .stderr
+                .contains("--channel/--version/--api-root/--download-root/--target/--yes are update-only flags"),
+            "{}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn update_accepts_yes_and_short_yes_flags() {
+        let runtime = CliRuntime {
+            cwd: PathBuf::from("."),
+            store_root: PathBuf::from(".roger-test"),
+            opencode_bin: "opencode".to_owned(),
+        };
+        let long_flag = run(
+            &[
+                "update".to_owned(),
+                "--yes".to_owned(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(long_flag.exit_code, 3, "{}", long_flag.stderr);
+        let long_payload = parse_robot(&long_flag.stdout);
+        assert_eq!(
+            long_payload["data"]["reason_code"],
+            "local_or_unpublished_build"
+        );
+
+        let short_flag = run(
+            &["update".to_owned(), "-y".to_owned(), "--robot".to_owned()],
+            &runtime,
+        );
+        assert_eq!(short_flag.exit_code, 3, "{}", short_flag.stderr);
+        let short_payload = parse_robot(&short_flag.stdout);
+        assert_eq!(
+            short_payload["data"]["reason_code"],
+            "local_or_unpublished_build"
+        );
+    }
+
+    #[test]
+    fn update_confirmation_requirement_matrix_is_truthful() {
+        let parsed_plain = parse_args(&["update".to_owned()]).expect("parse update");
+        assert_eq!(
+            evaluate_update_confirmation_requirement(&parsed_plain, true),
+            UpdateConfirmationRequirement::NeedsPrompt
+        );
+        assert_eq!(
+            evaluate_update_confirmation_requirement(&parsed_plain, false),
+            UpdateConfirmationRequirement::BlockedNonInteractive
+        );
+
+        let parsed_yes =
+            parse_args(&["update".to_owned(), "--yes".to_owned()]).expect("parse update --yes");
+        assert_eq!(
+            evaluate_update_confirmation_requirement(&parsed_yes, false),
+            UpdateConfirmationRequirement::BypassedByYes
+        );
+
+        let parsed_robot =
+            parse_args(&["update".to_owned(), "--robot".to_owned()]).expect("parse update --robot");
+        assert_eq!(
+            evaluate_update_confirmation_requirement(&parsed_robot, true),
+            UpdateConfirmationRequirement::BlockedRobotMode
+        );
+
+        let parsed_dry_run = parse_args(&["update".to_owned(), "--dry-run".to_owned()])
+            .expect("parse update --dry-run");
+        assert_eq!(
+            evaluate_update_confirmation_requirement(&parsed_dry_run, false),
+            UpdateConfirmationRequirement::NotRequired("dry_run")
+        );
+    }
+
+    #[test]
+    fn confirmation_parser_accepts_yes_and_rejects_cancel_variants() {
+        assert!(confirmation_response_is_affirmative("y"));
+        assert!(confirmation_response_is_affirmative("Y"));
+        assert!(confirmation_response_is_affirmative(" yes "));
+        assert!(!confirmation_response_is_affirmative(""));
+        assert!(!confirmation_response_is_affirmative("n"));
+        assert!(!confirmation_response_is_affirmative("no"));
+        assert!(!confirmation_response_is_affirmative("anything else"));
+    }
+
+    #[test]
+    fn migration_policy_is_explicitly_deferred_in_0_1_x() {
+        let policy = migration_policy_payload();
+        assert_eq!(policy["policy"], "binary_only");
+        assert_eq!(policy["schema_migrations_supported"], false);
+        assert_eq!(policy["status"], "deferred_in_0_1_x");
+        assert!(
+            policy["guidance"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("fail closed")
+        );
+    }
+
+    fn sample_store_compatibility(policy: &str) -> StoreCompatibilityEnvelope {
+        StoreCompatibilityEnvelope {
+            envelope_version: 1,
+            store_schema_version: 10,
+            min_supported_store_schema: 0,
+            auto_migrate_from: 8,
+            migration_policy: policy.to_owned(),
+            migration_class_max_auto: "class_b".to_owned(),
+            sidecar_generation: "v1".to_owned(),
+            backup_required: true,
+        }
+    }
+
+    #[test]
+    fn migration_preflight_reports_no_migration_when_schema_matches_target() {
+        let envelope = sample_store_compatibility("binary_only");
+        let preflight = assess_migration_preflight(10, &envelope, true);
+        assert_eq!(preflight.status, "no_migration_needed");
+        assert_eq!(preflight.classification, "none");
+        assert!(preflight.apply_allowed);
+        assert!(preflight.blocked_reason.is_none());
+    }
+
+    #[test]
+    fn migration_preflight_reports_auto_safe_posture_when_policy_allows_window() {
+        let envelope = sample_store_compatibility("auto_safe");
+        let preflight = assess_migration_preflight(9, &envelope, true);
+        assert_eq!(preflight.status, "auto_safe_migration_after_update");
+        assert_eq!(preflight.classification, "class_b");
+        assert!(preflight.apply_allowed);
+        assert!(preflight.blocked_reason.is_none());
+    }
+
+    #[test]
+    fn migration_preflight_reports_explicit_gate_when_policy_requires_it() {
+        let envelope = sample_store_compatibility("explicit_operator_gate");
+        let preflight = assess_migration_preflight(9, &envelope, true);
+        assert_eq!(
+            preflight.status,
+            "migration_requires_explicit_operator_gate"
+        );
+        assert_eq!(preflight.classification, "class_c");
+        assert!(!preflight.apply_allowed);
+        assert_eq!(
+            preflight.blocked_reason.as_deref(),
+            Some("target_release_requires_explicit_operator_gate")
+        );
+    }
+
+    #[test]
+    fn migration_preflight_blocks_binary_only_schema_drift_as_unsupported() {
+        let envelope = sample_store_compatibility("binary_only");
+        let preflight = assess_migration_preflight(9, &envelope, true);
+        assert_eq!(preflight.status, "migration_unsupported");
+        assert_eq!(preflight.classification, "class_d");
+        assert!(!preflight.apply_allowed);
+        assert_eq!(
+            preflight.blocked_reason.as_deref(),
+            Some("binary_only_policy_blocks_schema_migration")
+        );
+    }
+
+    #[test]
+    fn migration_preflight_blocks_when_embedded_and_published_envelopes_mismatch() {
+        let envelope = sample_store_compatibility("auto_safe");
+        let preflight = assess_migration_preflight(10, &envelope, false);
+        assert_eq!(preflight.status, "migration_unsupported");
+        assert_eq!(preflight.classification, "class_d");
+        assert!(!preflight.apply_allowed);
+        assert_eq!(
+            preflight.blocked_reason.as_deref(),
+            Some("embedded_and_published_envelope_mismatch")
+        );
+    }
+
+    #[test]
+    fn migration_preflight_blocks_when_target_declares_unsupported_policy() {
+        let envelope = sample_store_compatibility("unsupported");
+        let preflight = assess_migration_preflight(9, &envelope, true);
+        assert_eq!(preflight.status, "migration_unsupported");
+        assert_eq!(preflight.classification, "class_d");
+        assert!(!preflight.apply_allowed);
+        assert_eq!(
+            preflight.blocked_reason.as_deref(),
+            Some("target_release_declares_unsupported_migration_policy")
+        );
+    }
+
+    fn write_test_binary(path: &Path, body: &str) {
+        fs::write(path, body).expect("write binary fixture");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(path).expect("stat fixture").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).expect("chmod fixture");
+        }
+    }
+
+    fn create_update_fixture_archive(
+        root: &Path,
+        payload_dir: &str,
+        binary_name: &str,
+        binary_body: &str,
+    ) -> (PathBuf, String) {
+        let payload_root = root.join("payload-root");
+        let payload_path = payload_root.join(payload_dir);
+        fs::create_dir_all(&payload_path).expect("create payload dir");
+        write_test_binary(&payload_path.join(binary_name), binary_body);
+
+        let archive_name = "fixture-update.tar.gz";
+        let archive_path = root.join(archive_name);
+        let output = Command::new("tar")
+            .arg("-czf")
+            .arg(&archive_path)
+            .arg("-C")
+            .arg(&payload_root)
+            .arg(payload_dir)
+            .output()
+            .expect("run tar for fixture archive");
+        assert!(
+            output.status.success(),
+            "tar fixture archive failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let sha = sha256_for_file(&archive_path).expect("compute fixture sha");
+        (archive_path, sha)
+    }
+
+    #[test]
+    fn update_apply_replaces_binary_in_place_from_fixture_archive() {
+        let tmp = tempdir().expect("tempdir");
+        let install_dir = tmp.path().join("install");
+        fs::create_dir_all(&install_dir).expect("create install dir");
+        let binary_name = if cfg!(windows) { "rr.exe" } else { "rr" };
+        let install_path = install_dir.join(binary_name);
+        write_test_binary(&install_path, "old-binary\n");
+
+        let (archive_path, archive_sha) =
+            create_update_fixture_archive(tmp.path(), "payload", binary_name, "new-binary\n");
+        let archive_url = format!("file://{}", archive_path.to_string_lossy());
+        let outcome = apply_update_archive_in_place(
+            &archive_url,
+            "fixture-update.tar.gz",
+            &archive_sha,
+            "payload",
+            binary_name,
+            &install_path,
+            "2026.04.08",
+        )
+        .expect("apply fixture update");
+
+        assert_eq!(outcome.install_path, install_path);
+        let installed = fs::read_to_string(&install_path).expect("read installed binary");
+        assert_eq!(installed, "new-binary\n");
+
+        let backup_name = outcome
+            .backup_path
+            .file_name()
+            .expect("backup file name")
+            .to_string_lossy()
+            .to_string();
+        assert!(
+            !outcome.backup_path.exists(),
+            "expected backup to be removed after successful apply: {}",
+            outcome.backup_path.display()
+        );
+        assert!(backup_name.contains(".backup-"));
+    }
+
+    #[test]
+    fn update_apply_rolls_back_when_replacement_fails_after_backup() {
+        let tmp = tempdir().expect("tempdir");
+        let install_dir = tmp.path().join("install");
+        fs::create_dir_all(&install_dir).expect("create install dir");
+        let binary_name = if cfg!(windows) { "rr.exe" } else { "rr" };
+        let install_path = install_dir.join(binary_name);
+        write_test_binary(&install_path, "old-binary\n");
+
+        let missing_staged = install_dir.join("missing-staged-binary");
+        let err = apply_binary_replacement_with_rollback(&install_path, &missing_staged, "fixture")
+            .expect_err("replacement should fail when staged binary is missing");
+        assert!(
+            err.contains("rollback restored previous binary"),
+            "unexpected rollback error: {err}"
+        );
+        let installed = fs::read_to_string(&install_path).expect("read installed binary");
+        assert_eq!(installed, "old-binary\n");
+    }
+
+    #[test]
+    fn update_install_layout_rejects_mismatched_binary_name() {
+        let tmp = tempdir().expect("tempdir");
+        let install_path = tmp.path().join("not-rr-binary");
+        write_test_binary(&install_path, "binary\n");
+
+        let err = resolve_update_install_path(&install_path, "rr").expect_err("layout should fail");
+        assert!(err.contains("does not match expected release binary"));
     }
 }

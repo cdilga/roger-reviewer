@@ -4,42 +4,78 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Roger Reviewer</title>
+    <link rel="stylesheet" href="../../static/roger-identity.css" />
     <style>
       :root {
         color-scheme: light;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --rr-popup-canvas: linear-gradient(160deg, #edf4f7 0%, #f8fafb 48%, #f5f8f8 100%);
+        --rr-popup-ink: #15232f;
+        --rr-popup-muted: #4f6270;
+        --rr-popup-accent: #0b6d88;
+        --rr-popup-accent-strong: #08586e;
+        --rr-popup-border: #c8d7e1;
+        --rr-popup-shadow: 0 10px 20px rgba(13, 36, 48, 0.08);
+        font-family: "Segoe UI Variable", "Avenir Next", "Segoe UI", sans-serif;
       }
 
       body {
         margin: 0;
-        width: 320px;
-        background: #f6f8fa;
-        color: #1f2328;
+        width: 352px;
+        background: var(--rr-popup-canvas);
+        color: var(--rr-popup-ink);
       }
 
       main {
         padding: 12px;
       }
 
+      .brand-shell {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 10px;
+      }
+
+      .brand-mark {
+        width: 34px;
+        height: 34px;
+        flex: 0 0 auto;
+      }
+
+      .brand-wordmark {
+        display: block;
+        width: 152px;
+        max-width: 100%;
+        height: auto;
+      }
+
+      .brand-tagline {
+        margin: 4px 0 0;
+        font-size: 11px;
+        line-height: 1.35;
+        color: var(--rr-popup-muted);
+      }
+
       .card {
         background: #ffffff;
-        border: 1px solid #d0d7de;
-        border-radius: 10px;
+        border: 1px solid var(--rr-popup-border);
+        border-radius: 12px;
         padding: 12px;
-        box-shadow: 0 1px 2px rgba(27, 31, 36, 0.04);
+        box-shadow: var(--rr-popup-shadow);
       }
 
       h1 {
         margin: 0;
-        font-size: 14px;
+        font-size: 13px;
         line-height: 1.3;
+        letter-spacing: 0.01em;
       }
 
       p {
         margin: 8px 0 0;
         font-size: 12px;
         line-height: 1.4;
-        color: #57606a;
+        color: var(--rr-popup-muted);
       }
 
       .actions {
@@ -50,17 +86,20 @@
       }
 
       button {
-        border: 1px solid #d0d7de;
+        border: 1px solid var(--rr-popup-border);
         border-radius: 6px;
-        background: #f6f8fa;
-        color: #1f2328;
+        background: #f4f7f9;
+        color: var(--rr-popup-ink);
         font-size: 12px;
         padding: 7px 8px;
         cursor: pointer;
+        transition: border-color 0.12s ease, background-color 0.12s ease, color 0.12s ease;
       }
 
       button:hover:enabled {
-        background: #eff2f5;
+        background: #edf5f8;
+        border-color: var(--rr-popup-accent);
+        color: var(--rr-popup-accent-strong);
       }
 
       button:disabled {
@@ -71,10 +110,24 @@
       .status-error {
         color: #cf222e;
       }
+
+      .build-label {
+        margin: 10px 0 0;
+        font-size: 11px;
+        line-height: 1.4;
+        color: #566b79;
+      }
     </style>
   </head>
   <body>
     <main>
+      <header class="brand-shell">
+        <img class="brand-mark" src="../../static/roger-mark.svg" alt="Roger Reviewer mark" />
+        <div>
+          <img class="brand-wordmark" src="../../static/roger-wordmark.svg" alt="Roger Reviewer" />
+          <p class="brand-tagline">Local-first review continuity, always on your PR page.</p>
+        </div>
+      </header>
       <section class="card" aria-live="polite">
         <h1 id="popup-title">Roger Reviewer</h1>
         <p id="popup-subtitle">Checking active tab context…</p>
@@ -84,6 +137,7 @@
           <button type="button" data-action="show_findings" disabled>Findings</button>
           <button type="button" data-action="refresh_review" disabled>Refresh</button>
         </div>
+        <p id="popup-build" class="build-label" hidden></p>
       </section>
     </main>
     <script src="./main.js"></script>

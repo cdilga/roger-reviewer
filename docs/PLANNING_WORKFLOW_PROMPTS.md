@@ -17,6 +17,16 @@ The local planning pack points to the same core loop:
 3. convert the stabilized plan into a granular bead graph
 4. only then start implementation agents
 
+Additional Roger-specific planning rule:
+
+- during new feature creation and plan shaping, explicitly ask which user
+  actions are truly required versus which can be inferred safely from Roger's
+  local state
+- surface that question early in the plan and bead graph rather than discovering
+  it late during implementation polish
+- inference is allowed only for read-safe and launch-safe flows; approval,
+  posting, code mutation, and other elevated actions remain explicit
+
 The key adaptation for this repo is that the old flywheel bootstrap example is
 no longer the target problem. The actual product problem is Roger Reviewer: a
 local-first PR review system spanning a TUI, session-aware CLI, and GitHub
@@ -66,6 +76,12 @@ Please create a detailed markdown plan that covers:
 - risk register
 - open questions
 - plan-to-beads conversion strategy
+
+Also include an explicit section or subsection answering:
+- which user actions should remain explicit
+- which actions or choices Roger can infer safely
+- where reducing clicks is a primary UX goal
+- where click reduction must yield to safety or ambiguity
 
 Make it self-contained, specific, realistic, and explicit about tradeoffs.
 ```
@@ -175,6 +191,8 @@ Be especially critical about:
 - places where posting or mutation could accidentally happen before approval
 - places where the architecture drifts away from the daemonless/local-first requirement
 - missing smoke tests for OpenCode fallback and resume behavior
+- places where the current plan still forces unnecessary user clicks even though
+  Roger already has enough state to infer the next safe step
 ```
 
 ## 7. Readiness Review Prompt

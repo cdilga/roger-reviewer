@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Roger Reviewer Mark</title>
+  <desc id="desc">A rounded square badge with a ribbon slash and an R letterform.</desc>
+  <defs>
+    <linearGradient id="rogerMarkBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#12314a" />
+      <stop offset="100%" stop-color="#1d5f87" />
+    </linearGradient>
+    <linearGradient id="rogerMarkRibbon" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#8be0ff" />
+      <stop offset="100%" stop-color="#4ac4f8" />
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="24" fill="url(#rogerMarkBg)" />
+  <path d="M16 94 L94 16 H112 L34 94 Z" fill="url(#rogerMarkRibbon)" opacity="0.9" />
+  <path
+    d="M42 37 H63 C74 37 83 46 83 57 C83 66 76 74 68 76 L85 92 H71 L56 77 H51 V92 H42 Z M51 46 V68 H63 C69 68 74 63 74 57 C74 51 69 46 63 46 Z"
+    fill="#ffffff"
+  />
+</svg>

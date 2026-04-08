@@ -147,6 +147,16 @@ Important distinction: you are building Roger Reviewer itself, not acting as a R
 
 You may implement GitHub-adjacent, approval, posting, and mutation-sensitive flows where the backlog and plan call for them. The real restriction is on live external actions during this swarm run: do not actually post to GitHub or mutate external/dev/test environments unless the user explicitly authorizes that action.
 
+For swarm execution workflow, do not use pull requests as the unit of agent work. This run is bead-first and repo-local:
+
+1. do not create or manage GitHub PRs for your own implementation work
+2. do not use `gh pr`, PR review flows, or PR-thread coordination as your normal working loop
+3. do not assume a branch-per-agent workflow
+4. work in the checked-out repo/worktree, keep changes local and explicit, and use beads + Agent Mail as the coordination surface
+5. if a bead or closeout note mentions "open a PR", reinterpret that as a stale workflow assumption unless the current user instruction explicitly asks for PR handling
+
+Roger the product may review GitHub PRs, but the swarm building Roger should not default to a PR-based delivery workflow.
+
 If you need CPU-heavy cargo builds or tests and `rch` is available, prefer `rch exec -- <command>`. If `rch` is installed locally without a worker fleet, it may fail open to local execution; do not sit idle waiting for remote capacity that is not actually configured.
 
 Re-read `AGENTS.md` after every compaction or long interruption so the operating rules stay fresh. The durable state lives in beads and Agent Mail, so use them continuously.

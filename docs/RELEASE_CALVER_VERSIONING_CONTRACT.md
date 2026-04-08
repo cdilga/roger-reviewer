@@ -11,6 +11,14 @@ This document defines Roger's canonical release-version authority for `0.1.x`.
 Any workflow that names release tags, release titles, archive names, checksums, or
 manifest files must consume the JSON envelope emitted by the derivation script.
 
+Extension packaging follows the same release identity, but must translate that
+identity into browser-safe manifest fields:
+
+- tagged release builds stamp a numeric `manifest.version` derived from CalVer
+- tagged release builds stamp a matching human-readable `version_name`
+- local untagged builds keep a compatibility-safe numeric manifest version and
+  use `version_name` for `-dev` / local provenance postfixes
+
 ## Canonical CalVer Tag Format
 
 Roger uses date-based CalVer for release identity:

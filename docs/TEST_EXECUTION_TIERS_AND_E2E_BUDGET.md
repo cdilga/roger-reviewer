@@ -69,6 +69,8 @@ Required families:
 - CLI session-binding and robot-output tests
 - TUI controller tests against fake runtime services
 - Native Messaging envelope and host-mode contract tests
+- Native Messaging host-runtime round-trip tests against the registered `rr`
+  binary
 - GitHub adapter tests with Roger-owned doubles
 - search and rebuild tests against seeded local fixtures
 
@@ -159,6 +161,13 @@ cargo test -p roger-cli --test e2e_core_review_happy_path -- --nocapture
 
 `SMOKE-BRIDGE-CHROME-01`, `SMOKE-BRIDGE-BRAVE-01`, and
 `SMOKE-BRIDGE-EDGE-01` are named suite ids for supported-browser launch smoke.
+
+Bridge smoke rule:
+
+- a supported-browser bridge smoke is not complete unless it proves both:
+  1. registration/install truth (`rr extension doctor` or equivalent), and
+  2. host-runtime truth (the registered `rr` binary responds to a Native
+     Messaging request without hanging)
 They are explicitly smoke/acceptance lane guards, not heavyweight E2Es.
 
 Chrome/Brave-specific execution is required when:

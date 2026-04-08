@@ -80,14 +80,19 @@ Purpose:
 
 - Surfaces: extension, local companion, TUI
 - Primary artifact: structured review-intake payload
-- Happy path: extension injects GitHub-native inline Roger actions into the PR
-  page and Roger opens the correct local session
-- Common variants: `start`, `resume`, `refresh`, short objective or preset, open
-  directly into a target local queue, fallback to browser-action popup when
-  inline DOM attachment is unavailable
+- Happy path: extension attaches Roger entry controls into the GitHub PR page
+  using GitHub-native button styling in stable header-action seams, or renders a
+  first-class in-page Roger pane in the PR right rail above the reviewers card,
+  and Roger opens the correct local session with the lowest-click 4-action set
+  (`start`, `resume`, `findings`, `refresh`) available directly from the page
+- Common variants: short objective or preset, open directly into a target local
+  queue, header-action host versus right-rail pane, modal fallback when
+  page-DOM attachment is unavailable, browser-action popup as an explicit
+  manual fallback
 - Failure/recovery: companion unavailable, bridge missing, multiple local
   instances, launch-only mode with no readback, GitHub DOM drift that forces a
-  bounded fallback entrypoint
+  bounded in-page modal or browser-action fallback entrypoint, additive seam
+  unavailable without displacing first-party GitHub actions
 - Test intent: prove honest daemonless handoff behavior on supported browsers
 
 ### F02.1: Guided Browser Setup And Verification
@@ -103,11 +108,45 @@ Purpose:
   extension self-registration versus Roger-owned discovery; repair/dev-only use
   of lower-level bridge commands
 - Failure/recovery: extension not yet loaded, extension identity missing, host
-  registration drift, unsupported browser path, doctor reports blocked guidance
-  instead of claiming browser launch support
+  registration drift, unsupported browser path, `rr extension doctor` green but
+  runtime host execution still broken, doctor reports blocked guidance instead
+  of claiming browser launch support
 - Test intent: prove the normal browser setup path is guided, truthful, and
   does not require manual extension-id entry or a user-facing separate host
-  binary
+  binary, and that support is only claimed after the registered `rr` host
+  binary answers a real Native Messaging round trip
+
+### F02.2: Extension Shortcuts, Settings, And Help
+
+- Surfaces: extension popup, in-page PR entry, options/settings, help surface
+- Primary artifact: extension-local operator ergonomics and guidance state
+- Happy path: user can discover and use safe non-conflicting shortcuts for core
+  Roger actions, adjust extension settings explicitly, and open an in-extension
+  help surface that explains action meanings, setup state, and fallback paths
+- Common variants: popup-driven help, page-driven help, settings that tune
+  page-entry behavior, shortcut enable or disable controls, browser-managed
+  shortcut overrides
+- Failure/recovery: unavailable shortcut chord, conflicting browser binding,
+  missing setup state, help surface points user to `rr extension doctor` or
+  local Roger commands rather than pretending health
+- Test intent: prove extension ergonomics are discoverable, configurable, and
+  truthful without adding hidden state ownership
+
+### F02.3: Inferred Safe Actions And Reduced Extension Friction
+
+- Surfaces: extension PR entry, guided setup, session re-entry
+- Primary artifact: inferred-primary-action and reduced-friction interaction model
+- Happy path: Roger infers the most likely safe next action from session and
+  attention state, hides unnecessary secondary actions until they are relevant,
+  continues setup when extension registration arrives, and avoids extra
+  disambiguation prompts when a single strongest target is already known
+- Common variants: contextual `refresh`, emphasized `resume`, setup completes
+  after observed registration, picker still appears for real ambiguity
+- Failure/recovery: ambiguity remains explicit, setup still fails closed when
+  registration never appears, mutation-sensitive actions remain manual and
+  elevated
+- Test intent: prove Roger reduces avoidable clicks without inferring across
+  safety boundaries
 
 ### F03: Structured Findings Pack Intake
 

@@ -1,0 +1,32 @@
+:root {
+  --rr-brand-ink-900: #15232f;
+  --rr-brand-ink-700: #2a4150;
+  --rr-brand-ink-500: #4f6270;
+  --rr-brand-accent-700: #08586e;
+  --rr-brand-accent-500: #0b6d88;
+  --rr-brand-accent-300: #2f93ab;
+  --rr-brand-glow-200: #9ad2dd;
+  --rr-brand-canvas-100: #f4f8f9;
+}
+
+.rr-brand-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  border: 1px solid var(--rr-brand-glow-200);
+  background: linear-gradient(110deg, #ffffff 0%, var(--rr-brand-canvas-100) 100%);
+  color: var(--rr-brand-ink-700);
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 9px;
+}
+
+.rr-brand-chip::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--rr-brand-accent-500);
+  box-shadow: 0 0 0 3px rgba(11, 109, 136, 0.14);
+}

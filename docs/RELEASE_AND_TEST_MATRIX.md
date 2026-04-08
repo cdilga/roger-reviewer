@@ -22,8 +22,9 @@ Rules:
 - prefer one blessed path over a wide shallow support claim
 - automate the highest-risk workflow first, not the easiest one
 - treat OS/browser/provider packaging as product work, not release cleanup
-- treat Native Messaging as the serious `0.1.0` bridge and custom URL only as
-  a thin launch/recovery path
+- treat Native Messaging as the only supported `0.1.0` browser bridge
+- do not treat manifest installation or `rr extension doctor` success as proof
+  that the registered `rr` binary actually works as a Native Messaging host
 - keep the support matrix explicit so unsupported combinations are truthful
 - use stubs and fixtures where they increase determinism, but keep at least one
   real boundary test for each major external surface
@@ -62,13 +63,9 @@ Provider claim rule:
 | Surface | `0.1.0` status | Notes |
 |---------|----------------|-------|
 | Native Messaging | Primary bridge | Required for serious companion-tier behavior |
-| Custom URL | Convenience path | Keep for thin launch and recovery, not as the only serious bridge |
 | Chrome | Supported | Same extension source base |
 | Brave | Supported | Same extension source base |
 | Edge | Supported and first-class | Must not be treated as "probably similar enough to Chrome" |
-
-Custom URL may remain useful for thin launch and recovery, but it does not by
-itself satisfy Roger's companion-tier bridge claims.
 
 ## Release Artifact Baseline
 
@@ -101,7 +98,7 @@ ownership and support claims:
 | Artifact class | Required for blessed `0.1.0` local release | Target platforms | Notes |
 |----------------|---------------------------------------------|------------------|-------|
 | Core companion archive | Yes | macOS `arm64`, macOS `x86_64`, Windows `x86_64`, Windows `arm64`, Linux `x86_64`, Linux `arm64` | Versioned archive containing the `rr` binary and minimal local runtime assets. The unified `release` workflow currently ships a truthful first subset (`macOS arm64/x86_64`, `Windows x86_64`, `Linux x86_64/arm64`) and records `Windows arm64` as explicitly excluded in the aggregate manifest until that lane is wired. |
-| Bridge registration bundle | Yes where Roger claims browser-launch support on that OS | macOS, Windows, Linux | Native Messaging manifest templates plus Roger-owned install/uninstall helpers and any custom-URL registration assets |
+| Bridge registration bundle | Yes where Roger claims browser-launch support on that OS | macOS, Windows, Linux | Native Messaging manifest templates plus Roger-owned install/uninstall helpers for the registered `rr` host runtime |
 | Browser extension sideload package | Optional release lane, but required before Roger claims Chrome/Brave/Edge launch as shipped product behavior | One source base targeting Chrome, Brave, Edge | Keep browser-store publication out of the `0.1.0` critical path; publish installable package assets and docs first |
 | Release metadata bundle | Yes | All published releases | `SHA256SUMS`, install/update docs, release notes, and asset manifest describing what was built and what support tier it carries |
 
@@ -158,8 +155,8 @@ Ownership rules:
 
 - `release` keeps one top-level workflow while preserving job-level ownership
 - `build-core` owns compilation, but not publication
-- `package-bridge` owns Native Messaging and custom-URL registration
-  assets, but not browser-extension packaging
+- `package-bridge` owns Native Messaging registration assets and host-runtime
+  packaging truth, but not browser-extension packaging
 - `package-extension` remains its own job so the browser lane can
   advance or pause without muddying the core local-product release lane
 - `publish-release` should publish only the artifact classes that actually
@@ -271,12 +268,15 @@ Smoke validation for this contract:
 
 `0.1.0` implementation status:
 
-- `rr self-update` is deferred and not yet implemented in `packages/cli`
-- the currently implemented Roger-owned update path is to rerun the installer
-  contract against published CalVer metadata:
-  - Unix-like shells: `scripts/release/rr-install.sh --channel stable`
-  - PowerShell: `scripts/release/rr-install.ps1 -Channel stable`
-  - explicit pinned updates remain available through `--version` / `-Version`
+- `rr update` is the Roger-owned updater in `packages/cli` and performs
+  in-place binary replacement against published CalVer release metadata
+- default apply behavior is confirmation-gated on an interactive TTY
+- `--yes` / `-y` bypasses only the confirmation prompt for non-interactive
+  apply; artifact/provenance/safety checks still run
+- `--dry-run` and `--robot` remain non-mutating metadata/preflight paths; in
+  `--robot` mode, apply is blocked unless `--yes` / `-y` is provided
+- local/unpublished builds are blocked and require explicit reinstall from a
+  published CalVer release before update can run
 
 Behavior rules:
 
@@ -287,19 +287,55 @@ Behavior rules:
   manifest + checksum verification rules as install and fails closed on missing
   metadata, metadata/manifest drift, checksum mismatch, or ambiguous target
   resolution
+- apply path uses an atomic rename/backup strategy with rollback restore when
+  replacement fails after backup
 - installs created from local/unpublished artifacts should not be upgraded as
   if they were blessed release installs; Roger requires an explicit reinstall
   from a published CalVer release in that case
+- migration-capable updates are intentionally deferred in `0.1.x`; update
+  responses must report migration policy as binary-only
+  (`migration.status=deferred_in_0_1_x`) and fail closed if a future release
+  requires state/schema migration before apply
+- every unified release run must rehearse at least one representative
+  prior-schema Roger store upgrade before artifact generation; a failing
+  migration rehearsal blocks release generation rather than publishing a build
+  that cannot open supported local state
+
+Migration contract baseline for the `rr-1xhg` lane:
+
+- compatibility envelope and fail-closed boundaries are defined in
+  [`PLAN_FOR_SCHEMA_MIGRATIONS_AND_UPDATE_COMPATIBILITY.md`](PLAN_FOR_SCHEMA_MIGRATIONS_AND_UPDATE_COMPATIBILITY.md)
+- once migration-capable update support is implemented, `rr update --dry-run`
+  must report migration posture as one of:
+  - `no_migration_needed`
+  - `auto_safe_migration_after_update`
+  - `migration_requires_explicit_operator_gate`
+  - `migration_unsupported`
+- apply must block before binary replacement when preflight reports
+  `migration_requires_explicit_operator_gate` or `migration_unsupported`
+- first-run store open may auto-run only Class A/B migrations when envelope and
+  policy checks allow `auto_safe`; Class C/D paths remain fail-closed until an
+  explicit operator-gated lane is shipped
 
 ### Separate optional extension lane
 
-- bridge registration bundles and extension sideload packages remain a separate
-  post-install workflow
-- Roger may expose explicit follow-up commands such as `rr bridge install`, but
-  those commands are outside the base one-line local-product contract
+- bridge registration bundles and extension sideload packages remain an
+  optional guided setup lane after core install, driven by
+  `rr extension setup` and `rr extension doctor`; normal guided setup should
+  provision bridge registration directly so first-time browser onboarding does
+  not require a manual low-level bridge command
+- Roger may expose explicit low-level commands such as `rr bridge install`, but
+  those commands are repair/development workflows outside the normal onboarding
+  contract
 - release notes must not imply browser-launch support on a target unless the
   matching bridge registration bundle and extension package were actually
   shipped for that release
+- browser-launch support also requires one host-runtime smoke that proves the
+  registered `rr` binary can complete a Native Messaging request/response round
+  trip; install/doctor-only validation is not enough
+- extension packaging lane smoke command:
+  `bash scripts/release/test_package_extension_bundle.sh`
+  (proves zip artifact + extension-bundle manifest + bridge/pack robot outputs)
 
 ## Blessed Automated Paths
 
