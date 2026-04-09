@@ -10,7 +10,9 @@ use roger_bridge::{
     NativeHostManifest, SupportedBrowser, SupportedOs, native_host_install_path_for,
 };
 use roger_config::cli_defaults::{DEFAULT_OPENCODE_BIN, ENV_OPENCODE_BIN, ENV_STORE_ROOT};
+use roger_session_claude::{ClaudeAdapter, ClaudeSessionPath};
 use roger_session_codex::{CodexAdapter, CodexSessionPath};
+use roger_session_gemini::{GeminiAdapter, GeminiSessionPath};
 use roger_session_opencode::{
     OpenCodeAdapter, OpenCodeReturnPath, OpenCodeSessionPath, rr_return_to_roger_session,
 };
@@ -2249,7 +2251,7 @@ fn handle_bridge(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
 }
 
 fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
-    if parsed.provider != "opencode" && parsed.provider != "codex" {
+    if parsed.provider != "opencode" && parsed.provider != "codex" && parsed.provider != "claude" && parsed.provider != "gemini" {
         return blocked_response(
             format!(
                 "provider '{}' is not supported for rr review in this slice",
@@ -2258,10 +2260,12 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             vec![
                 "use --provider opencode for tier-b CLI continuity in 0.1.0".to_owned(),
                 "use --provider codex for bounded tier-a start/reseed support".to_owned(),
+                "use --provider claude for bounded tier-a start/reseed support".to_owned(),
+                "use --provider gemini for bounded tier-a start/reseed support".to_owned(),
             ],
             json!({
                 "provider": parsed.provider,
-                "supported_providers": ["opencode", "codex"],
+                "supported_providers": ["opencode", "codex", "claude", "gemini"],
             }),
         );
     }
@@ -2298,7 +2302,7 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                     "tier": provider_tier(&parsed.provider),
                     "supports": {
                         "review_start": true,
-                        "resume_reseed": parsed.provider == "codex" || parsed.provider == "opencode",
+                        "resume_reseed": parsed.provider == "codex" || parsed.provider == "claude" || parsed.provider == "gemini" || parsed.provider == "opencode",
                         "resume_reopen": parsed.provider == "opencode",
                         "return": parsed.provider == "opencode",
                     }
@@ -2356,6 +2360,48 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                     codex_session_path_label(&linkage.path).to_owned(),
                     linkage.continuity_quality,
                     provider_support_warning("codex", "rr review")
+                        .into_iter()
+                        .collect(),
+                )
+            }
+            "claude" => {
+                let adapter = ClaudeAdapter::new();
+                let linkage = match adapter.link_session(&target, &intent, None, None) {
+                    Ok(linkage) => linkage,
+                    Err(err) => {
+                        return blocked_response(
+                            format!("failed to start Claude session: {err}"),
+                            vec!["verify Claude CLI is installed and reachable".to_owned()],
+                            json!({"reason_code": "claude_start_failed"}),
+                        );
+                    }
+                };
+                (
+                    linkage.locator,
+                    claude_session_path_label(&linkage.path).to_owned(),
+                    linkage.continuity_quality,
+                    provider_support_warning("claude", "rr review")
+                        .into_iter()
+                        .collect(),
+                )
+            }
+            "gemini" => {
+                let adapter = GeminiAdapter::new();
+                let linkage = match adapter.link_session(&target, &intent, None, None) {
+                    Ok(linkage) => linkage,
+                    Err(err) => {
+                        return blocked_response(
+                            format!("failed to start Gemini session: {err}"),
+                            vec!["verify Gemini CLI is installed and reachable".to_owned()],
+                            json!({"reason_code": "gemini_start_failed"}),
+                        );
+                    }
+                };
+                (
+                    linkage.locator,
+                    gemini_session_path_label(&linkage.path).to_owned(),
+                    linkage.continuity_quality,
+                    provider_support_warning("gemini", "rr review")
                         .into_iter()
                         .collect(),
                 )
@@ -2681,19 +2727,19 @@ fn handle_resume_or_refresh(
         }
     };
 
-    if session.provider != "opencode" && session.provider != "codex" {
+    if session.provider != "opencode" && session.provider != "codex" && session.provider != "claude" && session.provider != "gemini" {
         return blocked_response(
             format!(
                 "session {} uses provider '{}' which cannot be resumed by this CLI slice",
                 session.id, session.provider
             ),
             vec![
-                "resume/refresh is currently available for opencode and codex sessions".to_owned(),
+                "resume/refresh is currently available for opencode, codex, claude, and gemini sessions".to_owned(),
             ],
             json!({
                 "session_id": session.id,
                 "provider": session.provider,
-                "supported_providers": ["opencode", "codex"],
+                "supported_providers": ["opencode", "codex", "claude", "gemini"],
             }),
         );
     }
@@ -2717,7 +2763,7 @@ fn handle_resume_or_refresh(
             "usable"
         };
         let inferred_resume_path =
-            if session.provider == "codex" || continuity_state.contains("reseed") {
+            if session.provider == "codex" || session.provider == "claude" || session.provider == "gemini" || continuity_state.contains("reseed") {
                 "reseeded_from_bundle"
             } else if continuity_state.contains("reopen") {
                 "reopened_by_locator"
@@ -2856,6 +2902,80 @@ fn handle_resume_or_refresh(
             };
             (
                 codex_session_path_label(&linkage.path).to_owned(),
+                linkage.continuity_quality,
+                linkage
+                    .decision
+                    .as_ref()
+                    .map(|decision| format!("{:?}", decision.reason_code))
+                    .unwrap_or_else(|| "none".to_owned()),
+                provider_support_warning(&session.provider, "rr resume")
+                    .into_iter()
+                    .collect(),
+            )
+        }
+        "claude" => {
+            let adapter = ClaudeAdapter::new();
+            let linkage = match adapter.link_session(
+                &session.review_target,
+                &intent,
+                session.session_locator.as_ref(),
+                resume_bundle.as_ref(),
+            ) {
+                Ok(linkage) => linkage,
+                Err(err) => {
+                    return blocked_response(
+                        format!("resume failed: {err}"),
+                        vec![
+                            "ensure a valid ResumeBundle exists or launch a new review with rr review --provider claude"
+                                .to_owned(),
+                        ],
+                        json!({
+                            "reason_code": "resume_failed_closed",
+                            "session_id": session.id,
+                            "error": err.to_string(),
+                        }),
+                    );
+                }
+            };
+            (
+                claude_session_path_label(&linkage.path).to_owned(),
+                linkage.continuity_quality,
+                linkage
+                    .decision
+                    .as_ref()
+                    .map(|decision| format!("{:?}", decision.reason_code))
+                    .unwrap_or_else(|| "none".to_owned()),
+                provider_support_warning(&session.provider, "rr resume")
+                    .into_iter()
+                    .collect(),
+            )
+        }
+        "gemini" => {
+            let adapter = GeminiAdapter::new();
+            let linkage = match adapter.link_session(
+                &session.review_target,
+                &intent,
+                session.session_locator.as_ref(),
+                resume_bundle.as_ref(),
+            ) {
+                Ok(linkage) => linkage,
+                Err(err) => {
+                    return blocked_response(
+                        format!("resume failed: {err}"),
+                        vec![
+                            "ensure a valid ResumeBundle exists or launch a new review with rr review --provider gemini"
+                                .to_owned(),
+                        ],
+                        json!({
+                            "reason_code": "resume_failed_closed",
+                            "session_id": session.id,
+                            "error": err.to_string(),
+                        }),
+                    );
+                }
+            };
+            (
+                gemini_session_path_label(&linkage.path).to_owned(),
                 linkage.continuity_quality,
                 linkage
                     .decision
@@ -3228,17 +3348,20 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     };
 
     let limit = parsed.limit.unwrap_or(10).min(100);
-    let lookup = match store.prior_review_lookup(PriorReviewLookupQuery {
-        scope_key: &format!("repo:{repository}"),
-        repository: &repository,
-        query_text,
-        limit: limit.saturating_add(1),
-        include_tentative_candidates: false,
-        allow_project_scope: false,
-        allow_org_scope: false,
-        semantic_assets_verified: false,
-        semantic_candidates: Vec::new(),
-    }) {
+    let mut embedder = roger_storage::SemanticEmbedderAdapter::default_for_runtime();
+    let lookup = match store.prior_review_lookup_with_embedder(
+        PriorReviewLookupQuery {
+            scope_key: &format!("repo:{repository}"),
+            repository: &repository,
+            query_text,
+            limit: limit.saturating_add(1),
+            include_tentative_candidates: false,
+            allow_project_scope: false,
+            allow_org_scope: false,
+            semantic_candidates: Vec::new(),
+        },
+        &mut embedder,
+    ) {
         Ok(result) => result,
         Err(err) => return error_response(format!("failed to run prior-review lookup: {err}")),
     };
@@ -5368,6 +5491,20 @@ fn codex_session_path_label(path: &CodexSessionPath) -> &'static str {
     match path {
         CodexSessionPath::StartedFresh => "started_fresh",
         CodexSessionPath::ReseededFromBundle => "reseeded_from_bundle",
+    }
+}
+
+fn claude_session_path_label(path: &ClaudeSessionPath) -> &'static str {
+    match path {
+        ClaudeSessionPath::StartedFresh => "started_fresh",
+        ClaudeSessionPath::ReseededFromBundle => "reseeded_from_bundle",
+    }
+}
+
+fn gemini_session_path_label(path: &GeminiSessionPath) -> &'static str {
+    match path {
+        GeminiSessionPath::StartedFresh => "started_fresh",
+        GeminiSessionPath::ReseededFromBundle => "reseeded_from_bundle",
     }
 }
 

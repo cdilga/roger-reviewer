@@ -720,6 +720,7 @@ pub struct PostingAdapterItemResult {
 pub trait OutboundPostingAdapter {
     fn post_approved_draft_batch(
         &self,
+        target: &ReviewTarget,
         batch: &OutboundDraftBatch,
         drafts: &[OutboundDraft],
     ) -> std::result::Result<Vec<PostingAdapterItemResult>, String>;
@@ -728,6 +729,7 @@ pub trait OutboundPostingAdapter {
 pub struct ExplicitPostingInput<'a> {
     pub action_id: &'a str,
     pub provider: &'a str,
+    pub target: &'a ReviewTarget,
     pub batch: &'a OutboundDraftBatch,
     pub drafts: &'a [OutboundDraft],
     pub approval: &'a OutboundApprovalToken,
@@ -928,7 +930,7 @@ pub fn execute_explicit_posting_flow(
         .map(|draft| draft.id.clone())
         .collect::<Vec<_>>();
 
-    let item_results = match adapter.post_approved_draft_batch(input.batch, input.drafts) {
+    let item_results = match adapter.post_approved_draft_batch(input.target, input.batch, input.drafts) {
         Ok(results) => results,
         Err(err) => {
             let reason_code = format!("adapter_error:{err}");

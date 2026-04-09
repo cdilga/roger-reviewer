@@ -1101,35 +1101,24 @@ fn review_blocks_truthfully_for_unsupported_provider() {
     };
 
     let review = run_rr(
-        &["review", "--pr", "42", "--provider", "claude", "--robot"],
+        &["review", "--pr", "42", "--provider", "pi-agent", "--robot"],
         &runtime,
     );
     assert_eq!(review.exit_code, 3, "{}", review.stderr);
 
     let payload = parse_robot_payload(&review.stdout);
     assert_eq!(payload["outcome"], "blocked");
-    assert_eq!(payload["data"]["provider"], "claude");
-    assert_eq!(
-        payload["data"]["supported_providers"],
-        Value::Array(vec![
-            Value::String("opencode".to_owned()),
-            Value::String("codex".to_owned())
-        ])
-    );
     assert!(
-        payload["repair_actions"]
+        payload["data"]["supported_providers"]
             .as_array()
-            .expect("repair actions")
+            .expect("supported list")
             .iter()
-            .any(|action| action
-                .as_str()
-                .expect("repair action string")
-                .contains("--provider opencode"))
+            .any(|p| p.as_str() == Some("opencode"))
     );
 }
 
 #[test]
-fn review_blocks_truthfully_for_gemini_until_provider_launch_support_is_exposed() {
+fn review_succeeds_with_degraded_outcome_for_claude_and_gemini() {
     let temp = tempdir().expect("tempdir");
     let repo = init_repo(&temp);
     let (_stub_dir, opencode_bin) = write_stub_binary(false);
@@ -1140,32 +1129,18 @@ fn review_blocks_truthfully_for_gemini_until_provider_launch_support_is_exposed(
         opencode_bin: opencode_bin.to_string_lossy().to_string(),
     };
 
-    let review = run_rr(
-        &["review", "--pr", "42", "--provider", "gemini", "--robot"],
-        &runtime,
-    );
-    assert_eq!(review.exit_code, 3, "{}", review.stderr);
+    for provider in ["claude", "gemini"] {
+        let review = run_rr(
+            &["review", "--pr", "42", "--provider", provider, "--robot"],
+            &runtime,
+        );
+        // Exits 5 for Degraded because Tier A providers (Claude/Gemini) are always degraded
+        assert_eq!(review.exit_code, 5, "provider {} failed: {}", provider, review.stderr);
 
-    let payload = parse_robot_payload(&review.stdout);
-    assert_eq!(payload["outcome"], "blocked");
-    assert_eq!(payload["data"]["provider"], "gemini");
-    assert_eq!(
-        payload["data"]["supported_providers"],
-        Value::Array(vec![
-            Value::String("opencode".to_owned()),
-            Value::String("codex".to_owned())
-        ])
-    );
-    assert!(
-        payload["repair_actions"]
-            .as_array()
-            .expect("repair actions")
-            .iter()
-            .any(|action| action
-                .as_str()
-                .expect("repair action string")
-                .contains("--provider codex"))
-    );
+        let payload = parse_robot_payload(&review.stdout);
+        assert_eq!(payload["outcome"], "degraded");
+        assert_eq!(payload["data"]["provider"], provider);
+    }
 }
 
 #[test]

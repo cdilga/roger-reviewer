@@ -1,0 +1,15 @@
+[package]
+name = "roger-session-claude"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+roger-app-core = { path = "../app-core" }
+roger-storage = { path = "../storage" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
