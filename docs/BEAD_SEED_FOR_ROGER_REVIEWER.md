@@ -27,8 +27,8 @@ draft.
 ### 1.3 Run architecture risk spikes and ADRs
 
 - Objective: reduce uncertainty around the supported-harness boundary with
-  OpenCode primary and Gemini bounded, the browser launch bridge, and the
-  artifact storage strategy before implementation fans out.
+  OpenCode primary and bounded live-CLI providers, the browser launch bridge,
+  and the artifact storage strategy before implementation fans out.
 - Depends on: 1.2.
 - Acceptance: spike outcomes are documented and any package-shaping decisions
   are captured in ADRs, including the Rust-first local runtime stance and the
@@ -146,14 +146,15 @@ draft.
 - Acceptance: OpenCode-backed reviews can resume from Roger and from plain
   OpenCode, and dropout/return flows are explicit and testable.
 
-### 3.1.2 Implement Gemini bounded adapter
+### 3.1.2 Implement bounded live-CLI provider adapter tranche
 
-- Objective: implement the bounded `0.1.0` Gemini harness path without forcing
-  transcript-isomorphic parity with OpenCode.
+- Objective: implement the bounded `0.1.0` live-CLI provider tranche without
+  forcing transcript-isomorphic parity with OpenCode.
 - Depends on: 3.1.
-- Acceptance: Gemini-backed reviews can start through Roger, persist
-  structured/raw outputs, and reseed from ResumeBundle truthfully even if native
-  reopen semantics differ.
+- Acceptance: bounded-provider reviews can start through Roger, persist
+  structured/raw outputs, and reseed from `ResumeBundle` truthfully even when
+  native reopen semantics differ; each provider is claimed only to the
+  capability tier it has actually validated.
 
 ### 3.2 Implement session persistence and resume
 
@@ -493,7 +494,8 @@ draft.
 ### 11.2 Add end-to-end validation matrix
 
 - Objective: cover CLI launch, TUI review, GitHub launch, refresh, posting, and
-  supported-harness fallback, with OpenCode primary and Gemini bounded.
+  supported-harness fallback, with OpenCode primary and bounded live-CLI
+  providers as secondary paths.
 - Depends on: 5.2, 6.3, 7.3, 8.2.
 - Acceptance: the main user workflows are executable and repeatable.
 
@@ -548,15 +550,15 @@ draft.
   and failure artifacts plus automated-E2E budget checks are wired into the
   harness instead of bespoke suite scripts.
 
-### 11.2.3 Implement provider acceptance suites for OpenCode and Gemini
+### 11.2.3 Implement provider acceptance suites for OpenCode and bounded providers
 
 - Objective: turn the supported-provider promises into repeatable adapter
   acceptance suites instead of leaving them as documentation-only claims.
 - Depends on: 3.1.1, 3.1.2, 11.2.2, 11.2.2.3.
 - Acceptance: OpenCode acceptance covers real reopen plus ResumeBundle fallback;
-  Gemini acceptance covers Roger-owned session/run continuity, structured/raw
-  capture, and truthful reseed without pretending native parity it does not
-  have.
+  bounded-provider acceptance covers Roger-owned session/run continuity,
+  structured/raw capture, and truthful reseed without pretending native parity
+  providers do not have.
 
 ### 11.3 Validate refresh identity behavior
 

@@ -1,7 +1,7 @@
 # Planning Workflow Prompts
 
 These prompts adapt the local planning workflow to `Roger Reviewer`, using
-[`roger-reviewer-brain-dump.md`](/Users/cdilga/Documents/dev/roger-reviewer/roger-reviewer-brain-dump.md)
+[`docs/roger-reviewer-brain-dump.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/roger-reviewer-brain-dump.md)
 as the raw source document and
 [`PLAN_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md)
 as the canonical plan. Use

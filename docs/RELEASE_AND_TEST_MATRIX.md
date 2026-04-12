@@ -15,6 +15,15 @@ The implementation-facing harness contract lives in
 The automated E2E budget file lives in
 [`AUTOMATED_E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/AUTOMATED_E2E_BUDGET.json).
 
+Roger now recognizes only three validation lanes:
+
+- `unit`
+- `integration`
+- `e2e`
+
+Names such as `fast-local`, `pr`, `gated`, `nightly`, and `release` are
+execution policies or gates, not extra lanes.
+
 ## Engineering Posture
 
 Rules:
@@ -30,6 +39,8 @@ Rules:
   real boundary test for each major external surface
 - do not add heavyweight automated E2Es outside the declared budget without an
   explicit justification record
+- treat release as an explicit operator gate backed by prerequisites and
+  current evidence, not as an ambient fourth validation lane
 
 ## `0.1.0` Provider Matrix
 
@@ -37,17 +48,18 @@ Rules:
 |----------|----------------|---------------------|
 | OpenCode | Primary | Real locator-based resume, Roger ledger integration, bare-harness dropout, `rr return` |
 | Codex | Secondary, bounded | Exposed via `rr review --provider codex`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |
-| Gemini harness | Adapter-contract lane, bounded | Keep Tier A adapter acceptance truthful (ledger + intake + structured/raw capture + ResumeBundle reseed) without claiming live `rr review --provider gemini` support |
-| Claude | Not in `0.1.0` | Contract-shaping only |
+| Claude | Secondary, bounded | Exposed via `rr review --provider claude`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |
+| Gemini harness | Secondary, bounded | Exposed via `rr review --provider gemini`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |
+| GitHub Copilot CLI | Active implementation scope, not yet live | Do not claim support until verified launch, policy, and continuity coverage are real |
 | Pi-Agent | Not in `0.1.0` | Contract-shaping only |
 
-Gemini adapter coverage in `0.1.0` should stay common-sense:
+Bounded-provider coverage in `0.1.0` should stay common-sense:
 
 - Roger owns the continuity model
-- Gemini adapter coverage does not require transcript-isomorphic resume parity with
-  OpenCode
-- if Gemini lacks a stable reopen path, Roger should still support truthful
-  reseed/resume through `ResumeBundle` when that provider path is exposed
+- Codex, Claude, and Gemini do not require transcript-isomorphic resume parity
+  with OpenCode to earn truthful Tier A claims
+- if a bounded provider lacks a stable reopen path, Roger should still support
+  truthful reseed/resume through `ResumeBundle` without widening the claim
 
 Provider claim rule:
 
@@ -171,7 +183,10 @@ Unified `release` operator contract for `0.1.0`:
 2. Use `workflow_dispatch` with `publish_mode=draft` for rehearsal, or
    `publish_mode=publish` for stable CalVer tags only.
 3. Approval is explicit via the `release-publish-approval` environment gate.
-4. `publish-release` must fail closed unless:
+4. Release is an operator decision that should be made only after the current
+   bead frontier, support wording, validation evidence, and smoke prerequisites
+   are acceptable for the intended claim set.
+5. `publish-release` must fail closed unless:
    - verify manifest schema is `roger.release-verify-assets.v1`
    - `publish_gate.publish_allowed == true`
    - the same workflow run produced successful build/package/verify jobs for the
@@ -182,16 +197,16 @@ Unified `release` operator contract for `0.1.0`:
      manifests
    - optional-lane parity holds with verify data from the same run; no silent
      widening or downgrade is allowed
-5. Release notes are generated from the verified manifest and must include:
+6. Release notes are generated from the verified manifest and must include:
    support posture, narrowed claims, checksum/signing references, and release
    run provenance.
-6. Stable publish (`publish_mode=publish`) requires explicit operator smoke
+7. Stable publish (`publish_mode=publish`) requires explicit operator smoke
    acknowledgement and the checklist in
    `docs/release-publish-operator-smoke.md`.
-7. `release-publish-plan` artifacts should retain:
+8. `release-publish-plan` artifacts should retain:
    - generated release plan + notes
    - verified manifest/checksums/signing notes from the same run
-8. Stable installer-readiness is not complete until live post-publish checks pass
+9. Stable installer-readiness is not complete until live post-publish checks pass
    against the canonical repo:
    - `GET https://api.github.com/repos/<owner>/<repo>/releases/latest` returns
      `200` and resolves to the expected stable tag.
@@ -362,7 +377,7 @@ Rules:
 
 - this is the one blessed automated end-to-end test for `0.1.x`
 - any additional automated E2E needs explicit justification that lower-level
-  unit, parameterized, or integration coverage cannot defend the same product
+  unit or integration coverage cannot defend the same product
   promise more cheaply
 - Roger should track the blessed automated E2E count in a small Roger-owned
   budget file or manifest and emit an agent-facing warning when that count rises
@@ -371,6 +386,9 @@ Rules:
   another expensive E2E
 - after the warning-only phase, CI should be allowed to fail additions that lack
   a recorded justification
+- if a future E2E defends a memory-assisted journey, it must assert truthful
+  retrieval mode, explicit scope buckets, preserved provenance, and degraded
+  lexical-only fallback where semantic retrieval is unavailable
 
 ### High-value automated boundary paths
 
@@ -459,9 +477,9 @@ Purpose:
 
 - prove fallback is operational, not marketing
 
-Gemini should not get its own heavyweight E2E initially. It should get a
-bounded adapter acceptance suite plus one smoke path proving prompt intake,
-structured/raw capture, and ResumeBundle-driven reseed.
+Codex, Claude, and Gemini should not each get their own heavyweight automated
+E2E initially. They should get bounded provider-acceptance coverage plus smoke
+paths commensurate with the claim Roger is actually making.
 
 ## Provider Acceptance Suites
 
@@ -472,10 +490,11 @@ structured/raw capture, and ResumeBundle-driven reseed.
 - raw output and structured findings both persist
 - bare-harness dropout and `rr return` work
 
-### Gemini adapter acceptance
+### Bounded provider acceptance (`codex`, `claude`, `gemini`)
 
-- Roger can start a Gemini-backed review through the adapter
-- structured findings and raw output both persist
+- Roger can start a bounded-provider-backed review through the live CLI surface
+- structured findings and/or raw output persist according to that provider's
+  truthful current claim
 - ResumeBundle reseed path works truthfully
 - unsupported deeper capabilities fail clearly rather than pretending parity
 
@@ -547,6 +566,6 @@ To keep tests valuable and stable:
 ## Explicit `0.1.0` Non-Goals
 
 - exhaustive CI coverage for every browser/OS/provider combination
-- Codex, Claude, or Pi-Agent provider support
+- Tier B parity for Codex, Claude, or Gemini before the implementation earns it
 - browser-store publication as a product gate
 - Gemini parity with OpenCode on native reopen semantics

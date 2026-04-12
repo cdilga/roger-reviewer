@@ -3,6 +3,9 @@
 This document turns the major Roger user flows into a reusable scenario matrix.
 It is not the canonical architecture spec; the canonical architecture remains
 [PLAN_FOR_ROGER_REVIEWER.md](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md).
+For the canonical command-surface expectations and the current user-flow
+hardening priorities behind those flows, see
+[`PLAN_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md).
 
 Purpose:
 
@@ -361,8 +364,8 @@ Purpose:
   harness session seeded from the latest control bundle, or the user returns to
   Roger after partial bare-harness exploration
 - Test intent: prove bare-harness fallback is a real operator path rather than a
-  fake emergency story; OpenCode is the primary `0.1.0` path and Gemini is a
-  bounded secondary path
+  fake emergency story; OpenCode is the primary `0.1.0` path and the bounded
+  live-CLI providers are secondary paths
 
 ### F17.1: Return from Bare Harness Back to Roger
 

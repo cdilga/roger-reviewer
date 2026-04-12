@@ -156,7 +156,7 @@ in the diff or repo snapshot.
 **Purpose:** A stale `SessionLocator` (points to a moved or deleted OpenCode
 session) paired with a valid `ResumeBundle` for the reseed path.
 
-**Allowed consumers:** `accept_opencode_*`, `accept_gemini_*`, `rr-011.5`
+**Allowed consumers:** `accept_opencode_*`, `accept_bounded_provider_*`, `rr-011.5`
 
 **Contents:**
 - a `SessionLocator` encoded to point at a non-existent session path

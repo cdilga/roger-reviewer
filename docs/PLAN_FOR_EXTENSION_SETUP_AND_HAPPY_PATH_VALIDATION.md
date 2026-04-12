@@ -16,6 +16,11 @@ specific recovery lane: make the extension/browser setup flow coherent and make
 the validation system strong enough that these regressions are caught before a
 human notices them on GitHub.
 
+For the broader command-surface expectations and user-flow hardening priorities
+across `rr review`, repo-local re-entry, TUI/workspace entry, full local
+review, refresh, and browser launch, see
+[`PLAN_FOR_ROGER_REVIEWER.md`](PLAN_FOR_ROGER_REVIEWER.md).
+
 ---
 
 ## Current Truth

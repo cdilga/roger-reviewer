@@ -1,6 +1,8 @@
 # Release CalVer Versioning Contract (`0.1.x`)
 
 This document defines Roger's canonical release-version authority for `0.1.x`.
+It supersedes any older duplicate CalVer contract drafts; do not keep parallel
+release-version authority docs.
 
 ## Scope and Authority
 

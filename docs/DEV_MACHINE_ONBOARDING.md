@@ -65,7 +65,7 @@ Authority note:
 - `docs/PLANNING_WORKFLOW_PROMPTS.md` defines the repo-local review procedure
 - `docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md` defines the reusable
   pre-planning discovery workflow
-- `roger-reviewer-brain-dump.md` is raw intent, not the current spec
+- `docs/roger-reviewer-brain-dump.md` is raw intent, not the current spec
 
 ## Current Skill Availability
 

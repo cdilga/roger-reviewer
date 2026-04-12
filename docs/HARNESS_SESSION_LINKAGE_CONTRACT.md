@@ -152,8 +152,8 @@ Support claims allowed at Tier C:
 
 ## `0.1.0` Provider Targets
 
-| Capability | OpenCode 0.1.0 | Gemini 0.1.0 | Future-provider rule |
-|------------|---------------|--------------|----------------------|
+| Capability | OpenCode 0.1.0 | Bounded live-CLI providers 0.1.0 | Future-provider rule |
+|------------|---------------|-----------------------------------|----------------------|
 | `start_session` | Required | Required | Required for any support |
 | `seed_from_resume_bundle` | Required | Required | Required for any support |
 | `capture_raw_output` | Required | Required | Required for any support |
@@ -168,9 +168,12 @@ Support claims allowed at Tier C:
 **OpenCode** should reach Tier B and may expose a safe Tier C subset
 (`roger-help`, `roger-status`, `roger-findings`, `roger-return`).
 
-**Gemini** only needs Tier A in `0.1.0`. Roger must not claim reopen, dropout,
-or in-harness command support for Gemini until it satisfies the corresponding
-tier requirements and has passed provider acceptance tests.
+**Bounded live-CLI providers** only need Tier A in `0.1.0`. In the current
+repo this covers `codex`, `claude`, and `gemini`, while GitHub Copilot CLI
+must not be described as live support until its verified launch and continuity
+path is real. Roger must not claim reopen, dropout, or in-harness command
+support for bounded providers until they satisfy the corresponding tier
+requirements and have passed provider acceptance tests.
 
 ---
 
@@ -193,7 +196,7 @@ May NOT claim:
 - full transcript migration to another harness
 - in-harness commands that include approval or GitHub-posting capability
 
-### Gemini `0.1.0`
+### Bounded live-CLI providers `0.1.0`
 
 May claim:
 
@@ -325,17 +328,17 @@ and safety posture visible; no approval or GitHub-posting paths reachable.
 **Pass condition:** Roger rebinds correctly; return path is explicit, not
 ambient; auto-return on harness exit is optional not required.
 
-### Smoke 5: Bounded Gemini Reseed (Gemini)
+### Smoke 5: Bounded Provider Reseed (`codex`, `claude`, or `gemini`)
 
-1. Start a Roger review session using Gemini harness
+1. Start a Roger review session using a bounded live-CLI provider
 2. Session is bound to a review target
 3. Roger writes a `ResumeBundle` at a stage boundary
 4. Simulate continuity loss (provider session gone)
-5. Roger reseeds from `ResumeBundle` in a fresh Gemini session
+5. Roger reseeds from `ResumeBundle` in a fresh provider session
 
-**Pass condition:** Gemini adapter reports continuity quality honestly; Roger
-reseeds cleanly; no claim of `reopen_by_locator` capability; no OpenCode-parity
-claims made.
+**Pass condition:** the provider adapter reports continuity quality honestly;
+Roger reseeds cleanly; no claim of `reopen_by_locator` capability is made; no
+OpenCode-parity claims are made.
 
 ---
 
@@ -347,7 +350,7 @@ claims made.
 3. In-harness commands must never expose approval or GitHub-posting flows
 4. Roger domain code must never call provider-specific session internals
    directly; all harness access goes through the `HarnessAdapter` boundary
-5. Gemini-specific limitations must be visible to the user at runtime, not
+5. bounded-provider limitations must be visible to the user at runtime, not
    silently papered over with OpenCode-equivalent UX
 
 ---
@@ -355,7 +358,8 @@ claims made.
 ## Follow-up Beads
 
 - `rr-003.1`: Implement OpenCode primary adapter satisfying Tier B + smoke 1-4
-- `rr-003.2`: Implement Gemini bounded adapter satisfying Tier A + smoke 5
+- `rr-003.2`: Implement the bounded-provider adapter tranche satisfying Tier A
+  + smoke 5, with each provider claimed only to its validated capability tier
 - `rr-003.3`: Implement session persistence and resume ledger
 - `rr-006.2`: Define TUI/app-core supervisor policy (can now proceed; depends
   on this contract)

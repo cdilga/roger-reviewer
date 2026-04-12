@@ -37,7 +37,7 @@ Primary references:
 | `int_github_*` | draft invalidation, payload rendering, partial post handling | `rr-020`, `rr-008.1`, `rr-011.4` |
 | `int_search_*` | prior-review lookup, lexical-only degrade, provenance-safe search | `rr-024` |
 | `accept_opencode_*` | OpenCode provider-claim acceptance | `rr-011.1`, `rr-011.5` |
-| `accept_gemini_*` | bounded Gemini provider-claim acceptance | `rr-011.1` |
+| `accept_bounded_provider_*` | bounded live-CLI provider-claim acceptance (`codex`, `claude`, `gemini`; later `copilot`) | `rr-011.1` |
 | `e2e_core_review_happy_path` | the one blessed automated multi-boundary happy path | `rr-011.7` plus later implementation beads |
 | `smoke_*` | manual or release-lane smoke on real targets | `rr-011.4`, `rr-011.5`, `rr-011.6` |
 
@@ -54,7 +54,7 @@ Each fixture family must be small, named by purpose, and reusable across suites.
 | `fixture_findings_partial_mixed` | partially valid pack with salvageable findings | `unit_*`, `int_harness_*`, `rr-011.3` |
 | `fixture_findings_raw_only` | no structured pack, raw output only | `int_harness_*`, `rr-011.3` |
 | `fixture_findings_invalid_anchor` | structurally valid finding with stale or bad anchors | `prop_*`, `rr-011.2`, `rr-011.3` |
-| `fixture_resumebundle_stale_locator` | stale `SessionLocator` plus valid `ResumeBundle` reseed path | `accept_opencode_*`, `accept_gemini_*`, `rr-011.5` |
+| `fixture_resumebundle_stale_locator` | stale `SessionLocator` plus valid `ResumeBundle` reseed path | `accept_opencode_*`, `accept_bounded_provider_*`, `rr-011.5` |
 | `fixture_opencode_dropout_return` | bare-harness dropout and `rr return` control flow | `accept_opencode_*`, `rr-011.5` |
 | `fixture_bridge_launch_only_no_status` | bridge present, truthful launch-only/no-status mode | `int_bridge_*`, `rr-011.4` |
 | `fixture_bridge_transcripts` | browser launch-intent and Native Messaging transcript corpus for supported browsers | `int_bridge_*`, `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, `smoke_browser_launch_edge` |
@@ -84,7 +84,7 @@ Each fixture family must be small, named by purpose, and reusable across suites.
 | Claim | Minimum defending coverage |
 |-------|----------------------------|
 | OpenCode direct resume, stale-locator reseed, dropout, and `rr return` | `accept_opencode_*` plus release-lane `smoke_*` |
-| Gemini bounded Tier A support | `accept_gemini_*`; no deeper continuity claim without new acceptance |
+| Bounded live-CLI provider Tier A support | `accept_bounded_provider_*`; no deeper continuity claim without new acceptance |
 | Native Messaging is the serious v1 bridge | `int_bridge_*` plus supported-browser `smoke_*` |
 | Chrome/Brave/Edge browser launch support is explicit and bounded | `int_bridge_*`, `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, `smoke_browser_launch_edge`, `fixture_bridge_transcripts` |
 | Launch-only bridge mode is truthful and does not fake status | `fixture_bridge_launch_only_no_status`, `int_bridge_*`, `rr-011.4` |

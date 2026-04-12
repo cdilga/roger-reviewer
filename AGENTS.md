@@ -112,6 +112,7 @@ Read these to understand the full plan before touching code.
 | [`docs/TUI_RUNTIME_SUPERVISOR_POLICY.md`](docs/TUI_RUNTIME_SUPERVISOR_POLICY.md) | Support contract for in-process queue classes, cancellation rules, and bounded refresh cadence |
 | [`docs/EXTENSION_PACKAGING_AND_RELEASE_CONTRACT.md`](docs/EXTENSION_PACKAGING_AND_RELEASE_CONTRACT.md) | Support contract for the minimal extension toolchain, contract export, and bridge/extension release ownership |
 | [`docs/PLAN_FOR_EXTENSION_SETUP_AND_HAPPY_PATH_VALIDATION.md`](docs/PLAN_FOR_EXTENSION_SETUP_AND_HAPPY_PATH_VALIDATION.md) | Recovery plan for command-surface reconciliation and happy-path/browser validation uplift |
+| [`docs/ROUND_05_SURFACE_RECONCILIATION_BRIEF.md`](docs/ROUND_05_SURFACE_RECONCILIATION_BRIEF.md) | Focused implementation-time reconciliation brief for TUI, CLI, extension UX, action hierarchy, and defending validation layers |
 | [`docs/PLAN_FOR_SCHEMA_MIGRATIONS_AND_UPDATE_COMPATIBILITY.md`](docs/PLAN_FOR_SCHEMA_MIGRATIONS_AND_UPDATE_COMPATIBILITY.md) | Focused plan for introducing safe Roger store schema migrations, update compatibility envelopes, backup/journal recovery, and release validation |
 | [`docs/STORE_MIGRATION_COMPATIBILITY_AND_OPERATOR_CONTRACT.md`](docs/STORE_MIGRATION_COMPATIBILITY_AND_OPERATOR_CONTRACT.md) | Implementation-facing migration/update compatibility contract: envelope fields, migration classes, fail-closed boundaries, updater preflight output, and first-run auto-migration limits (closes `rr-1xhg.1`) |
 | [`docs/ROBOT_CLI_CONTRACT.md`](docs/ROBOT_CLI_CONTRACT.md) | Support contract for the `0.1.0` `--robot` command shortlist and stable machine-readable output envelopes |
@@ -133,7 +134,8 @@ Read these to understand the full plan before touching code.
 | [`docs/DEV_MACHINE_ONBOARDING.md`](docs/DEV_MACHINE_ONBOARDING.md) | Practical machine setup guide for Codex, Agent Mail, and planning workflow access |
 | [`docs/IMPLEMENTATION_SOURCES.md`](docs/IMPLEMENTATION_SOURCES.md) | Saved implementation-time external sources for browser bridge, contract generation, and workflow methodology |
 | [`docs/EXECUTION_GOVERNANCE_AND_REPO_BOUNDARY.md`](docs/EXECUTION_GOVERNANCE_AND_REPO_BOUNDARY.md) | Delivery-governance contract for bead splitting, closure proof, support-claim truthfulness, and repo-vs-operator boundary |
-| [`roger-reviewer-brain-dump.md`](roger-reviewer-brain-dump.md) | Original raw brain dump — source of intent, not specification |
+| [`docs/beads/BEAD_AND_PROMPT_FAILURE_PATTERNS.md`](docs/beads/BEAD_AND_PROMPT_FAILURE_PATTERNS.md) | Retrospective on historical bead/prompt failure patterns and the startup, compaction, and bead-shaping rules meant to prevent recurrence |
+| [`docs/roger-reviewer-brain-dump.md`](docs/roger-reviewer-brain-dump.md) | Original raw brain dump — source of intent, not specification |
 
 ---
 
@@ -152,7 +154,7 @@ Authority order for repo work:
 5. Support docs such as the data/storage contract, release/test matrix,
    onboarding, workspace-status, ADRs, execution-governance notes, and prompt packs
 6. Historical critique rounds and supplementary feedback
-7. [`roger-reviewer-brain-dump.md`](roger-reviewer-brain-dump.md) as raw intent only
+7. [`docs/roger-reviewer-brain-dump.md`](docs/roger-reviewer-brain-dump.md) as raw intent only
 
 Rules:
 
@@ -225,6 +227,26 @@ Implementation gate status:
 not start extension delivery or mutable GitHub-write work before the local
 core, approval surfaces, and posting safety beads are in place.**
 
+### Scope posture
+
+Default rule: if work appears in the canonical plan, support contracts, or
+active implementation docs, it is in scope **now** unless the user or the doc
+explicitly marks it out of scope, `v2`, optional, experimental, or otherwise
+deferred.
+
+Rules:
+
+- do not read “future”, “follow-on”, “later”, or similar wording as permission
+  to postpone active planned work by default
+- if a feature depends on enabling hardening, treat that hardening as part of
+  the same implementation scope rather than as a separate someday prerequisite
+- sequence may control merge order, proof order, or dependency order, but it
+  does not by itself make work out of scope
+- if a doc intends to exclude work from the current implementation scope, it
+  must say so explicitly
+- when you find soft-deferral wording that conflicts with active scope, tighten
+  the docs instead of inheriting the ambiguity
+
 ### Current Repo Truth
 
 Use this as the short truth snapshot before you start inferring support from
@@ -234,6 +256,9 @@ historical docs.
   bridge, and validation crates
 - the local-first CLI path is real, but not every planned `0.1.0` flow is
   equally complete or equally proven
+- planned `0.1.0` work is active scope unless a doc explicitly fences it out;
+  incomplete proof is a delivery gap, not evidence that the feature is for
+  some later phase by default
 - support claims must be earned by live command surfaces plus named validation,
   not by planning intent or partially landed adapters
 - the extension remains bounded and should not be treated as the source of
@@ -265,7 +290,7 @@ Common commands:
 
 ```sh
 br info              # workspace summary
-br list              # all beads with status
+br list --all        # all beads, including closed
 br list --status open
 br ready             # open, unblocked, not deferred
 br show <id>         # full bead detail
@@ -421,19 +446,24 @@ that defends its promise.
 Minimum validation contract:
 
 1. what promise or acceptance criterion is being defended
-2. which layer is required: `unit`, `prop`, `int`, `accept`, `e2e`, or manual
-   `smoke`
+2. which validation lane is required: `unit`, `integration`, or `e2e`
 3. the exact suite name or command expected at closeout
-4. the CI tier or release lane it belongs to when relevant
+4. which execution policy or gate it belongs to when relevant, such as
+   `local-bead`, CI reproduction, operator stability, or `release-candidate`
 5. any fixture families or failure artifacts the suite depends on
 
 Rules:
 
-- smoke is not a blanket closeout. It is sufficient only when the bead or the
-  governing validation docs explicitly say smoke is the right layer
-- provider acceptance is not the same thing as end-to-end validation
+- smoke is not a validation lane. It is operator or release evidence and is
+  sufficient only when the bead or the governing validation docs explicitly say
+  it is the right proof layer
+- provider acceptance, crash recovery, bridge truthfulness, and other bounded
+  real-surface checks belong under the `integration` lane unless the defended
+  promise is a true multi-surface product journey
 - do not add a new blessed automated E2E unless the budget and justification
   rules in the validation docs are satisfied
+- release is an operator gate, not a fourth lane; support claims for a release
+  must be backed by named prerequisites and current evidence
 - if a bead is missing a validation contract, add or clarify it before closing
   the bead rather than silently guessing
 
@@ -802,8 +832,9 @@ every provider is equally supported.
 |----------|------------|-------------------------|----------------------------|-------|
 | OpenCode | Primary review harness | Yes | Yes | Must preserve real direct-resume fallback |
 | Codex | Secondary bounded review harness | Yes | Bounded | Exposed via `rr review --provider codex`; Tier A only today (no locator reopen or `rr return`) |
-| Gemini harness | Adapter-contract lane (not current CLI launch surface) | No | Bounded adapter only | Keep Tier A adapter acceptance truthful; do not claim live `rr review --provider gemini` support until it is actually exposed |
-| Claude | Future review harness | No | No | Same as Codex |
+| Claude | Secondary bounded review harness | Yes | Bounded | Exposed via `rr review --provider claude`; Tier A only today (no locator reopen or `rr return`) |
+| Gemini harness | Secondary bounded review harness | Yes | Bounded | Exposed via `rr review --provider gemini`; keep Tier A live-CLI claims truthful and do not imply locator reopen or `rr return` |
+| GitHub Copilot CLI | Active current-scope provider | Not yet | Planned Tier B target | Must land through the same verified-lifecycle and support-claim rules as every other provider |
 | Pi-Agent | Future review harness | No | No | Keep room in the adapter contract only |
 | GitHub CLI (`gh`) | GitHub adapter, not review harness | N/A | N/A | Write/read adapter for GitHub flows, not a drop-in review engine |
 
@@ -811,8 +842,10 @@ Rules:
 
 - `0.1.0` should feel excellent on the OpenCode path before Roger widens the
   provider matrix.
-- Codex and Gemini claims must stay truthful and bounded; only Codex is
-  currently exposed in the live `rr review --provider ...` surface.
+- Codex, Claude, and Gemini claims must stay truthful and bounded; all three
+  are currently exposed in the live `rr review --provider ...` surface.
+- GitHub Copilot CLI is active implementation scope, but it should remain out
+  of live support claims until the verified launch and continuity path are real.
 - Roger may commit to an eventual broader provider/browser/OS support track, but
   current beta claims must still stay honest about which paths are presently
   blessed, acceptance-tested, or partial.
@@ -832,9 +865,8 @@ Capability-tier rule:
 `0.1.0` intent:
 
 - OpenCode should reach Tier B and may expose selected Tier C affordances
-- Codex currently exposes a bounded Tier A path in the live CLI
-- Gemini Tier A remains adapter-contract coverage until `rr` provider launch
-  support is actually exposed
+- Codex, Claude, and Gemini currently expose bounded Tier A paths in the live
+  CLI
 - no provider is allowed to claim deeper support than its capability tier earns
 
 Harness-native Roger commands are optional in `0.1.0`. If implemented, prefer

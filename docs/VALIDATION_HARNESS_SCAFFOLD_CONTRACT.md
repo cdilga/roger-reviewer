@@ -81,7 +81,7 @@ Suite file and module names must use the prefix families defined in
 | `int_github_` | draft invalidation, payload rendering, partial post |
 | `int_search_` | prior-review lookup, lexical-only degrade |
 | `accept_opencode_` | OpenCode provider-claim acceptance |
-| `accept_gemini_` | bounded Gemini provider-claim acceptance |
+| `accept_bounded_provider_` | bounded live-CLI provider-claim acceptance (`codex`, `claude`, `gemini`; later `copilot`) |
 | `e2e_` | full multi-boundary happy path (one blessed E2E only) |
 | `smoke_` | manual or release-lane smoke |
 
@@ -181,8 +181,8 @@ suite_family = "accept_opencode_"
 notes = "Primary consumer for locator-reopen and stale-locator reseed cases"
 
 [[fixture.allowed_consumers]]
-suite_family = "accept_gemini_"
-notes = "Gemini reseed cases only"
+suite_family = "accept_bounded_provider_"
+notes = "Bounded-provider reseed cases only"
 
 [[fixture.allowed_consumers]]
 suite_family = "int_harness_"

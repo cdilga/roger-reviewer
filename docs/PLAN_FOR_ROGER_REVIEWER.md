@@ -2,13 +2,22 @@
 
 ## Status
 
-Planning, bead polishing, and readiness review are complete as of 2026-03-30.
-Roger is ready to begin implementation of the local-core-first `0.1.0` slice.
+Planning, bead polishing, and readiness review completed on 2026-03-30.
+Implementation of the local-core-first `0.1.0` slice is now active.
 
 Authoritative readiness artifacts:
 
 - [`READINESS_REVIEW_FIRST_IMPLEMENTATION_SLICE_WITHOUT_EXTENSION.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/READINESS_REVIEW_FIRST_IMPLEMENTATION_SLICE_WITHOUT_EXTENSION.md)
 - [`READINESS_IMPLEMENTATION_GATE_DECISION.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/READINESS_IMPLEMENTATION_GATE_DECISION.md)
+
+Current plan-maintenance rule:
+
+- this document is the canonical product and implementation plan
+- active hardening directions such as provider-parity truthfulness, explicit
+  outbound productization, and user-flow/command-surface completion should be
+  folded back into this file once the direction is accepted
+- narrower plan docs may still exist for bounded sub-lanes, but they should not
+  become long-lived alternative sources of product truth
 
 ## Project Statement
 
@@ -29,7 +38,7 @@ Canonical product name: `Roger Reviewer`
 Working CLI shorthand for the plan: `rr`
 
 This matches the existing
-[`roger-reviewer-brain-dump.md`](/Users/cdilga/Documents/dev/roger-reviewer/roger-reviewer-brain-dump.md)
+[`docs/roger-reviewer-brain-dump.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/roger-reviewer-brain-dump.md)
 and is the name the repo should optimize around unless a later branding pass
 changes it deliberately.
 
@@ -146,7 +155,7 @@ model.
    possible.
 3. Roger resolves the related PR if one exists remotely or accepts explicit PR
    input.
-4. Roger resumes or starts the underlying OpenCode-backed session.
+4. Roger resumes or starts the underlying supported-harness session.
 5. Roger opens the TUI or prints actionable CLI output depending on mode.
 
 This workflow is not a fallback-only path. Roger should remain directly useful
@@ -227,6 +236,61 @@ without the browser extension installed.
    post them.
 4. Roger stores the mapping between local finding state and remote review
    action.
+
+## Current User-Flow Hardening Priorities
+
+The target workflows above remain correct, but the live repo still has several
+current-scope productization gaps that must be treated as implementation work,
+not as optional polish.
+
+### U1. Review launch must become a real review flow
+
+- `rr review` is expected to mean more than provider/session bootstrap
+- the active scope is to finish the default stage pipeline, structured findings
+  intake, and handoff into the local decision workspace
+
+### U2. Repo-local re-entry needs a clear workspace path
+
+- `rr resume`, `rr status`, `rr findings`, and `rr sessions` should separate
+  quick probe behavior from true workspace entry
+- ambiguity must fail closed into an explicit session picker instead of hidden
+  guessing
+
+### U3. Dense local workspace entry needs an explicit contract
+
+- Roger still needs one clearly blessed way to enter the dense local review
+  workspace, whether through `rr review` / `rr resume` handoff or a dedicated
+  command such as `rr tui` / `rr open`
+- the TUI shell model is not, by itself, sufficient proof of an operator-usable
+  runtime path
+
+### U4. The full local review loop must be command- and UI-driven
+
+- a truthful local review loop means: launch review, run stages, materialize
+  findings, triage findings, review drafts locally, approve explicitly, and
+  post explicitly
+- this flow must be defended without manual store seeding in the proving
+  acceptance path
+
+### U5. Refresh must reconcile findings and approval state
+
+- `rr refresh` must evolve from continuity relink plus run recording into a
+  real refresh/reconciliation workflow
+- draft invalidation and reconfirmation after refresh are part of the same flow
+  rather than separate optional cleanup
+
+### U6. Browser launch must dispatch real Roger commands
+
+- the extension may stay bounded and launch-focused, but the serious bridge path
+  must invoke the real `rr` command and return canonical Roger state or fail
+  closed
+- launch-only honesty is acceptable; placeholder success is not
+
+### U7. Return must land back in Roger truthfully
+
+- `rr return` should not stop at provider continuity rebinding
+- the product flow needs a clear local workspace target after return, while
+  keeping provider support claims narrow and literal
 
 ## Agent Workflows
 
@@ -311,8 +375,8 @@ layout because the product has multiple surfaces sharing one domain model.
 │   ├── PLAN_FOR_ROGER_REVIEWER.md
 │   ├── BEAD_SEED_FOR_ROGER_REVIEWER.md
 │   ├── ALIEN_ARTEFACTS_FOR_ROGER_REVIEWER.md
-│   └── PLANNING_WORKFLOW_PROMPTS.md
-└── roger-reviewer-brain-dump.md
+│   ├── PLANNING_WORKFLOW_PROMPTS.md
+│   └── roger-reviewer-brain-dump.md
 ```
 
 ## Technology Direction
@@ -678,18 +742,19 @@ Not every provider needs equal status in `0.1.0`.
 |----------|------------|-------------------------|----------------------------|-----------|
 | OpenCode | Primary review harness | Yes | Yes | The canonical first implementation and fallback path |
 | Codex | Secondary bounded review harness | Yes | Bounded | Exposed via `rr review --provider codex`; Tier A only today (no locator reopen or `rr return`) |
-| Gemini harness | Adapter-contract lane (not current CLI launch surface) | No | Bounded adapter only | Keep Tier A adapter acceptance truthful; do not claim live `rr review --provider gemini` support until it is exposed |
-| Claude | Future review harness | No | No | Same as Codex |
+| Claude | Secondary bounded review harness | Yes | Bounded | Exposed via `rr review --provider claude`; Tier A only today (no locator reopen or `rr return`) |
+| Gemini harness | Secondary bounded review harness | Yes | Bounded | Exposed via `rr review --provider gemini`; keep Tier A live-CLI claims truthful and do not imply locator reopen or `rr return` |
+| GitHub Copilot CLI | Active current-scope provider | Not yet | Planned Tier B target | Must land through the same verified-lifecycle and support-claim rules as every other provider |
 | Pi-Agent | Future review harness | No | No | Same as Codex |
 | GitHub CLI (`gh`) | GitHub adapter, not review harness | N/A | N/A | Read/write adapter for GitHub operations only |
 
 Rules:
 
 - `0.1.0` only needs first-class review-harness support for OpenCode
-- Codex may ship as a bounded Tier A live-CLI path without implying Tier B
-  reopen/dropout parity
-- Gemini may stay adapter-contract coverage until provider launch support is
-  intentionally exposed in `rr review`
+- Codex, Claude, and Gemini may ship as bounded Tier A live-CLI paths without
+  implying Tier B reopen/dropout parity
+- GitHub Copilot CLI is active implementation scope, but it should remain out
+  of live support claims until the verified launch and continuity path are real
 - other providers should influence the adapter shape, not the `0.1.0`
   implementation commitment
 - GitHub CLI belongs in the GitHub adapter boundary, not the review-harness
@@ -704,6 +769,15 @@ Rules:
 
 Roger should classify harnesses by capability tier rather than by brand
 reputation.
+
+Scope rule for this plan:
+
+- anything described in this plan is in current implementation scope unless it
+  is explicitly marked `v2`, optional, experimental, or otherwise out of scope
+- sequence in this document controls dependency and proof order, not whether a
+  feature is allowed to slip into an undefined “later”
+- if a feature requires enabling hardening, that hardening is part of the same
+  feature scope
 
 `0.1.0` capability tiers:
 
@@ -730,9 +804,12 @@ reputation.
 `0.1.0` provider intent:
 
 - OpenCode should reach Tier B and may reach selected Tier C affordances
-- Codex currently exposes a bounded Tier A path in the live CLI surface
-- Gemini Tier A remains adapter-contract acceptance coverage until
-  `rr review --provider gemini` is actually exposed
+- Codex, Claude, and Gemini currently expose bounded Tier A paths in the live
+  CLI surface and should be documented literally as such
+- GitHub Copilot CLI is in current scope as the first serious post-OpenCode
+  provider and must land through the same contract as every other provider,
+  with verified launch, transaction boundaries, and support-claim discipline as
+  inseparable parts of that provider slice
 - future providers should be admitted by capability tier, not by one-off
   exceptions
 
@@ -752,6 +829,30 @@ Rules:
   canonical `rr` or TUI path rather than pretending parity
 - new harnesses should extend the same capability table instead of adding
   provider-specific contract branches
+
+### First-class provider admission rule
+
+A provider is first-class only when all of the following are true:
+
+- it appears truthfully in the canonical plan, onboarding, README support
+  snapshot, and release/test matrix
+- `rr review --provider <name>` is actually exposed and reflects the real
+  supported tier in help and status output
+- Roger records a real provider session identifier before it reports launch
+  success
+- Roger can defend the claimed continuity tier with live behavior rather than
+  only adapter-contract tests or synthetic locators
+- Roger controls the provider's write posture, GitHub posture, path scope, and
+  audit trail in review mode
+- deterministic doubles plus at least one support-appropriate smoke or
+  acceptance path exist for the claim being made
+- install/auth/policy drift and degraded modes are documented and fail closed
+
+Immediate truthfulness rule:
+
+- Roger must not describe a new provider as “matching OpenCode parity” unless
+  the live path actually proves the same tier; planning intent alone does not
+  widen a support claim
 
 Future direction:
 
@@ -784,8 +885,8 @@ connect.
 - a thin local editor handoff for opening code-evidence locations is in scope
   for `0.1.x` and does not imply a full editor client or editor-owned state
 - any ACP/MCP adoption should happen through focused architecture spikes after
-  OpenCode and the initial Gemini path have validated Roger's own harness
-  contract
+  OpenCode and the initial bounded live-CLI provider paths have validated
+  Roger's own harness contract
 
 ## Integration Contracts
 
@@ -804,25 +905,28 @@ Minimum expectations:
 - reinsert compact context bundles when resuming
 - avoid depending on fragile internal implementation details if a stable CLI or
   file-level boundary exists
+- verify harness launch before Roger records a completed-looking review session
+- keep lifecycle persistence atomic enough that crash or partial failure cannot
+  leave a session looking launched when the harness binding never became real
 
 `0.1.0` provider minima:
 
 - **OpenCode** should support the full primary path: live session linkage,
   reopen by locator when possible, `ResumeBundle` reseed, bare-harness dropout,
   and `rr return`
-- **Codex** should support the bounded live-CLI path: Roger-owned session/run
-  linkage, prompt intake, raw capture, and truthful `ResumeBundle` reseed
+- **Codex**, **Claude**, and **Gemini** should support the bounded
+  live-CLI Tier A path: Roger-owned session/run linkage, prompt intake, raw or
+  structured result capture as supported, and truthful `ResumeBundle` reseed
   without claiming locator reopen or `rr return`
-- **Gemini harness** should keep the bounded adapter contract path: Roger-owned
-  session/run linkage, prompt intake, structured/raw result capture, and
-  truthful `ResumeBundle` reseed, but this does not imply live
-  `rr review --provider gemini` launch support in the current CLI
+- **GitHub Copilot CLI** is active current-scope provider work, but it must not
+  be described as live support until the verified launch path, policy profile,
+  and continuity story are actually implemented
 - no provider should be allowed to bypass Roger's core session ledger, findings
   normalization, or approval model
 
 Recommended capability table:
 
-| Capability | OpenCode `0.1.0` | Gemini `0.1.0` | Future-provider rule |
+| Capability | OpenCode `0.1.0` | Bounded live-CLI providers `0.1.0` | Future-provider rule |
 |------------|------------------|----------------|----------------------|
 | `start_session` | Required | Required | Required for any support claim |
 | `seed_from_resume_bundle` | Required | Required | Required for any support claim |
@@ -830,10 +934,34 @@ Recommended capability table:
 | `normalize_or_repair_findings_from_output` | Required | Required | Required for any support claim |
 | `bind_review_target` | Required | Required | Required for any support claim |
 | `report_continuity_quality` | Required | Required | Required for any support claim |
-| `reopen_by_locator` | Required | Optional | Required for direct-resume claims |
-| `open_in_bare_harness_mode` | Required | Optional | Required for dropout claims |
-| `return_to_roger_session` | Required | Optional | Required for dropout claims |
+| `reopen_by_locator` | Required | Not claimed | Required for direct-resume claims |
+| `open_in_bare_harness_mode` | Required | Not claimed | Required for dropout claims |
+| `return_to_roger_session` | Required | Not claimed | Required for dropout claims |
 | `supports_roger_commands` | Optional | Not required | Optional ergonomic layer only |
+
+### Launch truth and transaction rule
+
+Roger must not treat provider start, resume, refresh, or return as a sequence
+of loosely related local writes.
+
+Required rules:
+
+- Roger should record a launch-attempt lifecycle distinct from the durable
+  `ReviewSession` lifecycle for states such as `pending`, `verified_started`,
+  `verified_reopened`, `verified_reseeded`, and explicit failure classes
+- a durable `ReviewSession` must not be finalized until the adapter has
+  returned a verified `SessionLocator` backed by a real provider session
+  identifier
+- review launch binding, run creation, continuity updates, and related
+  attention-state changes should commit transactionally per user-visible
+  lifecycle action
+- if provider interaction starts but binding verification fails, Roger should
+  retain failure evidence in the launch-attempt ledger rather than leaving a
+  completed-looking review session behind
+
+This rule is retroactive for the existing OpenCode/Codex/Gemini slices and is
+part of the current provider-support scope. Roger must not treat provider
+hardening as a separate optional precursor to provider delivery.
 
 ### Continuity-quality decision rule
 
@@ -953,6 +1081,31 @@ Minimum behavior:
 - one-shot launch or resume
 - predictable fallback when the bridge is unavailable
 - no architectural dependence on a long-lived background service
+- no “pretend success” response from the bridge before the real `rr` command
+  succeeds and returns a canonical Roger session id
+
+Bridge realism rule:
+
+- the serious bridge path should validate preflight, invoke the real `rr`
+  command in machine-readable mode, and return Roger-owned ids or fail closed
+- success responses with missing or synthetic session ids are not acceptable
+- setup/doctor flows are useful operator checks, but they do not substitute for
+  a real host-process request/response proof
+
+### Contract 2A: Bootstrap and doctor boundary
+
+Roger should expose one truthful bootstrap/preflight surface across providers
+instead of leaving onboarding guidance to drift.
+
+Required rules:
+
+- either `rr init` must exist as the canonical bootstrap command, or every doc
+  and recovery path must route to the real bootstrap surface Roger actually
+  ships
+- `rr doctor` should become the cross-provider preflight/debug surface for
+  install, auth, policy, and bridge health checks
+- onboarding, quickstart text, and CLI help must name only command surfaces
+  that actually exist in the product
 
 ### Contract 3: Outbound posting boundary
 
@@ -966,6 +1119,17 @@ Minimum expectations:
 - local state records success, failure, and remote identifiers
 - agents should not send review comments, questions, or suggestions through raw
   `gh` commands or other direct write tools; Roger owns that communication path
+- the product surface must expose the draft -> approve -> post path explicitly
+  rather than only implying it through storage state or planning prose
+
+Required visibility rules:
+
+- Roger should expose a first-class CLI or TUI command family for draft,
+  approval, and posting transitions
+- outbound state should be queryable as at least `drafted`,
+  `awaiting_approval`, `approved`, `posted`, `superseded`, and `invalidated`
+- refresh, retarget, or repo-snapshot drift must revoke stale approvals before
+  posting is available again
 
 ### Cross-review posting safety invariants
 
@@ -998,6 +1162,54 @@ Practical consequence:
 
 These invariants are expanded in
 [`DATA_MODEL_AND_STORAGE_CONTRACT.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/DATA_MODEL_AND_STORAGE_CONTRACT.md).
+
+## Execution Truth Rules
+
+Roger already has planning and bead history showing a failure mode where the
+graph can look healthy while the live product still relies on synthetic launch
+semantics or partially productized flows. The plan must explicitly prevent that
+pattern.
+
+### Why prior provider/support work could look complete without being complete
+
+The main failure modes were:
+
+- contract beads and adapter beads closed on schema/routing/unit coverage before
+  a separate proof unit existed for verified live launch and transactional
+  persistence
+- provider tests relied heavily on synthetic `SessionLocator` values, local
+  store inserts, and stub binaries, which are useful but do not by themselves
+  prove first-class support
+- epics could close when child beads were all closed even if the remaining gap
+  was a cross-cutting truthfulness issue rather than a missing single package
+  implementation
+- queue health became a misleading proxy for product health; an empty `br ready`
+  frontier did not mean the support claim was truly defended
+
+### Anti-gap rules for future plan-to-bead execution
+
+- provider-admission work must include an explicit “live launch truth” bead that
+  owns verified session binding, failure classes, and non-synthetic session-id
+  evidence
+- provider parity must be split into at least four independently provable
+  slices: lifecycle truthfulness, transactionality/crash safety, outward
+  product surface, and provider-specific integration
+- a provider-support epic must not close on adapter/double coverage alone if
+  the user-facing claim depends on real CLI exposure, bridge realism, or
+  operator-facing launch proof
+- docs and README support wording must narrow immediately when implementation
+  proof regresses or remains bounded; the plan should never assume future proof
+  will arrive “soon enough”
+- if the graph reaches an empty or nearly empty frontier while a named support
+  claim is still visibly unproven, shaping new proof beads is mandatory rather
+  than optional cleanup
+
+### Recommended implementation order for this gap
+
+1. harden lifecycle truthfulness and transactional launch boundaries
+2. make outbound approval/posting a visibly complete product surface
+3. re-audit OpenCode, Codex, and Gemini support claims against the live CLI
+4. land GitHub Copilot CLI through the same truth rules, not as a shortcut
 
 ## Storage and Indexing Strategy
 
@@ -1992,7 +2204,7 @@ cross-tool workflow engine.
 
 The CLI is the glue layer between local repo context, the TUI, and automation.
 
-Candidate commands:
+Current live `0.1.0` command surface:
 
 - `rr review`
 - `rr resume`
@@ -2001,9 +2213,23 @@ Candidate commands:
 - `rr findings`
 - `rr search`
 - `rr refresh`
-- `rr post`
 - `rr status`
-- `rr mark-all-accepted`
+- `rr update`
+- `rr extension setup`
+- `rr extension doctor`
+- `rr bridge ...`
+- `rr robot-docs`
+
+Current-scope command-surface additions still required to complete the product
+truthfully:
+
+- an explicit dense-workspace entry contract, whether through `rr review` /
+  `rr resume` handoff or a dedicated command such as `rr tui` / `rr open`
+- a first-class command family for draft, approval, and posting transitions
+- a truthful bootstrap/preflight surface centered on `rr doctor`, plus `rr init`
+  if that is the chosen canonical bootstrap command
+- a product-facing `rr extension uninstall` path if Roger intends uninstall as
+  part of the normal browser lane rather than leaving it as bridge-only repair
 
 Deferred command candidate (not in current shipped `0.1.0` CLI surface):
 
@@ -2024,6 +2250,9 @@ Expected CLI behavior:
   print a ranked selection list rather than silently picking one
 - `rr sessions` should provide a global session finder for jumping across repos,
   PRs, and attention states
+- CLI help, status output, and docs must describe only the provider surfaces
+  and command paths that actually exist in the product; drift here is a product
+  bug, not a documentation nicety
 
 ### Robot-facing CLI conventions
 
@@ -2645,8 +2874,14 @@ Testing needs to match both Roger's product shape and Roger's economics.
 The default rule is:
 
 - push confidence down the stack first
-- prefer unit and parameterized tests over heavier integration tests wherever a
-  lower layer can defend the same invariant
+- keep exactly three validation lanes: `unit`, `integration`, and `e2e`
+- keep parameterized and property-style testing inside the `unit` lane rather
+  than treating it as a separate lane
+- prefer unit coverage over heavier integration coverage wherever a lower layer
+  can defend the same invariant
+- keep provider acceptance, crash-recovery, bridge/install truthfulness, and
+  bounded real-surface checks inside `integration` unless the defended promise
+  is a true multi-surface product journey
 - keep automated end-to-end coverage intentionally scarce
 - require explicit justification before adding another slow multi-boundary test
 
@@ -2655,10 +2890,10 @@ The default rule is:
 Roger should derive most confidence from:
 
 1. unit tests
-2. parameterized or property-style tests
-3. narrow integration tests
-4. one blessed automated happy-path end-to-end test
-5. manual release smoke
+2. integration tests
+3. a very small number of earned automated end-to-end tests
+4. operator smoke and release evidence as explicit gate inputs, not as a
+   separate validation lane
 
 This is not because end-to-end tests are unimportant. It is because they are
 expensive to set up, slower to run, harder to debug, and easy to overuse as a
@@ -2666,7 +2901,9 @@ substitute for stronger lower-level contracts.
 
 ### Unit-test obligations
 
-Unit tests should be the largest layer in the suite.
+Unit tests should be the largest lane in the suite. This lane includes
+parameterized and property-style tests for Roger's high-dimensional rule
+systems.
 
 They should cover, at minimum:
 
@@ -2686,14 +2923,7 @@ They should cover, at minimum:
   artifact dirs, and logs
 - search or memory ranking helpers, scope filters, and degraded-mode fallbacks
 - TUI-presenter or view-model state reducers without needing a live terminal
-
-### Parameterized and property-style test obligations
-
-Roger has many small but high-dimensional rule systems. These should be tested
-with table-driven or property-style suites rather than with ad hoc large
-integration scenarios.
-
-Required parameterized areas:
+- parameterized or property-style coverage for the following rule matrices:
 
 - config-layer override matrices across global, project, repo, instance, and
   per-review layers
@@ -2701,8 +2931,8 @@ Required parameterized areas:
   edges
 - repair-loop outcomes across valid, partial, raw-only, repair-needed, and
   failed stage results
-- provider-capability matrices across OpenCode primary, Gemini bounded, and
-  future unsupported providers
+- provider-capability matrices across OpenCode primary, bounded live-CLI
+  providers, and future unsupported providers
 - scope and memory retrieval matrices across repo, project, org, and abstention
   behavior
 - anchor normalization and invalidation across file movement, rebases, and
@@ -2721,6 +2951,9 @@ matrices over hand-written one-off tests.
 ### Integration-test obligations
 
 Integration tests should defend boundary behavior, not replace unit tests.
+`Integration` is the home for provider acceptance, transaction and crash
+recovery, bridge/install truthfulness, memory/search contract coverage, and
+other bounded real-surface checks that do not need a full product journey.
 
 Required integration families:
 
@@ -2743,10 +2976,21 @@ Required integration families:
 - multi-instance and worktree tests for the concurrent reviewer case
 - search/index tests using seeded fixtures and rebuildable sidecars rather than
   live model downloads
+- provider-acceptance suites that prove truthful launch, resume, reseed,
+  bounded dropout, and other published provider claims without promoting each
+  provider path into its own heavyweight E2E
+- transaction and crash-recovery tests for launch binding, artifact writes,
+  return/rebind, retries after partial failure, and stale-event rejection
+- search and memory contract tests proving repo-first lookup, explicit broader
+  overlays, provenance buckets, candidate-versus-promoted behavior, and
+  truthful degraded lexical-only fallback
+- browser, bridge, install, and setup truthfulness checks unless the defended
+  promise truly requires a full end-to-end journey
 
 ### End-to-end testing policy
 
-Roger should keep one blessed automated happy-path end-to-end test in `0.1.x`.
+Roger should keep one blessed automated happy-path end-to-end test in `0.1.x`
+and admit additional E2Es only when they clearly earn their keep.
 
 Recommended minimum automated E2E:
 
@@ -2765,10 +3009,15 @@ Rules:
   defended by integration or acceptance tests rather than promoted immediately
   into additional full E2Es
 - every new automated E2E must justify why the failure mode cannot be defended
-  more cheaply with unit, parameterized, or narrow integration coverage
+  more cheaply with unit or integration coverage
 - adding a new E2E is appropriate only when it protects a product-defining
   promise across several real boundaries and a lower-layer breakdown would leave
   a meaningful gap
+- if a defended journey depends on prior-review lookup or promoted memory, the
+  E2E must assert the live memory contract rather than merely checking that
+  search returned something. At minimum that means truthful retrieval mode,
+  correct scope bucket, preserved provenance, and explicit degraded lexical-only
+  behavior when semantic retrieval is unavailable
 
 ### E2E budget feedback rule
 
@@ -2782,7 +3031,7 @@ Required behavior:
   automated E2E count has increased relative to the recorded baseline, Roger
   should emit a visible feedback message
 - that message should ask whether the new coverage could be defended more
-  cheaply with a unit, parameterized, or narrow integration test instead of
+  cheaply with a unit or integration test instead of
   taking the lazy path to another heavyweight E2E
 - the feedback should request an explicit justification or annotation for the
   new E2E before the change is treated as acceptable
@@ -2843,16 +3092,25 @@ Rules:
 
 ### CI and execution tiers
 
-Roger should separate test speed tiers explicitly.
+Roger should separate validation lanes from execution policies.
 
-Recommended tiers:
+Validation lanes are only:
 
-- fast local tier: unit tests, parameterized tests, schema tests, pure renderers,
-  and command-routing tests
-- PR tier: fast local tier plus targeted integration tests and adapter doubles
-- gated or nightly tier: the one blessed automated E2E, provider acceptance
-  paths, and heavier bridge or install smoke where automation is practical
-- release tier: manual smoke against the explicit matrix in
+- `unit`
+- `integration`
+- `e2e`
+
+Execution policies decide when and how those lanes run. Recommended policies:
+
+- `local-bead`: the smallest truthful unit or integration slice required before
+  committing a bead's changes
+- CI reproduction: deterministic reruns of the relevant `unit` and
+  `integration` coverage so support claims are reproducible outside one machine
+- operator stability: on-demand or scheduled runs of expensive real-surface
+  checks, selected integration suites, and the few E2Es that require a licensed
+  or brittle environment
+- `release-candidate`: an explicit operator gate backed by validation evidence,
+  artifact verification, and the release smoke matrix in
   [`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md)
 
 The exact suite-family rules, fixture contract, artifact layout, and E2E budget
@@ -2862,9 +3120,26 @@ rather than being rediscovered piecemeal during implementation. The concrete
 flow-to-suite mapping and fixture ownership should live in
 [`VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md).
 
-### Manual validation
+### Release gate and operator evidence
 
-Manual smoke should stay small but real.
+Release is not a fourth validation lane. It is an explicit operator decision
+that consumes current evidence from the three lanes plus release-specific smoke
+and artifact checks.
+
+Minimum release-candidate prerequisites:
+
+- required implementation beads are closed or explicitly waived
+- support wording for the candidate release is frozen and truthful
+- the relevant `unit` and `integration` coverage is green
+- the selected E2E set is green
+- operator-run smoke for claimed brittle external surfaces is current
+- artifact, checksum, installer, and manifest verification is green
+- publish approval is explicit rather than ambient
+
+### Manual validation and smoke
+
+Manual smoke should stay small but real and should feed the release-candidate
+gate rather than pretending to be its own lane.
 
 Required manual smoke areas:
 
@@ -2886,7 +3161,8 @@ Required manual smoke areas:
 
 ### Phase 0.5: Run architecture risk spikes
 
-- validate the harness session boundary with OpenCode primary and Gemini bounded
+- validate the harness session boundary with OpenCode primary and at least one
+  bounded live-CLI provider path
 - validate the browser extension launch bridge
 - validate the artifact storage split between DB rows and artifact blobs
 - write ADRs for any decision that materially changes the package layout
@@ -2954,7 +3230,7 @@ Do not advance phases casually.
 - scope, provenance, and memory-state rules are explicit enough to prevent
   silent cross-scope bleed
 - supported-harness session linkage is implemented truthfully, with OpenCode
-  primary and Gemini bounded
+  primary and bounded live-CLI providers kept literal about their tier
 - finding identity and refresh semantics are explicit enough to avoid duplicate
   finding explosions
 
@@ -3001,15 +3277,16 @@ Mitigation:
 - require every review session to maintain an underlying OpenCode mapping
 - test resume in plain OpenCode explicitly
 
-### Risk: Gemini support overpromises parity it does not have
+### Risk: bounded provider support overpromises parity it does not have
 
 Mitigation:
 
-- keep Gemini expectations bounded to Roger-owned ledgering, prompt intake,
-  structured/raw capture, and truthful `ResumeBundle` reseed
+- keep Codex, Claude, and Gemini expectations bounded to Roger-owned
+  ledgering, prompt intake, structured/raw capture, and truthful
+  `ResumeBundle` reseed
 - require unsupported deeper capabilities to fail clearly instead of emulating
   OpenCode semantics poorly
-- gate Gemini release claims behind the provider acceptance suite in
+- gate bounded-provider release claims behind the provider acceptance suites in
   [`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md)
 
 ### Risk: findings degrade into unstructured text dumps
@@ -3070,14 +3347,20 @@ and
 [`VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md).
 
 - **Future harness expansion**: The `0.1.0` capability tiers and provider
-  minima are now fixed. The remaining question is only which later providers
+  minima are now fixed. The remaining question is which later providers
   eventually earn Tier A, Tier B, or Tier C support beyond OpenCode and the
-  bounded Gemini path.
+  current bounded live-CLI providers. GitHub Copilot CLI is active current scope; the open
+  question is how much of its intended tier lands in the current slice, not
+  whether it belongs to some undefined later phase.
 
 - **Protocol adapters**: When Roger expands beyond the initial OpenCode and
-  Gemini paths, which later integrations justify ACP as a harness-control edge,
-  which justify MCP as a tool/context edge, and which clients such as VS Code,
-  JetBrains, or GitHub Copilot are important enough to shape that evaluation?
+  bounded-provider paths, which later integrations justify ACP as a
+  harness-control edge, which justify MCP as a tool/context edge, and which
+  clients such as VS Code, JetBrains, or GitHub Copilot are important enough to
+  shape that evaluation?
+  The baseline assumption is direct CLI integration first, not ACP-first, until
+  a provider proves that ACP materially reduces adapter complexity without
+  weakening Roger's safety posture.
 
 - **Semantic packaging**: If hybrid search is in the first Roger search slice,
   which local embedding model ships first, how are its assets installed and
@@ -3127,8 +3410,8 @@ The first bead graph should be organized around:
 
 - repo foundation
 - shared domain, storage, and search/index foundation
-- supported-harness session orchestration, with OpenCode primary and Gemini
-  bounded
+- supported-harness session orchestration, with OpenCode primary and bounded
+  live-CLI providers kept literal about their tier
 - prompt pipeline
 - CLI
 - TUI
