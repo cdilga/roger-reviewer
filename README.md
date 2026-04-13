@@ -7,6 +7,10 @@
 
 Roger Reviewer is in active `0.1.0` implementation.
 
+Default scope posture for this repo: planned `0.1.0` work is in scope now
+unless a doc explicitly marks it out of scope, optional, experimental, or `v2`.
+Sequence controls delivery order, not whether a planned feature “counts” yet.
+
 What is real in this repo right now:
 
 - local-first CLI/domain workflow is under active implementation
@@ -14,7 +18,7 @@ What is real in this repo right now:
 - extension support is optional and launch-focused, not the source of truth
 - safety model is explicit: no automatic posting and no hidden mutation path
 
-What is not fully shipped yet:
+Current gaps that still need to land:
 
 - no GA signed installer distribution channel yet
 - no GA local-state/schema migration automation in `rr update` (migration-capable updates are deferred/fail-closed in `0.1.x`)
@@ -48,7 +52,7 @@ Roger Reviewer is not:
 | Surface | Current reality | Notes |
 | --- | --- | --- |
 | Published `rr` CLI install | Available | One-line release installer ships on GitHub Releases |
-| `rr` CLI from source | Available for local/dev use | Commands are implemented in `packages/cli`; run via `cargo run` |
+| `rr` CLI from source | Blocked currently | The intended source-run path is `packages/cli`, but the current workspace still fails before `rr --help` because `packages/cli/Cargo.toml` contains a duplicate `serde.workspace` entry |
 | OpenCode provider flow | Blessed quickstart path | Primary documented continuity path for this slice |
 | Codex provider path | Bounded/non-primary | Exists in command surface but is not the primary supported onboarding lane |
 | Browser extension | Optional launch helper | PR-page launch panel; local Roger remains authoritative |
@@ -80,7 +84,8 @@ Public one-line installer entrypoints (CLI base product):
 - Pinned release (PowerShell, example `2026.04.07`):
   - `& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing 'https://github.com/cdilga/roger-reviewer/releases/download/v2026.04.07/rr-install.ps1').Content)) -Version '2026.04.07'`
 
-Optional follow-on workflow (separate from base CLI install):
+Optional browser workflow (separate from base CLI install, but still current
+repo scope when browser launch is needed):
 
 - bridge and extension packaging assets are optional; base `rr` install does not require them
 - use optional lanes only when browser launch/helper integration is needed
@@ -103,6 +108,10 @@ Source-run onboarding remains the developer path:
 1. install Rust toolchain
 2. clone repo and run `rr` through Cargo
 3. keep state local (default `.roger/` store)
+
+Current repo truth: this path is presently blocked until the workspace manifest
+issue in `packages/cli/Cargo.toml` is repaired. Do not treat source-run support
+as live again until `cargo run -p roger-cli --bin rr -- --help` succeeds.
 
 Optional env overrides:
 
@@ -204,8 +213,9 @@ Current panel actions on GitHub PR pages:
 Current UX reality:
 
 - the extension is a bounded launch surface, not the source of truth for Roger state
-- PR-page entry is under active UX refinement toward a right-rail `Roger Reviewer`
-  host, lower-click primary actions, and more contextual secondary actions
+- PR-page entry is under active implementation toward a right-rail `Roger Reviewer`
+  host, lower-click primary actions, and more contextual secondary actions; this
+  is current scope, not a parking lot
 - `Refresh` exists as a real Roger command today, but its long-term UX direction
   is contextual rather than always-primary
 
@@ -226,8 +236,9 @@ Current artifact truth:
 
 - `0.1.x` uses the unpacked extension artifact as the primary setup/testing
   surface
-- Roger still intends to keep a real path to future packed/shippable extension
-  artifacts without changing the setup contract
+- Roger will keep the setup contract stable while delivering packed/shippable
+  extension artifacts; that work is not excluded from current scope unless
+  explicitly fenced elsewhere
 
 Bridge dispatch order:
 

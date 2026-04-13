@@ -11,17 +11,54 @@ Primary references:
 - [`REVIEW_FLOW_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/REVIEW_FLOW_MATRIX.md)
 - [`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md)
 - [`TEST_HARNESS_GUIDELINES.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TEST_HARNESS_GUIDELINES.md)
+- [`VALIDATION_INVARIANT_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_INVARIANT_MATRIX.md)
 - [`AUTOMATED_E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/AUTOMATED_E2E_BUDGET.json)
 
 ## Governing Rules
 
-- Roger keeps one blessed automated E2E in `0.1.x`: `E2E-01 Core review happy path`.
+- Roger recognizes only three conceptual validation lanes: `unit`,
+  `integration`, and `e2e`.
+- The suite families below are current runner-compatible subkinds, not extra
+  top-level lanes.
+- Roger currently keeps one blessed automated E2E in `0.1.x`:
+  `E2E-01 Core review happy path`.
+- The E2E catalog may also record future candidate journeys such as `E2E-02`
+  and `E2E-03`, but they do not consume budget until promoted into the blessed
+  budget file.
 - Provider acceptance is separate from end-to-end testing.
 - Browser-launch, bridge recovery, malformed structured output, refresh
   invalidation, and same-PR multi-instance behavior must be defended mostly by
-  targeted integration, acceptance, or smoke tests rather than new E2Es.
+  targeted integration-family suites or smoke tests rather than new E2Es.
 - A support claim is not real unless a named suite family or manual smoke lane
   owns it.
+- Every release-critical support claim should also map to one or more invariant
+  ids in `VALIDATION_INVARIANT_MATRIX.md`.
+- Every implementation bead that changes behavior should cite invariant ids or
+  extend the invariant matrix in the same slice.
+
+## Invariant Linkage
+
+This document maps flows, fixtures, and suite families. It does not by itself
+prove that Roger's most critical product truths are owned. For that, use
+[`VALIDATION_INVARIANT_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_INVARIANT_MATRIX.md).
+
+Practical rule:
+
+- use this document to answer "which suite family and fixture family own this
+  flow?"
+- use the invariant matrix to answer "which critical truth is this work
+  actually defending?"
+- a bead that names flow coverage but no invariant ownership is still weaker
+  than Roger should tolerate for release-critical behavior
+
+## Lane Mapping And Compatibility
+
+| Current suite family or subkind | Conceptual lane |
+|---------------------------------|-----------------|
+| `unit_*`, `prop_*` | `unit` |
+| `int_*`, `accept_*` | `integration` |
+| `e2e_*` | `e2e` |
+| `smoke_*` | operator or release evidence, not a validation lane |
 
 ## Suite Families
 
@@ -75,7 +112,7 @@ Each fixture family must be small, named by purpose, and reusable across suites.
 | `F06`, `F13` refresh and draft invalidation | `prop_*`, `int_github_*`, `int_cli_*` | `rr-011.2`, `rr-011.4` |
 | `F07` draft review, approval, posting | `unit_*`, `int_github_*`, `e2e_core_review_happy_path` | `rr-008.1`, `rr-011.4` |
 | `F08` history, original pack, and raw output inspection | `int_tui_*`, `int_storage_*` | `rr-019` |
-| `F09` search and recall during review | `unit_*`, `int_search_*`, targeted manual smoke | `rr-024` |
+| `F09` search and recall during review | `unit_*`, `int_search_*`, targeted manual smoke, and memory-assisted E2Es when they are explicitly approved (`E2E-02`, `E2E-03`) | `rr-024` |
 | `F10`, `F14` bridge recovery and honest no-status mode | `int_bridge_*`, `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, `smoke_browser_launch_edge`, supported-browser `smoke_*` | `rr-011.4` |
 | `F12` same-PR multi-instance selection and routing | `prop_*`, `int_cli_*`, `int_bridge_*`, `smoke_*` | `rr-011.6` |
 
@@ -91,6 +128,7 @@ Each fixture family must be small, named by purpose, and reusable across suites.
 | Approval invalidation and partial post recovery are safe | `prop_*`, `int_github_*`, `fixture_partial_post_recovery`, `rr-011.4` |
 | Same-PR multi-instance routing is explicit and safe | `fixture_same_pr_multi_instance`, `int_cli_*`, `int_bridge_*`, `rr-011.6` |
 | Structured findings degraded modes are survivable and auditable | `fixture_findings_partial_mixed`, `fixture_findings_raw_only`, `fixture_findings_invalid_anchor`, `rr-011.3` |
+| Memory and recall stay truthful across review continuation and triage | `int_search_*`, targeted smoke, and any approved memory-assisted E2E catalog entries (`E2E-02`, `E2E-03`) | `rr-024` |
 
 ## Artifact Obligations
 
@@ -110,6 +148,8 @@ provider integration failures.
 ## `0.1.x` E2E Budget Rule
 
 - The only blessed automated E2E is `e2e_core_review_happy_path`.
+- `E2E-02` and `E2E-03` are cataloged candidates only until the budget file is
+  explicitly widened.
 - If that count increases, Roger should emit the explicit "could this be
   smaller, or are you taking the lazy route to another heavyweight E2E?"
   feedback required by the plan and `AGENTS.md`.

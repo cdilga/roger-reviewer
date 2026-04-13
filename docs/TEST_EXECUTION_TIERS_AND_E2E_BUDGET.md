@@ -11,9 +11,10 @@ and the release-facing validation matrix in
 ## Purpose
 
 Roger should not drift into an expensive test story before the product exists.
-The `0.1.0` validation contract needs four explicit execution tiers, one
-blessed automated end-to-end test, and a small machine-readable budget file
-that makes E2E growth visible instead of ambient.
+The `0.1.0` validation contract needs three validation lanes, a small set of
+execution policies that invoke those lanes, one blessed automated end-to-end
+test, and a machine-readable budget file that makes E2E growth visible instead
+of ambient.
 
 Current repo truth as of 2026-04-07:
 
@@ -25,20 +26,29 @@ Current repo truth as of 2026-04-07:
   alone; the suite must also be actually run in the relevant lane.
 - The metadata file reserves the suite id and budget slot, but the E2E exists
   because the executable suite landed, not because the metadata exists.
+- Historical metadata still includes labels such as `prop_*`, `accept_*`, and
+  `smoke_*`; treat those as sub-kinds inside the three-lane model until the
+  harness metadata is simplified.
 
-## Test Tiers
+## Validation Lanes
 
-### Tier 1: Fast local
+Roger recognizes only three validation lanes:
 
-Run on ordinary local development loops and before small planning-to-implementation
-changes are merged into implementation branches.
+- `unit`
+- `integration`
+- `e2e`
+
+### Lane 1: Unit
+
+This lane covers ordinary local development loops and should be the dominant
+source of confidence.
 
 Required posture:
 
 - target seconds-to-low-minutes runtime on a developer machine
 - cover pure domain logic, schema rules, serialization, prompt normalization,
   state transitions, and small adapter contracts
-- prefer unit, parameterized, and narrow fixture-backed integration tests
+- include parameterized and property-style suites directly in `unit`
 - avoid network access, real browser launch, real provider launch, and
   heavyweight install flows
 
@@ -49,14 +59,13 @@ Examples:
 - storage migration and artifact-addressing tests
 - CLI parsing and robot-output shape tests with doubles
 
-### Tier 2: PR validation
+### Lane 2: Integration
 
-Run on every PR or equivalent merge gate.
+This lane covers deterministic boundary tests and provider truthfulness without
+promoting every expensive flow into E2E.
 
 Required posture:
 
-- cover the full Tier 1 set plus the high-value integration families the plan
-  already commits to
 - stay deterministic and parallelizable in CI
 - use Roger-owned doubles or canned corpora for GitHub mutation, provider repair
   cases, and bridge-envelope contract coverage
@@ -73,52 +82,82 @@ Required families:
   binary
 - GitHub adapter tests with Roger-owned doubles
 - search and rebuild tests against seeded local fixtures
+- provider-acceptance coverage
+- transaction and crash-recovery coverage
+- install/setup and bridge truthfulness checks unless the defended promise is a
+  full product journey
 
-### Tier 3: Gated or nightly validation
+### Lane 3: End-to-End
 
-Run on a gated branch, release candidate, nightly cadence, or another explicit
-high-signal lane. This is the first tier allowed to include heavyweight
-cross-boundary validation.
+This lane is reserved for a very small number of product-defining journeys that
+cross several real Roger surfaces.
 
 Required posture:
 
 - include the one blessed automated E2E once implemented
-- include provider acceptance suites and bridge/install smoke that are too slow
-  or environment-sensitive for every PR
+- admit additional E2Es only when lower-layer coverage leaves a meaningful gap
 - keep the lane small enough that failures are actionable rather than noisy
 
 Required contents for `0.1.0`:
 
 - `E2E-01` core review happy path as an executable suite that is actually run;
   metadata or budget registration alone does not satisfy this
-- OpenCode acceptance suite
-- Gemini bounded acceptance suite
-- browser bridge smoke for the serious v1 bridge path
-- `SMOKE-BRIDGE-CHROME-01` for Chrome PR-page launch smoke
-- `SMOKE-BRIDGE-BRAVE-01` for Brave PR-page launch smoke
-- `SMOKE-BRIDGE-EDGE-01` for the Edge browser-launch edge scenario with
-  fixture-backed transcript ownership
-- same-PR routing or worktree smoke only where lower-level integration coverage
-  leaves a real gap
+- any future E2E only after explicit justification and budget approval
 
-### Tier 4: Release validation
+## Execution Policies
+
+Execution policies decide when and how the three lanes run. They are not lanes.
+
+### `local-bead`
+
+Run before committing a bead.
+
+Required posture:
+
+- target a small truthful slice of `unit` and, when needed, `integration`
+- prefer the cheapest proof that defends the bead honestly
+- keep the local loop fast enough to be habitual
+- record the exact command and resulting artifact or proof-manifest path when
+  the bead defends a release-critical invariant
+
+### CI reproduction
+
+Run on pull requests or equivalent merge gates.
+
+Required posture:
+
+- rerun deterministic `unit` and `integration` coverage outside the author's
+  machine
+- avoid requiring licensed environments or brittle real-surface dependencies by
+  default
+- keep proof outputs machine-discoverable enough that a reviewer can trace a
+  support claim to a suite result without scraping free-form notes
+
+### Operator stability
+
+Run on demand or on a schedule when Roger needs extra confidence in brittle or
+licensed environments.
+
+Required posture:
+
+- may include selected `integration` suites that touch real providers, browsers,
+  install flows, or host-runtime behavior
+- may include the small curated `e2e` set when the environment is available
+- should not become a dumping ground for work that belongs in lower lanes
+
+### `release-candidate`
 
 Run for tagged releases or release candidates that may become a shipped build.
 
 Required posture:
-
-- validate artifact integrity and packaging claims in addition to product
-  behavior
-- cover the blessed manual smoke matrix from the release/test matrix
-- fail closed on checksum, manifest, or missing-artifact mismatches
-
-Required contents:
 
 - artifact checksum verification
 - per-target packaging smoke for shipped artifact classes
 - manual smoke on the blessed OS or browser paths
 - confirmation that the shipped support claims still match what was actually
   built
+- consumption of the current proof manifests or equivalent suite summaries for
+  release-critical invariants before widening release wording
 
 ## Automated E2E Budget
 
@@ -130,7 +169,7 @@ Current implementation status:
 
 - implemented as `packages/cli/tests/e2e_core_review_happy_path.rs`
 - registered in budget and suite metadata
-- still requires a real run before any specific lane can claim that coverage
+- still requires a real run before any execution policy can claim that coverage
 
 That test protects a product-defining promise across several boundaries:
 
@@ -142,6 +181,14 @@ That test protects a product-defining promise across several boundaries:
 - persisted audit chain
 
 Everything else should default downward into a cheaper tier unless a lower-cost
+test shape leaves a meaningful product-risk gap.
+
+If a future E2E defends a memory-assisted journey, it must assert the live
+memory contract explicitly: truthful retrieval mode, correct scope bucket,
+preserved provenance, and explicit degraded lexical-only fallback when semantic
+retrieval is unavailable.
+
+Everything else should default downward into a cheaper lane unless a lower-cost
 test shape leaves a meaningful product-risk gap.
 
 Execution rule:
@@ -168,7 +215,8 @@ Bridge smoke rule:
   1. registration/install truth (`rr extension doctor` or equivalent), and
   2. host-runtime truth (the registered `rr` binary responds to a Native
      Messaging request without hanging)
-They are explicitly smoke/acceptance lane guards, not heavyweight E2Es.
+
+These are explicitly integration plus smoke guards, not heavyweight E2Es.
 
 Chrome/Brave-specific execution is required when:
 
@@ -187,7 +235,7 @@ Shared-source coverage without fresh Chrome/Brave runs is sufficient only when:
   artifacts remain representative
 
 `SMOKE-BRIDGE-EDGE-01` is the named suite id for the Edge browser-launch edge
-scenario. It is explicitly a smoke/acceptance lane guard, not a second
+scenario. It is explicitly an integration plus smoke guard, not a second
 heavyweight E2E.
 
 Edge-specific execution is required when:
@@ -213,6 +261,9 @@ Contract:
 
 - `blessed_automated_e2e_budget` is the current allowed baseline
 - `blessed_e2e_ids` lists approved heavyweight E2Es by stable id
+- `cataloged_candidate_e2e_ids`, when present, lists pre-shaped future E2Es
+  that do not count toward the budget until they are promoted into
+  `blessed_e2e_ids`
 - `warning_mode` controls the initial feedback phase
 - `future_ci_mode` defines the stricter gate Roger should enable once the
   workflow is proven
@@ -274,29 +325,32 @@ Once the warning workflow is proven, CI should fail either of these cases:
 
 Use these rules before promoting any test into the heavyweight E2E lane.
 
-- If a behavior can be defended with pure inputs and outputs, keep it in Tier 1.
-- If a behavior crosses one or two Roger-owned boundaries with good doubles,
-  keep it in Tier 2.
-- If a behavior needs a real provider, real bridge, or real packaging surface
-  but is not a shipped-release claim, place it in Tier 3.
+- If a behavior can be defended with pure inputs and outputs, keep it in the
+  `unit` lane.
+- If a behavior crosses one or two Roger-owned boundaries with good doubles, or
+  proves a bounded real-surface contract, keep it in the `integration` lane.
+- If a behavior validates a product-defining journey across several real Roger
+  surfaces, consider `e2e`.
 - If a behavior validates shipped artifacts, support claims, or manual release
-  promises, place it in Tier 4.
+  promises, keep it out of a new lane and model it as `release-candidate`
+  evidence.
 
 ## `0.1.0` Mapping Summary
 
-| Concern | Default tier | Notes |
+| Concern | Default lane or gate | Notes |
 | --- | --- | --- |
-| Domain logic, findings, schema, prompt repair | Tier 1 | Prefer parameterized tests over fixtures where possible |
-| Storage, migrations, CLI robot shapes, TUI controller, adapter contracts | Tier 2 | Deterministic CI coverage |
-| Core review happy path, provider acceptance, bridge smoke | Tier 3 | Keep small and intentionally curated |
-| Packaging, checksums, install truthfulness, release smoke | Tier 4 | Release-candidate or tagged-release gate |
+| Domain logic, findings, schema, prompt repair | `unit` | Prefer parameterized tests over fixtures where possible |
+| Storage, migrations, CLI robot shapes, TUI controller, adapter contracts | `integration` | Deterministic CI coverage |
+| Core review happy path | `e2e` | Keep intentionally small and curated |
+| Provider acceptance, bridge smoke, memory/search contract truth | `integration` plus operator stability where needed | Do not widen into E2E casually |
+| Packaging, checksums, install truthfulness, release smoke | `release-candidate` gate | Operator-facing release evidence |
 
 ## Review Rule For Future Beads
 
 Any bead that proposes a new automated E2E should name:
 
 - the candidate test id
-- the tier it belongs in
+- the lane it belongs in
 - the cheaper test shapes that were rejected
 - the justification record it will add to the budget file if it exceeds the
   current blessed count

@@ -24,6 +24,10 @@ implement without inventing their own schemas.
 - All validation lives under one canonical layout. No per-suite ad hoc paths.
 - Suite naming derives from the family prefix table in
   [`VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md).
+- Roger's conceptual validation lanes are `unit`, `integration`, and `e2e`.
+  The current scaffold keeps runner-compatible subkinds such as `property`,
+  `acceptance`, and `smoke`; treat them as refinements or release evidence, not
+  extra top-level lanes.
 - Every suite must attach a metadata envelope. The schema is fixed here.
 - Helpers that are shared across suite families live in `tests/support/`.
   Suite-local helpers stay inside the suite crate or module.
@@ -62,6 +66,13 @@ Suite code lives in the standard Rust workspace layout
 subdirectories). The `tests/` directory at the repo root owns the shared
 support layer and the canonical fixture corpus only.
 
+Compatibility note:
+
+- `target/test-artifacts/property/` maps to the conceptual `unit` lane
+- `target/test-artifacts/acceptance/` maps to the conceptual `integration` lane
+- `target/test-artifacts/release-smoke/` is operator or release evidence, not a
+  fourth validation lane
+
 ---
 
 ## Suite Naming Conventions
@@ -98,6 +109,18 @@ test names or free-form comments.
 
 ### Envelope Fields
 
+Current repo truth:
+
+- the metadata schema still exposes the historical `tier` field because the
+  runner and guard tooling consume it directly
+- interpret `tier = "unit"` and `tier = "property"` as the conceptual `unit`
+  lane
+- interpret `tier = "integration"` and `tier = "acceptance"` as the conceptual
+  `integration` lane
+- interpret `tier = "e2e"` as the conceptual `e2e` lane
+- interpret `tier = "smoke"` as operator or release evidence rather than a
+  validation lane
+
 ```toml
 # Embedded in each suite file via a constant or test attribute,
 # or emitted to a sidecar JSON at suite start.
@@ -106,6 +129,7 @@ test names or free-form comments.
 id = "<prefix>_<suite_name>"         # e.g. "int_harness_opencode_resume"
 family = "<prefix>"                   # must match one of the prefix families above
 flow_ids = ["F01", "F01.1"]          # flow families this suite defends
+invariant_ids = ["INV-SESSION-002"]   # release-critical truths this suite defends
 fixture_families = [                  # fixture families consumed
   "fixture_resumebundle_stale_locator"
 ]
@@ -121,6 +145,9 @@ preserve_failure_artifacts = true     # must be true for acceptance, e2e, bridge
 - `id` must be unique across all suites in the Roger workspace.
 - `flow_ids` must map to IDs defined in
   [`REVIEW_FLOW_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/REVIEW_FLOW_MATRIX.md).
+- `invariant_ids` should map to ids defined in
+  [`VALIDATION_INVARIANT_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_INVARIANT_MATRIX.md)
+  whenever the suite defends a release-critical product truth.
 - `fixture_families` must map to families defined in
   [`VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md).
 - `degraded = true` and `bounded = true` must be explicit for any suite
@@ -140,6 +167,9 @@ Owns: suite runner bootstrap, metadata envelope emission, artifact-tree
 initialization, and budget-guard integration.
 
 Must not own: fixture data, provider-specific doubles, TUI runtime doubles.
+
+This support layer should also own stable proof-manifest emission when a suite
+family is designated as release-critical by the validation docs.
 
 ### `tests/support/doubles/`
 
@@ -237,6 +267,24 @@ Artifacts must use the names from
 [`TEST_HARNESS_GUIDELINES.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TEST_HARNESS_GUIDELINES.md)
 § Required artifact classes.
 
+## Proof Manifests
+
+Release-critical suite families should make current proof mechanically
+discoverable.
+
+Required contract once implemented for a suite family:
+
+- publish `latest.json` pointing to the newest attempted run
+- publish `latest_success.json` pointing to the newest passing run
+- each manifest should point to the canonical summary artifact and any required
+  failure-artifact or replay pointer
+- E2E suites may publish these under `target/test-artifacts/e2e/<suite_id>/`
+  or the canonical E2E result root; integration suites may publish them under
+  `target/test-artifacts/integration/<suite_id>/`
+
+These manifests are not a fourth validation lane. They are machine-readable
+evidence locators for release-critical proofs.
+
 ---
 
 ## Acceptance Summary For `rr-025.1`
@@ -249,6 +297,7 @@ This document now fixes:
 - helper boundary rules and promotion policy
 - the fixture manifest format and allowed-consumer contract
 - failure artifact preservation rules and directory structure
+- the proof-manifest contract for release-critical suites
 
 That is sufficient for `rr-025.2` to materialize the first fixture corpus
 and for `rr-025.3` to wire CI tiers and artifact retention without

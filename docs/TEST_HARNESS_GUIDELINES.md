@@ -5,17 +5,29 @@ facing contract. It is the canonical harness-design companion to
 [`PLAN_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md)
 and
 [`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md).
+[`../TESTING.md`](/Users/cdilga/Documents/dev/roger-reviewer/TESTING.md) is the
+operator-facing entrypoint; this document remains the implementation-facing
+support contract.
 
 Use this document when:
 
 - defining new test suites
-- deciding whether a behavior belongs in unit, integration, acceptance, or E2E
+- deciding whether a behavior belongs in `unit`, `integration`, or `e2e`
 - adding fixtures, canned provider outputs, or browser or bridge transcripts
-- reviewing CI tier placement
+- reviewing execution-policy placement
 - deciding whether a proposed new automated E2E is justified
 
 This is not a generic testing tutorial. It is Roger's specific test-harness
 contract for `0.1.x`.
+
+Current repo truth:
+
+- the implementation still carries historical suite-family and metadata labels
+  such as `prop_*`, `accept_*`, and `smoke_*`
+- until the harness metadata is simplified, treat those labels as sub-kinds
+  inside the three-lane model: `prop_*` under `unit`, `accept_*` under
+  `integration`, and `smoke_*` as operator or release evidence rather than a
+  fourth lane
 
 ## Goals
 
@@ -25,24 +37,77 @@ contract for `0.1.x`.
   scenarios
 - force explicit fixture and artifact ownership before implementation begins
 - keep provider, browser, bridge, and approval claims tied to named suites
+- bind release-critical support claims to named invariant ids and proof outputs
 
 ## Core Rules
 
 - push confidence down the stack first
 - prefer deterministic fixtures and doubles over ambient real environments
+- keep exactly three validation lanes: `unit`, `integration`, and `e2e`
+- keep parameterized and property-style suites inside the `unit` lane
 - keep one blessed automated happy-path E2E in `0.1.x`
 - require at least one real boundary test for each major external surface
 - make degraded modes explicit in tests instead of silently omitting them
+- every release-critical support claim should map to one or more invariant ids
+  from
+  [`VALIDATION_INVARIANT_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_INVARIANT_MATRIX.md)
+- allow Roger-owned doubles only when they model real contract edges and real
+  failure modes; success-only fantasy doubles are not acceptable
 - preserve failure artifacts when they materially reduce diagnosis time
 - do not let browser or provider parity claims outrun the suites that defend
   them
 
-## Harness Layers
+## Invariant Ownership And Bead Translation
+
+Roger uses three lanes, but it should reason about critical truths through
+invariants.
+
+Rules:
+
+- new implementation work that changes a user-visible or operator-visible
+  promise should cite one or more invariant ids from
+  [`VALIDATION_INVARIANT_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_INVARIANT_MATRIX.md)
+  or add a new row there
+- a bead should not claim a support boundary without also naming the suite
+  families, fixture families, and proof outputs that defend the relevant
+  invariants
+- if a behavior cannot yet produce mechanically discoverable evidence, the docs
+  should describe the gap plainly rather than widening the support claim
+
+## Coverage Gap Escalation
+
+Low coverage is not automatically a problem bead. It becomes a Roger problem
+when it weakens a real promise or leaves a critical invariant effectively
+unowned.
+
+Agents should create or split a testing bead when they notice:
+
+- suspiciously thin coverage around a release-critical invariant
+- nominal-path coverage without matching degraded, invalidation, or recovery
+  coverage for the same promise
+- a suite family that appears to own a support claim in prose but does not
+  produce believable proof artifacts in practice
+- an underspecified test request whose faithful implementation depends on Roger's
+  UX, support, or failure-handling vision
+
+Plan-reread exception:
+
+- ordinary implementation work may often proceed from a bead plus the relevant
+  support docs
+- testing or validation work must reread the canonical plan, `TESTING.md`, and
+  the relevant validation contracts when the bead is underspecified relative to
+  the UX or support claim it is supposed to defend
+
+The goal is not to make every agent reread everything. The goal is to prevent
+agents from guessing when the test is supposed to encode product truth.
+
+## Validation Lanes
 
 ### 1. Unit
 
 Purpose:
-- defend local domain rules, state transitions, and pure shaping logic
+- defend local domain rules, state transitions, and pure shaping logic,
+  including property and parameterized coverage
 
 Required coverage:
 - `ReviewSession`, `ReviewRun`, `Finding`, `FindingState`, `OutboundDraft`,
@@ -62,32 +127,13 @@ Rules:
 - no real GitHub network
 - use compact parameter tables when a rule matrix exists
 
-### 2. Parameterized and Property
-
-Purpose:
-- cover Roger's small but combinatorial rule systems cheaply
-
-Required matrices:
-- config-layer precedence
-- finding triage and outbound-state transitions
-- draft invalidation causes
-- provider capability tiers
-- refresh reconciliation outcomes
-- instance and worktree isolation rules
-- robot-output shape variants
-- suggestion rendering edge cases
-
-Rules:
-- this layer is preferred over inventing a new integration test whenever the
-  behavior is fundamentally a rule matrix
-
-### 3. Narrow Integration
+### 2. Integration
 
 Purpose:
 - defend a boundary between Roger-owned components or between Roger and one
   external adapter contract
 
-Required families:
+Required coverage:
 - storage and migration
 - prompt pipeline plus canned provider-output corpora
 - harness adapters with doubles and resumability fixtures
@@ -99,36 +145,33 @@ Required families:
 - GitHub adapter behavior with Roger-owned doubles
 - multi-instance and worktree routing
 - index rebuild and artifact lookup
+- provider-acceptance suites proving truthful launch, resume, reseed, bounded
+  dropout, and published provider limits
+- transaction and crash-recovery suites for launch binding, artifact writes,
+  return/rebind, retries after partial failure, and stale-event rejection
+- search and memory contract coverage, including repo-first lookup, explicit
+  overlays, provenance buckets, candidate-versus-promoted distinctions, and
+  degraded lexical-only fallback
+
+Required unit-lane matrices that should not be promoted into integration unless
+the boundary itself is under test:
+- config-layer precedence
+- finding triage and outbound-state transitions
+- draft invalidation causes
+- provider capability tiers
+- refresh reconciliation outcomes
+- instance and worktree isolation rules
+- robot-output shape variants
+- suggestion rendering edge cases
 
 Rules:
 - target one meaningful boundary per suite
 - avoid mixing browser, provider, GitHub, and approval semantics into one test
   unless that is the specific boundary under test
+- this lane may touch real provider or bridge boundaries where needed, but it
+  should still stay narrower than a full product journey
 
-### 4. Provider Acceptance
-
-Purpose:
-- prove Roger's published provider claims are truthful
-
-OpenCode acceptance must cover:
-- locator-based reopen
-- stale-locator fallback to `ResumeBundle`
-- bare-harness dropout
-- `rr return`
-- honest failure when continuity guarantees are not met
-
-Gemini acceptance must cover:
-- Roger-owned continuity ledger
-- structured and raw artifact capture
-- truthful reseed through `ResumeBundle`
-- explicit rejection of unsupported deeper capability claims
-
-Rules:
-- this layer may touch real provider boundaries where needed
-- provider acceptance is not the same thing as full end-to-end review
-- each provider claim in the release matrix must map to named acceptance suites
-
-### 5. One Blessed Automated E2E
+### 3. End-to-End
 
 Purpose:
 - prove Roger's defining local review loop works across the critical
@@ -153,11 +196,40 @@ It must not expand casually into:
 - malformed findings
 - partial post recovery
 - provider-bounded degraded modes
+- most provider truthfulness checks
+- most search and memory contract checks
 
 Those belong in lower-cost suites unless a later explicit justification says
 otherwise.
 
-### 6. Manual Release Smoke
+If an E2E claims to defend a memory-assisted journey, it must assert the live
+memory contract explicitly: truthful retrieval mode, correct scope bucket,
+preserved provenance, and degraded lexical-only fallback when semantic retrieval
+is unavailable.
+
+The prescriptive E2E catalog, including unblessed candidate journeys, lives in
+[`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md).
+Only entries carried in
+[`AUTOMATED_E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/AUTOMATED_E2E_BUDGET.json)
+count as blessed heavyweight E2Es.
+
+## Execution Policies And Release Evidence
+
+Roger recognizes only three validation lanes. Everything else is an execution
+policy or release gate.
+
+Recommended execution policies:
+
+- `local-bead`: smallest truthful `unit` or `integration` slice that should run
+  before committing a bead
+- CI reproduction: deterministic reruns of the relevant `unit` and
+  `integration` coverage
+- operator stability: on-demand or scheduled runs of expensive real-surface
+  `integration` suites and the few E2Es that need them
+- `release-candidate`: explicit operator gate backed by lane evidence plus
+  smoke and artifact proof
+
+### Operator And Release Smoke
 
 Purpose:
 - defend the surfaces that are too expensive or brittle to over-automate early
@@ -171,8 +243,8 @@ Required areas:
 - one same-PR multi-instance sanity pass
 
 Rules:
-- manual smoke is part of the release contract, not a replacement for automated
-  lower layers
+- smoke is evidence for operator stability and release-candidate decisions. It
+  is not a fourth lane and it does not replace lower-layer automation
 
 ## Fixture Contract
 
@@ -275,29 +347,29 @@ Every non-unit suite should declare:
 - required fixture families
 - whether the path is blessed, bounded, degraded, launch-only, or manual-only
 
-## CI Tier Contract
+## Execution Policy Contract
 
-| Tier | Purpose | Allowed suites | Must block merges |
-|------|---------|----------------|-------------------|
-| `fast-local` | immediate developer feedback | unit, parameterized, schema, pure reducers, serializer checks | no |
-| `pr` | normal pull-request safety | `fast-local` plus targeted integration and adapter-double suites | yes |
-| `gated` | slower truth-defending automation | provider acceptance, one blessed automated E2E, bridge smoke where stable | yes on protected branches |
-| `nightly` | heavy or broad confidence work | expensive cross-matrix suites, broader fixture permutations, non-critical longevity checks | no for ordinary PRs |
-| `release` | tagged release validation | manual smoke plus artifact verification from the release matrix | yes for release promotion |
+| Policy | Purpose | Allowed lane mix | Must block merges |
+|--------|---------|------------------|-------------------|
+| `local-bead` | immediate developer feedback before commit | targeted `unit`, targeted `integration` | no |
+| CI reproduction | normal pull-request safety and deterministic replay | broad `unit`, targeted `integration` | yes |
+| operator stability | slower truth-defending runs in brittle or licensed environments | selected `integration`, selected `e2e` | only when explicitly required |
+| `release-candidate` | tagged-release validation and publish gate | current lane evidence plus smoke and artifact verification | yes for release promotion |
 
 Current repo truth as of 2026-04-07:
 - `e2e_core_review_happy_path` exists as suite metadata and budget policy.
 - executable functional coverage now exists in
   `packages/cli/tests/e2e_core_review_happy_path.rs`.
-- do not claim functional automated E2E coverage for gated/nightly/release
-  lanes unless that suite is actually run in the relevant lane.
+- do not claim functional automated E2E coverage for any execution policy
+  unless the executable suite is actually run there.
 - the metadata file reserves an id and documents intended scope, but the E2E
   exists only because the executable test landed.
 
 Rules:
-- a suite must live in exactly one default tier
-- promoting a suite upward requires an explicit reason in code review or the
-  planning notes
+- a suite must live in exactly one default lane, even if historical metadata
+  still uses more specific sublabels
+- promoting a suite into a more expensive execution policy requires an explicit
+  reason in code review or the planning notes
 - the browser path is not allowed to become a mandatory PR-tier dependency in
   `0.1.x`
 
@@ -354,7 +426,7 @@ The first implementation-facing harness slice should be:
 4. `rr-025.3`: suite metadata, CI-tier entrypoints, and artifact retention wiring
 5. unit and parameterized harness helpers inside that shared harness
 6. narrow integration harness for storage, prompt normalization, and CLI resume
-7. provider acceptance harness for OpenCode and Gemini
+7. provider acceptance harness for OpenCode and the bounded live-CLI providers
 8. keep one blessed automated E2E implemented and runnable
 9. release-smoke checklist and artifact verification
 

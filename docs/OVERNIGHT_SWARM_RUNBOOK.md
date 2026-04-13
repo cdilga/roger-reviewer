@@ -27,6 +27,9 @@ Roger Reviewer has passed readiness and is now in active implementation. Workers
   [docs/SWARM_QUEUE_TRUST_REHEARSAL_20260331.md](/Users/cdilga/Documents/dev/roger-reviewer/docs/SWARM_QUEUE_TRUST_REHEARSAL_20260331.md)
 - For operator read checks under contention, prefer read-safe `br` flags:
   `--no-auto-import --no-auto-flush`.
+- If DB-backed reads still return `snapshot conflict` after repair/checkpoint
+  work, use `br ... --no-db` for read-only queue inspection and restart the
+  long-lived `bv` observer before relying on DB-backed `br` commands again.
 
 ## Commands
 

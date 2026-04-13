@@ -1,9 +1,9 @@
-# Validation CI Tiers and Entrypoints
+# Validation CI Execution Policies and Entrypoints
 
 This document closes `rr-025.3`.
 
-It connects Roger's validation harness scaffold to the execution lanes,
-defines the CI tier entrypoints, fixes the suite metadata registration
+It connects Roger's validation harness scaffold to the execution policies that
+invoke Roger's three validation lanes, fixes the suite metadata registration
 contract, and wires artifact retention and the automated E2E budget guard.
 
 Authority:
@@ -13,7 +13,7 @@ Authority:
 - [`docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md)
 - [`docs/AUTOMATED_E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/AUTOMATED_E2E_BUDGET.json)
 
-This document does not override the tier definitions in
+This document does not override the lane and execution-policy definitions in
 `TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md`. It narrows them into concrete
 entrypoint names, runner commands, retention rules, and budget-guard
 integration so downstream suites do not invent their own runner policy.
@@ -23,17 +23,23 @@ Current repo truth as of 2026-04-07:
 - `tests/suites/e2e_core_review_happy_path.toml` is present as suite metadata.
 - `packages/cli/tests/e2e_core_review_happy_path.rs` is landed as the
   executable implementation for that suite id.
-- Nightly/release lanes should only be described as having demonstrated
-  functional E2E coverage when the suite is actually run in those lanes.
+- No execution policy should be described as having demonstrated functional E2E
+  coverage unless the suite is actually run there.
 - The metadata file is a registration record, not an implementation milestone
   by itself.
+- Historical metadata still includes labels such as `prop_*`, `accept_*`, and
+  `smoke_*`; treat those as sub-kinds inside the three-lane model until the
+  harness metadata is simplified.
 
 ---
 
 ## Governing Rules
 
+- Roger has exactly three validation lanes: `unit`, `integration`, and `e2e`.
+- Entry points such as `fast-local`, `pr`, `gated`, `nightly`, and `release`
+  are execution-policy names, not lane names.
 - One runner policy. Suites attach metadata; the entrypoints read it.
-  Suites must not each embed tier logic.
+  Suites must not each embed execution-policy logic.
 - The E2E budget is machine-readable. The budget guard reads
   `docs/AUTOMATED_E2E_BUDGET.json`. Growth beyond the budget requires the
   five justification fields in that file before it is allowed.
@@ -42,11 +48,37 @@ Current repo truth as of 2026-04-07:
 - `manual-only` and `smoke` suites do not run in CI. They run in release
   preparation and are documented here for completeness only.
 
+## Rust Quality Gates
+
+These commands are part of Roger's Rust validation baseline even though they are
+not separate validation lanes.
+
+Required command set:
+
+```sh
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+cargo llvm-cov --workspace --all-targets --summary-only
+```
+
+Rules:
+
+- `cargo fmt --check` and `cargo clippy` are quality gates, not substitutes for
+  suite evidence
+- `cargo llvm-cov` is Roger's coverage-reporting source of truth, but coverage
+  percentages do not override invariant ownership or proof-artifact
+  requirements
+- targeted suite replay should use `cargo test -p <package> --test <suite> --
+  --nocapture`
+- Roger does not require `rch` or any other remote compile wrapper as part of
+  this baseline
+
 ---
 
-## CI Tier Entrypoints
+## CI Execution Policies
 
-### Tier 1 — Fast Local (`fast-local`)
+### Policy 1 — Fast Local (`fast-local`)
 
 **When:** Developer loop. Runs in under 60 seconds on a dev machine.
 
@@ -59,9 +91,10 @@ or, if a workspace-level `make` target is defined:
 make test-fast
 ```
 
-**Includes:** `unit_*`, `prop_*`
+**Lane mix:** targeted `unit`
 
-**Excludes:** all integration, acceptance, E2E, and smoke suites
+**Excludes:** all non-lib integration-family suites, acceptance-subkind suites,
+E2E, and smoke suites
 
 **Artifact retention:** none (fast-local runs are not CI jobs)
 
@@ -69,7 +102,7 @@ make test-fast
 
 ---
 
-### Tier 2 — PR Gate (`pr`)
+### Policy 2 — PR Gate (`pr`)
 
 **When:** Every pull request. Target under 5 minutes on CI hardware.
 
@@ -82,9 +115,9 @@ or:
 make test-pr
 ```
 
-**Includes:** `unit_*`, `prop_*`, `int_*`
+**Lane mix:** broad `unit`, targeted `integration`
 
-**Excludes:** provider acceptance, E2E, and smoke suites
+**Excludes:** provider-acceptance subkind suites, E2E, and smoke suites
 
 **Artifact retention:** `target/test-artifacts/` for failures only;
 preserved by CI artifact upload for 7 days.
@@ -94,7 +127,7 @@ or any test that crosses more than two boundaries.
 
 ---
 
-### Tier 3 — Gated (`gated`)
+### Policy 3 — Gated (`gated`)
 
 **When:** Merge to main. May take longer than PR gate.
 
@@ -103,8 +136,7 @@ or any test that crosses more than two boundaries.
 make test-gated
 ```
 
-**Includes:** `unit_*`, `prop_*`, `int_*`, `accept_opencode_*`,
-`accept_gemini_*`
+**Lane mix:** broad `unit`, broad `integration`
 
 **Excludes:** `e2e_*` suite and smoke
 
@@ -116,7 +148,7 @@ automated E2E tests.
 
 ---
 
-### Tier 4 — Nightly (`nightly`)
+### Policy 4 — Nightly (`nightly`)
 
 **When:** Scheduled nightly CI run on the main branch.
 
@@ -125,10 +157,10 @@ automated E2E tests.
 make test-nightly
 ```
 
-**Includes:** all of Tier 3 plus `e2e_core_review_happy_path`.
+**Lane mix:** broad `unit`, broad `integration`, selected `e2e`.
 
-Tier 4 counts as functional E2E coverage only when that suite is actually run
-in the lane.
+This policy counts as functional E2E coverage only when that suite is actually
+run here.
 
 **Artifact retention:** full tree; upload for 30 days.
 
@@ -147,24 +179,24 @@ Important:
 
 ---
 
-### Tier 5 — Release (`release`)
+### Policy 5 — Release (`release`)
 
-**When:** Release cut. Manually triggered.
+**When:** Release cut. Manually triggered as an operator gate.
 
 **Command:**
 ```sh
 make test-release
 ```
 
-**Includes:** all of Tier 4 plus targeted smoke suites with automated stubs,
-including `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, and
-`smoke_browser_launch_edge`; manual smoke checklist is run by the release owner
-separately.
+**Lane mix:** current lane evidence plus targeted smoke suites with automated
+stubs, including `smoke_browser_launch_chrome`,
+`smoke_browser_launch_brave`, and `smoke_browser_launch_edge`; manual smoke
+checklist is run by the release owner separately.
 
 **Artifact retention:** full tree plus a release-candidate artifact bundle;
 upload indefinitely.
 
-**Budget guard:** strictly enforced as in Tier 4.
+**Budget guard:** strictly enforced as in the `nightly` execution policy.
 
 ### Supported-Browser Launch Smoke Policy
 
@@ -173,14 +205,14 @@ upload indefinitely.
 launch scenarios. They remain smoke suites and do not count toward the
 heavyweight E2E budget.
 
-Run these suites in Tier 5 release validation when:
+Run these suites in the `release` execution policy when:
 
 - bridge host registration behavior changed
 - launch payload/envelope handling changed
 - extension packaging lane changes could affect browser launch behavior
 - release/support wording changed for Chrome/Brave/Edge launch claims
 
-If none of the above changed, Tier 5 may rely on:
+If none of the above changed, the `release` execution policy may rely on:
 
 - green `int_bridge_*` coverage
 - most recent passing browser-launch smoke artifacts
@@ -227,8 +259,8 @@ call) must:
 
 Artifact retention is mandatory for:
 
-| Tier | Behavior |
-|------|----------|
+| Execution policy | Behavior |
+|------------------|----------|
 | fast-local | no retention |
 | PR | failure artifacts only, 7-day upload |
 | gated | full artifacts on failure, 14-day upload |
@@ -256,8 +288,8 @@ The budget guard is a thin Rust binary or build-script check that:
    docs/AUTOMATED_E2E_BUDGET.json with the five required justification
    fields and get explicit sign-off.
    ```
-4. The budget guard must run as part of Tier 4 (nightly) and Tier 5
-   (release). It may optionally run on PR gate as a warning-only check.
+4. The budget guard must run as part of the `nightly` and `release`
+   execution policies. It may optionally run on `pr` as a warning-only check.
 
 Required justification fields (from `AUTOMATED_E2E_BUDGET.json`):
 - `product_promise_defended`

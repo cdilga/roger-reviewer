@@ -7,7 +7,16 @@ If Agent Mail is reachable but says the project or your identity is missing, boo
 - register yourself with Agent Mail using the stable pane identity already attached to this session
 - then continue with the normal worker loop
 
-Before claiming your first bead, skim `docs/PLAN_FOR_ROGER_REVIEWER.md` only far enough to confirm the current phase, architecture direction, and safety model. Do not spend your first turn on a full line-by-line plan read while the live queue is waiting. Once you choose a bead, read the relevant plan sections and `br show <id>` in full.
+Before claiming your first bead, re-anchor on
+`docs/PLAN_FOR_ROGER_REVIEWER.md` enough to confirm the current phase,
+authority order, architecture direction, and support-claim truthfulness model.
+Do not spend your first turn on a full line-by-line plan read while the live
+queue is waiting, but do not treat the canonical plan as optional context.
+Once you choose a bead, read the relevant plan sections and `br show <id>` in
+full.
+
+If you are shaping beads, writing prompts, or resuming after compaction, also
+read `docs/beads/BEAD_AND_PROMPT_FAILURE_PATTERNS.md`.
 
 Implementation is active. Work from live queue truth (`br ready`), not launcher hints.
 
@@ -19,7 +28,10 @@ Implementation is active. Work from live queue truth (`br ready`), not launcher 
 4. Claim with `br update <id> --status in_progress`.
 5. Reserve files with Agent Mail before editing.
 6. Announce claim + reserved files in Agent Mail.
-7. Implement exactly to acceptance criteria (no extra scope).
+7. Finish the bead truthfully. Meet the acceptance criteria, but do not stop
+   mechanically if honest closeout also requires a missing child bead,
+   dependency correction, support-claim correction, or another adjacent bounded
+   slice. Complete it or bead it immediately.
 8. Run the required validation layer and record exact command/suite in bead close reason or notes.
 9. For CI-sensitive beads (labels `ci`/`github-actions`/`release`/`publish`), record remote run evidence before close:
    - `scripts/swarm/check_ci_closeout_evidence.sh --bead <id> --run-url <url> --outcome <outcome>`
@@ -37,6 +49,10 @@ If normal `br` queue commands still fail after a few retries, use the direct fal
 Treat the first clean `--no-daemon` result as authoritative rather than idling on lock contention.
 When scripting pure queue inspection (`ready/list/show`), prefer read-safe flags `--no-auto-import --no-auto-flush` to minimize hidden write work during contention.
 If `br ready` is empty but useful work exists, run `./scripts/swarm/audit_bead_batch.sh --limit 20 --strict` and follow its queue-repair playbook.
+
+After compaction or any long interruption, re-read `AGENTS.md`, reopen the
+relevant plan sections, and re-check `br ready` before acting. Do not resume
+from memory alone.
 
 ## Non-negotiables
 

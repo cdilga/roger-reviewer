@@ -171,7 +171,7 @@ The minimum command surface for `0.1.0` is:
 - `rr bridge pack-extension`
 - `rr extension setup`
 - `rr extension doctor`
-- `rr bridge uninstall`
+- `rr extension uninstall`
 
 Command roles:
 
@@ -197,7 +197,10 @@ Command roles:
   can service browser launches; the contract also requires at least one named
   validation layer that spawns the registered `rr` host binary and proves a
   bounded Native Messaging request/response round trip
-- `uninstall` removes Roger-owned bridge registration state for the current OS
+- `extension uninstall` is the product-facing removal path for the browser lane
+  and removes Roger-owned bridge registration state for the current OS
+- any retained `rr bridge uninstall` command is a demoted repair/development
+  alias rather than part of normal product help
 
 Rules:
 
@@ -206,8 +209,9 @@ Rules:
 - any future packed extension artifact must be a real built output with named
   validation and must not be represented only by docs or aspirational release
   language
-- `extension setup` and `uninstall` must not silently install or update the
-  browser extension itself; the browser load/enable step remains explicit
+- `extension setup` and `extension uninstall` must not silently install or
+  update the browser extension itself; the browser load/enable step remains
+  explicit
 - the normal user-facing flow must not require a manually typed extension id or
   a user-facing separate bridge-host binary path
 - explicit bridge-install flags such as `--extension-id` and `--bridge-binary`

@@ -94,13 +94,18 @@ Recommended minimum target matrix:
 
 | Artifact class | Required targets |
 |----------------|------------------|
-| Core Rust binaries | macOS `arm64`, macOS `x86_64`, Windows `x86_64`, Windows `arm64`, Linux `x86_64`, Linux `arm64` |
+| Core Rust binaries | macOS `arm64`, macOS `x86_64`, Windows `x86_64`, Linux `x86_64`, Linux `arm64` |
 | Extension package | Chrome, Brave, Edge from one source base |
 | Bridge install docs | macOS, Windows, Linux |
 
 If Linux browser integration proves materially weaker at first, Roger should be
 truthful about it rather than silently dropping Linux from the documented matrix
 late.
+
+Windows `arm64` remains an explicit follow-on release lane rather than part of
+the current truthful first shipped subset. Do not describe it as blessed
+support until the build, verification, installer, and update path all exist for
+that target.
 
 ### `0.1.0` artifact classes
 
@@ -157,7 +162,7 @@ with parallel jobs for build, packaging, verification, and publication.
 |-----|-----------|------------------|---------|
 | `ci-verify` | Continuous integration on every PR and release candidate | Lint, unit/integration suites, packaging smoke, artifact naming checks, checksum-manifest shape validation | Validation only; no published assets |
 | `release` `fixture-rehearsal` | PR guard inside unified release workflow | Run deterministic release fixture scripts and contract checks when release plumbing changes | Validation only; no published assets |
-| `release` `build-core` | Release pipeline | Build versioned Rust binaries for the supported OS/arch matrix and stage raw archives | Per-target core companion archives |
+| `release` `build-core` | Release pipeline | Build versioned Rust binaries for the supported OS/arch matrix, smoke the staged `rr` artifact surface, and stage raw archives | Per-target core companion archives |
 | `release` `package-bridge` | Release pipeline | Generate Native Messaging manifests, platform registration helpers, and bridge install/uninstall bundles for supported OS targets | Per-OS bridge registration bundles |
 | `release` `package-extension` | Release pipeline | Produce browser-installable extension packages from the shared source base and stamp them with the release version/source revision | Extension sideload packages for Chrome/Brave/Edge |
 | `release` `verify-release-assets` | Release pipeline | Recompute checksums, verify archive contents, confirm release manifest completeness, and enforce publish gates | Verified `SHA256SUMS` and release asset manifest |
@@ -167,6 +172,9 @@ Ownership rules:
 
 - `release` keeps one top-level workflow while preserving job-level ownership
 - `build-core` owns compilation, but not publication
+- `build-core` must fail closed if the staged `rr` artifact cannot satisfy the
+  minimal packaged-binary smoke contract (`rr --help`, `rr robot-docs`,
+  `rr update --dry-run --robot`) for that target
 - `package-bridge` owns Native Messaging registration assets and host-runtime
   packaging truth, but not browser-extension packaging
 - `package-extension` remains its own job so the browser lane can
@@ -220,6 +228,44 @@ Unified `release` operator contract for `0.1.0`:
      `--latest-proof-utc <YYYY-MM-DDTHH:MM:SSZ>`,
      `--latest-proof-tag <stable-tag>`, and
      `--installer-dry-run-outcome success`.
+
+### Release request contract
+
+Roger does not require one sacred trigger mechanism for release. A release
+request may come from:
+
+- explicit operator intent to cut a draft rehearsal or a stable release
+- a bead or release-tracking note that says `release at this point`
+- a support-claim narrowing change that needs a fresh tagged artifact to become
+  truthful
+
+Minimum release-request content:
+
+- intended mode: `draft rehearsal` or `publish`
+- target tag or channel
+- intended claim set, including any explicit narrowed exclusions
+- bead frontier expected to be included, or an explicit waiver list
+- required smoke surfaces for this claim set
+
+Agent obligations when a release is requested:
+
+1. Resolve the current bead frontier and record any waived gaps explicitly.
+2. Collect the freshest `unit`, `integration`, and `e2e` evidence required for
+   the intended claim set.
+3. Narrow release wording to what the current evidence actually supports.
+4. Run the unified `release` workflow in draft mode first unless the operator
+   explicitly asks to skip rehearsal.
+5. Review the verified manifest, smoke evidence, and installer/readiness checks
+   from that same run before proposing publish.
+6. Leave behind the verified manifest, support posture, and any narrowed claims
+   as the release closeout record.
+
+Rules:
+
+- a bead may request release-readiness, but it must not imply automatic publish
+- publish remains an explicit operator approval decision
+- if evidence is incomplete, agents should prepare the truthful narrowed draft
+  release rather than widening claims or silently skipping prerequisites
 
 ### Publication posture
 
@@ -352,10 +398,19 @@ Migration contract baseline for the `rr-1xhg` lane:
   `bash scripts/release/test_package_extension_bundle.sh`
   (proves zip artifact + extension-bundle manifest + bridge/pack robot outputs)
 
-## Blessed Automated Paths
+## Prescriptive E2E Catalog
 
 Roger should not start with many slow end-to-end tests. It should start with a
-small set that covers the real failure boundaries.
+small set that covers the real failure boundaries. This catalog is prescriptive:
+it names the journeys Roger either already blesses or has intentionally
+pre-shaped for future budget growth.
+
+Budget posture:
+
+- currently blessed and budgeted: `E2E-01`
+- cataloged but not yet budget-approved: `E2E-02`, `E2E-03`
+- only entries moved into `AUTOMATED_E2E_BUDGET.json` `blessed_e2e_ids` consume
+  the heavyweight E2E budget
 
 ### E2E-01: Core review happy path
 
@@ -386,13 +441,100 @@ Rules:
   another expensive E2E
 - after the warning-only phase, CI should be allowed to fail additions that lack
   a recorded justification
-- if a future E2E defends a memory-assisted journey, it must assert truthful
-  retrieval mode, explicit scope buckets, preserved provenance, and degraded
-  lexical-only fallback where semantic retrieval is unavailable
+- this E2E stays lean and does not own Roger's broader memory or browser
+  continuity story
+
+### E2E-02: Cross-surface review continuity with recall
+
+Status:
+
+- cataloged candidate only; not yet budget-approved
+
+Required shape:
+
+- launch from a supported browser or extension-originated bridge path on a
+  concrete PR target
+- persist Roger-to-provider linkage for the review session
+- drop out or detach while provider work is still in flight or before triage is
+  complete
+- resume the same review from another terminal
+- enter the TUI, inspect the returned findings, and open prior review context
+- triage at least three findings with distinct outcomes:
+  `accepted`, `needs-follow-up`, and `ignored`
+- materialize or update a local outbound draft batch from that triage
+- persist continuity state and prove the resumed terminal sees the same review
+  and draft state
+
+Required memory assertions:
+
+- recall runs from the live review context, not from an unrelated global search
+- `retrieval_mode` is truthful: `hybrid` when semantic is available, or
+  `lexical_only` when it is not
+- repo scope remains the default and no `project_overlay` or `org_policy`
+  content appears unless explicitly enabled for that review
+- provenance buckets remain visible on returned items, including
+  `repo_memory`, `project_overlay`, `org_policy`, and candidate/tentative items
+- candidate memory remains visibly tentative rather than silently behaving like
+  promoted memory
+- degraded lexical-only fallback is surfaced honestly and remains usable after
+  dropout or resume
+
+Purpose:
+
+- defend Roger's cross-surface continuity claim across extension or bridge
+  entry, provider continuity, TUI triage, memory-aware recall, and local draft
+  persistence
+
+Execution posture:
+
+- preferred in `operator stability` or `release-candidate`, using a real
+  supported provider path when the environment is available
+- GitHub mutation remains doubled and locally approval-gated even in this E2E
+
+### E2E-03: TUI-first review with memory-assisted triage
+
+Status:
+
+- cataloged candidate only; not yet budget-approved
+
+Required shape:
+
+- start from Roger's local CLI or TUI entry on a specific PR or open-session
+  target
+- create or resume a provider-backed review session
+- browse findings, history, and relevant raw/provider outputs from the TUI
+- use recall to compare at least one current finding with prior review evidence
+  or policy memory
+- triage at least three findings with distinct outcomes:
+  `accepted`, `needs-follow-up`, and `ignored`
+- materialize or refine a local outbound draft or suggestion candidate without
+  direct GitHub posting
+- suspend and resume the same review cleanly, including from a second terminal
+  when that path is supported
+
+Required memory assertions:
+
+- the live review exposes truthful retrieval mode and scope information
+- recalled items preserve provenance buckets and source identity
+- broader overlays stay fenced unless explicitly enabled
+- candidate-versus-promoted memory state stays explicit in the TUI
+- lexical-only degraded behavior remains honest and still supports triage
+
+Purpose:
+
+- defend Roger's TUI-first operating model when review triage depends on prior
+  review memory rather than only the current findings pack
+
+Execution posture:
+
+- earn this slot only if the TUI-first journey still exposes a real
+  multi-surface gap after `integration` coverage is strong
+- keep non-interactive `--robot` equivalents in `integration` by default unless
+  a later justification proves a full E2E is necessary
 
 ### High-value automated boundary paths
 
-These should usually stay as integration, acceptance, or smoke tests rather
+These should usually stay as integration-family suites or smoke tests rather
 than becoming separate heavyweight E2Es.
 
 #### Bridge-INT-01: Browser bridge happy path
@@ -420,6 +562,21 @@ Required shape:
 Purpose:
 
 - keep Chrome launch support explicit without adding a second heavyweight E2E
+
+#### INT-CLI-ROBOT-01: Non-interactive review continuity
+
+Required shape:
+
+- run the bounded `--robot` review, resume, findings, or status path without
+  the TUI
+- verify stable machine-readable envelopes and fail-closed mutation behavior
+- verify that any surfaced search or recall fields remain truthful about mode,
+  scope, and degraded state
+
+Purpose:
+
+- keep automation and scripting support real without spending a heavyweight E2E
+  slot on a path that should usually be defendable as `integration`
 
 #### SMOKE-BRIDGE-BRAVE-01: Brave PR-page launch smoke
 
@@ -450,7 +607,7 @@ Purpose:
 
 Rules:
 
-- these suites stay in targeted smoke/acceptance coverage by default
+- these suites stay in targeted integration plus smoke coverage by default
 - it must not be promoted into the heavyweight E2E lane unless the
   `0.1.x` E2E budget contract is explicitly changed
 - fixture ownership for these scenarios is

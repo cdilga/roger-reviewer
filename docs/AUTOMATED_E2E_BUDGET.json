@@ -9,8 +9,22 @@
     {
       "id": "E2E-01",
       "name": "Core review happy path",
-      "status": "planned",
+      "status": "implemented",
       "notes": "CLI launch, blessed provider path, findings normalization, local approval, GitHub adapter double, audit persistence"
+    }
+  ],
+  "cataloged_candidate_e2e_ids": [
+    {
+      "id": "E2E-02",
+      "name": "Cross-surface review continuity with recall",
+      "status": "proposed_not_budgeted",
+      "notes": "Extension or bridge entry, cross-terminal dropout and resume, TUI triage, and explicit memory assertions for retrieval mode, scope, provenance, candidate state, and degraded lexical-only fallback."
+    },
+    {
+      "id": "E2E-03",
+      "name": "TUI-first review with memory-assisted triage",
+      "status": "proposed_not_budgeted",
+      "notes": "Local CLI or TUI entry, prior-review recall during triage, outbound draft refinement, and explicit memory assertions for retrieval mode, scope, provenance, candidate state, and degraded lexical-only fallback."
     }
   ],
   "required_justification_fields_for_growth": [

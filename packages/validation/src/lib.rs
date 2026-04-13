@@ -134,7 +134,7 @@ artifact_retention = "always"
     {
       "id": "E2E-01",
       "name": "Core review happy path",
-      "status": "planned",
+      "status": "implemented",
       "notes": "Blessed path"
     }
   ],

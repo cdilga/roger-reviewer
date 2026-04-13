@@ -440,7 +440,7 @@ mod tests {
             blessed_e2e_ids: vec![BudgetedE2e {
                 id: "e2e_core_review_happy_path".into(),
                 name: "Core review happy path".into(),
-                status: "planned".into(),
+                status: "implemented".into(),
                 notes: String::new(),
             }],
             required_justification_fields_for_growth: vec![],

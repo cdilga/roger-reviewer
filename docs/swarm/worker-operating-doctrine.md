@@ -1,7 +1,18 @@
 This is the long-form worker operating doctrine for swarm runs.
 The concise worker startup prompt is `docs/swarm/overnight-marching-orders.md`.
 
-First read `AGENTS.md` carefully, then read `README.md`. Before claiming your first bead, skim the canonical plan in `docs/PLAN_FOR_ROGER_REVIEWER.md` only far enough to understand the project authority order, current implementation-stage status, and the `0.1.0` architecture direction. Do not burn the whole first turn on a full line-by-line plan read while ready work is waiting. After you choose a bead, read the relevant plan sections and `br show <id>` in full.
+First read `AGENTS.md` carefully, then read `README.md`. Before claiming your
+first bead, re-anchor on the canonical plan in `docs/PLAN_FOR_ROGER_REVIEWER.md`
+enough to refresh the project authority order, current implementation-stage
+status, local-core-first `0.1.0` architecture direction, and support-claim
+truthfulness model. Do not burn the whole first turn on a full line-by-line
+plan read while ready work is waiting, but do not treat the plan as optional
+context either. After you choose a bead, read the relevant plan sections and
+`br show <id>` in full.
+
+Read `docs/beads/BEAD_AND_PROMPT_FAILURE_PATTERNS.md` when shaping beads,
+writing launcher prompts, or recovering from a run that previously produced
+partial or misleading closeouts.
 
 The implementation gate has passed. You may now claim and execute implementation beads that are actually allowed by `AGENTS.md`, the canonical plan, and the current user instruction. Do not self-block on outdated planning-only assumptions.
 
@@ -24,6 +35,18 @@ Use the first clean `--no-daemon` result as authoritative rather than parking
 on a busy DB. Announce in Agent Mail when you had to fall back so other workers
 know the queue view came from the direct path.
 For scripted queue-inspection reads (`ready/list/show`), prefer `--no-auto-import --no-auto-flush` so read paths do not trigger hidden write-side repair under contention.
+If the busy error is specifically a snapshot conflict (`SQLITE_BUSY_SNAPSHOT`
+or `snapshot conflict on pages ...`), a long-lived reader such as `bv` may be
+holding a stale snapshot after checkpoint/repair work. In that case:
+
+1. use `br ready --no-db`, `br show <id> --no-db`, or `br list --status open --no-db`
+   only for read-only queue inspection
+2. restart the stale reader (`bv` or other long-lived DB observers) before
+   trusting DB-backed `br` reads again
+3. do not use `--no-db` for claiming, closing, syncing, or any other mutation
+   path; move back to DB-backed `br update/close/sync` only after the stale
+   reader is gone
+
 For launch preflight and prerequisites, treat transient `br doctor` sqlite lock
 signals as retry-class, and treat preserved recovery-artifact warnings, sidecar
 warnings, plus the stale blocked-cache recoverable-anomaly line as advisory
@@ -81,7 +104,11 @@ When you pick work:
 1. Claim it with `br update <id> --status in_progress`.
 2. Reserve the files you expect to touch through Agent Mail.
 3. Announce the bead you are taking and the files you reserved.
-4. Execute the bead exactly to its acceptance criteria and no further.
+4. Finish the bead truthfully. Satisfy the acceptance criteria, but do not stop
+   mechanically if an honest closeout also requires a missing child bead,
+   dependency correction, support-claim correction, or adjacent clearly-bounded
+   follow-on work. Complete that work if it remains one truthful slice;
+   otherwise bead it immediately and leave explicit notes.
 5. Run the validation required by that bead's contract before closing it.
 6. Record the exact validation command or suite result in the bead close reason
    or notes. Do not imply broader coverage than what actually ran.
@@ -159,7 +186,11 @@ Roger the product may review GitHub PRs, but the swarm building Roger should not
 
 If you need CPU-heavy cargo builds or tests and `rch` is available, prefer `rch exec -- <command>`. If `rch` is installed locally without a worker fleet, it may fail open to local execution; do not sit idle waiting for remote capacity that is not actually configured.
 
-Re-read `AGENTS.md` after every compaction or long interruption so the operating rules stay fresh. The durable state lives in beads and Agent Mail, so use them continuously.
+Re-read `AGENTS.md` after every compaction or long interruption so the
+operating rules stay fresh. Reopen the canonical plan sections relevant to your
+active bead before continuing, then re-check live queue truth with `br ready`
+instead of resuming from memory alone. The durable state lives in beads and
+Agent Mail, so use them continuously.
 
 If you are in a persistent interactive tmux swarm session, do not stop after a single checkpoint. After each useful checkpoint, immediately:
 

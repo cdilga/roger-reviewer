@@ -1,41 +1,42 @@
 # Beads Workspace Status
 
-As of 2026-04-01, the Roger Reviewer beads workspace is healthy after a second
-`br` path correction: queue-critical claim mutations now run through a known
-good pinned runtime while upstream/localfix regressions remain documented.
+As of 2026-04-12, the Roger Reviewer beads workspace is back on the vetted
+`0.1.34.pinned` runtime and the live DB has been repaired with the documented
+SQLite checkpoint plus `VACUUM` flow. The current trust issue is no longer
+"which `br` binary is selected?" but DB-backed `br` reads failing with
+`SQLITE_BUSY_SNAPSHOT` while a long-lived `bv` reader still holds an older
+snapshot.
 
 ## Current state
 
 - default automation path now resolves through
-  `/Users/cdilga/.local/bin/br -> /Users/cdilga/.local/bin/br-0.1.28.pinned`
-- this rollback was applied on 2026-04-01 because `br-0.1.34.localfix`
-  introduced claim-mutation FK failures on ready-bead updates in the active
-  Roger workspace
-- stock/pinned `0.1.34` remains repro-bad for fresh-init integrity checks
-  (`Page ...: never used`)
-- `br-0.1.28.pinned` currently satisfies both trust predicates used by Roger:
-  fresh-init integrity and routine mutation-path updates
+  `/Users/cdilga/.local/bin/br -> /Users/cdilga/.local/bin/br-0.1.34.pinned`
+- `scripts/swarm/resolve_br.sh` is the reason terminals keep snapping back to
+  `0.1.34`: its current hard pin is `PINNED_VERSION=0.1.34`
+- the latest official upstream release is `v0.1.38` (published 2026-04-10) and
+  its Apple Silicon asset matches the local
+  `/Users/cdilga/.local/bin/br-0.1.38.release` byte-for-byte
+- upstream `main` is newer than `v0.1.38` by 5 commits (`v0.1.38-5-g6d121a1`),
+  but a local head build still reproduces the same fresh-init integrity failure
+- `v0.1.38` was not promoted because a fresh temp workspace repro still failed
+  native `sqlite3 integrity_check`
+  (`Tree 50 page 50: free space corruption`)
+- stock/pinned `0.1.34` still reproduces the older fresh-init corruption
+  signature (`Page ...: never used`) in a fresh temp workspace, so `0.1.34`
+  remains "known workaround pin for mutation behavior", not "clean upstream fix"
 - [`.beads/beads.db`](/Users/cdilga/Documents/dev/roger-reviewer/.beads/beads.db)
-  passes SQLite integrity checks
-- [`.beads/issues.jsonl`](/Users/cdilga/Documents/dev/roger-reviewer/.beads/issues.jsonl)
-  and the DB are in sync with 109 issues
-- `rr-012` is now closed in the live beads graph, matching the Round 04
-  reconciliation outcome
-- `rr-025` is now closed; `VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md` is the
-  artifact that satisfies its acceptance criteria
-- `rr-025.1`, `rr-025.2`, and `rr-025.3` are now closed, so the upfront
-  validation-harness scaffold, fixture corpus, and CI-tier entrypoint lane is
-  no longer a planning gap
-- `rr-q18` and `rr-3ve` are closed, so the remaining open beads are
-  implementation work rather than planning-gate work
-- the graph now includes additional independent leaf tasks under harness and
-  prompt execution, including `rr-003.7`, `rr-003.8`, and `rr-016.1` through
-  `rr-016.3`
-- `rr-003.1` is currently `in_progress`, and `br ready` currently surfaces
-  `rr-003.7` and `rr-003.8` as the next unblocked implementation leaves
-- fresh-workspace `br init`, repeated `br create`, `br doctor`, repo-local
-  `br info`, and repo-local `br show` all complete successfully through the
-  default `br` path
+  now passes native `sqlite3` integrity checks again after the documented repair:
+  `PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA integrity_check;`
+- the live workspace currently has 270 issues in
+  [`.beads/issues.jsonl`](/Users/cdilga/Documents/dev/roger-reviewer/.beads/issues.jsonl)
+  (`open=1`, `closed=269`, `in_progress=0`)
+- DB-backed `br doctor` and `br ready` can still fail immediately after the
+  repair with `database is busy (snapshot conflict ...)` while a long-lived
+  `bv` process keeps the pre-repair snapshot open
+- at the time of the 2026-04-12 check, `lsof` showed `bv` as the only live
+  holder on `.beads/beads.db`
+- JSONL-only queue inspection still works during that state:
+  `br ready --no-db` returned `rr-1pz7`
 - stock upstream `br 0.1.29` through `0.1.34` were repro-bad locally: a fresh temp workspace
   failed native `sqlite3` integrity checks after ordinary sequential
   `br create` operations
@@ -55,29 +56,43 @@ good pinned runtime while upstream/localfix regressions remain documented.
 
 ## Validation performed
 
-- `br --version` -> `br 0.1.34`
-- `br info`
-- `br ready`
-- `br doctor`
 - `readlink /Users/cdilga/.local/bin/br` ->
-  `/Users/cdilga/.local/bin/br-0.1.34.localfix`
-- temp repro with `/Users/cdilga/.local/bin/br-0.1.34.bak` (stock `0.1.34`)
-  on `init -> create -> create -> sqlite3 integrity_check`
-  -> `Page 17: never used; Page 57: never used; Page 58: never used; Page 60: never used`
-- temp repro with `/Users/cdilga/.local/bin/br-0.1.34.pinned` on the same
-  steps -> `Page 17: never used; Page 57: never used; Page 58: never used; Page 60: never used`
-- temp repro with `br 0.1.34`:
-  `git init && br init && br create ... && sqlite3 .beads/beads.db "PRAGMA integrity_check;"`
-  -> `Page 17: never used`
-- temp repro with upstream `main` on the same steps
-  -> `Page 17: never used`
-- temp repro with local `br-0.1.34.localfix` on the same steps
-  -> `ok`
-- temp repro with local `br-0.1.34.localfix` plus `br doctor`
-  -> clean doctor run except expected frankensqlite WAL-sidecar warning
-- repo-local `br show rr-001.6`
+  `/Users/cdilga/.local/bin/br-0.1.34.pinned`
+- `br --version` -> `br 0.1.34`
+- `curl -fsSL https://api.github.com/repos/Dicklesworthstone/beads_rust/releases/latest`
+  -> latest upstream release is `v0.1.38` with asset
+     `br-v0.1.38-darwin_arm64.tar.gz`
+- `curl -fsSL -o /tmp/br-v0.1.38-darwin_arm64.tar.gz <release-url>` plus
+  `curl -fsSL <release-url>.sha256`
+  -> downloaded release asset checksum matched published checksum
+- `shasum -a 256 /tmp/br-v0.1.38-darwin_arm64/br /Users/cdilga/.local/bin/br-0.1.38.release`
+  -> identical hashes; local `br-0.1.38.release` matches the official release
+- `git clone https://github.com/Dicklesworthstone/beads_rust.git /tmp/beads_rust-main-test`
+  plus `cargo build --release`
+  -> built upstream head `6d121a1` (`v0.1.38-5-g6d121a1`)
+- `br info`
+- `br doctor` before repair
+  -> `WARN sqlite.integrity_check ... Page 17: never used ...`
 - `sqlite3 .beads/beads.db "PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA integrity_check;"`
-  -> `ok`
+  -> `0|0|0` then `ok`
+- `br doctor` after repair
+  -> native `sqlite3.integrity_check` passes, but DB-backed doctor path hits
+     `database is busy (snapshot conflict ...)`
+- `br ready`
+  -> `database is busy (snapshot conflict on pages: page 7864320 > snapshot db_size 374 (latest: 374))`
+- `br ready --no-db`
+  -> ready queue still visible; returned `rr-1pz7`
+- `lsof .beads/beads.db .beads/beads.db-wal .beads/beads.db-shm`
+  -> `bv` was the only remaining live holder
+- temp repro with `/Users/cdilga/.local/bin/br-0.1.34.pinned` on
+  `init -> create -> create -> sqlite3 integrity_check`
+  -> `Page 17: never used; Page 57: never used; Page 58: never used; Page 60: never used`
+- temp repro with `/Users/cdilga/.local/bin/br-0.1.38.release` on the same
+  steps
+  -> `Tree 50 page 50: free space corruption`
+- temp repro with `/tmp/beads_rust-main-test/target/release/br` on the same
+  steps
+  -> `Tree 50 page 50: free space corruption`
 
 ## Canonical workspace-trust check
 
@@ -103,6 +118,11 @@ so only the direct parity and integrity checks are evaluated.
 - `br doctor` still reports preserved recovery artefacts in
   [`.beads/.br_recovery`](/Users/cdilga/Documents/dev/roger-reviewer/.beads/.br_recovery).
   That is currently a cleanup warning, not a functional error.
+- If DB-backed `br ready`/`show`/`list` start returning `snapshot conflict`
+  immediately after repair or checkpoint work, restart long-lived `bv` or other
+  DB readers first. Until they release the stale snapshot, use `br ... --no-db`
+  only for read-only queue inspection; do not treat `--no-db` as a safe
+  mutation path.
 - The active local `br` path is intentional, but it is not a permanent
   version-policy claim. Reevaluate future upstream versions explicitly rather
   than assuming the local patch will be needed forever.

@@ -19,6 +19,92 @@ Current plan-maintenance rule:
 - narrower plan docs may still exist for bounded sub-lanes, but they should not
   become long-lived alternative sources of product truth
 
+## Agentic-First Planning And Documentation Doctrine
+
+Roger should follow an agentic-first planning posture:
+
+- planning tokens are cheaper than implementation tokens
+- a large, self-contained canonical plan is cheaper and safer than letting
+  implementation truth fragment across many small overlapping briefs
+- agent execution quality is highest when the core product shape, workflows,
+  constraints, and rollout order fit inside one authoritative planning packet
+- side plans are useful as temporary synthesis artifacts, but they are not
+  allowed to become shadow sources of truth
+
+This means Roger should prefer:
+
+- one dense canonical plan for product shape, workflows, architecture, rollout,
+  and major current-scope hardening directions
+- narrow support contracts for stable implementation-facing seams
+- ADRs for decision records
+- the bead seed and live beads for decomposition and proof tracking
+- explicitly marked historical critique docs for rationale only
+- explicitly marked operator/runbook docs for repo process only
+
+Roger should avoid:
+
+- multiple live planning docs that each partially redefine the product
+- leaving accepted design corrections trapped in a side brief instead of
+  folding them into the canonical plan
+- treating historical critique material as if it were the current spec
+- mixing operator swarm/runbook content into the same authority layer as the
+  product plan
+
+### Documentation classes
+
+Every Markdown document under `docs/` should fit one of these classes:
+
+1. canonical plan
+2. support contract
+3. bounded side-plan
+4. bead seed or bead/process support
+5. historical critique or reconciliation record
+6. operator/runbook/process document
+7. raw intent or archive artifact
+
+Each class has a different job:
+
+- canonical plan: current product truth
+- support contract: narrow implementation obligations that derive from the
+  canonical plan rather than compete with it
+- bounded side-plan: temporary planning synthesis for one active lane; expected
+  to merge back into the canonical plan or a support contract
+- bead seed/process support: decomposition and execution guidance, not product
+  redefinition
+- historical critique: rationale for why the plan changed
+- operator/runbook/process doc: repo-operation truth, not product truth
+- raw intent/archive: context only
+
+### Documentation cleanup program
+
+Roger's docs cleanup should follow this order:
+
+1. inventory every Markdown doc and assign one documentation class
+2. decide one action per doc: keep, merge, archive, move, or delete
+3. expand the canonical plan until active product truth is mostly present there
+4. keep support contracts narrow and implementation-facing rather than
+   duplicating narrative product planning
+5. merge accepted side-plan content back into the canonical plan or the
+   relevant support contract
+6. explicitly mark historical and operator docs so agents do not treat them as
+   live product truth
+7. only then convert the stabilized direction into beads or implementation work
+
+### Documentation cleanup acceptance criteria
+
+The docs cleanup is successful only when:
+
+- the canonical plan is self-contained enough that an agent can start from
+  `AGENTS.md`, this file, and one relevant support contract without needing a
+  scavenger hunt across side briefs
+- every doc in `docs/` has a clear role and is no longer ambiguous about
+  whether it is live truth, bounded support, or historical rationale
+- active product rules are not stranded only in temporary side-plan docs
+- historical and operator docs are visibly fenced from the product authority
+  layer
+- broken links, missing doc references, and stale support claims are treated as
+  bugs
+
 ## Project Statement
 
 Roger Reviewer is a local-first pull request review system that combines a
@@ -291,6 +377,34 @@ not as optional polish.
 - `rr return` should not stop at provider continuity rebinding
 - the product flow needs a clear local workspace target after return, while
   keeping provider support claims narrow and literal
+
+### U8. The TUI shell must become a real operator cockpit
+
+- the current shell proves useful structure, but current-scope implementation
+  still needs a real operator cockpit with durable home, findings, drafts,
+  sessions, search/history, bounded composer, and prompt/discoverability
+  affordances
+- first-release TUI work should optimize for low navigation cost, stable
+  selection, explicit mutation elevation, and truthful degraded states rather
+  than merely increasing pane count
+
+### U9. Product correctness must include interrupted and degraded real-world use
+
+- current-scope correctness includes long-lived sessions, refresh churn,
+  approval invalidation, stale evidence anchors, bridge/setup drift, posting
+  failures, partial findings repair, and dropout/return continuity
+- Roger should not treat "works in the clean happy path" as sufficient proof for
+  UX or support claims when ordinary real-world operator interruptions produce a
+  different outcome
+
+### U10. Validation and proof must track real operator promises, not only nominal success
+
+- each user-facing surface needs the cheapest truthful proof layer for both the
+  nominal path and the failure/degraded path that materially affects the same
+  promise
+- a single generic end-to-end succeeds-only test is not an acceptable
+  substitute for narrower proof of fail-closed launch, refresh invalidation,
+  recovery UX, and operator-visible repair states
 
 ## Agent Workflows
 
@@ -1586,6 +1700,28 @@ evidence comparison, batch triage, refresh lineage, or outbound approval
 editing, it belongs in the TUI first. Other surfaces may mirror entrypoints or
 bounded summaries, but they should not become a second full review workspace.
 
+### Schema alignment for TUI surfaces
+
+The TUI must project canonical Roger entities rather than inventing shadow
+objects.
+
+Rules:
+
+- the primary operator queue item is a `Finding`, not a generic issue row or UI
+  card
+- findings queues, filters, and selections operate on canonical `Finding`
+  identity
+- finding detail and evidence inspection project `Finding`,
+  `CodeEvidenceLocation`, clarification history, and linked outbound-draft state
+- session views project `ReviewSession`, recent `ReviewRun` history, and
+  canonical `AttentionState`
+- draft approval views operate on `OutboundDraft` items grouped into
+  `OutboundDraftBatch`, because approval and posting happen at the batch level
+- prompt palette and prompt reuse operate on `PromptPreset` and
+  `PromptInvocation`
+- transient UI selections, overlays, and command palettes are controller state,
+  not new durable domain aggregates
+
 ### Default TUI information architecture
 
 The default TUI should be organized around a small number of operator views:
@@ -1646,12 +1782,41 @@ The TUI should support two distinct "I need help" behaviors:
 
 - **clarify in place**: ask a bounded question about the currently selected
   finding and keep the user inside Roger
-- **drop out intentionally**: open or resume the underlying OpenCode session
-  with a compact Roger control bundle so the user or agent can continue outside
-  the Roger shell without losing review discipline
+- **drop out intentionally**: open or resume the underlying OpenCode session as
+  the default escape hatch, with a compact Roger control bundle so the user or
+  agent can continue outside the Roger shell without losing review discipline
 
 The second case is not a failure fallback only. It is a legitimate operator move
 when the user wants a more direct harness experience for a while.
+
+Roger may also offer a secondary explicit handoff into equivalent local `rr`
+command paths, but the default dropout target from the TUI should be the
+underlying harness rather than a second Roger shell.
+
+### Local chat lane inside the TUI
+
+Roger should support a bounded local chat lane inside the TUI for `0.1.0`.
+
+Required shape:
+
+- support finding-bound clarification tied to one or more selected `Finding`
+  objects
+- support session-local chat tied to the active `ReviewSession`, with optional
+  attached finding references and current working-set context
+- use a Roger-owned reference syntax such as `@finding(<id>)` so operators can
+  cite findings without manual copy and paste
+- keep both modes bounded, auditable, and visibly distinct from raw harness use
+
+Storage and lineage rules:
+
+- finding-bound clarification should remain attached to Roger's clarification
+  lineage for the selected finding set
+- session-local chat should persist through ordinary `PromptInvocation` history
+  and artifacts rather than introducing a second uncontrolled chat subsystem in
+  `0.1.0`
+- if the operator wants unconstrained harness behavior or the bounded chat lane
+  becomes the wrong tool, Roger should make deliberate dropout to the
+  underlying harness one action away
 
 ### Local editor handoff behavior
 
@@ -1713,6 +1878,80 @@ The TUI should answer two questions with almost no navigation cost:
 
 - what requires a decision right now
 - what can be safely postponed without losing important context
+
+### First-release TUI creation focus
+
+Roger should create the first serious TUI around a small set of durable
+operator primitives rather than around an expanding list of disconnected views.
+
+Required first-release primitives:
+
+- **attention queue**: one durable answer to "what needs me now?"
+- **focusable work queue**: findings, drafts, sessions, search hits, and
+  history items behave like related queue objects rather than unrelated widgets
+- **stable selection set**: one or many selected items stay stable across
+  inspection and bounded actions
+- **shared inspector**: one consistent detail region for the focused item
+- **composer**: one bounded place to clarify, follow up, or draft from the
+  current working set
+- **prompt source model**: the operator can distinguish sticky session baseline
+  context from one-run modifiers
+- **elevated mutation gate**: approval and posting stay visibly separate from
+  reading and triage
+- **dropout and return bridge**: the operator can leave the cockpit
+  deliberately and return without losing control context
+
+Recommended first-release workspace reduction:
+
+- keep five durable operator destinations: `Home`, `Findings`, `Drafts`,
+  `Search/History`, and `Sessions`
+- keep `Prompt Palette`, help, and the composer as overlays or drawers rather
+  than full peer workspaces
+- treat additional first-release surface proposals skeptically unless they
+  materially strengthen one of the primitives above
+
+### TUI discoverability and prompt control
+
+The TUI should make its control model legible without forcing the operator back
+to repo docs.
+
+Required behavior:
+
+- expose a first-class help overlay, conventionally via `?`, that covers
+  keybindings, selection grammar, prompt entry, mutation-sensitive actions,
+  dropout/return actions, and mouse affordances
+- expose a real prompt palette in the TUI rather than burying preset selection
+  in config or scattered commands
+- render the session baseline separately from one-run modifiers so the operator
+  can see what Roger is carrying forward versus what is being injected for the
+  next invocation
+- support bounded finding references with Roger-owned syntax such as
+  `@finding(<id>)` across clarification and session-local chat flows
+
+The prompt palette should remain a first-class operator tool, but not become a
+second prompt-authoring product. Favorites, recent, frequent, scope-valid
+presets, preview of the resolved prompt, and an optional short explicit
+objective are in scope; arbitrary prompt-stack builders and unconstrained
+browser-like prompt composition are not.
+
+### TUI real-world robustness expectations
+
+The cockpit must stay truthful under ordinary interrupted usage, not only under
+clean demos.
+
+Required expectations:
+
+- selection and current focus should survive ordinary queue/inspector movement,
+  refreshes, session switches, and recoverable background failures whenever the
+  underlying target is still valid
+- stale or invalid code anchors, partial findings packs, repair-needed runs,
+  approval invalidation after refresh or retarget, and posting failures must
+  surface as bounded operator states with visible next actions
+- resize, long queues, multi-session ambiguity, and crash or restart recovery
+  are product requirements, not optional polish
+- support claims for the TUI require truth under these ordinary interrupted
+  operator conditions, not only proof that a static shell or happy-path action
+  exists
 
 ### Session re-entry and global session finder
 
@@ -1801,8 +2040,10 @@ Packaging and platform requirements:
   sibling host binary
 - it must support on-demand one-shot launch flows and request/response companion
   flows without becoming a daemon
-- release artifacts should target macOS `arm64` and `x86_64`, Windows `x86_64`
-  and `arm64`, and Linux `x86_64` at a minimum
+- release artifacts should target macOS `arm64` and `x86_64`, Windows
+  `x86_64`, and Linux `x86_64` and `arm64` as the current truthful first
+  shipped subset; Windows `arm64` remains an explicit follow-on lane and must
+  stay narrowed in support wording until it is actually built and verified
 - Roger `0.1.0` artifact classes should be explicit rather than inferred:
   versioned core binary archives, bridge registration assets for Native
   Messaging, optional browser-extension packages, and
@@ -1861,9 +2102,9 @@ Accepted `0.1.0` contract:
 - the installer may accept explicit version or channel arguments such as stable,
   rc, or a pinned tag, but it must never move a user onto prerelease bits
   implicitly
-- the accepted one-line update path after install is `rr self-update` or an
-  equivalent Roger-owned self-update command exposed by the same binary rather
-  than telling users to rerun a platform-specific package-manager recipe
+- the accepted one-line update path after install is `rr update`; any
+  `rr self-update` phrasing is non-canonical shorthand and should not survive
+  in help text, support contracts, or release instructions
 - that update command must consult release metadata, stay on the current
   release channel by default, allow an explicit pinned target version, verify
   checksums before replacing the installed binary, and fail closed on mismatch
@@ -1871,9 +2112,24 @@ Accepted `0.1.0` contract:
 - if the current install was created from a local/unpublished build, the update
   command should refuse silent upgrade and tell the user to reinstall from a
   published release instead of guessing provenance
+- `packages/cli` (`roger-cli`) is the canonical shipped CLI package in the
+  current workspace because it owns the `rr` binary that release automation
+  builds and publishes; `apps/cli` is not packaging authority unless it is
+  later wired into the workspace and release pipeline explicitly
+- the release/build lane must prove packaged-binary usability, not just
+  successful compilation; before archiving or publishing target metadata, Roger
+  should smoke the staged `rr` artifact with at least `rr --help`,
+  `rr robot-docs`, and `rr update --dry-run --robot`
+- truthful source-run support is part of the same delivery contract: Roger must
+  not claim a local/dev Cargo path unless the workspace can at least load the
+  manifest and render `rr --help` from source
 - local installation paths, PATH guidance, and overwrite semantics may vary by
   OS, but they must be Roger-owned and documented in release instructions rather
   than delegated to Homebrew, winget, npm, or another external package manager
+- Roger should add signed provenance for blessed release artifacts when the
+  signing lane is wired; until then, unsigned targets must be surfaced
+  explicitly in release notes and verification output rather than treated as
+  silently normal
 - the browser extension remains an optional guided setup lane after the local
   product is installed; browser launch onboarding should run through
   `rr extension setup` plus `rr extension doctor` with Native Messaging in the
@@ -1908,6 +2164,9 @@ Accepted `0.1.0` contract:
   return bounded repair guidance (for example rerun `rr extension setup` for
   normal-path recovery, or use low-level bridge commands only for explicit
   development/repair workflows)
+- the product-facing uninstall path for the browser lane is
+  `rr extension uninstall`; any retained `rr bridge uninstall` path is a
+  demoted repair/development alias rather than normal product help
 - lower-level commands such as `rr bridge pack-extension`,
   `rr bridge install --extension-id <id> --bridge-binary <path>`, or
   host-registration subcommands may still exist for development and repair
@@ -2050,8 +2309,8 @@ Candidate features that may remain v2:
 The extension should mirror the TUI selectively rather than imitate it fully:
 
 - **Review Home** becomes a PR-local launcher card with `start`, `resume`,
-  `refresh`, and `open in Roger`, styled to feel native to GitHub and attached
-  inline to the page when a stable host seam exists
+  `refresh review`, and `open in Roger`, styled to feel native to GitHub and
+  attached inline to the page when a stable host seam exists
 - **Session Overview** becomes a compact status badge or popover showing bounded
   counts such as `new`, `needs follow-up`, `drafted`, and `awaiting approval`
 - **Findings Queue** becomes at most a short teaser list or counts plus a local
@@ -2065,6 +2324,25 @@ The extension should mirror the TUI selectively rather than imitate it fully:
   not a second full prompt-authoring surface
 - **Attention Events** become lightweight badges or banners only if the bridge
   can read status safely without introducing hidden infrastructure
+
+### Operator-visible verbs must represent user intent
+
+The extension must not expose transport plumbing as ordinary product actions.
+
+Rules:
+
+- ordinary PR-page actions should represent review intent such as `start`,
+  `resume`, `refresh review`, `open findings locally`, or `open draft queue`
+- `refresh` in product UI must mean refreshing the review against changed PR or
+  repo state, never refreshing Native Messaging transport or bridge readback
+- if the extension can attempt bridge readback or status refresh automatically,
+  it should do so automatically rather than exposing a maintenance button
+- manual transport controls such as `refresh bridge`, `ping host`, `reload
+  status`, or similar mechanics belong only in setup, doctor, or explicit
+  recovery surfaces
+- when bridge readback is unavailable, the extension should degrade to truthful
+  launch and open-local affordances rather than surfacing a cluster of plumbing
+  commands
 
 ### Capability tiers driven by bridge strength
 
@@ -2546,6 +2824,36 @@ Rules:
 - if Roger later grows richer shared prompt packs, explicit prompt versioning
   can be added without invalidating the `0.1.0` storage model
 
+### Session baseline and run modifiers in local surfaces
+
+Roger should distinguish between sticky per-session prompt defaults and
+one-off run modifiers.
+
+Required `0.1.0` model:
+
+- `session baseline`
+  - Roger-owned defaults for the active `ReviewSession`
+  - may include the resolved prompt preset, selected provider/model within the
+    already-allowed capability tier, and bounded prior-run carry-forward
+- `run modifiers`
+  - one-off prompt-shaping inputs for the next `PromptInvocation`
+  - may include the chosen preset, short `explicit_objective`, selected finding
+    references, and scoped modifiers such as changed-files-only
+
+Rules:
+
+- session baseline must be visible and inspectable from local Roger surfaces
+- changing the session baseline is an explicit forward-only action that affects
+  future runs, not past prompt history
+- a baseline change should create a visible run-mode boundary in session
+  history, not silently rewrite what earlier runs meant
+- baseline changes must not casually change review-target identity, approval
+  policy, posting authority, or safety posture; those require a new session or
+  a more explicit elevated local flow
+- every `PromptInvocation` still snapshots the exact resolved prompt text it
+  actually used, regardless of current preset definitions or later baseline
+  changes
+
 ### Outcome capture for future analytics
 
 Roger should collect enough structured data in `0.1.0` that later analytics can
@@ -2987,6 +3295,42 @@ Required integration families:
 - browser, bridge, install, and setup truthfulness checks unless the defended
   promise truly requires a full end-to-end journey
 
+### Robustness, failure handling, and real-world usage obligations
+
+Roger's correctness contract includes nominal, degraded, interrupted, and
+failed states. Validation should name those states explicitly.
+
+At minimum, current-scope validation should defend:
+
+- launch verification and binding failures before a session is reported as
+  started
+- resume and return flows that degrade to reseed or fail closed truthfully
+- refresh invalidation and reconfirmation for drafts and approvals
+- stale or invalid evidence anchors without destruction of surviving finding
+  context
+- partial, raw-only, and repair-needed findings outcomes
+- browser bridge unavailability, stale readback, and setup drift without
+  nervous transport-plumbing UI
+- posting rejection or failure recovery with preserved audit and retry or
+  review path
+- install, update, checksum, provenance, and manifest failures that must remain
+  fail closed
+- TUI selection persistence and session-switch correctness across refreshes,
+  long queues, and ordinary operator interruptions
+
+Real-world usage proof should also include at least bounded evidence for:
+
+- browser-first review start into local Roger, then local continuation
+- shell-first review, deliberate dropout to the harness, and durable return
+- refresh after target change with correct invalidation behavior
+- same-PR multi-session ambiguity and truthful session picking
+- large-enough fixtures or longer-lived sessions to reveal queue, recency, and
+  recovery problems that do not appear in toy demos
+
+This is not a license to add more automated end-to-end tests by reflex. Most of
+these obligations should be defended by unit, integration, operator-stability,
+or manual-smoke evidence unless the promise is truly a multi-surface journey.
+
 ### End-to-end testing policy
 
 Roger should keep one blessed automated happy-path end-to-end test in `0.1.x`
@@ -3006,8 +3350,8 @@ Rules:
 
 - browser launch, Native Messaging, dropout or return, malformed findings,
   multi-instance routing, and provider-bounded behavior should usually be
-  defended by integration or acceptance tests rather than promoted immediately
-  into additional full E2Es
+  defended by integration-family suites or smoke evidence rather than promoted
+  immediately into additional full E2Es
 - every new automated E2E must justify why the failure mode cannot be defended
   more cheaply with unit or integration coverage
 - adding a new E2E is appropriate only when it protects a product-defining
@@ -3018,6 +3362,30 @@ Rules:
   search returned something. At minimum that means truthful retrieval mode,
   correct scope bucket, preserved provenance, and explicit degraded lexical-only
   behavior when semantic retrieval is unavailable
+- the prescriptive E2E catalog lives in
+  [`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md);
+  only entries promoted into
+  [`AUTOMATED_E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/AUTOMATED_E2E_BUDGET.json)
+  consume blessed budget slots
+
+### E2E admission contract
+
+Every proposed new automated E2E should name, before it is accepted:
+
+- the exact user-visible or operator-visible promise it defends
+- the specific real boundaries it exercises that lower layers do not already
+  cover
+- why unit plus integration plus operator smoke are insufficient for that gap
+- the fixture/runtime cost it adds to the suite and release process
+- the support wording or release claim that depends on the test existing
+
+Default rule:
+
+- if the proposed E2E mostly reasserts a success path that lower layers can
+  already defend, reject it
+- if the defended promise is primarily about failure handling, degraded mode,
+  invalidation, or recovery, prefer unit or integration proof first
+- a happy-path E2E never substitutes for narrower failure-state coverage
 
 ### E2E budget feedback rule
 
@@ -3063,6 +3431,42 @@ That means the suite must also validate:
   normalized outputs
 - command semantics shared across CLI, TUI, harness-command adapters, and later
   automation surfaces
+
+### Rust validation-tooling direction
+
+Roger is a Rust-first local product and should adopt a Rust-specific testing
+toolchain where that improves proof quality without bloating the lane model.
+
+Adopted command baseline:
+
+- formatting gate: `cargo fmt --check`
+- lint gate: `cargo clippy --workspace --all-targets -- -D warnings`
+- broad workspace validation: `cargo test --workspace --all-targets`
+- targeted suite replay: `cargo test -p <package> --test <suite> -- --nocapture`
+
+Adopted Rust tools:
+
+- `proptest` for rule matrices, reducer transitions, and other property-style
+  unit coverage
+- `insta` for stable structural snapshots where Roger wants queue, inspector,
+  or controller-state proof without brittle full-terminal goldens
+- `cargo llvm-cov` for coverage reporting and ratcheting
+
+Approved but intentionally non-default:
+
+- `cargo fuzz` for parsers, bridge envelopes, and structured-artifact surfaces
+- `criterion` for explicit performance-contract work
+- `loom` for narrow concurrency seams only when ordinary tests cannot defend the
+  interleaving or lock-ordering contract honestly
+
+Deliberate non-adoptions from adjacent Rust projects:
+
+- do not make `rch` or any other remote compile wrapper part of Roger's
+  canonical command surface
+- do not create extra top-level validation lanes for fuzzing, benchmarking, or
+  audits; keep them as supporting tooling around the same three-lane model
+- do not let coverage percentages become the primary release truth; named
+  invariants, suites, fixtures, and proof artifacts remain the governing model
 
 ### Test artifacts and fixture corpus
 
@@ -3406,6 +3810,15 @@ settled enough for implementation:
 Convert the plan into beads only after one critique/integration loop confirms
 the architecture is stable enough.
 
+For documentation-heavy changes, the analogous rule is:
+
+- do not beadize or implement a new planning direction while it still depends
+  on multiple overlapping live plan docs
+- first fold the accepted direction into the canonical plan and relevant
+  support contracts
+- then archive, downgrade, or delete the temporary synthesis docs that are no
+  longer needed as live inputs
+
 The first bead graph should be organized around:
 
 - repo foundation
@@ -3426,8 +3839,18 @@ Each bead must include:
 - rationale
 - dependencies
 - exact acceptance criteria
+- the concrete user-visible or operator-visible promise being defended
+- the primary ownership surface, such as domain, CLI, TUI, extension,
+  bridge/setup, or release/install
+- the primary failure, degraded, or recovery cases that are part of the same
+  promise
 - explicit validation contract, naming the cheapest truthful layer
+- explicit in-scope and out-of-scope boundaries
 - whether it is v1-critical or later
+- the support-claim boundary: what wording becomes safe after the bead lands,
+  and what must still remain narrowed
+- any required proof artefacts, operator smoke lanes, or repair notes when
+  real-surface behavior is involved
 - any relevant flow ids from `REVIEW_FLOW_MATRIX.md`
 - any relevant provider/browser/OS coverage obligations from
   `RELEASE_AND_TEST_MATRIX.md`
@@ -3440,6 +3863,15 @@ Execution-governance rules:
 - a bead does not close on "code landed"; it closes on acceptance evidence
 - support claims must match live surface + docs + validation, not planning
   intent alone
+- if a bead mixes UX creation, failure handling, and support-claim proof across
+  several user-visible surfaces, split it unless it is intentionally an
+  integration checkpoint
+- if a bead touches launch, refresh, approval, posting, install/update, or the
+  browser bridge, it should name invalidation, fail-closed, and recovery
+  behavior explicitly rather than leaving those obligations implicit
+- docs-only reconciliation may clarify truth, but it does not close the
+  underlying implementation bead when live operator behavior or live validation
+  proof is still missing
 
 ## Definition of Done for the Planning Stage
 

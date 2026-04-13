@@ -80,7 +80,8 @@ expected exception because it is web-native.
 ├── _exploration/      # reference repos (do not import as dependencies)
 │   ├── frankentui/    # FrankenTUI source — TUI architecture reference
 │   ├── asupersync/    # async runtime — v2 extension bridge reference
-│   └── cass/          # CASS search — search layer reference implementation
+│   ├── cass/          # CASS search — search layer reference implementation
+│   └── pi_agent_rust/ # Rust-native agent/testing/program-governance reference
 ├── docs/              # planning and architecture docs
 └── AGENTS.md          # this file
 ```
@@ -104,6 +105,7 @@ Read these to understand the full plan before touching code.
 | [`docs/ROUND_04_ARCHITECTURE_RECONCILIATION_BRIEF.md`](docs/ROUND_04_ARCHITECTURE_RECONCILIATION_BRIEF.md) | Round 04 prep brief — settled versus unresolved architecture and blocked-bead impact |
 | [`docs/ROUND_04_ARCHITECTURE_RECONCILIATION_OUTCOME.md`](docs/ROUND_04_ARCHITECTURE_RECONCILIATION_OUTCOME.md) | Formal closeout of Round 04 — reconciled decisions, remaining bounded questions, and bead impact |
 | [`docs/PLANNING_WORKFLOW_PROMPTS.md`](docs/PLANNING_WORKFLOW_PROMPTS.md) | Prompts for future critique, integration, and bead polishing rounds |
+| [`docs/DOCS_TREE_INVENTORY_AND_CLEANUP_PLAN.md`](docs/DOCS_TREE_INVENTORY_AND_CLEANUP_PLAN.md) | Full-tree docs inventory assigning each `docs/*.md` file a class plus keep/merge/archive action for cleanup execution |
 | [`docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md`](docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md) | Reusable prompt pack for repo onboarding and pre-planning discovery |
 | [`docs/DATA_MODEL_AND_STORAGE_CONTRACT.md`](docs/DATA_MODEL_AND_STORAGE_CONTRACT.md) | Implementation-facing contract for canonical entities, concurrency, artifacts, and migration boundaries |
 | [`docs/CORE_DOMAIN_SCHEMA_AND_FINDING_FINGERPRINT.md`](docs/CORE_DOMAIN_SCHEMA_AND_FINDING_FINGERPRINT.md) | Narrow support contract for the core entity set, finding identity, refresh lineage, and invalidation rules |
@@ -119,8 +121,10 @@ Read these to understand the full plan before touching code.
 | [`docs/HARNESS_SESSION_LINKAGE_CONTRACT.md`](docs/HARNESS_SESSION_LINKAGE_CONTRACT.md) | Implementation-facing contract for the Roger-to-harness session boundary, `SessionLocator`, `ResumeBundle`, and adapter obligations (closes `rr-015`) |
 | [`docs/SEARCH_MEMORY_LIFECYCLE_AND_SEMANTIC_ASSET_POLICY.md`](docs/SEARCH_MEMORY_LIFECYCLE_AND_SEMANTIC_ASSET_POLICY.md) | Support contract for prior-review search, semantic asset lifecycle, memory promotion rules, and `0.1.0` scope fence before `rr-024` |
 | [`docs/RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md) | Explicit `0.1.0` provider, browser, OS, fixture, and validation matrix |
+| [`TESTING.md`](TESTING.md) | Operator-facing testing doctrine tying support claims to invariants, suites, proof artifacts, and release truth |
 | [`docs/TEST_HARNESS_GUIDELINES.md`](docs/TEST_HARNESS_GUIDELINES.md) | Canonical implementation-facing contract for suite layers, fixtures, CI tiers, and E2E budget rules |
 | [`docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md`](docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md) | Implementation-facing support contract for `0.1.0` test execution tiers, the one blessed automated E2E, and the machine-readable E2E budget guard |
+| [`docs/VALIDATION_INVARIANT_MATRIX.md`](docs/VALIDATION_INVARIANT_MATRIX.md) | Canonical registry of release-critical product invariants, owning suite families, proof artifacts, and bead-translation rules |
 | [`docs/REVIEW_FLOW_MATRIX.md`](docs/REVIEW_FLOW_MATRIX.md) | Scenario matrix mapping Roger user flows to happy-path, variant, and failure/recovery coverage for alignment across TUI, CLI, extension, and harness |
 | [`docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md) | Planning-stage matrix naming flow families, fixture families, suite families, and support-claim ownership; seeds the `rr-011.x` validation beads (closes `rr-025`) |
 | [`docs/VALIDATION_HARNESS_SCAFFOLD_CONTRACT.md`](docs/VALIDATION_HARNESS_SCAFFOLD_CONTRACT.md) | Implementation-facing contract for suite directory layout, naming conventions, metadata envelope schema, helper boundaries, fixture manifests, and failure-artifact preservation rules (closes `rr-025.1`) |
@@ -171,6 +175,14 @@ Default reading path for agents:
 2. `docs/PLAN_FOR_ROGER_REVIEWER.md`
 3. Relevant bead or support doc for the task at hand
 
+Testing exception:
+
+- if you are shaping or implementing tests for a bead whose UX behavior,
+  support claim, fail-closed semantics, or recovery expectations are
+  underspecified, reread the canonical plan plus `TESTING.md` and the relevant
+  validation support docs before implementing the tests
+- do not guess at product truth just because the immediate bead is thin
+
 Use [`docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md`](docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md)
 when the task is to study an unfamiliar repo, produce a current-state brief,
 or establish an authority map before planning.
@@ -183,6 +195,23 @@ Read critique rounds only when:
 
 Do not treat "latest critique doc read" as "current truth". The canonical plan
 is the current truth unless the user says otherwise.
+
+### Agentic-First Documentation Cleanup Rules
+
+Roger follows an agentic-first planning posture:
+
+- prefer one dense canonical plan plus narrow support contracts over many
+  overlapping live plan docs
+- treat side plans as temporary synthesis artifacts, not permanent parallel
+  sources of product truth
+- if a side-plan direction is accepted, merge it into the canonical plan or the
+  relevant support contract and then archive, downgrade, or delete the side
+  plan
+- every doc under `docs/` should clearly read as one of: canonical plan,
+  support contract, bounded side-plan, bead/process support, historical
+  critique, operator/runbook doc, or raw/archive context
+- broken doc links, stale planning references, and support-claim drift are
+  bugs; fix them when discovered instead of preserving the ambiguity
 
 ---
 
@@ -381,6 +410,9 @@ Rules:
   real blocker
 - announce new or split beads in Agent Mail so other agents can pick them up
 - every new implementation bead should include an explicit validation contract
+- agents may create testing beads or research beads when they notice suspicious
+  coverage gaps, weak invariant ownership, or an underspecified test contract
+  that would otherwise force guesswork
 - docs, metadata, and planning cleanups may clarify truth, but they do not
   satisfy an implementation bead whose acceptance criteria require executable
   code, runnable suites, or live user-facing behavior
@@ -393,6 +425,9 @@ Rules:
 
 - a leaf bead should usually have one clear ownership area, one acceptance
   boundary, and one validation story
+- every new or split bead should name one concrete user-visible or
+  operator-visible promise, one primary ownership surface, and one primary
+  proof story
 - if a bead is too large for one agent to finish and prove in one bounded
   session, split it before or during execution
 - parent beads should usually act as integration checkpoints; child beads should
@@ -401,6 +436,11 @@ Rules:
   repo "done"; shape the graph or create the missing child bead instead
 - if a bead contains multiple disjoint code areas, multiple support claims, or
   multiple unrelated validation layers, it is probably undersplit
+- if failure handling, degraded mode, invalidation, or recovery are part of the
+  promise, they belong in the bead contract rather than as implied future
+  cleanup
+- if a bead mixes several user-visible surfaces or several independent proof
+  stories, split it unless it is intentionally an integration checkpoint
 
 ### A bead does not close on "code landed"
 
@@ -457,13 +497,23 @@ Rules:
 - smoke is not a validation lane. It is operator or release evidence and is
   sufficient only when the bead or the governing validation docs explicitly say
   it is the right proof layer
+- if robustness, failure handling, invalidation, or recovery are part of the
+  promise, the validation contract must name those cases and the proof layer for
+  them explicitly
 - provider acceptance, crash recovery, bridge truthfulness, and other bounded
   real-surface checks belong under the `integration` lane unless the defended
   promise is a true multi-surface product journey
+- success-only validation is insufficient for beads that touch launch,
+  resume/return, refresh, approval, posting, bridge/setup, install/update, or
+  other fail-closed boundaries
 - do not add a new blessed automated E2E unless the budget and justification
   rules in the validation docs are satisfied
 - release is an operator gate, not a fourth lane; support claims for a release
   must be backed by named prerequisites and current evidence
+- a user instruction or bead note that effectively says `release at this
+  point` should be treated as a request to prepare the `release-candidate`
+  gate, gather the required evidence, and narrow claims as needed; only the
+  final publish step remains an explicit operator approval decision
 - if a bead is missing a validation contract, add or clarify it before closing
   the bead rather than silently guessing
 
@@ -552,6 +602,10 @@ Default posture:
   code and docs
 - when you find "a bit more" that is necessary for an honest closeout, treat
   that as part of the job: finish it, or bead it
+- when you notice a nearby validation hole, weak degraded-mode coverage, or a
+  thinly specified testing frontier, you are expected to widen the proof story
+  or create the next obvious testing bead rather than silently narrowing the
+  claim
 
 The desired behavior is:
 

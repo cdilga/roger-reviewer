@@ -1,6 +1,8 @@
 # Plan For Truthful Provider Parity And GitHub Copilot CLI
 
-Status: Proposed
+Status: Proposed bounded side-plan. Accepted directions should be folded back
+into `PLAN_FOR_ROGER_REVIEWER.md` or the relevant support contracts rather than
+leaving this file as a long-lived parallel source of product truth.
 Intended repo path: `docs/PLAN_FOR_TRUTHFUL_PROVIDER_PARITY_AND_GITHUB_COPILOT_CLI.md`
 Audience: Roger maintainers and implementers working on `0.1.x` hardening and provider expansion
 
@@ -30,6 +32,13 @@ This plan is therefore not just “add another provider.” It is a combined har
 - make Roger's existing core lifecycle honest
 - finish the support claims Roger already wants to make
 - add GitHub Copilot CLI as a first-class provider without weakening Roger's safety model
+
+Documentation-maintenance rule for this file:
+
+- use it as a bounded synthesis input while the lane is still moving quickly
+- once the direction is accepted, merge the live product truth back into the
+  canonical plan and relevant support contracts
+- do not let this remain the only place where active Roger behavior is defined
 
 ---
 
@@ -711,7 +720,6 @@ This is especially important once Copilot joins the matrix.
 
 ## New files
 
-- `docs/PLAN_FOR_TRUTHFUL_PROVIDER_PARITY_AND_GITHUB_COPILOT_CLI.md`
 - `packages/session-copilot/src/lib.rs`
 - `packages/session-copilot/Cargo.toml`
 - `.github/copilot-instructions.md`
