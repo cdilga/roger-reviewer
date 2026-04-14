@@ -357,6 +357,17 @@ Stable `data` fields:
 `rr robot-docs schemas` must expose the current `schema_id` inventory for every
 shortlisted command in this contract.
 
+`rr robot-docs guide` and `rr robot-docs workflows` may also carry advisory
+inside-Roger examples for agents, including:
+
+- `context` such as `inside_roger`
+- `skill_path` pointing at a repo-local skill artifact
+- `example` or `notes` fields that describe the currently safe in-harness subset
+
+These examples are discoverability aids only. They must not imply that
+`rr agent` is part of the `--robot` contract or that richer in-harness
+commands are already shipped.
+
 ## Degraded, Partial, and Repair-Needed Handling
 
 - `partial` means Roger produced a usable subset of the requested result but had

@@ -6,7 +6,11 @@
 
 # Project-local Codex state
 .codex/
-.claude/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/roger-inside-roger-agent/
+!.claude/skills/roger-inside-roger-agent/SKILL.md
 .roger/
 
 # Local reference clones are useful during planning, but the initial repo

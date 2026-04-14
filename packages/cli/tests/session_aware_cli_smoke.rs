@@ -1604,6 +1604,50 @@ fn robot_docs_surfaces_schema_inventory_and_blocks_unknown_topics() {
             .any(|item| item["command"] == "rr update")
     );
 
+    let guide = run_rr(&["robot-docs", "guide", "--robot"], &runtime);
+    assert_eq!(guide.exit_code, 0, "{}", guide.stderr);
+    let guide_payload = parse_robot_payload(&guide.stdout);
+    assert_eq!(guide_payload["data"]["topic"], "guide");
+    let guide_items = guide_payload["data"]["items"]
+        .as_array()
+        .expect("guide items");
+    let inside_roger = guide_items
+        .iter()
+        .find(|item| item["context"] == "inside_roger")
+        .expect("inside Roger guide item");
+    assert_eq!(
+        inside_roger["skill_path"],
+        ".claude/skills/roger-inside-roger-agent/SKILL.md"
+    );
+    let example_commands = inside_roger["example"]["commands"]
+        .as_array()
+        .expect("example commands");
+    assert!(
+        example_commands
+            .iter()
+            .any(|command| command == "roger-status")
+    );
+
+    let workflows = run_rr(&["robot-docs", "workflows", "--robot"], &runtime);
+    assert_eq!(workflows.exit_code, 0, "{}", workflows.stderr);
+    let workflows_payload = parse_robot_payload(&workflows.stdout);
+    assert_eq!(workflows_payload["data"]["topic"], "workflows");
+    let workflow_items = workflows_payload["data"]["items"]
+        .as_array()
+        .expect("workflow items");
+    let inside_roger_workflow = workflow_items
+        .iter()
+        .find(|item| item["name"] == "inside_roger_safe_subset")
+        .expect("inside Roger workflow");
+    assert_eq!(
+        inside_roger_workflow["skill_path"],
+        ".claude/skills/roger-inside-roger-agent/SKILL.md"
+    );
+    let steps = inside_roger_workflow["steps"]
+        .as_array()
+        .expect("workflow steps");
+    assert!(steps.iter().any(|step| step == "roger-return"));
+
     let blocked = run_rr(&["robot-docs", "unknown-topic", "--robot"], &runtime);
     assert_eq!(blocked.exit_code, 3, "{}", blocked.stderr);
     let blocked_payload = parse_robot_payload(&blocked.stdout);

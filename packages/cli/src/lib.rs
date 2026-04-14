@@ -4844,6 +4844,21 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                 json!({"command": "rr bridge install [--extension-id <id>] --robot", "purpose": "repair/dev host registration override when guided setup cannot discover identity"}),
                 json!({"command": "rr bridge uninstall --robot", "purpose": "remove bridge registration assets"}),
                 json!({"command": "rr robot-docs schemas --robot", "purpose": "schema inventory"}),
+                json!({
+                    "kind": "inside_roger_skill",
+                    "context": "inside_roger",
+                    "audience": "agent",
+                    "skill_path": ".claude/skills/roger-inside-roger-agent/SKILL.md",
+                    "purpose": "safe in-harness review loop when already inside a Roger-managed provider session",
+                    "example": {
+                        "commands": ["roger-help", "roger-status", "roger-findings", "roger-return"],
+                        "notes": [
+                            "use only inside an active Roger-managed provider session or bare-harness continuation",
+                            "if unsupported, fail closed to the equivalent rr command outside the harness",
+                            "does not authorize approval, posting, raw gh writes, or bypassing Roger review policy"
+                        ]
+                    }
+                }),
             ],
             "0.1.0",
         ),
@@ -4891,6 +4906,13 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
             vec![
                 json!({"name": "resume_loop", "steps": ["rr sessions --robot", "rr resume --session <id> --robot", "rr findings --session <id> --robot"]}),
                 json!({"name": "search_followup", "steps": ["rr search --query <text> --robot", "rr status --session <id> --robot"]}),
+                json!({
+                    "name": "inside_roger_safe_subset",
+                    "context": "inside_roger",
+                    "skill_path": ".claude/skills/roger-inside-roger-agent/SKILL.md",
+                    "steps": ["roger-help", "roger-status", "roger-findings", "roger-return"],
+                    "notes": "Use only inside a Roger-managed provider session. These are optional harness-native convenience commands; if unsupported, return to the equivalent rr command outside the harness."
+                }),
             ],
             "0.1.0",
         ),

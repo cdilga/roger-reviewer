@@ -16,6 +16,10 @@ This directory contains reusable Roger-specific skill artifacts.
   - Roger-native performance-work contract based on baseline-first,
     profile-first, proof-backed optimization discipline.
 
+- `ROGER_INSIDE_ROGER_AGENT.md`
+  - Narrow agent-only skill for safe in-harness operation when already inside a
+    Roger-managed session; keeps the agent on the supported Roger-native subset.
+
 ## Intended use
 
 These files are for:
