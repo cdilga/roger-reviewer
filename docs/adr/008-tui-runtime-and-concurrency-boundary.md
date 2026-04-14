@@ -7,7 +7,8 @@
 
 Roger needs:
 
-- a Rust TUI because FrankenTUI is Rust-native
+- a Rust TUI because Roger's accepted local runtime is Rust-first and the TUI
+  must share local ownership with app-core
 - multiple concurrent entrypoints such as TUI, CLI, bridge host, and
   agent-owned invocations
 - truthful daemonless behavior in steady state
@@ -20,8 +21,8 @@ That creates an architectural fork:
 - keep the TUI and app-core in-process and solve the real concurrency problem at
   the canonical store and worker-execution layers
 
-FrankenTUI also matters here because its foreground loop is synchronous rather
-than tokio-native.
+The foreground UI loop also matters here because `FrankenTUI`, Roger's current
+TUI dependency, is synchronous rather than tokio-native.
 
 ## Decision
 
@@ -31,9 +32,10 @@ Recommended runtime shape:
 
 - the TUI process hosts the Roger command router, domain access, and view-model
   logic in-process
-- FrankenTUI owns the foreground synchronous event loop for that process
+- the Roger TUI runtime owns the foreground synchronous event loop for that
+  process; in `0.1.x`, that loop is implemented via FrankenTUI
 - long-running or latency-tolerant work runs behind a Roger-owned background
-  supervisor rather than on the FrankenTUI foreground loop
+  supervisor rather than on the TUI foreground loop
 - CLI, bridge-host, and agent-owned entrypoints may run as separate Roger
   processes against the same canonical store
 - cross-process safety is enforced through session leases or optimistic
@@ -76,7 +78,7 @@ per-request thread spawning.
 
 Recommended model:
 
-- one FrankenTUI foreground thread for UI input, reducers, and rendering
+- one foreground UI thread for input, reducers, and rendering
 - one dedicated async executor thread for I/O-bound work such as harness I/O,
   bridge traffic, GitHub adapter requests, and other async-capable jobs
 - one bounded CPU-worker pool or dedicated indexing/search-maintenance workers
@@ -97,8 +99,8 @@ Recommended rule:
   to the canonical store
 - the active TUI keeps a `last_seen_event_id` or equivalent cursor and performs
   bounded polling against the event stream for cross-process updates
-- do not make filesystem notification, a resident broker, or an asupersync-like
-  event fabric a `0.1.x` requirement
+- do not make filesystem notification, a resident broker, or a richer event
+  fabric a `0.1.x` requirement
 
 ### Minimum external envelope
 
@@ -158,8 +160,8 @@ separate app-core service.
 - it preserves the daemonless architecture more honestly
 - it still leaves room for later editor or client integrations because those can
   target Roger-owned external contracts rather than an assumed local daemon API
-- it avoids overfitting to `_exploration/asupersync`, which remains a useful v2
-  reference for richer event fabrics rather than a `0.1.x` requirement
+- it avoids overfitting to richer event-fabric exploration that is not required
+  for `0.1.x`
 
 ## Consequences
 

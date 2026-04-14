@@ -24,8 +24,9 @@ IPC service.
 ## Core Rules
 
 - Roger remains daemonless in steady state.
-- The FrankenTUI foreground loop stays synchronous and must not block on
-  provider, bridge, indexing, or GitHub adapter I/O.
+- The active TUI foreground loop stays synchronous and must not block on
+  provider, bridge, indexing, or GitHub adapter I/O. In `0.1.x`, that means
+  the Roger `FrankenTUI`-based foreground loop.
 - Background work runs behind a Roger-owned supervisor and communicates back to
   the foreground loop through typed local channels plus durable event rows.
 - Cross-process truth comes from the canonical Roger store, not in-memory task
@@ -78,7 +79,7 @@ Rules:
 ### Same-process wake
 
 - Background completions inside the same Roger process send an immediate local
-  wake signal to the FrankenTUI foreground loop.
+  wake signal to the active TUI foreground loop.
 - The wake signal is advisory. The canonical store and durable event rows remain
   the source of truth.
 

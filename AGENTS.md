@@ -8,7 +8,7 @@ other) working in this repository. Read it before doing anything else.
 ## What is Roger Reviewer?
 
 Roger Reviewer is a local-first pull request review system. It combines a
-session-aware CLI (`rr`), a TUI-first review interface (FrankenTUI), and a
+session-aware CLI (`rr`), a TUI-first review interface, and a
 GitHub browser extension. Its purpose is to drive high-quality review loops,
 keep review state durable and searchable, and require explicit human approval
 before anything is sent back to GitHub.
@@ -42,15 +42,16 @@ These are not preferences. Violating them is a bug.
 
 ## Tech Stack (Current Direction)
 
-**Rust-first local runtime direction** — FrankenTUI has been explored and
-confirmed Rust-only. See `_exploration/frankentui`. Roger should therefore
-favor Rust for local surfaces and local core/runtime layers unless a platform
-constraint clearly justifies another language. The browser extension is the main
-expected exception because it is web-native.
+**Rust-first local runtime direction** — exploratory work has confirmed that
+Roger's local TUI and core/runtime layers should stay Rust-native for `0.1.x`.
+`FrankenTUI` is the current TUI dependency and a real runtime constraint, but
+it is not Roger's product noun or design authority. External repos under
+`_exploration/` are historical references only. The browser extension is the
+main expected exception because it is web-native.
 
 | Layer | Language | Notes |
 |-------|----------|-------|
-| TUI | Rust | FrankenTUI `Model` trait; in-process with Roger app-core in `0.1.x`; one primary `rr` binary, supervised background execution, and stable envelopes at external edges |
+| TUI | Rust | Roger-owned Rust TUI runtime built on `FrankenTUI`; in-process with Roger app-core in `0.1.x`; one primary `rr` binary, supervised background execution, and stable envelopes at external edges |
 | CLI (`rr`) | Rust default | Session-aware commands, harness adapter, GitHub adapter |
 | App core | Rust default | Domain logic, storage, finding lifecycle |
 | Browser extension | TypeScript/JS | WebExtension; Native Messaging is the only supported `0.1.x` browser bridge, with the installed `rr` binary as the intended host runtime; keep runtime deps near zero and allow only a small typed toolchain |
@@ -78,7 +79,7 @@ expected exception because it is web-native.
 │   ├── validation/    # suite planning / budget tooling
 │   └── worktree-manager/
 ├── _exploration/      # reference repos (do not import as dependencies)
-│   ├── frankentui/    # FrankenTUI source — TUI architecture reference
+│   ├── frankentui/    # historical Rust TUI exploration reference
 │   ├── asupersync/    # async runtime — v2 extension bridge reference
 │   ├── cass/          # CASS search — search layer reference implementation
 │   └── pi_agent_rust/ # Rust-native agent/testing/program-governance reference
@@ -938,7 +939,7 @@ ACP/MCP edge adapters, not as reasons to make Roger protocol-first in
 `0.1.0`.
 
 ### Resolved
-- ~~FrankenTUI runtime~~ → Rust-native confirmed. Roger must have a Rust TUI layer.
+- ~~Rust TUI runtime direction~~ → Rust-native confirmed. Roger must have a Rust TUI layer.
 - ~~TUI/app-core process split~~ → Roger stays in-process in `0.1.x`; the
   remaining question is worker/wake behavior rather than whether Roger starts
   with a general local IPC architecture.
@@ -967,7 +968,8 @@ ACP/MCP edge adapters, not as reasons to make Roger protocol-first in
 
 ## Beads Workflow Integration
 
-This project uses [beads_viewer](https://github.com/Dicklesworthstone/beads_viewer) for issue tracking. Issues are stored in `.beads/` and tracked in git.
+This project uses the Beads workflow for issue tracking. Issues are stored in
+`.beads/` and tracked in git.
 
 **Note:** `br` is non-invasive and never executes git commands. After
 `br sync --flush-only`, manually run `git add .beads/` and `git commit` when

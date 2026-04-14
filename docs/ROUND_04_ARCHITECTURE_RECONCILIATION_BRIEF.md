@@ -125,7 +125,7 @@ Already decided:
 - the TUI and app-core stay in-process in `0.1.x`
 - Roger should invest first in stable external contracts, not in a mandatory
   local TUI-to-core IPC boundary
-- FrankenTUI owns the synchronous foreground event loop
+- the Roger TUI foreground loop is synchronous
 - background work should run behind Roger-owned worker channels or a supervised
   executor
 
@@ -151,7 +151,7 @@ Suggested Round 04 decision:
 
 - Roger should ship as a small Rust workspace with shared crates, not as a
   split local-service architecture.
-- The TUI process should host FrankenTUI, the Roger command router, domain
+- The TUI process should host the Roger TUI runtime, the Roger command router, domain
   access, and view-model assembly in-process.
 - CLI commands, bridge host entrypoints, and other automation entrypoints may
   run as separate Roger processes against the same canonical store.

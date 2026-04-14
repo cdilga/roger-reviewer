@@ -189,8 +189,8 @@ implementation plan:
   recover context without invasive coupling.
 - A browser extension can launch or resume local Roger flows using an on-demand
   mechanism that does not turn into a hidden daemon.
-- FrankenTUI can be integrated without forcing a second, conflicting application
-  architecture.
+- The Rust TUI runtime can integrate cleanly without forcing a second,
+  conflicting application architecture.
 - A narrow, local-only hybrid retrieval slice can ship from the first Roger
   search milestone without turning embeddings into a blocker for the core review
   loop.
@@ -497,10 +497,10 @@ layout because the product has multiple surfaces sharing one domain model.
 
 ### Confirmed: Roger needs a Rust TUI layer
 
-FrankenTUI has been explored directly (cloned at `_exploration/frankentui`). It
-is Rust-native, the `Model` trait must be implemented in Rust, and there is no
-TypeScript embedding path that would let Roger keep a non-Rust TUI. This
-resolves the runtime question for the presentation layer.
+Exploration of Rust-native TUI options resolved the runtime question for the
+presentation layer: Roger's local cockpit should stay Rust-native for `0.1.x`.
+`FrankenTUI` is the current TUI dependency, but the reason for the choice is
+Roger's own runtime shape rather than loyalty to an external project.
 
 It also establishes the default bias for the rest of Roger: favor Rust for the
 local runtime unless a platform constraint clearly justifies another language.
@@ -508,9 +508,10 @@ The browser extension is the main expected exception because it is inherently
 web-native.
 
 **Confirmed TUI layer: Rust**
-- Implements the FrankenTUI `Model` trait
-- Diff-based rendering, diff-optimised widgets, inline mode
-- Synchronous event loop (no tokio/async-std)
+- Roger-owned Rust TUI runtime
+- currently implemented on top of FrankenTUI
+- diff-oriented terminal rendering and inline interaction are in scope
+- synchronous foreground UI loop (no async runtime on the hot path)
 - Runs in-process with Roger app-core in `0.1.x`; external surfaces and future
   out-of-process adapters use Roger-owned versioned contracts instead
 
@@ -534,10 +535,9 @@ web-native.
 
 ### Architecture implication
 
-- Brain dump explicitly names FrankenTUI. Replacing it with a TypeScript TUI
-  loses the rendering quality and inline-mode guarantees.
-- CASS (also cloned at `_exploration/cass`) demonstrates the Rust TUI + local
-  indexing pattern, but Roger should not inherit its language split blindly.
+- The original planning direction toward a Rust TUI holds, but Roger should
+  describe the cockpit in Roger-owned terms rather than by naming external
+  implementations as if they were product primitives.
 - The key decision is the ownership boundary within a Rust-first local runtime,
   not whether Roger should chase a balanced multi-language split as an end in
   itself.
@@ -550,8 +550,8 @@ Decision for `0.1.x`:
 
 - keep the TUI and Roger app-core in-process in the same Rust runtime rather
   than splitting them into separate local processes by default
-- treat FrankenTUI's synchronous foreground event loop as the UI authority for a
-  given TUI process
+- treat the Roger TUI's synchronous foreground event loop as the UI authority
+  for a given TUI process
 - keep one primary `rr` binary with internal mode boundaries for TUI, CLI,
   bridge-host, robot-facing commands, and helper flows rather than assuming a
   small fleet of cooperating binaries
@@ -649,9 +649,10 @@ Principles:
 
 Current dependency stance:
 
-- **Likely earned**: FrankenTUI, SQLite, Tantivy, FastEmbed if semantic search
-  remains part of the first Roger search slice, `gh` CLI as an external runtime
-  dependency, and browser-native APIs such as Native Messaging
+- **Likely earned**: FrankenTUI as the current Rust TUI dependency, SQLite,
+  Tantivy, FastEmbed if semantic search remains part of the first Roger search
+  slice, `gh` CLI as an external runtime dependency, and browser-native APIs
+  such as Native Messaging
 - **Under active scrutiny**: any heavy TypeScript application framework, broad
   GitHub SDK usage if `gh` CLI is sufficient, local web server stacks for the
   bridge, and convenience wrappers around storage or search that do not add
@@ -3788,7 +3789,7 @@ settled enough for implementation:
 
 ### Resolved questions
 
-- ~~FrankenTUI runtime~~: Confirmed Rust-native. Roger needs a Rust TUI layer.
+- ~~Rust TUI runtime~~: Confirmed Rust-native. Roger needs a Rust TUI layer.
 - ~~Local runtime language bias~~: Favor Rust for CLI, app-core, storage, and
   search unless a platform constraint strongly justifies another language. The
   browser extension is the main expected JS/TS exception.

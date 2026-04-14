@@ -100,7 +100,7 @@ Recommended `0.1.x` process model:
 - CLI invocations, browser-bridge host invocations, agent-owned commands, and
   other local entrypoints may run as separate Roger processes against the same
   canonical store
-- same-process long-running work should move off the FrankenTUI foreground loop
+- same-process long-running work should move off the active TUI foreground loop
   onto a dedicated async executor thread for I/O-bound work plus bounded
   CPU-worker execution for indexing/search maintenance, with Roger-owned
   channels returning bounded results back to the UI loop

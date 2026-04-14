@@ -370,25 +370,22 @@ Recommended first-release shape:
 This is a better first-release tradeoff than giving every concept a top-level
 screen.
 
-## External TUI reference learnings
+## Roger-specific TUI reconciliation rules
 
-Recent analysis of `beads_viewer` is useful here, but the lesson is not "copy
-its screen map." The useful lesson is which TUI tradeoffs held up after real
-feature pressure and screenshot-driven refinement.
+Recent TUI analysis reinforced several design tradeoffs, but the important move
+here is to phrase them as Roger rules rather than as another project's lineage.
 
 Use these as reconciliation rules for Roger:
 
-- borrow layout and interaction lessons from external TUIs, but do not inherit
-  their nouns; Roger must stay grounded in canonical `Finding`,
-  `OutboundDraftBatch`, `ReviewSession`, `AttentionState`, and prompt lineage
-  rather than generic cards, issues, or dashboard widgets
+- Roger must stay grounded in canonical `Finding`, `OutboundDraftBatch`,
+  `ReviewSession`, `AttentionState`, and prompt lineage rather than generic
+  cards, issues, or dashboard widgets
 - adaptive split-view is worth keeping, but the inspector must earn its screen
   cost; if the right-hand region is frequently empty, redundant, or less useful
   than the queue, that is a product bug rather than an acceptable placeholder
-- top-level view count must stay low; external experience reinforces that rich
-  TUIs degrade quickly when every useful concept becomes a peer workspace, so
-  overlays and drawers should absorb help, prompt, and composer affordances
-  wherever possible
+- top-level view count must stay low; rich TUIs degrade quickly when every
+  useful concept becomes a peer workspace, so overlays and drawers should
+  absorb help, prompt, and composer affordances wherever possible
 - any Roger-owned ranking or attention signal must be explained in-product;
   opaque scores create operator distrust, so the TUI should expose concise
   "what this means", "why Roger surfaced it", and "how to act on it" guidance
@@ -397,10 +394,10 @@ Use these as reconciliation rules for Roger:
   questions such as "what changed since my last pass?" and "why is this session
   asking for attention now?"; history should share the same queue-plus-inspector
   grammar rather than becoming a separate novelty screen
-- do not cargo-cult a kanban or board metaphor into Roger; the `beads_viewer`
-  experience shows that workflow boards often consume lots of space while
-  adding little beyond a strong queue, so Roger should only ship board-like
-  surfaces if they clearly outperform the findings queue for real review work
+- do not cargo-cult a kanban or board metaphor into Roger; workflow boards
+  often consume lots of space while adding little beyond a strong queue, so
+  Roger should only ship board-like surfaces if they clearly outperform the
+  findings queue for real review work
 - expensive analysis should be computed once in shared core state and projected
   into each surface; if a calculation is skipped, stale, or unavailable, Roger
   should say so explicitly rather than pretending the result is always live

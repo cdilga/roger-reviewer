@@ -5,9 +5,11 @@
 
 ## Context
 
-Roger's TUI is already constrained to Rust by FrankenTUI. Search is also
-Rust-native. Session orchestration, storage, local bridge behavior, and
-multi-instance runtime management all live on the same side of the system.
+Roger's accepted local-runtime direction keeps the TUI and core ownership in
+Rust. `FrankenTUI` is the current TUI dependency, which reinforces that
+direction without becoming the product model. Search is also Rust-native.
+Session orchestration, storage, local bridge behavior, and multi-instance
+runtime management all live on the same side of the system.
 
 The remaining question was whether Roger should split its local runtime across
 Rust and TypeScript or treat Rust as the default for local ownership.

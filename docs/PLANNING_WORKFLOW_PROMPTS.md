@@ -40,7 +40,8 @@ Use this if you want a frontier model to regenerate the plan from scratch.
 I want to build Roger Reviewer, a local-first pull request review system.
 
 Core product intent:
-- TUI-first review experience using FrankenTUI for the main interface
+- TUI-first review experience with a Roger-owned Rust operator cockpit as the
+  main interface, currently built on FrankenTUI
 - backend/session layer that is a drop-in wrapper over an OpenCode session, while always preserving the ability to resume in plain OpenCode
 - Chrome/Brave GitHub extension that injects rich PR actions and can launch or reconnect local review workflows
 - shared architecture that can power the TUI, extension, and session-aware CLI without introducing a long-running daemon
