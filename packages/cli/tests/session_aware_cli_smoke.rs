@@ -1222,16 +1222,46 @@ fn bounded_provider_outputs_are_truthful_for_status_resume_refresh_and_return() 
     );
 
     let resume = run_rr(&["resume", "--pr", "42", "--robot"], &runtime);
-    assert_eq!(resume.exit_code, 3, "{}", resume.stderr);
+    assert_eq!(resume.exit_code, 5, "{}", resume.stderr);
     let resume_payload = parse_robot_payload(&resume.stdout);
-    assert_eq!(resume_payload["outcome"], "blocked");
+    assert_eq!(resume_payload["outcome"], "degraded");
     assert_eq!(resume_payload["data"]["provider"], "gemini");
+    assert_eq!(
+        resume_payload["data"]["resume_path"],
+        "reseeded_from_bundle"
+    );
+    assert_eq!(resume_payload["data"]["continuity_quality"], "degraded");
+    assert!(
+        resume_payload["warnings"]
+            .as_array()
+            .expect("resume warnings")
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .expect("warning string")
+                .contains("bounded support"))
+    );
 
     let refresh = run_rr(&["refresh", "--pr", "42", "--robot"], &runtime);
-    assert_eq!(refresh.exit_code, 3, "{}", refresh.stderr);
+    assert_eq!(refresh.exit_code, 5, "{}", refresh.stderr);
     let refresh_payload = parse_robot_payload(&refresh.stdout);
-    assert_eq!(refresh_payload["outcome"], "blocked");
+    assert_eq!(refresh_payload["outcome"], "degraded");
     assert_eq!(refresh_payload["data"]["provider"], "gemini");
+    assert_eq!(
+        refresh_payload["data"]["resume_path"],
+        "reseeded_from_bundle"
+    );
+    assert_eq!(refresh_payload["data"]["continuity_quality"], "degraded");
+    assert!(
+        refresh_payload["warnings"]
+            .as_array()
+            .expect("refresh warnings")
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .expect("warning string")
+                .contains("bounded support"))
+    );
 
     let ret = run_rr(&["return", "--pr", "42", "--robot"], &runtime);
     assert_eq!(ret.exit_code, 3, "{}", ret.stderr);

@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use roger_app_core::cli_config;
 use roger_app_core::time;
 use roger_app_core::{
@@ -2752,7 +2754,9 @@ fn handle_resume_or_refresh(
 
     if parsed.robot {
         let continuity_state = session.continuity_state.to_ascii_lowercase();
-        let degraded = continuity_state.contains("degraded")
+        let provider_is_bounded = session.provider != "opencode";
+        let degraded = provider_is_bounded
+            || continuity_state.contains("degraded")
             || continuity_state.contains("reseed")
             || continuity_state.contains("unusable");
         let continuity_quality = if continuity_state.contains("unusable") {
@@ -4856,6 +4860,76 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                             "use only inside an active Roger-managed provider session or bare-harness continuation",
                             "if unsupported, fail closed to the equivalent rr command outside the harness",
                             "does not authorize approval, posting, raw gh writes, or bypassing Roger review policy"
+                        ]
+                    },
+                    "finding_return_contract": {
+                        "canonical_transport": "rr agent worker.submit_stage_result",
+                        "availability": "canonical worker contract; separate from the --robot command shortlist and not implied to be shipped by this discovery item alone",
+                        "binding_fields": [
+                            "review_session_id",
+                            "review_run_id",
+                            "review_task_id",
+                            "task_nonce"
+                        ],
+                        "result_fields": [
+                            "schema_id",
+                            "stage",
+                            "task_kind",
+                            "outcome",
+                            "summary",
+                            "structured_findings_pack"
+                        ],
+                        "finding_pack": {
+                            "schema_version": "structured_findings_pack/v1",
+                            "finding_fields": [
+                                "fingerprint",
+                                "title",
+                                "normalized_summary",
+                                "severity",
+                                "confidence",
+                                "code_evidence"
+                            ]
+                        },
+                        "result_envelope_example": {
+                            "operation": "worker.submit_stage_result",
+                            "payload": {
+                                "schema_id": "<worker-stage-result-schema>",
+                                "review_session_id": "<review-session-id>",
+                                "review_run_id": "<review-run-id>",
+                                "review_task_id": "<review-task-id>",
+                                "task_nonce": "<task-nonce>",
+                                "stage": "deep_review",
+                                "task_kind": "review",
+                                "outcome": "completed",
+                                "summary": "Found 1 likely correctness issue.",
+                                "structured_findings_pack": {
+                                    "schema_version": "structured_findings_pack/v1",
+                                    "stage": "deep_review",
+                                    "findings": [
+                                        {
+                                            "fingerprint": "<finding-fingerprint>",
+                                            "title": "Null result ignored in refresh path",
+                                            "normalized_summary": "The refresh path drops a null adapter result and reports success instead of surfacing a failure.",
+                                            "severity": "high",
+                                            "confidence": "medium",
+                                            "code_evidence": [
+                                                {
+                                                    "evidence_role": "primary",
+                                                    "repo_rel_path": "packages/cli/src/lib.rs",
+                                                    "start_line": 1200,
+                                                    "end_line": 1218,
+                                                    "anchor_digest": "<anchor-digest>"
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            }
+                        },
+                        "notes": [
+                            "Roger validates the session/run/task/nonce binding before accepting the result",
+                            "Roger validates and repairs the nested findings pack before materializing canonical Finding rows",
+                            "roger-return is a control handoff back to Roger, not the findings submission transport"
                         ]
                     }
                 }),

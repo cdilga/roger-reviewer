@@ -4,7 +4,7 @@ use roger_app_core::{
     ApprovalState, ExplicitPostingInput, ExplicitPostingOutcome, OutboundApprovalToken,
     OutboundDraft, OutboundDraftBatch, OutboundPostingAdapter, PostedActionStatus,
     PostingAdapterItemResult, PostingAdapterItemStatus, execute_explicit_posting_flow,
-    outbound_target_tuple_json,
+    outbound_target_tuple_json, ReviewTarget,
 };
 use roger_cli::{CliRuntime, run};
 use roger_storage::{
@@ -75,6 +75,17 @@ fn workspace_root() -> PathBuf {
         .parent()
         .expect("workspace root")
         .to_path_buf()
+}
+
+fn sample_target() -> ReviewTarget {
+    ReviewTarget {
+        repository: "owner/repo".to_owned(),
+        pull_request_number: 42,
+        base_ref: "main".to_owned(),
+        head_ref: "feature".to_owned(),
+        base_commit: "abc123".to_owned(),
+        head_commit: "def456".to_owned(),
+    }
 }
 
 fn init_repo(temp: &TempDir) -> PathBuf {
@@ -275,6 +286,7 @@ fn e2e_core_review_happy_path_exercises_real_repo_suite_flow() {
         ExplicitPostingInput {
             action_id: "posted-e2e-1",
             provider: "github",
+            target: &sample_target(),
             batch: &batch,
             drafts: std::slice::from_ref(&draft),
             approval: &approval,
