@@ -39,6 +39,14 @@ This document does not freeze the final SQL schema or storage engine details.
 - `ReviewRunState`
 - `SessionLocator`
 - `ResumeBundle`
+- `SessionBaselineSnapshot`
+
+### Worker execution capture
+
+- `ReviewTask`
+- `WorkerInvocation`
+- `WorkerToolCallEvent`
+- `WorkerStageResult`
 
 ### Prompt and command capture
 
@@ -64,11 +72,15 @@ This document does not freeze the final SQL schema or storage engine details.
 - `PostedAction`
 - `PostedActionItem`
 
-### Scope and configuration
+### Scope, memory, and configuration
 
 - `Scope`
 - `Source`
 - `Episode`
+- `MemoryItem`
+- `MemoryEdge`
+- `MemoryReviewRequest`
+- `UsageEvent`
 - `ConfigLayer`
 
 ## Aggregate Roles
@@ -118,15 +130,64 @@ Required invariants:
 - can outlive or replace a dead `SessionLocator` path without pretending to be
   a full transcript replay
 
+### `SessionBaselineSnapshot`
+
+Roger-owned snapshot of the stable session baseline before task-level overrides.
+
+Required invariants:
+
+- belongs to exactly one `ReviewSession`
+- records allowed scopes, default recall posture, candidate-visibility policy,
+  and prompt strategy for the current continuity lane
+- may be superseded by a later baseline generation, but prior baseline history
+  remains auditable
+- is the canonical answer to "what was the default context posture at this
+  point in the session"
+
+### `ReviewTask`
+
+Roger-owned unit of scheduled review work inside a run.
+
+Required invariants:
+
+- belongs to exactly one `ReviewSession` and one `ReviewRun`
+- stores Roger-owned objective, task kind, and turn strategy
+- stores the scope and operation envelope the worker is allowed to use
+- is created by Roger, not by the provider or worker
+
+### `WorkerInvocation`
+
+Append-only record of one attempt to execute one `ReviewTask`.
+
+Required invariants:
+
+- belongs to exactly one `ReviewTask`
+- may own zero or more `PromptInvocation` turns
+- records provider/session/transport identity for audit and recovery
+- failure or interruption is still canonical history, not an omitted event
+
 ### `PromptInvocation`
 
 Append-only record of the exact prompt Roger resolved and sent.
 
 Required invariants:
 
+- belongs to one `ReviewTask` and, when worker-managed, one `WorkerInvocation`
 - stores the exact resolved prompt text or a content-addressed reference to it
 - captures stage, model, provider, and originating surface
+- is one turn record, not the whole worker-task record
 - is immutable once written
+
+### `WorkerStageResult`
+
+Terminal result proposal returned from one `WorkerInvocation`.
+
+Required invariants:
+
+- binds back to the originating session/run/task plus task nonce
+- may include findings, clarification requests, or follow-up hints
+- is validated by Roger before canonical `Finding` or `ClarificationThread`
+  state is materialized
 
 ### `Finding`
 
@@ -201,6 +262,52 @@ Required invariants:
 
 - every promotable or searchable durable object has an explicit scope identity
 - cross-scope references may exist, but silent cross-scope merge is forbidden
+
+### `MemoryItem`
+
+Reusable semantic or procedural memory object owned by Roger.
+
+Required invariants:
+
+- carries explicit scope identity, memory class, and trust state
+- never silently bypasses the promotion and demotion rules from the canonical
+  memory policy
+- candidate memory must not behave like promoted memory by default
+
+### `MemoryEdge`
+
+Typed relationship between memory items, sources, or episodes.
+
+Required invariants:
+
+- preserves support, contradiction, supersession, or alias semantics explicitly
+- never silently collapses cross-scope disagreement into a merge
+
+### `UsageEvent`
+
+Append-only trace of how evidence or memory was surfaced, cited, applied,
+approved, contradicted, or marked harmful.
+
+Required invariants:
+
+- remains auditable and append-only
+- provides the minimum learning signal needed for promotion, demotion, and
+  anti-pattern handling
+- does not by itself mutate memory trust state without Roger-owned transition
+  logic
+
+### `MemoryReviewRequest`
+
+Roger-owned review request for promotion, demotion, deprecation, restoration,
+or anti-pattern marking of durable memory.
+
+Required invariants:
+
+- names exactly one subject memory item and one requested target state
+- is auditable and non-mutating until Roger accepts it
+- may be proposed by a worker, CLI flow, or TUI flow, but resolution remains a
+  Roger-owned review action
+- rejected, superseded, or withdrawn requests remain part of durable lineage
 
 ### `ConfigLayer`
 

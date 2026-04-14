@@ -5,7 +5,7 @@ facing contract. It is the canonical harness-design companion to
 [`PLAN_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md)
 and
 [`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md).
-[`../TESTING.md`](/Users/cdilga/Documents/dev/roger-reviewer/TESTING.md) is the
+[`TESTING.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TESTING.md) is the
 operator-facing entrypoint; this document remains the implementation-facing
 support contract.
 
@@ -94,7 +94,7 @@ Plan-reread exception:
 
 - ordinary implementation work may often proceed from a bead plus the relevant
   support docs
-- testing or validation work must reread the canonical plan, `TESTING.md`, and
+- testing or validation work must reread the canonical plan, `docs/TESTING.md`, and
   the relevant validation contracts when the bead is underspecified relative to
   the UX or support claim it is supposed to defend
 

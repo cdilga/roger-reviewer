@@ -116,13 +116,17 @@ Read these to understand the full plan before touching code.
 | [`docs/EXTENSION_PACKAGING_AND_RELEASE_CONTRACT.md`](docs/EXTENSION_PACKAGING_AND_RELEASE_CONTRACT.md) | Support contract for the minimal extension toolchain, contract export, and bridge/extension release ownership |
 | [`docs/PLAN_FOR_EXTENSION_SETUP_AND_HAPPY_PATH_VALIDATION.md`](docs/PLAN_FOR_EXTENSION_SETUP_AND_HAPPY_PATH_VALIDATION.md) | Recovery plan for command-surface reconciliation and happy-path/browser validation uplift |
 | [`docs/ROUND_05_SURFACE_RECONCILIATION_BRIEF.md`](docs/ROUND_05_SURFACE_RECONCILIATION_BRIEF.md) | Focused implementation-time reconciliation brief for TUI, CLI, extension UX, action hierarchy, and defending validation layers |
+| [`docs/CONFIGURATION_CAPABILITY_AND_DEFAULTING_CONTRACT.md`](docs/CONFIGURATION_CAPABILITY_AND_DEFAULTING_CONTRACT.md) | Support contract for layered config, defaulting, operator-versus-machine exposure, file/path-bearing settings, and launch/isolation UX integration |
 | [`docs/PLAN_FOR_SCHEMA_MIGRATIONS_AND_UPDATE_COMPATIBILITY.md`](docs/PLAN_FOR_SCHEMA_MIGRATIONS_AND_UPDATE_COMPATIBILITY.md) | Focused plan for introducing safe Roger store schema migrations, update compatibility envelopes, backup/journal recovery, and release validation |
 | [`docs/STORE_MIGRATION_COMPATIBILITY_AND_OPERATOR_CONTRACT.md`](docs/STORE_MIGRATION_COMPATIBILITY_AND_OPERATOR_CONTRACT.md) | Implementation-facing migration/update compatibility contract: envelope fields, migration classes, fail-closed boundaries, updater preflight output, and first-run auto-migration limits (closes `rr-1xhg.1`) |
+| [`docs/UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md`](docs/UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md) | Support contract for update semantics, GitHub Releases asset mechanics, install-layout boundaries, and the proof required before Roger claims a tested upgrade path |
 | [`docs/ROBOT_CLI_CONTRACT.md`](docs/ROBOT_CLI_CONTRACT.md) | Support contract for the `0.1.0` `--robot` command shortlist and stable machine-readable output envelopes |
 | [`docs/HARNESS_SESSION_LINKAGE_CONTRACT.md`](docs/HARNESS_SESSION_LINKAGE_CONTRACT.md) | Implementation-facing contract for the Roger-to-harness session boundary, `SessionLocator`, `ResumeBundle`, and adapter obligations (closes `rr-015`) |
+| [`docs/REVIEW_WORKER_RUNTIME_AND_BOUNDARY_CONTRACT.md`](docs/REVIEW_WORKER_RUNTIME_AND_BOUNDARY_CONTRACT.md) | Implementation-facing contract for the manager/worker/provider split, the `ReviewTask` ledger, and the agent-only `rr agent` boundary |
 | [`docs/SEARCH_MEMORY_LIFECYCLE_AND_SEMANTIC_ASSET_POLICY.md`](docs/SEARCH_MEMORY_LIFECYCLE_AND_SEMANTIC_ASSET_POLICY.md) | Support contract for prior-review search, semantic asset lifecycle, memory promotion rules, and `0.1.0` scope fence before `rr-024` |
+| [`docs/TUI_WORKSPACE_AND_OPERATOR_FLOW_CONTRACT.md`](docs/TUI_WORKSPACE_AND_OPERATOR_FLOW_CONTRACT.md) | Implementation-facing contract for first-release TUI workspace shape, operator primitives, selection, inspector, composer, and mutation visibility |
 | [`docs/RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md) | Explicit `0.1.0` provider, browser, OS, fixture, and validation matrix |
-| [`TESTING.md`](TESTING.md) | Operator-facing testing doctrine tying support claims to invariants, suites, proof artifacts, and release truth |
+| [`docs/TESTING.md`](docs/TESTING.md) | Operator-facing testing doctrine tying support claims to invariants, suites, proof artifacts, and release truth |
 | [`docs/TEST_HARNESS_GUIDELINES.md`](docs/TEST_HARNESS_GUIDELINES.md) | Canonical implementation-facing contract for suite layers, fixtures, CI tiers, and E2E budget rules |
 | [`docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md`](docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md) | Implementation-facing support contract for `0.1.0` test execution tiers, the one blessed automated E2E, and the machine-readable E2E budget guard |
 | [`docs/VALIDATION_INVARIANT_MATRIX.md`](docs/VALIDATION_INVARIANT_MATRIX.md) | Canonical registry of release-critical product invariants, owning suite families, proof artifacts, and bead-translation rules |
@@ -139,6 +143,7 @@ Read these to understand the full plan before touching code.
 | [`docs/DEV_MACHINE_ONBOARDING.md`](docs/DEV_MACHINE_ONBOARDING.md) | Practical machine setup guide for Codex, Agent Mail, and planning workflow access |
 | [`docs/IMPLEMENTATION_SOURCES.md`](docs/IMPLEMENTATION_SOURCES.md) | Saved implementation-time external sources for browser bridge, contract generation, and workflow methodology |
 | [`docs/EXECUTION_GOVERNANCE_AND_REPO_BOUNDARY.md`](docs/EXECUTION_GOVERNANCE_AND_REPO_BOUNDARY.md) | Delivery-governance contract for bead splitting, closure proof, support-claim truthfulness, and repo-vs-operator boundary |
+| [`docs/BEAD_CREATION_INPUTS.md`](docs/BEAD_CREATION_INPUTS.md) | Process support document defining the bounded authoritative packet that bead-creation and bead-polish workflows should consume |
 | [`docs/beads/BEAD_AND_PROMPT_FAILURE_PATTERNS.md`](docs/beads/BEAD_AND_PROMPT_FAILURE_PATTERNS.md) | Retrospective on historical bead/prompt failure patterns and the startup, compaction, and bead-shaping rules meant to prevent recurrence |
 | [`docs/roger-reviewer-brain-dump.md`](docs/roger-reviewer-brain-dump.md) | Original raw brain dump — source of intent, not specification |
 
@@ -180,13 +185,17 @@ Testing exception:
 
 - if you are shaping or implementing tests for a bead whose UX behavior,
   support claim, fail-closed semantics, or recovery expectations are
-  underspecified, reread the canonical plan plus `TESTING.md` and the relevant
+  underspecified, reread the canonical plan plus `docs/TESTING.md` and the relevant
   validation support docs before implementing the tests
 - do not guess at product truth just because the immediate bead is thin
 
 Use [`docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md`](docs/REPO_ONBOARDING_AND_DISCOVERY_PROMPTS.md)
 when the task is to study an unfamiliar repo, produce a current-state brief,
 or establish an authority map before planning.
+
+Use [`docs/BEAD_CREATION_INPUTS.md`](docs/BEAD_CREATION_INPUTS.md) when the task
+is to convert accepted planning truth into new beads, split beads, or audit
+whether a side-plan is still allowed into the bead-creation packet.
 
 Read critique rounds only when:
 
@@ -885,20 +894,24 @@ every provider is equally supported.
 
 | Provider | Roger role | `0.1.0` drop-in support | `0.1.0` deeper integration | Notes |
 |----------|------------|-------------------------|----------------------------|-------|
-| OpenCode | Primary review harness | Yes | Yes | Must preserve real direct-resume fallback |
-| Codex | Secondary bounded review harness | Yes | Bounded | Exposed via `rr review --provider codex`; Tier A only today (no locator reopen or `rr return`) |
-| Claude | Secondary bounded review harness | Yes | Bounded | Exposed via `rr review --provider claude`; Tier A only today (no locator reopen or `rr return`) |
-| Gemini harness | Secondary bounded review harness | Yes | Bounded | Exposed via `rr review --provider gemini`; keep Tier A live-CLI claims truthful and do not imply locator reopen or `rr return` |
-| GitHub Copilot CLI | Active current-scope provider | Not yet | Planned Tier B target | Must land through the same verified-lifecycle and support-claim rules as every other provider |
+| GitHub Copilot CLI | Golden-path first-class provider | Not yet | Planned Tier B target | Authoritative `#1` provider target; keep out of live support claims until verified launch/policy/continuity proof exists |
+| OpenCode | First-class continuity fallback and reference harness | Yes | Yes | Authoritative `#2` provider; must preserve real direct-resume fallback |
+| Codex | Secondary bounded review harness | Yes | Bounded | Authoritative `#3` provider; exposed via `rr review --provider codex`; Tier A only today (no locator reopen or `rr return`) |
+| Gemini | Secondary bounded review harness | Yes | Bounded | Authoritative `#4` provider; exposed via `rr review --provider gemini`; keep Tier A live-CLI claims truthful and do not imply locator reopen or `rr return` |
+| Claude Code | Secondary bounded review harness | Yes | Bounded | Authoritative `#5` provider; exposed via `rr review --provider claude`; Tier A only today (no locator reopen or `rr return`) |
 | Pi-Agent | Future review harness | No | No | Keep room in the adapter contract only |
 | GitHub CLI (`gh`) | GitHub adapter, not review harness | N/A | N/A | Write/read adapter for GitHub flows, not a drop-in review engine |
 
 Rules:
 
-- `0.1.0` should feel excellent on the OpenCode path before Roger widens the
-  provider matrix.
-- Codex, Claude, and Gemini claims must stay truthful and bounded; all three
-  are currently exposed in the live `rr review --provider ...` surface.
+- the authoritative provider support order is GitHub Copilot CLI, OpenCode,
+  Codex, Gemini, then Claude Code
+- that order is the product support hierarchy, not permission to widen live
+  claims before proof exists
+- OpenCode remains the strongest currently landed continuity path until the
+  Copilot golden path is fully verified
+- Codex, Gemini, and Claude Code claims must stay truthful and bounded; all
+  three are currently exposed in the live `rr review --provider ...` surface
 - GitHub Copilot CLI is active implementation scope, but it should remain out
   of live support claims until the verified launch and continuity path are real.
 - Roger may commit to an eventual broader provider/browser/OS support track, but
@@ -919,14 +932,26 @@ Capability-tier rule:
 
 `0.1.0` intent:
 
-- OpenCode should reach Tier B and may expose selected Tier C affordances
-- Codex, Claude, and Gemini currently expose bounded Tier A paths in the live
-  CLI
+- GitHub Copilot CLI is the first-class golden-path provider target and must
+  land through the same verified-lifecycle, policy, and proof rules as every
+  other provider
+- OpenCode should reach Tier B and remains the required fallback/reference path
+- Codex, Gemini, and Claude Code currently expose bounded Tier A paths in the
+  live CLI
 - no provider is allowed to claim deeper support than its capability tier earns
 
 Harness-native Roger commands are optional in `0.1.0`. If implemented, prefer
 the safe subset `roger-help`, `roger-status`, `roger-findings`, and
 `roger-return`. Approval/posting stays in the TUI or canonical `rr` flow.
+
+Machine-surface rule:
+
+- `rr --robot` is the machine-readable surface for ordinary operator-facing
+  Roger commands
+- `rr agent` is the dedicated in-session transport for Roger-managed review
+  workers
+- do not describe them as interchangeable or use one as a substitute for the
+  other in docs, beads, or implementation notes
 
 Cross-harness session portability is a future-direction concern, not a
 `0.1.0` dependency. If a stable Jeffrey Emanuel portability layer such as CASR

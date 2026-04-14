@@ -80,8 +80,11 @@ Required fields:
 - `id`
 - `review_session_id`
 - `review_run_id`
+- `review_task_id`
 - `prompt_preset_id`
-- `source_surface`: such as `cli`, `tui`, `extension`, or `external-link`
+- `source_surface`: Roger-owned origin enum such as `cli`, `tui`, `extension`,
+  `external_link`, `harness_command`, `agent`, or `system`
+- `turn_index`
 - `resolved_text_digest`
 - `used_at`
 
@@ -96,6 +99,7 @@ Required runtime capture:
 
 Recommended fields:
 
+- `worker_invocation_id` when the invocation belongs to a worker-managed task
 - `resolved_text_artifact_id` when the full text is stored out of row
 - `resolved_text_inline_preview` for hot-path inspection
 - `user_override_text` for bounded objective or local override text
@@ -105,6 +109,13 @@ Recommended fields:
 Rules:
 
 - Every run must store the exact resolved prompt text it actually used.
+- `PromptInvocation` is the exact prompt-turn record, not the whole task record.
+- One `ReviewTask` may own several `PromptInvocation` turns.
+- The default path is one task, one prompt turn, one terminal result.
+- A configured multi-turn program is explicit task strategy and must not be
+  reconstructed later from loose prompt text heuristics.
+- Palette-driven or freehand follow-up from the TUI should create a new
+  `ReviewTask` rather than rewriting older invocation history.
 - Replay and audit operate from the invocation snapshot, not from the current
   preset definition.
 - Roger does not need formal preset version numbers in `0.1.0` because the
@@ -175,7 +186,8 @@ Rules:
 - optional in `0.1.0`; the storage contract should allow it, but Roger does not
   need to treat favorites as a launch blocker
 - persisted per Roger profile by default
-- favorites point to preset IDs and optional display ordering only
+- favorites are boolean preset markers only in `0.1.0`; ordered favorites are
+  explicitly deferred
 - favorites do not override scope or permission checks
 
 ## Typed Outcome Event Model
@@ -189,74 +201,96 @@ runtime subsystem.
 Every outcome event should include:
 
 - `id`
-- `event_type`
-- `occurred_at`
+- `kind`
+- `created_at`
 - `review_session_id`
 - `review_run_id` when applicable
 - `prompt_invocation_id` when the event is attributable to a prompt pass
 - `actor_kind`: such as `agent`, `human`, or `system`
 - `actor_id` when known
 - `source_surface`
+- `entity_id` when a single primary entity is useful for indexing
+- `entity_kind` when `entity_id` is present
 - `payload`
 
 Rules:
 
-- event types are append-only
-- later schema growth should add fields or new event types rather than changing
+- event kinds are append-only and follow
+  [`adr/009-prompt-preset-and-outcome-events.md`](./adr/009-prompt-preset-and-outcome-events.md)
+- later schema growth should add fields or new event kinds rather than changing
   the meaning of existing ones
 - materialized summaries may be rebuilt from the event stream
+- `source_surface` uses the normalized Roger enum:
+  `cli`, `tui`, `extension`, `external_link`, `harness_command`, `agent`, or
+  `system`; legacy values such as `direct`, `bridge`, or `external-link`
+  normalize at the boundary rather than surviving as new stored truth
 
-### Required `0.1.0` Event Types
+### Required `0.1.0` Event Kinds
 
-#### `finding_emitted`
+#### `finding_created`
 
 Use when a prompt pass or repair path creates a normalized finding candidate.
 
 Required payload:
 
 - `finding_id`
-- `finding_fingerprint`
+- `fingerprint`
 - `severity`
 - `confidence`
 - `stage`
 
-#### `finding_state_changed`
+#### `finding_triage_changed`
 
 Use when triage or outbound state changes on an existing finding.
 
 Required payload:
 
 - `finding_id`
-- `from_triage_state`
-- `to_triage_state`
+- `from_state`
+- `to_state`
+- `actor`
+
+Optional payload:
+
 - `from_outbound_state`
 - `to_outbound_state`
 - `reason_code` when present
 
-#### `draft_materialized`
+#### `finding_draft_created`
 
 Use when Roger creates a local outbound draft from one or more findings.
 
 Required payload:
 
+- `finding_id`
 - `draft_id`
+- `review_session_id`
+
+Optional payload:
+
 - `draft_batch_id`
-- `finding_ids`
 - `payload_digest`
 
-#### `approval_state_changed`
+#### `draft_approved`
 
 Use when a draft or batch moves through approval, rejection, or invalidation.
 
 Required payload:
 
 - `draft_batch_id`
-- `from_approval_state`
-- `to_approval_state`
-- `approval_token_id` when present
-- `reason_code` when present
+- `approval_token_id`
+- `actor`
 
-#### `posted_action_recorded`
+#### `draft_invalidated`
+
+Use when approval is revoked before post.
+
+Required payload:
+
+- `draft_batch_id`
+- `invalidation_reason_code`
+
+#### `draft_posted`
 
 Use when Roger records a post attempt or completed post against GitHub.
 
@@ -264,10 +298,56 @@ Required payload:
 
 - `draft_batch_id`
 - `posted_action_id`
+- `remote_identifier`
+
+Optional payload:
+
 - `remote_provider`
-- `remote_identifier` when known
-- `status`
-- `failure_code` when present
+
+#### `draft_post_failed`
+
+Use when Roger records a failed post attempt against GitHub.
+
+Required payload:
+
+- `draft_batch_id`
+- `failure_code`
+
+#### `memory_review_requested`
+
+Use when Roger records a request to promote, demote, deprecate, restore, or
+mark durable memory as an anti-pattern.
+
+Required payload:
+
+- `memory_review_request_id`
+- `subject_memory_id`
+- `request_kind`
+- `requested_target_state`
+- `actor`
+
+Optional payload:
+
+- `review_session_id`
+- `review_run_id`
+- `reason_summary`
+
+#### `memory_review_resolved`
+
+Use when Roger accepts, rejects, supersedes, or withdraws a memory review
+request.
+
+Required payload:
+
+- `memory_review_request_id`
+- `subject_memory_id`
+- `resolution`
+- `actor`
+
+Optional payload:
+
+- `requested_target_state`
+- `resolution_summary`
 
 #### `usefulness_labeled`
 
@@ -276,16 +356,36 @@ finding, or review outcome.
 
 Required payload:
 
-- `target_kind`: `prompt_invocation`, `finding`, `draft_batch`, or
-  `review_session`
-- `target_id`
-- `label`: Roger-defined values such as `useful`, `mixed`, or `low_value`
+- `label`: `useful`, `not_useful`, or `harmful`
+- `actor`
 
 Optional payload:
 
+- `finding_id`
+- `draft_id`
+- `review_session_id`
 - `note_artifact_id`
 
-### Optional `0.1.0` Event Types
+#### `pr_merged`
+
+Use when Roger receives a best-effort merged signal for the target PR.
+
+Required payload:
+
+- `review_session_id`
+- `remote_pr_id`
+
+#### `pr_closed_unmerged`
+
+Use when Roger receives a best-effort close-without-merge signal for the target
+PR.
+
+Required payload:
+
+- `review_session_id`
+- `remote_pr_id`
+
+### Optional `0.1.0` Event Kinds
 
 Roger may also store the following if they are cheap and clean to capture:
 
@@ -312,7 +412,8 @@ That means:
 
 ## Implementation Notes For Later Beads
 
-- Storage schema should treat `PromptInvocation` as canonical history and reuse
+- Storage schema should treat `ReviewTask`, `WorkerInvocation`, and
+  `PromptInvocation` together as the canonical execution history, with reuse
   projections as rebuildable state.
 - Prompt selection UI should read preset IDs plus reuse projections rather than
   duplicating prompt text catalogs.

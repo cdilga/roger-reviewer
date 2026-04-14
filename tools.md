@@ -57,7 +57,7 @@ For the current Roger workflow, the important assumptions are:
 
 - `AGENTS.md` is authoritative for repo workflow
 - `docs/PLAN_FOR_ROGER_REVIEWER.md` is the canonical product plan
-- `TESTING.md` is the testing doctrine
+- `docs/TESTING.md` is the testing doctrine
 - `br` is the backlog system
 - `cass` is the quick memory/history lookup tool
 - `ntm` is optional orchestration, not a hard dependency
@@ -462,6 +462,6 @@ install `fd` as well.
 ## Related docs
 
 - [`AGENTS.md`](AGENTS.md)
-- [`TESTING.md`](TESTING.md)
+- [`docs/TESTING.md`](docs/TESTING.md)
 - [`docs/DEV_MACHINE_ONBOARDING.md`](docs/DEV_MACHINE_ONBOARDING.md)
 - [`docs/PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md)

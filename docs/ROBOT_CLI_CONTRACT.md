@@ -29,10 +29,12 @@ This contract does not define:
 - the internal storage schema for every Roger entity
 - full TOON enablement for every command
 - future harness-native command surfaces beyond ordinary `rr` semantics
+- the in-session `rr agent ...` worker transport
 
 ## CLI-Wide Rules
 
 - `--robot` enables machine-facing mode. It does not create a separate workflow.
+- `--robot` applies to operator-facing Roger commands only.
 - In robot mode, stdout carries only the requested machine-readable payload.
 - In robot mode, stderr carries diagnostics, warnings, and progress text meant
   for humans operating the command.
@@ -45,6 +47,12 @@ This contract does not define:
   prove the payload shape and fallback behavior.
 - Robot mode must expose degraded, partial, blocked, or repair-needed states
   explicitly rather than flattening them into plain success prose.
+
+Boundary rule:
+
+- the review-worker transport lives under `rr agent ...`
+- `rr agent` is not part of the `--robot` contract and must remain a separate
+  machine-facing surface with its own binding and schema rules
 
 ## `0.1.0` Command Shortlist
 
@@ -252,6 +260,19 @@ Stable `data` fields:
 - `items`
 - `count`
 - `truncated`
+- `degraded_reasons`
+- `scope_bucket`
+
+Search contract notes:
+
+- current shipped `rr search` uses `mode` as the executed `retrieval_mode`
+  field and does not yet require a separate `query_mode`
+- the canonical search contract now distinguishes `query_mode` from
+  `retrieval_mode`; when the richer search-mode slice lands, `query_mode`
+  should be added explicitly while `mode` remains a backwards-compatible alias
+  for `retrieval_mode` until a later schema revision removes the alias
+- current shipped `rr search` should be interpreted as `query_mode=auto`
+  unless a later surface adds an explicit selector
 
 Each search item must include:
 
@@ -261,6 +282,14 @@ Each search item must include:
 - `score`
 - `locator`
 - `snippet`
+
+Optional search item fields when available:
+
+- `memory_lane`
+- `trust_state`
+- `citation_posture`
+- `surface_posture`
+- `explain_summary`
 
 When semantic retrieval is unavailable, `mode` must report a degraded lexical
 path explicitly rather than implying full hybrid retrieval.

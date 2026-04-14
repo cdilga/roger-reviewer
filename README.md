@@ -14,7 +14,10 @@ Sequence controls delivery order, not whether a planned feature “counts” yet
 What is real in this repo right now:
 
 - local-first CLI/domain workflow is under active implementation
-- OpenCode is the blessed continuity path for the quickstart flow
+- the authoritative provider order is GitHub Copilot CLI, OpenCode, Codex,
+  Gemini, then Claude Code
+- OpenCode is still the strongest currently landed continuity path while the
+  Copilot-first golden path is being brought up to proof
 - extension support is optional and launch-focused, not the source of truth
 - safety model is explicit: no automatic posting and no hidden mutation path
 
@@ -39,7 +42,8 @@ Roger Reviewer is:
 - local-first (`SQLite` state is authoritative)
 - session-aware (`review`, `resume`, `refresh`, `return`, `sessions`)
 - approval-gated (draft + approve + post boundaries are explicit)
-- continuity-focused (OpenCode fallback stays real)
+- continuity-focused (Copilot is the golden-path target; OpenCode fallback stays
+  real)
 
 Roger Reviewer is not:
 
@@ -47,14 +51,40 @@ Roger Reviewer is not:
 - an automatic GitHub posting bot
 - a daemon-centered architecture
 
+## Core Architectural Contracts
+
+Roger's core architectural split is now:
+
+- Roger manages review lifecycle, canonical state, approval, posting, and memory policy
+- the review worker performs bounded review tasks and returns proposals/results
+- the provider/harness hosts that worker session but does not own Roger truth
+
+The main contract docs for that split are:
+
+- [`docs/HARNESS_SESSION_LINKAGE_CONTRACT.md`](docs/HARNESS_SESSION_LINKAGE_CONTRACT.md)
+- [`docs/REVIEW_WORKER_RUNTIME_AND_BOUNDARY_CONTRACT.md`](docs/REVIEW_WORKER_RUNTIME_AND_BOUNDARY_CONTRACT.md)
+- [`docs/PLAN_FOR_TRANSACTIONAL_LAUNCH_LIFECYCLE_AND_BRIDGE_TRUTH.md`](docs/PLAN_FOR_TRANSACTIONAL_LAUNCH_LIFECYCLE_AND_BRIDGE_TRUTH.md)
+
+Machine-facing boundary rule:
+
+- `rr --robot` is the machine-readable surface for operator-facing Roger
+  commands
+- `rr agent` is the agent-only in-session transport for the Roger-managed
+  review worker
+- they are intentionally different surfaces and must not be described as
+  interchangeable
+
 ## Support Snapshot
 
 | Surface | Current reality | Notes |
 | --- | --- | --- |
 | Published `rr` CLI install | Available | One-line release installer ships on GitHub Releases |
 | `rr` CLI from source | Blocked currently | The intended source-run path is `packages/cli`, but the current workspace still fails before `rr --help` because `packages/cli/Cargo.toml` contains a duplicate `serde.workspace` entry |
-| OpenCode provider flow | Blessed quickstart path | Primary documented continuity path for this slice |
-| Codex provider path | Bounded/non-primary | Exists in command surface but is not the primary supported onboarding lane |
+| GitHub Copilot CLI provider flow | Golden-path target, not yet live | Authoritative first-class provider target; do not claim live support until verified launch, policy, and continuity coverage are real |
+| OpenCode provider flow | Strongest currently landed path | Authoritative `#2` provider and fallback continuity reference for `0.1.x` |
+| Codex provider path | Supported, bounded Tier A | Authoritative `#3` provider; exposed in command surface without locator reopen or `rr return` claims |
+| Gemini provider path | Supported, bounded Tier A | Authoritative `#4` provider; exposed in command surface without locator reopen or `rr return` claims |
+| Claude Code provider path | Supported, bounded Tier A | Authoritative `#5` provider; exposed in command surface as `--provider claude` without locator reopen or `rr return` claims |
 | Browser extension | Optional launch helper | PR-page launch panel; local Roger remains authoritative |
 | In-extension posting controls | Not shipped | Approval/posting stays local and explicit |
 
@@ -66,10 +96,11 @@ Installer/update metadata contracts now exist in-repo:
   `release-install-metadata-<version>.json` plus matching core/checksum assets
 - `rr update` is the Roger-owned updater for published releases and applies the
   replacement in place after metadata, target, and checksum verification
-- default interactive apply is confirmation-gated; `--yes` / `-y` bypasses
-  only the confirmation prompt and does not skip provenance or safety checks
-- `--dry-run` remains a non-mutating metadata/preflight path, and `--robot`
-  apply is blocked unless `--yes` / `-y` is also provided
+- current repo source includes explicit confirmation-bypass flags for
+  non-interactive apply, but release-hosted install guidance must follow the
+  installed binary's own `rr --help` until a published release carries those
+  exact flags
+- `--dry-run` remains a non-mutating metadata/preflight path
 - local/unpublished builds fail closed without embedded release markers; local
   state/schema migrations remain deferred in `0.1.x`
 
@@ -89,7 +120,9 @@ repo scope when browser launch is needed):
 
 - bridge and extension packaging assets are optional; base `rr` install does not require them
 - use optional lanes only when browser launch/helper integration is needed
-- the browser extension is not shipped as a release artifact in this slice; pack/sideload it from source if you need the PR-page launch panel
+- whether bridge/extension artifacts ship is release-specific; use the current
+  release notes and asset list to determine whether those optional lanes were
+  published for a given tag
 - when browser integration is needed, use `rr extension setup --browser <edge|chrome|brave>` followed by
   `rr extension doctor --browser <edge|chrome|brave>`; normal setup should provision bridge registration
   without requiring manual `rr bridge install`
@@ -120,7 +153,7 @@ export RR_STORE_ROOT="$PWD/.roger"
 export RR_OPENCODE_BIN="opencode"
 ```
 
-## Quickstart (Blessed Local Path)
+## Quickstart (Current Strongest Landed Path)
 
 ### 1. Prerequisites
 
@@ -151,7 +184,7 @@ rr --help
 rr update --dry-run
 ```
 
-### 4. Start a review session (OpenCode)
+### 4. Start a review session (OpenCode, current strongest landed path)
 
 ```bash
 rr review --pr 123 --provider opencode
@@ -283,16 +316,20 @@ raw SSE/MCP endpoint directly.
 
 ## Known Boundaries
 
-- `rr update` now performs Roger-owned in-place replacement for published
-  releases, gated by explicit confirmation on an interactive TTY or `--yes` /
-  `-y` for non-interactive apply
+- `rr update` is the Roger-owned in-place updater for published releases, but
+  the exact shipped release semantics are narrowed by
+  [`docs/UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md`](docs/UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md)
+  rather than assumed from current source alone
 - local/unpublished builds still fail closed and require reinstall from a
   published release
 - migration-capable update steps are intentionally deferred in `0.1.x`; future
   migration-required releases must fail closed with explicit backup/export +
   reinstall guidance
 - extension readback/status parity is not shipped yet
-- support claims prioritize the OpenCode continuity lane
+- provider support order is GitHub Copilot CLI, OpenCode, Codex, Gemini, then
+  Claude Code
+- current landed continuity proof is strongest on OpenCode until the Copilot
+  golden path is verified end to end
 - degraded continuity states are expected to fail closed where ambiguity exists
 
 ## Repo Orientation
@@ -311,4 +348,5 @@ raw SSE/MCP endpoint directly.
 - [`AGENTS.md`](AGENTS.md)
 - [`docs/PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md)
 - [`docs/HARNESS_SESSION_LINKAGE_CONTRACT.md`](docs/HARNESS_SESSION_LINKAGE_CONTRACT.md)
+- [`docs/REVIEW_WORKER_RUNTIME_AND_BOUNDARY_CONTRACT.md`](docs/REVIEW_WORKER_RUNTIME_AND_BOUNDARY_CONTRACT.md)
 - [`docs/RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md)

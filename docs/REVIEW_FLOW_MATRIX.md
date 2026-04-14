@@ -255,15 +255,54 @@ Purpose:
 
 ### F09: Search and Recall During Review
 
-- Surfaces: TUI, CLI
-- Primary artifact: scoped retrieval results
+- Surfaces: TUI, CLI, supported harness fallback via `rr`
+- Primary artifact: scoped retrieval results plus recall envelope
 - Happy path: user searches prior findings, summaries, artifacts, or promoted
-  memory without leaving the current review context
-- Common variants: search from inspector, compare with related prior finding,
-  repo-only vs explicit broader overlay
+  memory without leaving the current review context, and Roger returns explicit
+  lane/provenance truth such as `evidence_hits`, `tentative_candidates`, and
+  `promoted_memory`
+- Common variants: `query_mode=auto`, `exact_lookup`, `recall`, or
+  `related_context`; search from inspector; compare with related prior finding;
+  repo-only vs explicit broader overlay; candidate memory shown only for strong
+  anchor overlap or explicit request; active-agent lookup through `rr --robot`
 - Failure/recovery: lexical-only degraded mode, conflicting history, no safe
-  result, stale-memory suppression
+  result, stale-memory suppression, overlay denied, or candidate memory withheld
+  because ordinary retrieval is not allowed to treat it as promoted memory
 - Test intent: prove retrieval is useful without causing silent scope bleed
+
+### F09.1: Active Agent Memory Access During Review
+
+- Surfaces: CLI, supported harness commands, TUI handoff
+- Primary artifact: `AgentAccessContext`, recall envelope, and bounded request
+  lanes
+- Happy path: an active agent resolves current Roger session context, inspects
+  `status`, `findings`, and `search` results, and can request clarification,
+  draft work, memory review, or return control without mutating approval or
+  posting state directly
+- Common variants: `rr --robot` read/query flow, supported harness-native
+  `roger-help`/`roger-status`/`roger-findings`/`roger-return`, explicit TUI
+  handoff for promotion review or approval-sensitive work
+- Failure/recovery: unsupported harness-native command falls back to the
+  equivalent `rr` guidance, unavailable overlays stay blocked, lexical-only
+  recall remains explicit, or Roger requires a reseed/return path rather than
+  pretending continuity
+- Test intent: prove active agents can use Roger memory and context safely
+  without hidden scope widening or mutation authority
+
+### F09.2: Candidate Audit and Memory Review During Review
+
+- Surfaces: TUI, CLI, `rr agent` proposal lane
+- Primary artifact: `MemoryReviewRequest` plus recall-envelope candidate view
+- Happy path: operator or worker inspects candidate or contradicted memory in a
+  deliberate review posture, creates a `MemoryReviewRequest`, and Roger records
+  an auditable pending review item without mutating durable memory immediately
+- Common variants: promotion review from TUI search/history, worker proposal for
+  promotion or deprecation, candidate-only recall with `query_mode=candidate_audit`
+- Failure/recovery: request rejected, request superseded by newer evidence,
+  candidate withheld from ordinary retrieval, or operator defers decision while
+  retaining the request in local lineage
+- Test intent: prove memory review is explicit, auditable, and separate from
+  ordinary retrieval
 
 ### F10: Companion, Bridge, and Setup Recovery
 
@@ -389,12 +428,12 @@ Purpose:
 - Primary artifact: `RogerCommand`, `RogerCommandResult`, and
   `HarnessCommandBinding`
 - Happy path: user invokes a provider-native Roger command such as
-  `roger-status`, `roger-findings`, `roger-clarify`, or `roger-return`, and the
+  `roger-status`, `roger-findings`, or `roger-return`, and the
   harness adapter routes it through the same Roger-owned core operation as the
   equivalent `rr` command
 - Common variants: provider syntax differs, the command opens the TUI instead of
-  rendering a bounded inline response, or only a subset of Roger command IDs is
-  supported by the current harness
+  rendering a bounded inline response, or only the tiny safe subset of Roger
+  command IDs is supported by the current harness in `0.1.0`
 - Failure/recovery: harness has no Roger command surface, the specific command
   is unsupported, or Roger falls back to the equivalent `rr` guidance and
   session-finder path without faking support

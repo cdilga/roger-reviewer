@@ -60,6 +60,14 @@ Instead:
 
 This is a mid-build reconciliation pass, not a vision reset.
 
+Merge-back note:
+
+- accepted TUI workspace and operator-flow truth should live in
+  `TUI_WORKSPACE_AND_OPERATOR_FLOW_CONTRACT.md`
+- this brief should keep broader cross-surface reconciliation, unresolved UX
+  mismatches, and implementation ordering rather than acting as the permanent
+  home for settled TUI workspace rules
+
 ---
 
 ## Current repo truth for the surface layer
@@ -289,11 +297,13 @@ Rules:
   and canonical `AttentionState`
 - draft approval views operate on `OutboundDraft` items grouped by
   `OutboundDraftBatch`, because approval and posting happen at the batch level
-- prompt palette and prompt reuse operate on `PromptPreset` and
-  `PromptInvocation`, not on a second ad hoc prompt-store invented by the UI
-- the composer launches `PromptInvocation` records; finding-bound clarification
-  should remain on Roger's clarification lineage, while session-wide chat should
-  still persist through ordinary invocation and artifact history rather than a
+- prompt palette and prompt reuse operate on `PromptPreset`,
+  `ReviewTask`, and `PromptInvocation`, not on a second ad hoc prompt-store
+  invented by the UI
+- the composer launches canonical `ReviewTask` records whose turn history is
+  captured through `PromptInvocation`; finding-bound clarification should
+  remain on Roger's clarification lineage, while session-wide chat should still
+  persist through ordinary task/invocation and artifact history rather than a
   second uncontrolled chat model
 - stable selection sets are controller state over canonical ids, not a new
   durable aggregate
@@ -499,7 +509,8 @@ Required capabilities:
 - autocomplete finding references from current selection, recent findings, and
   visible queue rows
 - preserve the exact selected finding set in the invocation snapshot
-- route the result either to clarify-in-place or to a new bounded follow-up run
+- route the result either to clarify-in-place or to a new bounded follow-up
+  task attached to the current session
 - allow an immediate handoff to the underlying harness from the same context
   when the operator chooses to leave Roger's bounded lane
 
@@ -1117,17 +1128,17 @@ Use this test for `0.1.x`:
 | Findings queue | `Finding`, `FindingFingerprint` | keep | — | `Finding` is the primary operator primitive and needs its own dense queue. |
 | Finding inspector | `Finding`, `CodeEvidenceLocation`, clarification lineage | bundle | persistent inspector region | It is critical, but it should be the shared detail region, not a route. |
 | Draft approval queue | `OutboundDraft`, `OutboundDraftBatch`, `PostedAction` | keep | — | Approval and posting are elevated enough to deserve a distinct workspace. |
-| Timeline and history | `ReviewRun`, `PromptInvocation`, `PostedAction` | bundle | combined Search/History destination | Useful, but first release should combine it with recall/search instead of adding another top-level tab. |
+| Timeline and history | `ReviewRun`, `ReviewTask`, `PromptInvocation`, `PostedAction` | bundle | combined Search/History destination | Useful, but first release should combine it with recall/search instead of adding another top-level tab. |
 | Search and recall | scoped searchables over sessions/findings/artifacts | keep | combined Search/History destination | Search is a core continuity promise and needs a durable destination. |
 | Focusable work-queue model | controller state over canonical ids | bundle | all queue views | Foundational primitive, not a user-facing top-level feature. |
 | Stable selection set | controller state over `Finding` / `OutboundDraft` ids | bundle | Findings, Drafts, Search | Mandatory capability, but it should live inside queue interactions. |
 | Multi-select and batch actions | `Finding`, `FindingDecisionEvent` | bundle | Findings queue | Essential workflow power, but not a separate surface. |
-| Composer | `PromptInvocation` plus selection context | keep | overlay/drawer | Roger needs one bounded action surface for clarify/chat/follow-up. |
+| Composer | `ReviewTask`, `PromptInvocation`, and selection context | keep | overlay/drawer | Roger needs one bounded action surface for clarify/chat/follow-up. |
 | Finding reference syntax `@finding(<id>)` | `Finding` identity | bundle | Composer | Required affordance, but only as part of the composer. |
-| Finding-bound clarification | clarification lineage + `PromptInvocation` | bundle | Composer | Required behavior, but it should share one action surface with chat/follow-up. |
-| Session-local chat | `ReviewSession`, `PromptInvocation` | bundle | Composer | Needed, but bounded and not a separate chat product. |
-| Prompt palette | `PromptPreset`, `PromptInvocation` | bundle | overlay/drawer | Real operator tool, but not a full peer workspace. |
-| Session baseline prompt model | `PromptPreset`, `PromptInvocation`, `ReviewSession` | bundle | Session overview + Prompt Palette | Required for truth and auditability, but not its own screen. |
+| Finding-bound clarification | clarification lineage + `ReviewTask` + `PromptInvocation` | bundle | Composer | Required behavior, but it should share one action surface with chat/follow-up. |
+| Session-local chat | `ReviewSession`, `ReviewTask`, `PromptInvocation` | bundle | Composer | Needed, but bounded and not a separate chat product. |
+| Prompt palette | `PromptPreset`, `ReviewTask`, `PromptInvocation` | bundle | overlay/drawer | Real operator tool, but not a full peer workspace. |
+| Session baseline prompt model | `PromptPreset`, `ReviewTask`, `PromptInvocation`, `ReviewSession` | bundle | Session overview + Prompt Palette | Required for truth and auditability, but not its own screen. |
 | Run modifiers | `PromptInvocation` | bundle | Composer + Prompt Palette | Per-run controls belong where the run is launched. |
 | Active session baseline changes | `ReviewSession`, `PromptInvocation` | bundle | Session overview + Prompt Palette | Needed, but as explicit bounded controls rather than a separate feature area. |
 | Elevated mutation gate | `OutboundDraftBatch`, `PostedAction` | bundle | Draft queue + confirmations | Critical rule, but it should shape the draft surface rather than add another destination. |

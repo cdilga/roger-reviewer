@@ -17,13 +17,14 @@ Roger already has the right high-level instincts:
 - an explicit harness boundary with capability tiers
 - a preference for one honest blessed path over a broad but shallow support claim
 
-The repo is not yet at the point where those ideas are fully true in the shipped paths. The shortfalls are concentrated in five areas:
+The repo is not yet at the point where those ideas are fully true in the shipped paths. The shortfalls are concentrated in six areas:
 
 1. core lifecycle truthfulness (`review`, `resume`, `return`, bridge launch)
 2. transactionality and crash safety in the authoritative local ledger
 3. explicit outbound approval/posting productization
-4. support-claim discipline across OpenCode, Codex, and Gemini
-5. lack of a second serious, local-first provider that fits Roger's architecture cleanly
+4. support-claim discipline across OpenCode, Codex, Gemini, and Claude Code
+5. lack of a first-class review-worker transport and execution ledger
+6. lack of a second serious, local-first provider that fits Roger's architecture cleanly
 
 GitHub Copilot CLI is a strong fit for that fifth gap. It is terminal-native, interactive, supports programmatic invocation, supports resuming previous sessions by session ID, records local session data, exposes repository-scoped hooks with session lifecycle payloads, and offers an ACP server for later integration work. It also has enough policy surface to run in a Roger-owned, fail-closed review posture.
 
@@ -62,6 +63,19 @@ Copilot should not get a one-off exception. It should enter through the existing
 
 **Decision:** add a dedicated `session-copilot` crate and update all planning, test, and support matrices accordingly.
 
+### D3A. Freeze the provider hierarchy explicitly
+
+The authoritative provider order is:
+
+1. GitHub Copilot CLI
+2. OpenCode
+3. Codex
+4. Gemini
+5. Claude Code
+
+**Decision:** this is the product support hierarchy everywhere in the docs, while
+live claims remain gated by proof for each provider.
+
 ### D4. Prefer direct CLI + hooks for the first integration, not ACP-first
 
 Copilot CLI's ACP server is attractive, but it is explicitly in public preview. The CLI already exposes enough stable surfaces for a serious first integration: interactive launch, `--interactive`, `--resume`, repository hooks, repository custom instructions, and local session state.
@@ -80,6 +94,15 @@ Roger explicitly forbids hidden GitHub posting and hidden mutation. Copilot CLI 
 - no external URL access by default in review mode
 - no provider memory write as a substitute for Roger memory
 - no “allow all” / “yolo” mode in Roger-managed review sessions
+
+### D6. Use a dedicated `rr agent` transport for the review worker
+
+Roger's worker/agent boundary should not be left as implied prompt glue or
+folded into `--robot`.
+
+**Decision:** make the worker contract transport-neutral, use `rr agent ...` as
+the first concrete in-session transport, keep `--robot` for operator-facing
+machine-readable commands, and treat MCP as an optional later adapter only.
 
 ---
 
@@ -105,10 +128,11 @@ Until those conditions hold, the provider is bounded, experimental, or contract-
 
 | Provider | Intended status | Target tier | Notes |
 |---|---|---:|---|
-| OpenCode | Primary | Tier B (selected Tier C optional) | Must become fully real, not placeholder-backed |
-| GitHub Copilot CLI | First-class | Tier B | Strong fit for local-first multi-session continuity |
-| Codex | Secondary, bounded | Tier A | Keep truthful or remove live claim until verified |
-| Gemini | Adapter-contract / bounded | Tier A | Keep adapter lane honest until live launch is exposed |
+| GitHub Copilot CLI | First-class / golden path | Tier B | Authoritative `#1` provider target once verified |
+| OpenCode | First-class fallback/reference | Tier B (selected Tier C optional) | Authoritative `#2` provider and current strongest landed continuity path |
+| Codex | Secondary, bounded | Tier A | Authoritative `#3` provider; keep truthful or remove live claim until verified |
+| Gemini | Secondary, bounded | Tier A | Authoritative `#4` provider; keep adapter lane honest until live launch is exposed |
+| Claude Code | Secondary, bounded | Tier A | Authoritative `#5` provider; keep live claim literal and bounded |
 | `gh` | GitHub adapter only | N/A | Never a review harness |
 
 ### Immediate truthfulness rule
@@ -189,7 +213,8 @@ Pick one of these and finish it:
 - implement `rr init`, or
 - remove `rr init` guidance everywhere and replace it with the actual store/bootstrap command
 
-Recommended path: implement a lightweight `rr init` plus `rr doctor` family because Roger now needs a cross-provider preflight surface anyway.
+Settled path: implement a lightweight `rr init` plus `rr doctor` family because
+Roger now needs a cross-provider preflight surface anyway.
 
 ### Acceptance criteria
 

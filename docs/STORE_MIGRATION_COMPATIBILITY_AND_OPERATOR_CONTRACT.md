@@ -23,10 +23,17 @@ than prose in historical critique docs. It narrows and clarifies:
 - [`RELEASE_AND_TEST_MATRIX.md`](RELEASE_AND_TEST_MATRIX.md)
 - [`PLAN_FOR_SCHEMA_MIGRATIONS_AND_UPDATE_COMPATIBILITY.md`](PLAN_FOR_SCHEMA_MIGRATIONS_AND_UPDATE_COMPATIBILITY.md)
 
+For current published-release updater semantics, artifact mechanics, and tested
+upgrade-path truth, read
+[`UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md`](UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md)
+alongside this document. This contract owns the migration-specific portion of
+that lane, not every release-surface detail.
+
 Current product truth remains unchanged until follow-on beads land:
 
 - `0.1.x` still reports migration posture as deferred/fail-closed
-- `rr update` still applies binary replacement only
+- `rr update` is still scoped to binary replacement only; current shipped-release
+  viability for that path is further narrowed by the update contract above
 
 ## Compatibility Envelope
 

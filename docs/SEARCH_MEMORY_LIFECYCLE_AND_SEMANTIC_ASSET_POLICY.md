@@ -71,6 +71,198 @@ Roger must keep evidence retrieval separate from reusable memory retrieval.
 
 Candidate memory must never silently behave like promoted memory.
 
+## Canonical Search Operating Model
+
+Roger should copy QMD-grade retrieval mechanics without copying QMD's authority
+model. The canonical Roger contract separates search intent from executed engine
+path.
+
+### `query_mode`
+
+`query_mode` describes why the operator or worker is searching.
+
+Canonical values:
+
+- `auto`: default safe path; Roger infers the narrowest truthful search posture
+  from current session context, anchors, and the supplied query
+- `exact_lookup`: direct lookup for a known object, locator, path, symbol, or
+  prior finding identity
+- `recall`: retrieve relevant prior evidence and promoted memory for the active
+  review target
+- `related_context`: expand around the current finding, artifact, or anchor set
+  to pull nearby evidence and supporting memory
+- `candidate_audit`: deliberately inspect tentative or contradicted memory that
+  ordinary retrieval would normally suppress
+- `promotion_review`: inspect candidate memory plus open review requests for
+  promotion, demotion, deprecation, restoration, or anti-pattern marking
+
+Rules:
+
+- `query_mode` is the search-intent contract. It is not the same thing as the
+  retrieval engine path.
+- current shipped `rr search` should be treated as `query_mode=auto` unless a
+  richer surface passes an explicit value
+- explicit candidate or promotion-review behavior must never be inferred from an
+  ordinary `auto` query just because a candidate ranks well
+
+### `retrieval_mode`
+
+`retrieval_mode` describes the engine posture Roger actually executed.
+
+Required `0.1.x` values:
+
+- `hybrid`
+- `lexical_only`
+
+Rules:
+
+- `hybrid` means lexical retrieval plus verified semantic retrieval over the
+  curated corpus
+- `lexical_only` means Roger completed the request without semantic retrieval
+  and must preserve explicit degraded reasons when hybrid was requested or would
+  normally be available
+- if Roger later exposes a distinct canonical-DB or file-scan fallback, it must
+  surface as an explicit retrieval mode instead of pretending to be `hybrid`
+
+### `RecallEnvelope`
+
+Every surfaced search or recall item should resolve to one canonical envelope,
+even when a specific surface projects only a subset of fields inline.
+
+Required fields:
+
+- `item_kind`
+- `item_id`
+- `query_mode`
+- `retrieval_mode`
+- `scope_bucket`
+- `memory_lane`: `evidence_hits`, `tentative_candidates`, or
+  `promoted_memory`
+- `trust_state` nullable
+- `source_refs`
+- `locator`
+- `snippet_or_summary`
+- `anchor_overlap_summary`
+- `degraded_flags`
+- `explain_summary`
+- `citation_posture`
+- `surface_posture`
+
+Required posture values:
+
+- `citation_posture`
+  - `cite_allowed`
+  - `inspect_only`
+  - `warning_only`
+- `surface_posture`
+  - `ordinary`
+  - `candidate_review`
+  - `operator_review_only`
+
+Rules:
+
+- every returned item must preserve enough information to answer "why did this
+  surface now" without forcing the operator or worker to infer it from score
+  alone
+- `tentative_candidates` should normally use `inspect_only` or
+  `operator_review_only` rather than `cite_allowed`
+- contradicted or `anti_pattern` memory may surface only as `warning_only`
+- CLI, TUI, and worker retrieval are projections of the same
+  `RecallEnvelope`; they must not drift into separate semantics
+
+### `MemoryReviewRequest`
+
+Roger needs an explicit non-mutating request object for durable memory review.
+
+Required fields:
+
+- `id`
+- `review_session_id`
+- `review_run_id` nullable
+- `source_surface`
+- `request_kind`
+- `subject_memory_id`
+- `requested_target_state`
+- `reason_summary`
+- `supporting_refs`
+- `status`
+- `requested_by_actor_kind`
+- `requested_by_actor_id` nullable
+- `created_at`
+- `resolved_at` nullable
+- `resolved_by_actor_kind` nullable
+- `resolved_by_actor_id` nullable
+- `resolution_summary` nullable
+
+Required `request_kind` values:
+
+- `promote`
+- `demote`
+- `deprecate`
+- `restore`
+- `mark_anti_pattern`
+
+Required `status` values:
+
+- `pending_review`
+- `accepted`
+- `rejected`
+- `superseded`
+- `withdrawn`
+
+Rules:
+
+- a `MemoryReviewRequest` is auditable and non-mutating until accepted by
+  Roger-owned review logic
+- workers may propose memory review; they do not mutate durable memory directly
+- the TUI is the dense operator review surface for accepting or rejecting these
+  requests
+- the extension must not become an independent promotion-review surface
+
+### `SessionBaselineSnapshot`
+
+Roger should model baseline search posture explicitly rather than deriving it
+from the latest prompt turn heuristically.
+
+Required fields:
+
+- `id`
+- `review_session_id`
+- `review_run_id` nullable
+- `baseline_generation`
+- `review_target_snapshot`
+- `allowed_scopes`
+- `default_query_mode`
+- `candidate_visibility_policy`
+- `prompt_strategy`
+- `policy_epoch_refs`
+- `degraded_flags`
+- `created_at`
+
+Rules:
+
+- the session baseline records the stable context Roger resolved for the current
+  review lane before task-specific overrides are applied
+- `ReviewTask` and `PromptInvocation` may narrow or specialize this baseline,
+  but they do not replace it
+- dropout, return, reseed, and refresh flows must be able to explain the
+  current default search posture by resolving the active baseline snapshot
+
+### Surface semantics
+
+- `rr search` is the canonical operator and robot query plane. The current
+  shipped CLI remains a thin `query_mode=auto` projection, but the canonical
+  contract is that search results are projections of `RecallEnvelope`, not ad
+  hoc snippets.
+- the TUI `Search/History` destination is the dense operator workbench for
+  recall inspection, candidate audit, and promotion review using the same
+  underlying retrieval contract
+- `rr agent ...` and `worker.search_memory` use the same recall contract but
+  remain scoped to the current task/session envelope and cannot promote memory
+  directly
+- the extension may launch or mirror bounded search state later, but it is not
+  an independent recall or promotion-review authority
+
 ## Memory Classes and States
 
 ### Memory classes

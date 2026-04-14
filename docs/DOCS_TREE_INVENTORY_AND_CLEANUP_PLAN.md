@@ -40,7 +40,7 @@ Special rule for this cleanup:
 | `docs/PLAN_FOR_TRUTHFUL_PROVIDER_PARITY_AND_GITHUB_COPILOT_CLI.md` | bounded side-plan | `keep` | Preserve as an active posture-sharpening side-plan; merge accepted truth back into canonical/support docs |
 | `docs/PLAN_FOR_EXTENSION_SETUP_AND_HAPPY_PATH_VALIDATION.md` | bounded side-plan | `merge-back` | Keep while extension happy-path recovery remains active |
 | `docs/PLAN_FOR_SCHEMA_MIGRATIONS_AND_UPDATE_COMPATIBILITY.md` | bounded side-plan | `merge-back` | Keep until migration contract and implementation fully supersede it |
-| `docs/ROUND_05_SURFACE_RECONCILIATION_BRIEF.md` | bounded side-plan | `merge-back` | Useful reconciliation brief; should not become parallel long-term product authority |
+| `docs/ROUND_05_SURFACE_RECONCILIATION_BRIEF.md` | bounded side-plan | `merge-back` | Useful reconciliation brief; accepted TUI workspace truth should migrate into support contracts and the canonical plan rather than staying here long-term |
 
 ## 2. Active support contracts and matrices
 
@@ -59,9 +59,11 @@ Special rule for this cleanup:
 | `docs/ROBOT_CLI_CONTRACT.md` | support contract | `keep` | Stable machine interface contract |
 | `docs/SEARCH_MEMORY_LIFECYCLE_AND_SEMANTIC_ASSET_POLICY.md` | support contract | `keep` | Search and memory policy contract |
 | `docs/STORE_MIGRATION_COMPATIBILITY_AND_OPERATOR_CONTRACT.md` | support contract | `keep` | Migration and operator compatibility contract |
+| `docs/TESTING.md` | support contract | `keep` | Operator-facing testing doctrine and validation-contract entrypoint |
 | `docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md` | support contract | `keep` | Execution-tier and E2E budget contract |
 | `docs/TEST_HARNESS_GUIDELINES.md` | support contract | `keep` | Harness policy and suite-layer contract |
 | `docs/TUI_RUNTIME_SUPERVISOR_POLICY.md` | support contract | `keep` | TUI runtime policy |
+| `docs/TUI_WORKSPACE_AND_OPERATOR_FLOW_CONTRACT.md` | support contract | `keep` | First-release TUI workspace and operator-flow contract |
 | `docs/VALIDATION_CI_TIERS_AND_ENTRYPOINTS.md` | support contract | `keep` | CI entrypoint and artifact policy |
 | `docs/VALIDATION_FIXTURE_CORPUS_AND_MANIFEST.md` | support contract | `keep` | Fixture corpus contract |
 | `docs/VALIDATION_HARNESS_SCAFFOLD_CONTRACT.md` | support contract | `keep` | Harness structure and metadata contract |
@@ -73,6 +75,7 @@ Special rule for this cleanup:
 |------|-------|--------|-------|
 | `docs/BEADS_WORKSPACE_STATUS.md` | process support | `keep+status` | Current workspace health and repair notes |
 | `docs/BEAD_SEED_FOR_ROGER_REVIEWER.md` | bead seed | `keep` | Canonical decomposition seed |
+| `docs/BEAD_CREATION_INPUTS.md` | process support | `keep` | Bounded authoritative packet for bead-creation and bead-polish workflows |
 | `docs/DEV_MACHINE_ONBOARDING.md` | process support | `keep` | Machine setup and workflow access guide |
 | `docs/DOCS_TREE_INVENTORY_AND_CLEANUP_PLAN.md` | process support | `keep` | Full-tree docs inventory and cleanup action map |
 | `docs/IMPLEMENTATION_SOURCES.md` | process support | `keep+status` | External implementation reference ledger, not product truth |
@@ -195,6 +198,17 @@ After the tree is reclassified and status-normalized:
 - keep the authority order explicit
 - avoid forcing new agents to infer doc class from filename alone
 
+### Slice E: bead-input packet stabilization
+
+Once accepted truth has been merged back:
+
+- keep `docs/BEAD_CREATION_INPUTS.md` aligned with the actual canonical packet
+- remove side-plans from the bead-creation packet as soon as the relevant
+  canonical plan sections and support contracts are sufficient
+- prefer adding one narrow support contract over keeping a broad side-plan alive
+  purely for bead-shaping context
+- do not let historical rounds creep back into ordinary bead-creation inputs
+
 ## Completion criteria for the docs-tree cleanup
 
 The full-tree cleanup is complete only when:
@@ -204,5 +218,7 @@ The full-tree cleanup is complete only when:
 - non-canonical docs are visibly marked so they cannot be mistaken for current
   product truth
 - accepted side-plan content is folded back into canonical/support docs
+- bead-creation skills can operate from one bounded authoritative packet without
+  depending on historical rounds by default
 - the docs root no longer mixes live product truth, historical rationale, and
   operator runbooks without explicit labeling

@@ -46,18 +46,21 @@ Rules:
 
 | Provider | `0.1.0` status | Minimum expectation |
 |----------|----------------|---------------------|
-| OpenCode | Primary | Real locator-based resume, Roger ledger integration, bare-harness dropout, `rr return` |
+| GitHub Copilot CLI | Golden-path first-class provider target, not yet live | Do not claim live support until verified launch, policy, worker boundary, and continuity coverage are real |
+| OpenCode | First-class fallback and current strongest landed path | Real locator-based resume, Roger ledger integration, bare-harness dropout, `rr return` |
 | Codex | Secondary, bounded | Exposed via `rr review --provider codex`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |
-| Claude | Secondary, bounded | Exposed via `rr review --provider claude`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |
-| Gemini harness | Secondary, bounded | Exposed via `rr review --provider gemini`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |
-| GitHub Copilot CLI | Active implementation scope, not yet live | Do not claim support until verified launch, policy, and continuity coverage are real |
+| Gemini | Secondary, bounded | Exposed via `rr review --provider gemini`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |
+| Claude Code | Secondary, bounded | Exposed via `rr review --provider claude`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |
 | Pi-Agent | Not in `0.1.0` | Contract-shaping only |
 
 Bounded-provider coverage in `0.1.0` should stay common-sense:
 
+- the authoritative provider support order is GitHub Copilot CLI, OpenCode,
+  Codex, Gemini, then Claude Code
+- that order does not widen a live claim before the relevant proof exists
 - Roger owns the continuity model
-- Codex, Claude, and Gemini do not require transcript-isomorphic resume parity
-  with OpenCode to earn truthful Tier A claims
+- Codex, Gemini, and Claude Code do not require transcript-isomorphic resume
+  parity with OpenCode to earn truthful Tier A claims
 - if a bounded provider lacks a stable reopen path, Roger should still support
   truthful reseed/resume through `ResumeBundle` without widening the claim
 
@@ -69,6 +72,22 @@ Provider claim rule:
   that satisfies the Tier B contract
 - Roger should only claim **in-harness Roger command support** for a harness
   that actually exposes the relevant Tier C affordances
+
+## Agent-session / worker boundary acceptance
+
+Roger now has two distinct machine-facing surfaces:
+
+- `rr --robot` for operator-facing commands in machine-readable form
+- `rr agent` for in-session review-worker calls bound to an active task
+
+Minimum acceptance expectations for the worker boundary:
+
+- `rr agent` requires valid session/run/task binding plus task nonce
+- one task may execute as the default single-turn report flow or as an explicit
+  configured multi-turn program
+- prompt-turn history remains auditable per turn
+- terminal worker results materialize findings only after Roger validation
+- out-of-scope memory/tool requests fail closed with explicit denial
 
 ## `0.1.0` Browser And Bridge Matrix
 
@@ -172,9 +191,12 @@ Ownership rules:
 
 - `release` keeps one top-level workflow while preserving job-level ownership
 - `build-core` owns compilation, but not publication
-- `build-core` must fail closed if the staged `rr` artifact cannot satisfy the
-  minimal packaged-binary smoke contract (`rr --help`, `rr robot-docs`,
-  `rr update --dry-run --robot`) for that target
+- the intended gate is for `build-core` to fail closed if the staged `rr`
+  artifact cannot satisfy the minimal packaged-binary smoke contract (`rr --help`,
+  `rr robot-docs`, `rr update --dry-run --robot`) for that target, but the
+  current workflow does not yet execute that packaged-binary smoke in
+  `build-core`; release truth must therefore come from explicit downstream proof
+  rather than assuming this gate already exists
 - `package-bridge` owns Native Messaging registration assets and host-runtime
   packaging truth, but not browser-extension packaging
 - `package-extension` remains its own job so the browser lane can
@@ -295,13 +317,14 @@ Behavior rules:
 
 - the installer resolves the latest stable release by default and may accept an
   explicit pinned version or allowed channel such as `stable` or `rc`
-- `--version 0.1.0` is a product-line alias that resolves to the latest stable
-  published CalVer tag; explicit CalVer pins remain `YYYY.MM.DD[-rc.N]`
+- the `0.1.0` product-line alias currently belongs only to the installer
+  surface documented in the update contract; explicit CalVer pins remain
+  `YYYY.MM.DD[-rc.N]`
 - host OS and CPU detection map to the published core companion archive matrix
   and must fail clearly for unsupported targets rather than guessing
-- the installer downloads the chosen core companion archive plus the release
-  metadata bundle, verifies the artifact against published `SHA256SUMS`, and
-  aborts on any mismatch
+- installer checksum/metadata behavior must follow the narrower current-truth
+  rules in [`UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md`](UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md),
+  including any surface-specific fallback or parity caveat
 - install success yields a usable local `rr` binary without requiring the
   browser extension, Native Messaging registration, or store publication
 - platform-specific install paths and PATH guidance are Roger-owned release-doc
@@ -321,6 +344,8 @@ Smoke validation for this contract:
 - post-publish live stable smoke (manual release lane):
   - `curl -fsSL https://api.github.com/repos/cdilga/roger-reviewer/releases/latest`
   - `bash scripts/release/rr-install.sh --repo cdilga/roger-reviewer --dry-run`
+  - fresh isolated install from the live Unix installer followed by
+    `rr update --dry-run --robot` from that installed binary
   - record UTC timestamp + resolved stable tag in release closeout evidence
 - PowerShell installer validation is currently a manual smoke on a Windows host
   until a stable `pwsh` lane is available in this workspace
@@ -332,17 +357,17 @@ Smoke validation for this contract:
 - `rr update` is the Roger-owned updater in `packages/cli` and performs
   in-place binary replacement against published CalVer release metadata
 - default apply behavior is confirmation-gated on an interactive TTY
-- `--yes` / `-y` bypasses only the confirmation prompt for non-interactive
-  apply; artifact/provenance/safety checks still run
-- `--dry-run` and `--robot` remain non-mutating metadata/preflight paths; in
-  `--robot` mode, apply is blocked unless `--yes` / `-y` is provided
+- current source exposes `--yes` / `-y` as confirmation-bypass flags for
+  non-interactive apply, but release-hosted support claims must follow the
+  actual published binary surface until a stable release carries those flags
+- `--dry-run` and `--robot` remain non-mutating metadata/preflight paths
 - local/unpublished builds are blocked and require explicit reinstall from a
   published CalVer release before update can run
 
 Behavior rules:
 
-- default update behavior stays on the selected published channel (`stable` or
-  `rc`) and upgrades only to a newer published version in that lane
+- truthful current support is stable-by-default; RC users must opt in with
+  `--channel rc` until current-channel stickiness is implemented and proven
 - an explicit pinned target version is allowed
 - the updater path reuses the same host detection and install metadata +
   manifest + checksum verification rules as install and fails closed on missing
@@ -634,7 +659,7 @@ Purpose:
 
 - prove fallback is operational, not marketing
 
-Codex, Claude, and Gemini should not each get their own heavyweight automated
+Codex, Gemini, and Claude Code should not each get their own heavyweight automated
 E2E initially. They should get bounded provider-acceptance coverage plus smoke
 paths commensurate with the claim Roger is actually making.
 
@@ -723,6 +748,6 @@ To keep tests valuable and stable:
 ## Explicit `0.1.0` Non-Goals
 
 - exhaustive CI coverage for every browser/OS/provider combination
-- Tier B parity for Codex, Claude, or Gemini before the implementation earns it
+- Tier B parity for Codex, Gemini, or Claude Code before the implementation earns it
 - browser-store publication as a product gate
 - Gemini parity with OpenCode on native reopen semantics

@@ -94,8 +94,10 @@ required fields and adds two:
   resolved prompt text exceeds inline storage threshold (default 4KB)
 - `user_override_text` nullable — the short explicit objective or other
   user-supplied override injected at invocation time
-- `source_surface` — `cli`, `tui`, `extension`, or `direct` so auditors can
-  see where the invocation originated
+- `source_surface` — Roger-owned origin enum such as `cli`, `tui`,
+  `extension`, `external_link`, `harness_command`, `agent`, or `system` so
+  auditors can see where the invocation originated; older `direct`, `bridge`,
+  or `external-link` strings should normalize into this enum during migration
 - `provider` — the harness provider used for this invocation
 - `model_id` — model identifier used, as reported by the harness
 - `stage` — `exploration`, `deep_review`, or `follow_up`; allows later grouping
@@ -129,6 +131,8 @@ Required event kinds:
 | `draft_invalidated` | approval revoked before post | `draft_batch_id`, `invalidation_reason_code` |
 | `draft_posted` | successful post to GitHub | `draft_batch_id`, `posted_action_id`, `remote_identifier` |
 | `draft_post_failed` | post failed | `draft_batch_id`, `failure_code` |
+| `memory_review_requested` | memory promotion/demotion/deprecation/restore request recorded | `memory_review_request_id`, `subject_memory_id`, `request_kind`, `requested_target_state`, `actor` |
+| `memory_review_resolved` | memory review request accepted/rejected/superseded/withdrawn | `memory_review_request_id`, `subject_memory_id`, `resolution`, `actor` |
 | `usefulness_labeled` | user provides explicit signal | `finding_id` nullable, `draft_id` nullable, `label` (`useful`, `not_useful`, `harmful`), `actor` |
 | `pr_merged` | PR merged signal received (best-effort) | `review_session_id`, `remote_pr_id` |
 | `pr_closed_unmerged` | PR closed without merge (best-effort) | `review_session_id`, `remote_pr_id` |
@@ -139,12 +143,21 @@ Shared fields on every outcome event:
 - `kind`
 - `created_at`
 - `review_session_id`
+- `review_run_id` nullable
+- `prompt_invocation_id` nullable
+- `actor_kind` nullable
+- `actor_id` nullable
+- `source_surface`
+- `payload` — bounded structured JSON payload containing event-kind-specific
+  fields
 - any entity ids listed in the Required fields column above
 
 Rules:
 
 - outcome events are append-only and must never be updated or deleted
 - every event kind is typed; Roger must not store untyped string-blob event rows
+- storage may persist `entity_id` and `entity_kind` as indexing aids, but those
+  fields do not replace the canonical event kind plus structured payload
 - `pr_merged` and `pr_closed_unmerged` are best-effort signals; their absence
   must not break any core workflow
 - `usefulness_labeled` may be attached to a finding, a draft, or a session; at

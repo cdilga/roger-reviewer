@@ -1,5 +1,8 @@
 # Roger Reviewer Testing Doctrine
 
+Status: operator-facing testing doctrine and entrypoint to the validation
+contract set.
+
 This document is the operator-facing entrypoint for Roger's testing posture.
 It summarizes how Roger turns support claims into runnable proof, and it points
 to the implementation-facing contracts that define suites, fixtures, artifacts,
@@ -31,7 +34,7 @@ Use the testing docs in this order:
 
 1. `AGENTS.md`
 2. `docs/PLAN_FOR_ROGER_REVIEWER.md`
-3. `TESTING.md`
+3. this document
 4. `docs/VALIDATION_INVARIANT_MATRIX.md`
 5. `docs/TEST_HARNESS_GUIDELINES.md`
 6. `docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`
@@ -115,6 +118,10 @@ Examples:
 - partial findings salvage must preserve valid findings rather than discarding
   the whole pack
 - bridge launch must never report fake Roger success
+- published release assets must remain self-consistent across installer and
+  updater surfaces
+- blocked install/update paths must emit truthful recovery guidance for the
+  actual operator context
 - search must not silently widen scope or erase provenance
 
 Roger's release-critical invariants live in
@@ -242,3 +249,4 @@ If Roger follows this doctrine, users should get:
 - [`docs/VALIDATION_CI_TIERS_AND_ENTRYPOINTS.md`](docs/VALIDATION_CI_TIERS_AND_ENTRYPOINTS.md)
 - [`docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md`](docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md)
 - [`docs/RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md)
+- [`docs/UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md`](docs/UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md)

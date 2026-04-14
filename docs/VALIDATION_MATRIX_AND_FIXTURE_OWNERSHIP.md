@@ -69,10 +69,12 @@ Practical rule:
 | `int_storage_*` | storage, migrations, artifact budgets, canonical-row invariants | `rr-014` |
 | `int_harness_*` | adapter boundaries with doubles and resumability fixtures | `rr-003.1`, `rr-003.2`, `rr-011.5` |
 | `int_cli_*` | launch resolution, session finder, robot outputs, resume routing | `rr-018`, `rr-011.6` |
+| `unit_worker_*` | worker envelope, task binding, and task-result materialization logic | worker-boundary beads |
+| `int_worker_*` | active-agent task binding, scope envelope, and result-submission boundaries | worker-boundary beads, later agent-access beads |
 | `int_tui_*` | findings workflow, approval surfaces, inspector, editor handoff | `rr-019`, `rr-011.5` |
 | `int_bridge_*` | Native Messaging envelopes, launch-only mode, install recovery, read-safe status | `rr-021`, `rr-011.4` |
 | `int_github_*` | draft invalidation, payload rendering, partial post handling | `rr-020`, `rr-008.1`, `rr-011.4` |
-| `int_search_*` | prior-review lookup, lexical-only degrade, provenance-safe search | `rr-024` |
+| `int_search_*` | prior-review lookup, query-mode planning, recall envelopes, lexical-only degrade, provenance-safe search | `rr-024` |
 | `accept_opencode_*` | OpenCode provider-claim acceptance | `rr-011.1`, `rr-011.5` |
 | `accept_bounded_provider_*` | bounded live-CLI provider-claim acceptance (`codex`, `claude`, `gemini`; later `copilot`) | `rr-011.1` |
 | `e2e_core_review_happy_path` | the one blessed automated multi-boundary happy path | `rr-011.7` plus later implementation beads |
@@ -91,6 +93,14 @@ Each fixture family must be small, named by purpose, and reusable across suites.
 | `fixture_findings_partial_mixed` | partially valid pack with salvageable findings | `unit_*`, `int_harness_*`, `rr-011.3` |
 | `fixture_findings_raw_only` | no structured pack, raw output only | `int_harness_*`, `rr-011.3` |
 | `fixture_findings_invalid_anchor` | structurally valid finding with stale or bad anchors | `prop_*`, `rr-011.2`, `rr-011.3` |
+| `fixture_worker_task_binding` | valid agent task context with stable session/run/task/nonce tuple | `unit_worker_*`, `int_worker_*`, `accept_opencode_*` |
+| `fixture_worker_nonce_mismatch` | stale or mismatched task/nonce binding that must fail closed | `unit_worker_*`, `int_worker_*` |
+| `fixture_worker_scope_boundary` | active-agent read/query request that attempts to exceed allowed task scope | `int_worker_*`, `int_search_*` |
+| `fixture_memory_recall_envelope` | retrieval corpus proving lane, scope, trust, and degraded explanation fields | `int_search_*`, `int_cli_*` |
+| `fixture_memory_candidate_vs_promoted` | retrieval corpus with candidate and promoted memory for the same anchors | `int_search_*`, `int_cli_*`, `int_worker_*` |
+| `fixture_memory_review_requests` | candidate memory plus promotion/demotion review requests and expected non-mutating resolutions | `int_search_*`, `int_worker_*`, `int_tui_*` |
+| `fixture_memory_scope_denial` | overlay recall request that must fail closed without explicit enablement | `int_search_*`, `int_worker_*` |
+| `fixture_session_baseline_search_defaults` | session baseline snapshots proving default query mode, candidate visibility, and allowed-scope posture across dropout/return/reseed | `int_cli_*`, `int_worker_*`, `accept_opencode_*` |
 | `fixture_resumebundle_stale_locator` | stale `SessionLocator` plus valid `ResumeBundle` reseed path | `accept_opencode_*`, `accept_bounded_provider_*`, `rr-011.5` |
 | `fixture_opencode_dropout_return` | bare-harness dropout and `rr return` control flow | `accept_opencode_*`, `rr-011.5` |
 | `fixture_bridge_launch_only_no_status` | bridge present, truthful launch-only/no-status mode | `int_bridge_*`, `rr-011.4` |
@@ -112,7 +122,9 @@ Each fixture family must be small, named by purpose, and reusable across suites.
 | `F06`, `F13` refresh and draft invalidation | `prop_*`, `int_github_*`, `int_cli_*` | `rr-011.2`, `rr-011.4` |
 | `F07` draft review, approval, posting | `unit_*`, `int_github_*`, `e2e_core_review_happy_path` | `rr-008.1`, `rr-011.4` |
 | `F08` history, original pack, and raw output inspection | `int_tui_*`, `int_storage_*` | `rr-019` |
-| `F09` search and recall during review | `unit_*`, `int_search_*`, targeted manual smoke, and memory-assisted E2Es when they are explicitly approved (`E2E-02`, `E2E-03`) | `rr-024` |
+| `F09` search and recall during review | `unit_*`, `int_search_*`, `int_cli_*`, targeted manual smoke, and memory-assisted E2Es when they are explicitly approved (`E2E-02`, `E2E-03`) | `rr-024` |
+| `F09.1` active agent memory access during review | `unit_worker_*`, `int_worker_*`, `int_cli_*`, targeted `accept_*`, and targeted manual smoke | later agent-access beads |
+| `F09.2` candidate audit and memory review during review | `unit_*`, `int_search_*`, `int_worker_*`, `int_tui_*`, and targeted manual smoke | `rr-024`, later agent-access beads |
 | `F10`, `F14` bridge recovery and honest no-status mode | `int_bridge_*`, `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, `smoke_browser_launch_edge`, supported-browser `smoke_*` | `rr-011.4` |
 | `F12` same-PR multi-instance selection and routing | `prop_*`, `int_cli_*`, `int_bridge_*`, `smoke_*` | `rr-011.6` |
 
@@ -129,6 +141,8 @@ Each fixture family must be small, named by purpose, and reusable across suites.
 | Same-PR multi-instance routing is explicit and safe | `fixture_same_pr_multi_instance`, `int_cli_*`, `int_bridge_*`, `rr-011.6` |
 | Structured findings degraded modes are survivable and auditable | `fixture_findings_partial_mixed`, `fixture_findings_raw_only`, `fixture_findings_invalid_anchor`, `rr-011.3` |
 | Memory and recall stay truthful across review continuation and triage | `int_search_*`, targeted smoke, and any approved memory-assisted E2E catalog entries (`E2E-02`, `E2E-03`) | `rr-024` |
+| Active-agent read/query and memory access remain scoped, provenance-rich, and truthfully degraded | `unit_worker_*`, `int_worker_*`, `int_cli_*`, targeted `accept_*`, `fixture_worker_scope_boundary`, `fixture_memory_recall_envelope` | later agent-access beads |
+| Memory promotion/demotion review stays explicit and non-mutating until accepted | `int_search_*`, `int_worker_*`, `int_tui_*`, `fixture_memory_review_requests` | `rr-024`, later agent-access beads |
 
 ## Artifact Obligations
 

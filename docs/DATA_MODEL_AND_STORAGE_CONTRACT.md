@@ -121,7 +121,15 @@ concurrent review activity across PRs or agents.
 - `ReviewTarget`
 - `SessionLocator`
 - `ResumeBundle`
+- `SessionBaselineSnapshot`
 - `HarnessCapabilitySet`
+
+### Worker task and execution activity
+
+- `ReviewTask`
+- `WorkerInvocation`
+- `WorkerToolCallEvent`
+- `WorkerStageResult`
 
 ### Prompt and command activity
 
@@ -160,6 +168,7 @@ concurrent review activity across PRs or agents.
 - `Episode`
 - `MemoryItem`
 - `MemoryEdge`
+- `MemoryReviewRequest`
 - `UsageEvent`
 
 ### Runtime and isolation
@@ -201,11 +210,29 @@ Recommended materialized-state areas:
 
 ### Prompt invariants
 
+- each `PromptInvocation` belongs to one canonical task/invocation attempt even
+  when the task program contains multiple turns
 - each `PromptInvocation` stores the exact resolved prompt text used at runtime
 - preset reuse is by stable preset id, but audit/repro uses the invocation
   snapshot
 - large prompt text may move to cold artifacts while the invocation row keeps
   digest, metadata, and bounded inline summary
+- `source_surface` is a Roger-owned normalized enum:
+  `cli`, `tui`, `extension`, `external_link`, `harness_command`, `agent`, or
+  `system`; legacy spellings such as `direct`, `bridge`, or `external-link`
+  normalize into this enum at the boundary
+
+### Worker execution invariants
+
+- each `ReviewTask` belongs to exactly one `ReviewSession` and one `ReviewRun`
+- each `ReviewTask` stores the allowed scopes, allowed operations, and
+  turn-strategy Roger assigned to that unit of work
+- each `WorkerInvocation` belongs to exactly one `ReviewTask`
+- each `WorkerInvocation` may own zero or more `PromptInvocation` turns
+- each successful or terminal task attempt stores exactly one
+  `WorkerStageResult`
+- nonce mismatch, stale task binding, or cross-session result submission must
+  fail closed
 
 ### Finding invariants
 
@@ -235,6 +262,19 @@ Recommended materialized-state areas:
 - every searchable/promotable item has explicit scope identity
 - cross-scope aliasing is allowed; silent cross-scope merge is not
 
+### Baseline and memory-review invariants
+
+- each `SessionBaselineSnapshot` belongs to exactly one `ReviewSession`
+- a baseline snapshot records Roger's stable session posture for allowed
+  scopes, default recall mode, candidate visibility, and policy epochs before
+  task-level overrides are applied
+- `ReviewTask` and `PromptInvocation` may narrow or specialize a baseline, but
+  they do not overwrite baseline history
+- each `MemoryReviewRequest` belongs to one canonical memory subject and one
+  Roger session lineage
+- `MemoryReviewRequest` transitions are auditable and non-mutating until an
+  accepted resolution is applied through Roger-owned memory-state logic
+
 ## Suggested Minimal Relational Fields
 
 Do not treat this as the final SQL schema. Treat it as the minimum contract.
@@ -248,7 +288,8 @@ Do not treat this as the final SQL schema. Treat it as the minimum contract.
 - `template_text`
 - `tags` — optional labels, stored as JSON array or normalized tag rows
 - `is_builtin` — boolean; builtin presets are not directly user-editable
-- `is_favorite` — boolean; user-marked shortcut
+- `is_favorite` — boolean; user-marked shortcut; ordered favorites are deferred
+  beyond `0.1.0`
 - `created_at`
 - `updated_at`
 - `row_version`
@@ -269,17 +310,91 @@ Reuse signals are derived from these rows:
 - **frequent**: rolling invocation count within a window (default 90 days)
 - **last-used per repo**: single max `used_at` per preset + `scope_key`
 
+### `ReviewTask`
+
+- `id`
+- `review_session_id`
+- `review_run_id`
+- `stage`
+- `task_kind`
+- `task_nonce`
+- `objective`
+- `turn_strategy`
+- `allowed_scopes_json`
+- `allowed_operations_json`
+- `expected_result_schema`
+- `prompt_preset_id` nullable
+- `created_at`
+
+### `WorkerInvocation`
+
+- `id`
+- `review_session_id`
+- `review_run_id`
+- `review_task_id`
+- `provider`
+- `provider_session_id` nullable
+- `transport_kind`
+- `started_at`
+- `completed_at` nullable
+- `outcome_state`
+- `raw_output_artifact_id` nullable
+- `result_artifact_id` nullable
+
+### `WorkerToolCallEvent`
+
+- `id`
+- `worker_invocation_id`
+- `operation_name`
+- `request_digest`
+- `response_digest` nullable
+- `outcome_state`
+- `created_at`
+
+### `WorkerStageResult`
+
+- `id`
+- `review_session_id`
+- `review_run_id`
+- `review_task_id`
+- `worker_invocation_id`
+- `task_nonce`
+- `outcome_kind`
+- `submitted_result_artifact_id` nullable
+- `findings_pack_artifact_id` nullable
+- `created_at`
+
+### `SessionBaselineSnapshot`
+
+- `id`
+- `review_session_id`
+- `review_run_id` nullable
+- `baseline_generation`
+- `review_target_snapshot_json`
+- `allowed_scopes_json`
+- `default_query_mode`
+- `candidate_visibility_policy`
+- `prompt_strategy`
+- `policy_epoch_refs_json`
+- `degraded_flags_json`
+- `created_at`
+
 ### `PromptInvocation`
 
 - `id`
 - `review_session_id`
 - `review_run_id`
+- `review_task_id`
+- `worker_invocation_id`
 - `prompt_preset_id` nullable — null for fully ad hoc prompts
+- `turn_index`
 - `resolved_text_digest`
 - `resolved_text_artifact_id` nullable — cold artifact reference when resolved
   text exceeds inline threshold (suggested 4KB); digest still stored inline
 - `user_override_text` nullable
-- `source_surface` — `cli`, `tui`, `extension`, or `direct`
+- `source_surface` — Roger-owned origin enum such as `cli`, `tui`, `extension`,
+  `external_link`, `harness_command`, `agent`, or `system`; legacy `direct`,
+  `bridge`, or `external-link` values normalize into this enum
 - `provider`
 - `model_id`
 - `stage` — `exploration`, `deep_review`, or `follow_up`
@@ -287,17 +402,49 @@ Reuse signals are derived from these rows:
 
 ### `OutcomeEvent`
 
-Append-only typed events for analytics capture. See
-`009-prompt-preset-and-outcome-events.md` for the full event kind taxonomy.
+Append-only typed events for analytics capture. Event kind taxonomy and naming
+authority live in [`adr/009-prompt-preset-and-outcome-events.md`](./adr/009-prompt-preset-and-outcome-events.md).
 
 - `id`
 - `kind` — typed enum, not a free-form string
 - `review_session_id`
-- `entity_id` — primary entity id relevant to this event kind (finding id,
-  draft id, batch id, posted action id, etc.)
-- `entity_kind` — discriminator for `entity_id`
-- `extra_json` nullable — bounded extra fields per event kind
+- `review_run_id` nullable
+- `prompt_invocation_id` nullable
+- `actor_kind` nullable
+- `actor_id` nullable
+- `source_surface` — same normalized enum used by `PromptInvocation`
+- `entity_id` nullable — primary entity id useful for indexing this event kind
+- `entity_kind` nullable — discriminator for `entity_id`
+- `payload_json` nullable — bounded structured payload for event-kind-specific
+  fields
 - `created_at`
+
+Rules:
+
+- `entity_id` and `entity_kind` are indexing aids, not substitutes for the
+  canonical event kind plus payload
+- storage should persist enough structured payload that later analytics and
+  audit do not need to reconstruct meaning from free-form text blobs
+
+### `MemoryReviewRequest`
+
+- `id`
+- `review_session_id`
+- `review_run_id` nullable
+- `subject_memory_id`
+- `request_kind`
+- `requested_target_state`
+- `status`
+- `reason_summary`
+- `supporting_refs_json`
+- `source_surface`
+- `requested_by_actor_kind`
+- `requested_by_actor_id` nullable
+- `resolved_by_actor_kind` nullable
+- `resolved_by_actor_id` nullable
+- `resolution_summary` nullable
+- `created_at`
+- `resolved_at` nullable
 
 ### `Finding`
 
@@ -392,6 +539,7 @@ created, triaged, drafted, approved, posted, and labeled. See
 
 Minimum outcome-ready data:
 
+- which task and turn strategy were used for each run (from `ReviewTask`)
 - which prompt preset and resolved prompt text were used (from `PromptInvocation`)
 - which findings were accepted, ignored, resolved, or left stale (from `OutcomeEvent` + `Finding`)
 - which findings produced drafts (from `OutcomeEvent` `finding_draft_created`)
@@ -399,10 +547,13 @@ Minimum outcome-ready data:
 - which posted actions map to remote review ids (from `OutcomeEvent` `draft_posted`)
 - PR outcome state and merge outcome when available (from `OutcomeEvent` `pr_merged` / `pr_closed_unmerged`)
 - explicit human usefulness labels when provided (from `OutcomeEvent` `usefulness_labeled`)
+- which memory review requests were raised and how they resolved (from
+  `MemoryReviewRequest` plus `OutcomeEvent` `memory_review_requested` /
+  `memory_review_resolved` when emitted)
 
-These queries must be answerable from `PromptInvocation` + `OutcomeEvent` rows
-plus the existing `Finding` and `OutboundDraft` state rows without requiring more
-than two additional joins.
+These queries must be answerable from `ReviewTask`, `PromptInvocation`, and
+`OutcomeEvent` rows plus the existing `Finding` and `OutboundDraft` state rows
+without requiring more than two additional joins.
 
 This is enough to derive later usefulness scoring without turning `0.1.0` into
 an analytics product.

@@ -12,8 +12,8 @@ But some supported or future harnesses also expose in-session command
 affordances such as slash commands, subcommands, or provider-specific command
 palettes. If Roger ignores that capability entirely, the dropout-to-bare-
 harness story becomes clumsy: the user can inspect code in the bare harness, but
-has no natural in-context way to ask Roger for status, findings, clarification,
-or a clean return path.
+has no natural in-context way to ask Roger for status, findings, or a clean
+return path.
 
 If Roger overfits to one harness's syntax, the opposite problem appears:
 provider-specific command glue leaks into app-core and the semantics drift away
@@ -30,15 +30,18 @@ Roger needs one contract that preserves both truths:
 Roger should define a stable logical command surface in core, with optional
 harness-native bindings layered on top of it.
 
-Recommended logical command IDs:
+Current `0.1.0` logical command IDs:
 
 - `roger-help`
 - `roger-status`
 - `roger-findings`
+- `roger-return`
+
+Possible later additions behind separate beads and validation:
+
 - `roger-refresh`
 - `roger-clarify`
 - `roger-open-drafts`
-- `roger-return`
 
 Recommended core objects:
 
@@ -74,6 +77,8 @@ Dispatch rules:
 - mutation-capable flows such as approval and GitHub posting remain elevated in
   the TUI or CLI approval flow rather than hidden behind lightweight in-harness
   commands
+- the default support claim in `0.1.0` is only the safe subset above; richer
+  command IDs require their own proof and should not be implied by this ADR
 
 `0.1.0` stance:
 
@@ -88,7 +93,7 @@ Preferred first subset when implemented:
 - `roger-findings`
 - `roger-return`
 
-Still optional even on capable harnesses:
+Still optional even on capable harnesses, pending later beads:
 
 - `roger-refresh`
 - `roger-clarify`
@@ -100,8 +105,8 @@ Still optional even on capable harnesses:
   architecture center
 - CLI, TUI, and supported harnesses can share semantics and state transitions
   rather than drift into separate mini-products
-- return-to-Roger, status, and clarification become easier to discover from
-  within a dropped-out harness session
+- return-to-Roger, status, and findings become easier to discover from within a
+  dropped-out harness session
 - provider-specific syntax stays isolated in adapter bindings instead of leaking
   into app-core
 

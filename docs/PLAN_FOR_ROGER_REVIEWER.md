@@ -37,6 +37,8 @@ This means Roger should prefer:
   and major current-scope hardening directions
 - narrow support contracts for stable implementation-facing seams
 - ADRs for decision records
+- one explicit bead-creation input packet derived from the canonical plan,
+  relevant contracts, and the bead seed rather than from the whole docs tree
 - the bead seed and live beads for decomposition and proof tracking
 - explicitly marked historical critique docs for rationale only
 - explicitly marked operator/runbook docs for repo process only
@@ -102,6 +104,8 @@ The docs cleanup is successful only when:
 - active product rules are not stranded only in temporary side-plan docs
 - historical and operator docs are visibly fenced from the product authority
   layer
+- bead-creation skills can operate from a bounded authoritative packet without
+  rereading historical rounds by default
 - broken links, missing doc references, and stale support claims are treated as
   bugs
 
@@ -518,8 +522,9 @@ web-native.
 **Default direction for non-web local layers: Rust**
 - Session-aware `rr` CLI commands should default to Rust
 - App-core, storage, search, and local orchestration should default to Rust
-- Harness integration (OpenCode first, not OpenCode-only) should sit behind a
-  Roger-owned boundary regardless of provider
+- Harness integration should keep GitHub Copilot CLI as the golden-path target
+  and OpenCode as the required fallback/reference path, not an OpenCode-only
+  design
 - GitHub adapter logic may shell out to `gh`, but only behind Roger-owned
   adapter boundaries; agent-facing review communication should stay Roger
   mediated, not raw-`gh` driven
@@ -810,7 +815,8 @@ Important consequences:
 ## Session Model
 
 Roger should wrap a supported harness session rather than replace it, with
-OpenCode as the canonical first-class path in `0.1.0`.
+GitHub Copilot CLI as the canonical first-class provider target and OpenCode as
+the required fallback/reference path in `0.1.x`.
 
 Required properties:
 
@@ -855,21 +861,27 @@ Not every provider needs equal status in `0.1.0`.
 
 | Provider | Roger role | `0.1.0` drop-in support | `0.1.0` deeper integration | Direction |
 |----------|------------|-------------------------|----------------------------|-----------|
-| OpenCode | Primary review harness | Yes | Yes | The canonical first implementation and fallback path |
-| Codex | Secondary bounded review harness | Yes | Bounded | Exposed via `rr review --provider codex`; Tier A only today (no locator reopen or `rr return`) |
-| Claude | Secondary bounded review harness | Yes | Bounded | Exposed via `rr review --provider claude`; Tier A only today (no locator reopen or `rr return`) |
-| Gemini harness | Secondary bounded review harness | Yes | Bounded | Exposed via `rr review --provider gemini`; keep Tier A live-CLI claims truthful and do not imply locator reopen or `rr return` |
-| GitHub Copilot CLI | Active current-scope provider | Not yet | Planned Tier B target | Must land through the same verified-lifecycle and support-claim rules as every other provider |
+| GitHub Copilot CLI | Golden-path first-class provider | Not yet | Planned Tier B target | Authoritative `#1` provider target once verified; must land through the same verified-lifecycle and support-claim rules as every other provider |
+| OpenCode | First-class continuity fallback and reference harness | Yes | Yes | Authoritative `#2` provider and current strongest landed continuity path |
+| Codex | Secondary bounded review harness | Yes | Bounded | Authoritative `#3` provider; exposed via `rr review --provider codex`; Tier A only today (no locator reopen or `rr return`) |
+| Gemini | Secondary bounded review harness | Yes | Bounded | Authoritative `#4` provider; exposed via `rr review --provider gemini`; keep Tier A live-CLI claims truthful and do not imply locator reopen or `rr return` |
+| Claude Code | Secondary bounded review harness | Yes | Bounded | Authoritative `#5` provider; exposed via `rr review --provider claude`; Tier A only today (no locator reopen or `rr return`) |
 | Pi-Agent | Future review harness | No | No | Same as Codex |
 | GitHub CLI (`gh`) | GitHub adapter, not review harness | N/A | N/A | Read/write adapter for GitHub operations only |
 
 Rules:
 
-- `0.1.0` only needs first-class review-harness support for OpenCode
-- Codex, Claude, and Gemini may ship as bounded Tier A live-CLI paths without
-  implying Tier B reopen/dropout parity
+- the authoritative provider support order is GitHub Copilot CLI, OpenCode,
+  Codex, Gemini, then Claude Code
+- that support order is a product hierarchy, not permission to widen live
+  claims before proof exists
+- OpenCode remains the strongest currently landed continuity path until the
+  Copilot golden path is fully verified
+- Codex, Gemini, and Claude Code may ship as bounded Tier A live-CLI paths
+  without implying Tier B reopen/dropout parity
 - GitHub Copilot CLI is active implementation scope, but it should remain out
-  of live support claims until the verified launch and continuity path are real
+  of live support claims until the verified launch, policy, and continuity path
+  are real
 - other providers should influence the adapter shape, not the `0.1.0`
   implementation commitment
 - GitHub CLI belongs in the GitHub adapter boundary, not the review-harness
@@ -918,13 +930,13 @@ Scope rule for this plan:
 
 `0.1.0` provider intent:
 
-- OpenCode should reach Tier B and may reach selected Tier C affordances
-- Codex, Claude, and Gemini currently expose bounded Tier A paths in the live
-  CLI surface and should be documented literally as such
-- GitHub Copilot CLI is in current scope as the first serious post-OpenCode
-  provider and must land through the same contract as every other provider,
-  with verified launch, transaction boundaries, and support-claim discipline as
-  inseparable parts of that provider slice
+- GitHub Copilot CLI is the first-class golden-path provider target and must
+  land through the same contract as every other provider, with verified launch,
+  transaction boundaries, and support-claim discipline as inseparable parts of
+  that provider slice
+- OpenCode should reach Tier B and remains the required fallback/reference path
+- Codex, Gemini, and Claude Code currently expose bounded Tier A paths in the
+  live CLI surface and should be documented literally as such
 - future providers should be admitted by capability tier, not by one-off
   exceptions
 
@@ -986,8 +998,8 @@ connect.
 
 - ACP is a candidate future harness-control adapter once Roger adds a second
   serious non-OpenCode harness beyond the `0.1.0` baseline
-- ACP is especially worth evaluating for later Codex, Claude, Gemini, and
-  GitHub Copilot CLI/editor-hosted integration paths when those clients expose
+- ACP is especially worth evaluating for later GitHub Copilot CLI, Codex,
+  Gemini, and Claude Code/editor-hosted integration paths when those clients expose
   enough session and tool-call control to reduce adapter complexity
 - MCP is a candidate future tool/context adapter for exposing Roger resources,
   search, helper commands, and bounded review context to external agents or
@@ -1005,7 +1017,7 @@ connect.
 
 ## Integration Contracts
 
-Before implementation spreads across multiple packages, Roger needs three core
+Before implementation spreads across multiple packages, Roger needs four core
 contracts plus one optional harness-command contract.
 
 ### Contract 1: Harness session boundary
@@ -1029,7 +1041,7 @@ Minimum expectations:
 - **OpenCode** should support the full primary path: live session linkage,
   reopen by locator when possible, `ResumeBundle` reseed, bare-harness dropout,
   and `rr return`
-- **Codex**, **Claude**, and **Gemini** should support the bounded
+- **Codex**, **Gemini**, and **Claude Code** should support the bounded
   live-CLI Tier A path: Roger-owned session/run linkage, prompt intake, raw or
   structured result capture as supported, and truthful `ResumeBundle` reseed
   without claiming locator reopen or `rr return`
@@ -1106,7 +1118,60 @@ following are true:
 
 If any of those fail, Roger should reseed from `ResumeBundle` or fail closed.
 
-### Contract 1A: Harness command boundary
+### Contract 1A: Review-worker boundary
+
+Roger must define a first-class boundary between the review manager and the
+agent/runtime that actually performs review work inside a provider session.
+
+Core rule:
+
+- Roger manages review lifecycle, task scheduling, finding materialization,
+  memory policy, approval, and posting
+- the review worker performs bounded review tasks and returns proposals/results
+- the harness/provider hosts the worker session but does not own Roger truth
+
+Minimum expectations:
+
+- Roger creates canonical review-task objects rather than treating prompt
+  execution as an unstructured side effect
+- the default task path is one `ReviewTask`, one `WorkerInvocation`, one
+  `PromptInvocation`, and one terminal `WorkerStageResult`
+- configurable multi-turn programs are explicit task strategy, not hidden
+  prompt glue; one task may own several `PromptInvocation` turns before one
+  terminal result
+- later palette-driven or freehand follow-up from the TUI creates a new
+  `ReviewTask` attached to the same session rather than silently mutating past
+  task history
+- the worker receives bounded Roger-owned context for one task rather than an
+  ambient dump of store state
+- the worker reads memory, findings, status, and artifact excerpts through
+  Roger-owned operations governed by Roger's scope and trust rules
+- the worker returns a canonical stage-result envelope that may include a
+  structured findings pack, clarification requests, or follow-up hints
+- the worker must not mutate canonical finding state directly, promote durable
+  memory directly, approve/post GitHub output directly, or bypass Roger's
+  review-mode safety posture
+- every worker result must bind back to Roger-owned session/run/task identity so
+  stale or cross-session submissions fail closed
+
+Transport rule:
+
+- the worker contract should be transport-neutral
+- a dedicated agent-only `rr agent` transport is the preferred first path in
+  `0.1.x`
+- reusing existing human CLI verbs may be acceptable for narrow proof slices
+  but should not define the long-term worker protocol
+- `rr --robot` remains the machine-readable transport for operator-facing
+  commands and must stay distinct from `rr agent`
+- MCP is a valid later adapter for tools/context, but it must remain an edge
+  adapter over Roger-owned contracts rather than the foundational architecture
+
+See
+[`REVIEW_WORKER_RUNTIME_AND_BOUNDARY_CONTRACT.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/REVIEW_WORKER_RUNTIME_AND_BOUNDARY_CONTRACT.md)
+for the full worker object model, tool surface, result envelope, and transport
+decision.
+
+### Contract 1B: Harness command boundary
 
 For harnesses that support slash commands, subcommands, or equivalent in-session
 command affordances, Roger should expose a thin Roger-owned command surface.
@@ -1171,7 +1236,8 @@ subset is:
 - `roger-findings`
 - `roger-return`
 
-The following remain optional even for capable harnesses:
+The following remain optional even for capable harnesses, and only behind
+separate beads and validation:
 
 - `roger-refresh`
 - `roger-clarify`
@@ -1214,11 +1280,11 @@ instead of leaving onboarding guidance to drift.
 
 Required rules:
 
-- either `rr init` must exist as the canonical bootstrap command, or every doc
-  and recovery path must route to the real bootstrap surface Roger actually
-  ships
-- `rr doctor` should become the cross-provider preflight/debug surface for
-  install, auth, policy, and bridge health checks
+- `rr init` is the canonical bootstrap command for Roger-owned local setup
+- `rr doctor` is the canonical cross-provider preflight/debug surface for
+  install, auth, policy, store, and bridge health checks
+- until a given bootstrap or doctor path is implemented, docs/help must call it
+  planned rather than shipped
 - onboarding, quickstart text, and CLI help must name only command surfaces
   that actually exist in the product
 
@@ -2086,6 +2152,12 @@ Requirements:
 
 Accepted `0.1.0` contract:
 
+- this section is the intended product/release target; when the latest published
+  artifact or release automation is narrower, the authoritative current support
+  truth is
+  [`UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md`](UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md)
+  plus [`RELEASE_AND_TEST_MATRIX.md`](RELEASE_AND_TEST_MATRIX.md)
+
 - Roger's one-line install flow targets the local product only: the `rr`
   binary plus any minimal local companion assets needed for the CLI/TUI path
 - the install flow must not silently install the browser extension, register
@@ -2106,10 +2178,11 @@ Accepted `0.1.0` contract:
 - the accepted one-line update path after install is `rr update`; any
   `rr self-update` phrasing is non-canonical shorthand and should not survive
   in help text, support contracts, or release instructions
-- that update command must consult release metadata, stay on the current
-  release channel by default, allow an explicit pinned target version, verify
-  checksums before replacing the installed binary, and fail closed on mismatch
-  or missing metadata
+- the target update behavior is for `rr update` to consult release metadata,
+  stay on the current release channel by default, allow an explicit pinned
+  target version, verify checksums before replacing the installed binary, and
+  fail closed on mismatch or missing metadata; until that target is fully
+  shipped, current support claims must use the narrower update contract above
 - if the current install was created from a local/unpublished build, the update
   command should refuse silent upgrade and tell the user to reinstall from a
   published release instead of guessing provenance
@@ -2120,7 +2193,8 @@ Accepted `0.1.0` contract:
 - the release/build lane must prove packaged-binary usability, not just
   successful compilation; before archiving or publishing target metadata, Roger
   should smoke the staged `rr` artifact with at least `rr --help`,
-  `rr robot-docs`, and `rr update --dry-run --robot`
+  `rr robot-docs`, and `rr update --dry-run --robot`; until that gate is
+  actually wired, release docs must not pretend it already exists
 - truthful source-run support is part of the same delivery contract: Roger must
   not claim a local/dev Cargo path unless the workspace can at least load the
   manifest and render `rr --help` from source
@@ -2229,6 +2303,10 @@ hardening after `rr-r3dt`):
 
 `0.1.x` implementation-facing in-place update contract (`rr-5urd.1`):
 
+- this section describes the intended `rr-5urd.1` end-state contract; when the
+  latest published release is narrower, the live support truth is owned by
+  [`UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md`](UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md)
+
 - command surface: use `rr update` as the canonical self-update entrypoint for
   the installed binary in this repo
 - default interaction: `rr update` must require explicit confirmation before
@@ -2238,7 +2316,7 @@ hardening after `rr-r3dt`):
   rather than guessing consent
 - `--yes` / `-y` semantics: bypass only the confirmation prompt; they must not
   bypass release metadata, checksum, provenance, target-resolution, or install
-  safety checks
+  safety checks once those flags are present in the shipped release surface
 - `--dry-run` semantics: perform metadata/provenance/target validation only and
   never mutate the installed binary
 - `--robot` semantics: remain machine-readable and truthful; robot output must
@@ -2505,8 +2583,7 @@ truthfully:
 - an explicit dense-workspace entry contract, whether through `rr review` /
   `rr resume` handoff or a dedicated command such as `rr tui` / `rr open`
 - a first-class command family for draft, approval, and posting transitions
-- a truthful bootstrap/preflight surface centered on `rr doctor`, plus `rr init`
-  if that is the chosen canonical bootstrap command
+- a truthful bootstrap/preflight surface centered on `rr init` and `rr doctor`
 - a product-facing `rr extension uninstall` path if Roger intends uninstall as
   part of the normal browser lane rather than leaving it as bridge-only repair
 
@@ -2564,20 +2641,38 @@ Rules:
 - when raw output, partial findings, or repair-needed states occur, robot mode
   should expose them explicitly rather than flattening them into success text
 
+### Agent-session transport conventions
+
+Roger should reserve a separate in-session transport for the review worker.
+
+Required conventions:
+
+- reserve the `rr agent ...` namespace for worker-only calls that occur inside
+  an active Roger-managed review task
+- `rr agent` requires Roger-owned `ReviewSession`, `ReviewRun`, `ReviewTask`,
+  and `task_nonce` binding
+- `rr agent` is not a launch surface, not a general automation surface, and not
+  a substitute for `--robot`
+- `rr agent` payloads should be stable machine-readable envelopes bound to the
+  worker contract rather than to operator-facing command prose
+
 ### Optional harness command surface
 
 Where a harness supports commands, Roger should expose a small command surface
 that mirrors core `rr` operations rather than inventing a separate workflow.
 
-Recommended command IDs:
+Current `0.1.0` logical command IDs:
 
 - `roger-help`
 - `roger-status`
 - `roger-findings`
+- `roger-return`
+
+Possible later additions, only behind separate beads and validation:
+
 - `roger-refresh`
 - `roger-clarify`
 - `roger-open-drafts`
-- `roger-return`
 
 These are logical command IDs, not fixed syntax. One harness may expose
 `/roger-status`, another may expose `:roger status`, and another may offer no
@@ -2586,10 +2681,10 @@ uniform literal spelling.
 
 Scope rule:
 
-- this surface should stay bounded to Roger navigation, status, refresh,
-  clarification, and return affordances; approval and GitHub-posting actions
-  remain explicitly elevated in the TUI or CLI approval flow rather than hidden
-  behind lightweight in-harness commands
+- this surface should stay bounded to Roger navigation, status, findings, and
+  return affordances in `0.1.0`; approval and GitHub-posting actions remain
+  explicitly elevated in the TUI or CLI approval flow rather than hidden behind
+  lightweight in-harness commands
 
 ## Review Intake and Prompt Ingress
 
@@ -2606,7 +2701,8 @@ Required top-level fields:
 - `schema_id`
   - fixed value `review-intake.v1`
 - `source`
-  - `surface`: `cli`, `tui`, `extension`, `external-link`, later others
+  - `surface`: `cli`, `tui`, `extension`, `external_link`,
+    `harness_command`, `system`, later others
   - `surface_invocation_id`: source-local correlation ID when available
   - `received_at`
 - `action`
@@ -2664,7 +2760,7 @@ same fields.
 - `extension`
   - must emit only the bounded browser-safe subset defined below
   - never becomes a second general-purpose prompt-authoring surface
-- `external-link`
+- `external_link`
   - follows the same bounded rules as the extension unless Roger later defines a
     stronger authenticated local surface
 
@@ -2756,7 +2852,7 @@ Required `0.1.0` fail-closed rules:
   audit paths even when launch succeeds
 
 This gives Roger a real shared intake contract for CLI, TUI, extension, and
-external-link launches while keeping web-path prompt ingress bounded and
+`external_link` launches while keeping web-path prompt ingress bounded and
 auditable.
 
 ### Local launch profile and terminal topology
@@ -2835,11 +2931,13 @@ Required `0.1.0` model:
 - `session baseline`
   - Roger-owned defaults for the active `ReviewSession`
   - may include the resolved prompt preset, selected provider/model within the
-    already-allowed capability tier, and bounded prior-run carry-forward
+    already-allowed capability tier, bounded prior-run carry-forward, and the
+    default turn strategy or prompt program for the next Roger-managed task
 - `run modifiers`
-  - one-off prompt-shaping inputs for the next `PromptInvocation`
+  - one-off prompt-shaping inputs for the next `ReviewTask`
   - may include the chosen preset, short `explicit_objective`, selected finding
-    references, and scoped modifiers such as changed-files-only
+    references, scoped modifiers such as changed-files-only, and an explicit
+    override of the default turn strategy when allowed
 
 Rules:
 
@@ -2851,9 +2949,12 @@ Rules:
 - baseline changes must not casually change review-target identity, approval
   policy, posting authority, or safety posture; those require a new session or
   a more explicit elevated local flow
-- every `PromptInvocation` still snapshots the exact resolved prompt text it
-  actually used, regardless of current preset definitions or later baseline
-  changes
+- every `ReviewTask` owns the turn strategy Roger actually used
+- every `PromptInvocation` still snapshots the exact resolved prompt text for
+  one turn inside that task, regardless of current preset definitions or later
+  baseline changes
+- manual palette-driven or freehand follow-up should create a new `ReviewTask`
+  rather than rewriting the prompt history of an older task
 
 ### Outcome capture for future analytics
 
@@ -3686,7 +3787,7 @@ Mitigation:
 
 Mitigation:
 
-- keep Codex, Claude, and Gemini expectations bounded to Roger-owned
+- keep Codex, Gemini, and Claude Code expectations bounded to Roger-owned
   ledgering, prompt intake, structured/raw capture, and truthful
   `ResumeBundle` reseed
 - require unsupported deeper capabilities to fail clearly instead of emulating

@@ -6,8 +6,8 @@ Roger already has two partially true but currently disconnected facts:
 
 1. the canonical store has a real schema version and a real migration runner in
    `packages/storage`
-2. `rr update` can already replace the installed binary in place for published
-   releases
+2. the repo/source already contains an in-place replacement path under
+   `rr update` for published-release installs
 
 What is still missing is the upgrade contract that safely connects those two
 facts. Today Roger explicitly defers migration-capable updates in `0.1.x`, which
@@ -28,6 +28,12 @@ The implementation-facing contract for this lane is
 If this plan and implementation behavior diverge, update that contract first
 and then sync this lane plan.
 
+For current live install/update surface truth, especially published-release
+semantics, read
+[`UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md`](UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md)
+alongside this document. This migration plan defines the intended migration
+lane, not every currently shipped updater affordance.
+
 ---
 
 ## Current Truth
@@ -37,8 +43,8 @@ and then sync this lane plan.
 - `RogerStore::open(...)` already runs a forward migration chain against the
   canonical SQLite database using `PRAGMA user_version` plus the
   `schema_migrations` ledger.
-- `rr update` already supports published-release in-place binary replacement
-  with:
+- the repo/source already contains a published-release in-place replacement path
+  under `rr update`, with:
   - metadata validation
   - target resolution
   - checksum verification
