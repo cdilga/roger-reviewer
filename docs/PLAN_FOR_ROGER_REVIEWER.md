@@ -607,7 +607,8 @@ Recommended fields:
 - `kind`: `request` | `response` | `event`
 - `name`
 - `correlation_id`
-- `source_surface`: `tui` | `cli` | `bridge` | `harness_command` | `agent`
+- `source_surface`: `tui` | `cli` | `extension` | `external_link` |
+  `harness_command` | `agent` | `system`
 - `session_id` when bound
 - `run_id` when bound
 - `instance_id` when relevant
@@ -1197,7 +1198,8 @@ Recommended command objects:
   - `review_session_id`
   - `review_run_id` when relevant
   - `args`
-  - `invocation_surface` such as `cli`, `tui`, `harness_command`
+  - `invocation_surface` such as `cli`, `tui`, `harness_command`, `agent`, or
+    `system`
   - `provider`
 - `RogerCommandResult`
   - `status`
@@ -1444,6 +1446,20 @@ retrofit. The implementation sequence can still keep search off the critical
 path for the first end-to-end review loop, but the first Roger search slice
 should include both lexical and semantic retrieval.
 
+### Semantic asset provisioning
+
+- Roger owns semantic asset provisioning through Roger-owned commands and
+  metadata, not through borrowed QMD runtime behavior
+- the base `rr` install should not silently download local embedding or rerank
+  models
+- the canonical first semantic install path is an explicit Roger command such
+  as `rr assets install --asset semantic-default`
+- Roger should install those assets into a Roger-owned local root under the
+  profile/store path, verify digests before enabling them, and surface their
+  state through `rr assets status`, `rr status`, and `rr doctor`
+- when semantic assets are absent, invalid, or unverified, Roger remains usable
+  and search degrades truthfully to lexical-only
+
 ### Index generations and degraded mode
 
 - foreground writes go to the canonical database first and mark dirty rows or
@@ -1453,8 +1469,9 @@ should include both lexical and semantic retrieval.
 - the query path serves the committed index plus a small dirty overlay when
   needed
 - if semantic search is unavailable, Roger returns lexical-only results
-- if lexical/vector sidecars are missing or corrupt, Roger falls back to DB scan
-  and file/doc search
+- if lexical sidecars are missing or corrupt, Roger may enter an explicit
+  `recovery_scan` mode over canonical DB and bounded file/doc search, but that
+  path is recovery-only and must never masquerade as normal planned retrieval
 - rebuilds create a fresh lexical/vector generation from the canonical DB
   snapshot and atomically swap it in
 
@@ -1587,6 +1604,55 @@ Required retrieval lanes:
   history
 
 Candidate memory must not silently behave like promoted memory.
+
+### Search intent versus engine mode
+
+Roger should keep search intent separate from the executed retrieval engine.
+
+- `query_mode` expresses the search posture Roger is attempting, such as
+  `auto`, `exact_lookup`, `recall`, `related_context`, `candidate_audit`, or
+  `promotion_review`
+- `retrieval_mode` expresses the actual engine path that executed, with
+  `hybrid`, `lexical_only`, and `recovery_scan` as the required `0.1.x`
+  baseline
+- `auto` is compatibility ingress only and must resolve to one of the concrete
+  planned modes before retrieval executes or results are surfaced
+- the accepted product contract is explicit search intent plus explicit
+  resolution truth; omitted intent is a migration aid, not the normal front
+  door Roger should optimize around
+- new docs, tests, and future command shaping should treat explicit search
+  intent selection as the steady-state contract
+
+### Recall envelope and promotion review
+
+Every surfaced search result should resolve to one canonical recall envelope.
+
+Minimum recall truth:
+
+- retrieval lane
+- scope bucket
+- `requested_query_mode`
+- `resolved_query_mode`
+- `retrieval_mode`
+- trust or warning posture
+- bounded explanation of why the item surfaced now
+
+Roger should also model a first-class `MemoryReviewRequest` for promotion,
+demotion, deprecation, restoration, or anti-pattern marking. Those requests are
+auditable and non-mutating until Roger-owned review logic accepts them.
+
+### Session baseline for recall posture
+
+Roger should model a first-class `SessionBaselineSnapshot` so the current
+session can explain:
+
+- which scopes are allowed by default
+- which search posture is the default
+- whether candidate memory is visible by default
+- which prompt strategy and policy epochs currently govern the session
+
+`ReviewTask` and `PromptInvocation` may narrow this baseline, but they do not
+replace baseline history.
 
 ### Promotion, decay, and conflict rules
 
@@ -3435,10 +3501,22 @@ or manual-smoke evidence unless the promise is truly a multi-surface journey.
 
 ### End-to-end testing policy
 
-Roger should keep one blessed automated happy-path end-to-end test in `0.1.x`
-and admit additional E2Es only when they clearly earn their keep.
+Roger should keep a small, explicit, six-slot catalog of major heavyweight
+automated end-to-end journeys in `0.1.x`, rather than one sprawling omnibus
+suite. The first implemented member should still be the core local-review path,
+and the remaining slots should stay narrow enough to parallelize cleanly and
+fail diagnostically.
 
-Recommended minimum automated E2E:
+Approved major E2E catalog:
+
+- `E2E-01`: core review happy path
+- `E2E-02`: cross-surface review continuity with recall
+- `E2E-03`: TUI-first review with memory-assisted triage
+- `E2E-04`: refresh and draft reconciliation after new commits
+- `E2E-05`: browser setup and first PR-page launch
+- `E2E-06`: bare-harness dropout and return continuity
+
+Recommended initial automated E2E (`E2E-01`):
 
 - launch from CLI
 - create or resume a real provider-backed review session on the blessed path
@@ -3452,8 +3530,8 @@ Rules:
 
 - browser launch, Native Messaging, dropout or return, malformed findings,
   multi-instance routing, and provider-bounded behavior should usually be
-  defended by integration-family suites or smoke evidence rather than promoted
-  immediately into additional full E2Es
+  defended by integration-family suites or smoke evidence unless one of the
+  approved six major journeys specifically needs them
 - every new automated E2E must justify why the failure mode cannot be defended
   more cheaply with unit or integration coverage
 - adding a new E2E is appropriate only when it protects a product-defining
@@ -3466,9 +3544,10 @@ Rules:
   behavior when semantic retrieval is unavailable
 - the prescriptive E2E catalog lives in
   [`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md);
-  only entries promoted into
+  the six approved entries live in
   [`AUTOMATED_E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/AUTOMATED_E2E_BUDGET.json)
-  consume blessed budget slots
+  and any seventh journey must be promoted there before it consumes a blessed
+  budget slot
 
 ### E2E admission contract
 
@@ -3488,6 +3567,8 @@ Default rule:
 - if the defended promise is primarily about failure handling, degraded mode,
   invalidation, or recovery, prefer unit or integration proof first
 - a happy-path E2E never substitutes for narrower failure-state coverage
+- the six approved journeys should remain separate proof units; do not collapse
+  them into one giant suite to simulate coverage breadth
 
 ### E2E budget feedback rule
 
@@ -3868,9 +3949,9 @@ and
   a provider proves that ACP materially reduces adapter complexity without
   weakening Roger's safety posture.
 
-- **Semantic packaging**: If hybrid search is in the first Roger search slice,
-  which local embedding model ships first, how are its assets installed and
-  verified, and when should Roger evaluate code-oriented or sparse variants?
+- **Semantic profile evolution**: after the first Roger-owned default semantic
+  asset profile lands, when should Roger add code-oriented, sparse, or rerank
+  variants beyond that initial profile?
 
 - **Outcome labeling implementation**: What exact storage shape should represent
   merged-resolution links and `UsageEvent` derivation jobs?

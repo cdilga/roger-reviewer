@@ -269,14 +269,17 @@ The extension setup contract must assert:
 
 ## Principle
 
-Keep the one-blessed-E2E discipline for the local review core, but add missing
-acceptance, integration, and release-smoke coverage for browser/setup/install
-flows.
+Keep the major-E2E catalog small and split across the six approved product
+journeys, but add missing acceptance, integration, and release-smoke coverage
+for browser/setup/install flows.
 
 ### What stays as-is
 
-- `E2E-01 Core review happy path` remains the blessed automated local-review E2E
-- the E2E budget does not grow casually
+- `E2E-01 Core review happy path` remains the first implemented automated
+  local-review E2E
+- browser/setup proof should earn its own approved major-journey slot rather
+  than being stapled onto `E2E-01`
+- the E2E budget does not grow casually beyond the approved six-slot catalog
 
 ### What must be added
 

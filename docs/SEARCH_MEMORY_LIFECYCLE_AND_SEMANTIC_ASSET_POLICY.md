@@ -83,8 +83,9 @@ path.
 
 Canonical values:
 
-- `auto`: default safe path; Roger infers the narrowest truthful search posture
-  from current session context, anchors, and the supplied query
+- `auto`: compatibility ingress only; Roger derives the narrowest truthful
+  concrete search posture from current session context, anchors, and the
+  supplied query before retrieval executes
 - `exact_lookup`: direct lookup for a known object, locator, path, symbol, or
   prior finding identity
 - `recall`: retrieve relevant prior evidence and promoted memory for the active
@@ -100,10 +101,49 @@ Rules:
 
 - `query_mode` is the search-intent contract. It is not the same thing as the
   retrieval engine path.
-- current shipped `rr search` should be treated as `query_mode=auto` unless a
-  richer surface passes an explicit value
+- `auto` must resolve to one of the concrete planned modes above before
+  retrieval executes or results are surfaced
+- result envelopes and logs should preserve both the requested ingress mode and
+  the resolved concrete mode when `auto` was supplied or implied
+- omitted intent is only a compatibility ingress; the accepted steady-state
+  planner contract is explicit intent plus explicit resolution truth
+- new docs, tests, and bead acceptance should treat explicit intent selection as
+  the normal front door rather than polishing omitted/implicit `auto`
 - explicit candidate or promotion-review behavior must never be inferred from an
   ordinary `auto` query just because a candidate ranks well
+
+Execution expectations by mode:
+
+- `auto`
+  - ingress convenience only; Roger resolves to the narrowest concrete mode
+    supported by the active `SessionBaselineSnapshot`, current anchor set, and
+    operator/task context
+  - both requested and resolved mode must be surfaced in the result envelope
+- `exact_lookup`
+  - prioritize direct identifiers such as finding fingerprint, path, symbol,
+    memory id, prompt invocation id, or review-run locator
+  - do not widen silently into broad semantic recall when the exact object is
+    missing; degrade truthfully instead
+- `recall`
+  - repo-first retrieval of prior evidence plus promoted memory relevant to the
+    active review target or task
+  - candidates stay suppressed unless explicit policy or baseline allows them
+- `related_context`
+  - anchor-centered expansion around the current finding, artifact, file,
+    symbol, diff hunk, or prompt-stage result
+  - should favor neighbor evidence, linked memory, and conflict/support edges
+    over broad whole-repo recall
+- `candidate_audit`
+  - deliberately includes `tentative_candidates`, contradicted memory, or
+    fragile heuristics that ordinary recall would hide
+  - surfaced items default to `inspect_only` or `warning_only`, never ordinary
+    cite posture
+- `promotion_review`
+  - joins candidate recall with open `MemoryReviewRequest` objects so the
+    operator can review promotion, demotion, deprecation, restoration, and
+    anti-pattern proposals in one place
+  - result ordering should cluster duplicates, contradictions, and authority
+    references rather than behaving like a plain relevance list
 
 ### `retrieval_mode`
 
@@ -113,6 +153,7 @@ Required `0.1.x` values:
 
 - `hybrid`
 - `lexical_only`
+- `recovery_scan`
 
 Rules:
 
@@ -121,8 +162,12 @@ Rules:
 - `lexical_only` means Roger completed the request without semantic retrieval
   and must preserve explicit degraded reasons when hybrid was requested or would
   normally be available
-- if Roger later exposes a distinct canonical-DB or file-scan fallback, it must
-  surface as an explicit retrieval mode instead of pretending to be `hybrid`
+- `recovery_scan` means Roger could not rely on the normal lexical sidecar path
+  and is using a bounded canonical-DB or file/doc recovery path instead
+- `recovery_scan` is a recovery-only posture, not a healthy-path default for
+  ordinary review/search
+- Roger must never silently present `recovery_scan` as if normal planned search
+  were active
 
 ### `RecallEnvelope`
 
@@ -133,7 +178,8 @@ Required fields:
 
 - `item_kind`
 - `item_id`
-- `query_mode`
+- `requested_query_mode`
+- `resolved_query_mode`
 - `retrieval_mode`
 - `scope_bucket`
 - `memory_lane`: `evidence_hits`, `tentative_candidates`, or
@@ -250,10 +296,10 @@ Rules:
 
 ### Surface semantics
 
-- `rr search` is the canonical operator and robot query plane. The current
-  shipped CLI remains a thin `query_mode=auto` projection, but the canonical
-  contract is that search results are projections of `RecallEnvelope`, not ad
-  hoc snippets.
+- `rr search` is the canonical operator and robot query plane. The accepted
+  contract is explicit `query_mode`, explicit `retrieval_mode`, and explicit
+  `RecallEnvelope` projection truth. Omitted intent may exist only as a
+  compatibility ingress that Roger resolves before execution.
 - the TUI `Search/History` destination is the dense operator workbench for
   recall inspection, candidate audit, and promotion review using the same
   underlying retrieval contract
@@ -262,6 +308,34 @@ Rules:
   directly
 - the extension may launch or mirror bounded search state later, but it is not
   an independent recall or promotion-review authority
+
+### Related feature mode bindings
+
+The search contract must stay coherent across adjacent surfaces.
+
+- CLI `rr search`
+  - the direct operator and robot ingress for all six canonical `query_mode`
+    values
+  - must surface requested mode, resolved mode, retrieval mode, scope bucket,
+    lane counts, and degraded reasons
+- TUI `Search/History`
+  - the dense projection of the same contract
+  - must let the operator pivot between `recall`, `related_context`,
+    `candidate_audit`, and `promotion_review` without inventing a second search
+    model
+- TUI promotion-review workbench
+  - a specialized projection of `promotion_review`
+  - owns acceptance/rejection of `MemoryReviewRequest` objects, not independent
+    memory mutation rules
+- Worker retrieval
+  - `worker.search_memory` and related in-session commands use the same
+    `query_mode`/`retrieval_mode` semantics
+  - worker results may propose follow-up or memory review, but they do not
+    bypass Roger-owned promotion review
+- Extension
+  - may launch a bounded search or mirror resolved recall state
+  - must not become a separate search planner, memory promoter, or authority
+    source
 
 ## Memory Classes and States
 
@@ -425,12 +499,28 @@ Not allowed for semantic indexing in `0.1.0`:
 
 - Roger owns semantic asset installation through an explicit local command or
   install step rather than hidden lazy downloads during review.
+- The base `rr` installer should install Roger itself, not silently download
+  semantic models as part of ordinary product bootstrap.
+- The canonical first semantic install path is a Roger-owned asset command such
+  as `rr assets install --asset semantic-default`.
+- `rr init` or `rr doctor` may recommend that command when hybrid retrieval is
+  desired, but they must not silently trigger model download behind the
+  operator's back.
 - The configured model identity, asset version, source, expected digests, and
   target install path must be inspectable in local config or status output.
+- The default install root should remain Roger-owned, for example under
+  `<store.root>/assets/semantic/<asset-id>/<version>/`, rather than in a
+  provider-specific or QMD-specific cache directory.
+- Asset fetches should resolve through Roger-owned release metadata or an
+  explicitly configured mirror/root, not through ad hoc runtime downloader
+  logic hidden inside the retrieval engine.
 - Asset install must fail closed on digest mismatch, partial download, or
   incompatible metadata.
 - Roger must allow semantic search to remain disabled when assets are absent or
   verification fails.
+- `rr assets status`, `rr assets verify`, `rr status`, and `rr doctor` should
+  all be able to surface the installed/verified/degraded asset state
+  truthfully.
 
 ### Verification policy
 
@@ -448,10 +538,10 @@ in transient logs.
 
 - If semantic assets are missing, invalid, or unverified, Roger must say that
   semantic retrieval is unavailable and continue with lexical-only retrieval.
-- If lexical sidecars are also unavailable, Roger may fall back to canonical-DB
-  scan and bounded file/doc search.
-- Roger must never silently present a lexical-only or DB-scan result set as if
-  full hybrid retrieval were active.
+- If lexical sidecars are also unavailable, Roger may enter explicit
+  `recovery_scan` mode over canonical DB and bounded file/doc search.
+- Roger must never silently present a lexical-only or `recovery_scan` result
+  set as if full hybrid retrieval were active.
 
 ## Usage and Outcome Vocabulary
 

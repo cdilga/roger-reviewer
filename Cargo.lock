@@ -304,7 +304,9 @@ dependencies = [
  "roger-app-core",
  "roger-bridge",
  "roger-config",
+ "roger-session-claude",
  "roger-session-codex",
+ "roger-session-gemini",
  "roger-session-opencode",
  "roger-storage",
  "roger-validation",
@@ -340,6 +342,18 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "roger-session-claude"
+version = "0.1.0"
+dependencies = [
+ "roger-app-core",
+ "roger-storage",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

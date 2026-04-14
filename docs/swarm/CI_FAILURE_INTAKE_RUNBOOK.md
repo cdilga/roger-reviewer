@@ -83,10 +83,8 @@ The watcher treats GitHub run metadata as untrusted text.
 
 ### Triggering behavior
 
-`validation-main` now covers the old main-branch validation lanes:
+`validation-main` is now a manual operator workflow only:
 
-- push to `main` selects the `gated` tier
-- scheduled runs select the `nightly` tier
 - manual dispatch selects `gated`, `nightly`, or `release`
 
 The workflow uses a single branch-scoped concurrency group with

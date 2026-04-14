@@ -194,6 +194,7 @@ Required payload classes:
 
 - review target identity
 - session/run identity
+- active baseline snapshot or baseline reference
 - provider and transport identity
 - current stage and task objective
 - allowed scopes and allowed operations

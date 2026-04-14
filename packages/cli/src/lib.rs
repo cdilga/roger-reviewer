@@ -2260,12 +2260,12 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             vec![
                 "use --provider opencode for tier-b CLI continuity in 0.1.0".to_owned(),
                 "use --provider codex for bounded tier-a start/reseed support".to_owned(),
-                "use --provider claude for bounded tier-a start/reseed support".to_owned(),
                 "use --provider gemini for bounded tier-a start/reseed support".to_owned(),
+                "use --provider claude for bounded tier-a start/reseed support".to_owned(),
             ],
             json!({
                 "provider": parsed.provider,
-                "supported_providers": ["opencode", "codex", "claude", "gemini"],
+                "supported_providers": ["opencode", "codex", "gemini", "claude"],
             }),
         );
     }
@@ -2734,12 +2734,12 @@ fn handle_resume_or_refresh(
                 session.id, session.provider
             ),
             vec![
-                "resume/refresh is currently available for opencode, codex, claude, and gemini sessions".to_owned(),
+                "resume/refresh is currently available for opencode, codex, gemini, and claude sessions".to_owned(),
             ],
             json!({
                 "session_id": session.id,
                 "provider": session.provider,
-                "supported_providers": ["opencode", "codex", "claude", "gemini"],
+                "supported_providers": ["opencode", "codex", "gemini", "claude"],
             }),
         );
     }
@@ -3348,8 +3348,7 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     };
 
     let limit = parsed.limit.unwrap_or(10).min(100);
-    let mut embedder = roger_storage::SemanticEmbedderAdapter::default_for_runtime();
-    let lookup = match store.prior_review_lookup_with_embedder(
+    let lookup = match store.prior_review_lookup(
         PriorReviewLookupQuery {
             scope_key: &format!("repo:{repository}"),
             repository: &repository,
@@ -3358,9 +3357,9 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             include_tentative_candidates: false,
             allow_project_scope: false,
             allow_org_scope: false,
+            semantic_assets_verified: false,
             semantic_candidates: Vec::new(),
         },
-        &mut embedder,
     ) {
         Ok(result) => result,
         Err(err) => return error_response(format!("failed to run prior-review lookup: {err}")),
@@ -4044,7 +4043,7 @@ fn read_local_store_schema_for_update(
             layout.db_path.display()
         )
     })?;
-    conn.pragma_query_value(None, "user_version", |row| row.get(0))
+    conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(|err| {
             format!(
                 "failed to read local store schema version from {}: {err}",
@@ -5791,7 +5790,7 @@ fn next_id(prefix: &str) -> String {
 }
 
 fn usage_text() -> &'static str {
-    "Usage:\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--repo owner/repo] [--limit <n>] [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--yes|-y] [--dry-run] [--robot]\n  rr bridge export-contracts [--robot]\n  rr bridge verify-contracts [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge install [--extension-id <id>] [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr extension setup [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr extension doctor [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr refresh [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n\nUpdate notes:\n  - default rr update apply prompts for confirmation on interactive TTY\n  - pass --yes/-y for non-interactive apply confirmation; --robot apply requires --yes/-y\n  - --dry-run and --robot without --yes are non-mutating metadata checks\n  - local/unpublished builds fail closed; migration-capable updates are deferred in 0.1.x"
+    "Usage:\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--repo owner/repo] [--limit <n>] [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--yes|-y] [--dry-run] [--robot]\n  rr bridge export-contracts [--robot]\n  rr bridge verify-contracts [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge install [--extension-id <id>] [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr extension setup [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr extension doctor [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr refresh [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n\nUpdate notes:\n  - default rr update apply prompts for confirmation on interactive TTY\n  - pass --yes|-y for non-interactive apply confirmation; --robot apply requires --yes|-y\n  - --dry-run and --robot without --yes are non-mutating metadata checks\n  - local/unpublished builds fail closed; migration-capable updates are deferred in 0.1.x"
 }
 
 #[cfg(test)]

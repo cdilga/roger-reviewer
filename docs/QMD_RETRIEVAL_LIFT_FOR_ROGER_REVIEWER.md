@@ -47,6 +47,27 @@ QMD is not designed to own:
 - scope-gated memory promotion
 - provenance buckets across repo/project/org overlays
 
+## Translation rule
+
+Roger should not treat QMD as a drop-in component plan.
+
+Required translation discipline:
+
+- borrow the retrieval idea
+- restate it as a Roger-owned contract
+- implement it against Roger-owned storage, config, status, and install flows
+
+That means Roger should not inherit QMD's:
+
+- Node/Bun runtime assumptions
+- package topology
+- native-module dependency chain
+- daemon or server posture
+- model-install UX
+
+If a QMD mechanic cannot be described as a Roger-owned `rr` behavior, it is not
+ready to enter Roger planning.
+
 ---
 
 ## Lift matrix
@@ -119,6 +140,35 @@ Reject:
 
 - raw codebase embedding as the default memory substrate
 - Node/Bun native-module dependence in Roger’s critical path
+
+### Semantic asset provisioning
+
+Copy:
+
+- explicit local asset management
+- verified local-only semantic execution
+- no requirement for a hosted service
+
+Reimplement:
+
+- Roger-owned semantic asset installation through `rr`, not through QMD tools
+- a Roger-owned default asset profile such as `semantic-default`, fetched from
+  Roger release metadata or an explicitly configured mirror
+- install roots under Roger-controlled storage such as
+  `<store.root>/assets/semantic/<asset-id>/<version>/`
+- explicit commands such as:
+  - `rr assets install --asset semantic-default`
+  - `rr assets verify`
+  - `rr assets status`
+- `rr doctor` and `rr status` reporting whether semantic assets are present,
+  verified, stale, or unavailable
+- lexical-only fallback when those assets are absent or unverifiable
+
+Reject:
+
+- hidden lazy model downloads triggered by ordinary review or search
+- inheriting QMD's model/runtime setup as Roger's operator workflow
+- treating semantic assets as part of the base `rr` install contract
 
 ### Fusion
 
@@ -294,4 +344,3 @@ The right target is:
 - Roger-owned scope and memory semantics
 - a search surface that helps both humans and in-session agents without
   becoming the authority layer itself
-

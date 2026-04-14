@@ -543,7 +543,7 @@ Minimum outcome-ready data:
 - which prompt preset and resolved prompt text were used (from `PromptInvocation`)
 - which findings were accepted, ignored, resolved, or left stale (from `OutcomeEvent` + `Finding`)
 - which findings produced drafts (from `OutcomeEvent` `finding_draft_created`)
-- which drafts were approved, invalidated, rejected, or posted (from `OutcomeEvent`)
+- which drafts were approved, invalidated, or posted (from `OutcomeEvent`)
 - which posted actions map to remote review ids (from `OutcomeEvent` `draft_posted`)
 - PR outcome state and merge outcome when available (from `OutcomeEvent` `pr_merged` / `pr_closed_unmerged`)
 - explicit human usefulness labels when provided (from `OutcomeEvent` `usefulness_labeled`)

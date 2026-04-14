@@ -1,8 +1,8 @@
 {
   "policy_version": 1,
   "release_line": "0.1.x",
-  "blessed_automated_e2e_budget": 1,
-  "current_planned_blessed_automated_e2e_count": 1,
+  "blessed_automated_e2e_budget": 6,
+  "current_planned_blessed_automated_e2e_count": 6,
   "warning_mode": "warn_on_unjustified_growth",
   "future_ci_mode": "fail_on_unjustified_growth",
   "blessed_e2e_ids": [
@@ -11,22 +11,39 @@
       "name": "Core review happy path",
       "status": "implemented",
       "notes": "CLI launch, blessed provider path, findings normalization, local approval, GitHub adapter double, audit persistence"
-    }
-  ],
-  "cataloged_candidate_e2e_ids": [
+    },
     {
       "id": "E2E-02",
       "name": "Cross-surface review continuity with recall",
-      "status": "proposed_not_budgeted",
-      "notes": "Extension or bridge entry, cross-terminal dropout and resume, TUI triage, and explicit memory assertions for retrieval mode, scope, provenance, candidate state, and degraded lexical-only fallback."
+      "status": "budgeted_not_yet_implemented",
+      "notes": "Supported browser or bridge entry, continuity across dropout or resume, TUI triage, local draft persistence, and explicit memory truth assertions for retrieval mode, scope, provenance, and degraded lexical-only fallback."
     },
     {
       "id": "E2E-03",
       "name": "TUI-first review with memory-assisted triage",
-      "status": "proposed_not_budgeted",
-      "notes": "Local CLI or TUI entry, prior-review recall during triage, outbound draft refinement, and explicit memory assertions for retrieval mode, scope, provenance, candidate state, and degraded lexical-only fallback."
+      "status": "budgeted_not_yet_implemented",
+      "notes": "Local CLI or TUI entry, findings and history inspection, prior-review recall during triage, outbound draft refinement, and explicit memory truth assertions for mode, scope, provenance, and degraded fallback."
+    },
+    {
+      "id": "E2E-04",
+      "name": "Refresh and draft reconciliation after new commits",
+      "status": "budgeted_not_yet_implemented",
+      "notes": "Active review with pending drafts, refresh after new commits or rebase, finding reconciliation, draft revalidation or reconfirmation, and preserved audit lineage across target change."
+    },
+    {
+      "id": "E2E-05",
+      "name": "Browser setup and first PR-page launch",
+      "status": "budgeted_not_yet_implemented",
+      "notes": "Guided setup, extension identity discovery without manual entry, Native Messaging host registration, truthful doctor result, and first PR-page launch into the correct local Roger session."
+    },
+    {
+      "id": "E2E-06",
+      "name": "Bare-harness dropout and return continuity",
+      "status": "budgeted_not_yet_implemented",
+      "notes": "Intentional dropout from Roger to a supported harness, preserved control context, return through rr or harness-native affordance, and continuity back into the same Roger session."
     }
   ],
+  "cataloged_candidate_e2e_ids": [],
   "required_justification_fields_for_growth": [
     "product_promise_defended",
     "why_lower_layer_is_insufficient",

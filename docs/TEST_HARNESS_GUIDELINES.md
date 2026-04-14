@@ -16,6 +16,14 @@ Use this document when:
 - adding fixtures, canned provider outputs, or browser or bridge transcripts
 - reviewing execution-policy placement
 - deciding whether a proposed new automated E2E is justified
+- translating a user-facing persona journey or chaos branch into executable
+  validation coverage;
+  use
+  [`PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md)
+  together with
+  [`REVIEW_FLOW_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/REVIEW_FLOW_MATRIX.md)
+  for that step, and prefer stable scenario ids such as `PJ-03A` or `PJ-05C`
+  over vague journey names
 
 This is not a generic testing tutorial. It is Roger's specific test-harness
 contract for `0.1.x`.
@@ -45,7 +53,8 @@ Current repo truth:
 - prefer deterministic fixtures and doubles over ambient real environments
 - keep exactly three validation lanes: `unit`, `integration`, and `e2e`
 - keep parameterized and property-style suites inside the `unit` lane
-- keep one blessed automated happy-path E2E in `0.1.x`
+- keep the heavyweight E2E catalog small, explicit, and capped at six major
+  journeys in `0.1.x`
 - require at least one real boundary test for each major external surface
 - make degraded modes explicit in tests instead of silently omitting them
 - every release-critical support claim should map to one or more invariant ids
@@ -174,40 +183,49 @@ Rules:
 ### 3. End-to-End
 
 Purpose:
-- prove Roger's defining local review loop works across the critical
-  multi-boundary path
+- prove Roger's defining product journeys across the critical multi-boundary
+  paths without collapsing them into one huge suite
 
-The blessed `0.1.x` E2E is:
+Roger's approved heavyweight `0.1.x` E2E catalog contains six major,
+contract-shaped journeys:
+
 - `E2E-01 Core review happy path`
+- `E2E-02 Cross-surface review continuity with recall`
+- `E2E-03 TUI-first review with memory-assisted triage`
+- `E2E-04 Refresh and draft reconciliation after new commits`
+- `E2E-05 Browser setup and first PR-page launch`
+- `E2E-06 Bare-harness dropout and return continuity`
 
-It must include:
-- CLI launch
-- session create or resume on the blessed provider path
-- valid structured findings intake
-- local draft materialization
-- explicit local approval step
-- post through a GitHub adapter double
-- durable audit persistence
+Current repo truth:
 
-It must not expand casually into:
-- browser launch
-- extension readback
-- multi-instance routing
-- malformed findings
-- partial post recovery
-- provider-bounded degraded modes
-- most provider truthfulness checks
-- most search and memory contract checks
+- executable functional coverage exists today for `E2E-01` in
+  `packages/cli/tests/e2e_core_review_happy_path.rs`
+- `E2E-02` through `E2E-06` are budget-approved scenario slots only until
+  executable suites land and are run
 
-Those belong in lower-cost suites unless a later explicit justification says
-otherwise.
+Rules:
+
+- keep these six journeys split; they exist as separate proof units for
+  ownership, diagnosability, and parallel execution rather than as ingredients
+  for one mega-E2E
+- `E2E-01` stays lean and owns the core local review loop, not browser setup,
+  refresh reconciliation, or harness-dropout continuity
+- lower-cost suites still own most failure handling, degraded behavior,
+  invalidation, and recovery proof
+- browser launch, extension readback, multi-instance routing, malformed
+  findings, partial post recovery, most provider truthfulness checks, and most
+  search or memory contract checks should stay in lower-cost suites unless one
+  of the approved six journeys specifically needs them
+- additions beyond the six approved journeys require an explicit budget change
+  and written justification
 
 If an E2E claims to defend a memory-assisted journey, it must assert the live
 memory contract explicitly: truthful retrieval mode, correct scope bucket,
 preserved provenance, and degraded lexical-only fallback when semantic retrieval
 is unavailable.
 
-The prescriptive E2E catalog, including unblessed candidate journeys, lives in
+The prescriptive E2E catalog, including any future unblessed candidate
+journeys, lives in
 [`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md).
 Only entries carried in
 [`AUTOMATED_E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/AUTOMATED_E2E_BUDGET.json)
@@ -381,7 +399,10 @@ The canonical machine-readable budget file is:
 - [`AUTOMATED_E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/AUTOMATED_E2E_BUDGET.json)
 
 Guard rules:
-- `0.1.x` allows exactly one blessed automated happy-path E2E by default
+- `0.1.x` allows exactly six blessed major heavyweight E2E journeys by default
+- those six are the contract-shaped catalog entries in
+  `AUTOMATED_E2E_BUDGET.json`; they are approved scenario slots, not automatic
+  proof
 - a new automated E2E must include a written justification that explains why a
   unit, parameterized, acceptance, or narrow integration suite would not defend
   the promise more cheaply
@@ -427,7 +448,8 @@ The first implementation-facing harness slice should be:
 5. unit and parameterized harness helpers inside that shared harness
 6. narrow integration harness for storage, prompt normalization, and CLI resume
 7. provider acceptance harness for OpenCode and the bounded live-CLI providers
-8. keep one blessed automated E2E implemented and runnable
+8. keep the approved six-slot E2E catalog honest and the implemented journeys
+   runnable, starting with `E2E-01`
 9. release-smoke checklist and artifact verification
 
 Do not resolve step 8 by editing docs, budget files, or suite metadata alone.

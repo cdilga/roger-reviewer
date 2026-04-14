@@ -113,7 +113,8 @@ Recommended fields:
 - `kind`: `request` | `response` | `event`
 - `name`
 - `correlation_id`
-- `source_surface`: `tui` | `cli` | `bridge` | `harness_command` | `agent`
+- `source_surface`: `tui` | `cli` | `extension` | `external_link` |
+  `harness_command` | `agent` | `system`
 - `session_id` when bound
 - `run_id` when bound
 - `instance_id` when relevant

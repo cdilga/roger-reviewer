@@ -2,8 +2,9 @@ use roger_app_core::{
     DraftRefreshSignal, ExplicitPostingInput, ExplicitPostingOutcome, OutboundApprovalToken,
     OutboundDraft, OutboundDraftBatch, OutboundPostGateDecision, OutboundPostGateInput,
     OutboundPostingAdapter, PostedAction, PostedActionStatus, PostingAdapterItemResult,
-    PostingAdapterItemStatus, evaluate_outbound_post_gate, execute_explicit_posting_flow,
-    outbound_target_tuple_json, validate_outbound_draft_batch_linkage,
+    PostingAdapterItemStatus, ReviewTarget, evaluate_outbound_post_gate,
+    execute_explicit_posting_flow, outbound_target_tuple_json,
+    validate_outbound_draft_batch_linkage,
 };
 use serde::Deserialize;
 use std::cell::Cell;
@@ -27,6 +28,17 @@ fn load_fixture() -> OutboundAuditFixture {
         .join("../../tests/fixtures/fixture_github_draft_batch/outbound_audit_case.json");
     let raw = fs::read_to_string(&path).expect("failed to read outbound audit fixture");
     serde_json::from_str(&raw).expect("failed to decode outbound audit fixture")
+}
+
+fn sample_target() -> ReviewTarget {
+    ReviewTarget {
+        repository: "owner/repo".to_owned(),
+        pull_request_number: 42,
+        base_ref: "main".to_owned(),
+        head_ref: "feature".to_owned(),
+        base_commit: "abc123".to_owned(),
+        head_commit: "def456".to_owned(),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -54,6 +66,7 @@ impl StubPostingAdapter {
 impl OutboundPostingAdapter for StubPostingAdapter {
     fn post_approved_draft_batch(
         &self,
+        _target: &roger_app_core::ReviewTarget,
         _batch: &OutboundDraftBatch,
         _drafts: &[OutboundDraft],
     ) -> std::result::Result<Vec<PostingAdapterItemResult>, String> {
@@ -266,6 +279,7 @@ fn explicit_posting_executes_only_after_gate_revalidation() {
         ExplicitPostingInput {
             action_id: "posted-action-1",
             provider: "github",
+            target: &sample_target(),
             batch: &batch,
             drafts: std::slice::from_ref(&draft),
             approval: &approval,
@@ -305,6 +319,7 @@ fn explicit_posting_fails_closed_without_adapter_call_when_gate_blocks() {
         ExplicitPostingInput {
             action_id: "posted-action-blocked",
             provider: "github",
+            target: &sample_target(),
             batch: &batch,
             drafts: std::slice::from_ref(&draft),
             approval: &approval,
@@ -339,6 +354,7 @@ fn explicit_posting_fails_closed_when_local_draft_state_is_missing() {
         ExplicitPostingInput {
             action_id: "posted-action-missing-local-state",
             provider: "github",
+            target: &sample_target(),
             batch: &batch,
             drafts: &drafts,
             approval: &approval,
@@ -386,6 +402,7 @@ fn explicit_posting_records_partial_outcome_and_retry_candidates() {
         ExplicitPostingInput {
             action_id: "posted-action-partial",
             provider: "github",
+            target: &sample_target(),
             batch: &batch,
             drafts: &drafts,
             approval: &approval,
@@ -417,6 +434,7 @@ fn explicit_posting_records_failed_attempt_for_adapter_errors() {
         ExplicitPostingInput {
             action_id: "posted-action-error",
             provider: "github",
+            target: &sample_target(),
             batch: &batch,
             drafts: std::slice::from_ref(&draft),
             approval: &approval,
@@ -463,6 +481,7 @@ fn explicit_posting_fails_closed_on_invalid_adapter_result_shape() {
         ExplicitPostingInput {
             action_id: "posted-action-invalid",
             provider: "github",
+            target: &sample_target(),
             batch: &batch,
             drafts: &drafts,
             approval: &approval,

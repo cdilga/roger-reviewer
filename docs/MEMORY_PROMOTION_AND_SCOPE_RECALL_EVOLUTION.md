@@ -1,7 +1,7 @@
 # Memory Promotion And Scope Recall Evolution
 
-Status: Proposed
-Class: bounded side-plan / memory evolution brief
+Status: merged into canonical/support contracts on 2026-04-14
+Class: historical side-plan / merged memory brief
 Audience: maintainers shaping Roger memory, recall, and usefulness-learning beads
 
 Authority:
@@ -264,4 +264,3 @@ It is:
 - at the right time
 - with the right trust level
 - and with a clear path to stop remembering harmful lessons
-

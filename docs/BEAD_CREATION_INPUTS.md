@@ -84,6 +84,8 @@ Examples of relevant support docs:
   `PROMPT_PRESET_AND_OUTCOME_CONTRACT.md`
 - robot surface work:
   `ROBOT_CLI_CONTRACT.md`
+- search, memory, or recall work:
+  `SEARCH_MEMORY_LIFECYCLE_AND_SEMANTIC_ASSET_POLICY.md`
 - TUI workspace work:
   `TUI_WORKSPACE_AND_OPERATOR_FLOW_CONTRACT.md`,
   `TUI_RUNTIME_SUPERVISOR_POLICY.md`
@@ -189,6 +191,31 @@ Bead-creation skills should emit or preserve these fields whenever relevant:
 - the cheapest truthful validation lane
 - named suite, fixture, or artefact expectations when proof is part of the
   promise
+
+### Mandatory capture for search and recall beads
+
+If a bead touches search, recall, memory surfacing, hybrid retrieval, or agent
+memory access, it must capture all of the following explicitly rather than
+falling back to vague “query” language:
+
+- whether the promise is about planner intent, lexical retrieval, hybrid
+  retrieval, memory surfacing, or degraded recovery
+- the concrete `query_mode` or the rule for resolving compatibility-ingress
+  `auto` into a concrete planned mode before execution
+- the allowed `retrieval_mode` values involved, especially whether the bead
+  touches `hybrid`, `lexical_only`, or `recovery_scan`
+- whether the bead changes `RecallEnvelope` fields such as
+  `requested_query_mode`, `resolved_query_mode`, `retrieval_mode`, lane, scope,
+  or explainability
+- whether the bead is allowed to touch candidate-versus-promoted behavior
+- the exact invariant ids and fixtures that defend “no opaque simple-query
+  default” and “no recovery mode masquerading as healthy retrieval”
+
+Anti-pattern:
+
+- any bead phrased as “improve search,” “add a simple query,” or “just use
+  auto/default search” without the explicit planner and degraded-mode contract
+  above is underspecified and should be split or rejected
 
 If a proposed bead cannot name those cleanly, it should be split or the packet
 should be clarified before creation.

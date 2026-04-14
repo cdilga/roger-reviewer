@@ -2551,14 +2551,8 @@ impl RogerStore {
         };
 
         if semantic_operational {
-            let evidence_semantic_scores = semantic_scores_for_target(
-                &query.semantic_candidates,
-                SemanticLookupTargetKind::EvidenceFinding,
-            );
-            let memory_semantic_scores = semantic_scores_for_target(
-                &query.semantic_candidates,
-                SemanticLookupTargetKind::MemoryItem,
-            );
+            let (evidence_semantic_scores, memory_semantic_scores) =
+                semantic_scores_by_target(&query.semantic_candidates);
 
             for (finding_id, semantic_score_milli) in &evidence_semantic_scores {
                 let exists = evidence_hits
@@ -2617,21 +2611,21 @@ impl RogerStore {
                 hit.fused_score = fused_score(hit.lexical_score, hit.semantic_score_milli);
             }
 
-            evidence_hits.sort_by(|left, right| {
+            evidence_hits.sort_unstable_by(|left, right| {
                 right
                     .fused_score
                     .cmp(&left.fused_score)
                     .then_with(|| right.lexical_score.cmp(&left.lexical_score))
                     .then_with(|| left.finding_id.cmp(&right.finding_id))
             });
-            promoted_memory.sort_by(|left, right| {
+            promoted_memory.sort_unstable_by(|left, right| {
                 right
                     .fused_score
                     .cmp(&left.fused_score)
                     .then_with(|| right.lexical_score.cmp(&left.lexical_score))
                     .then_with(|| left.memory_id.cmp(&right.memory_id))
             });
-            tentative_candidates.sort_by(|left, right| {
+            tentative_candidates.sort_unstable_by(|left, right| {
                 right
                     .fused_score
                     .cmp(&left.fused_score)
@@ -3367,7 +3361,7 @@ impl RogerStore {
         query_is_empty: bool,
         limit: usize,
     ) -> Result<Vec<PriorReviewEvidenceHit>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT
                 f.id,
                 f.session_id,
@@ -3511,7 +3505,7 @@ impl RogerStore {
               LIMIT ?{limit_index}"
         ));
 
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params_from_iter(values), |row| {
             let lexical_score = row.get::<_, i64>(8).unwrap_or_default();
             Ok(PriorReviewMemoryHit {
@@ -3541,49 +3535,46 @@ impl RogerStore {
         repository: &str,
         finding_id: &str,
     ) -> Result<Option<PriorReviewEvidenceHit>> {
-        self.conn
-            .query_row(
-                "SELECT
-                    f.id,
-                    f.session_id,
-                    COALESCE(f.last_seen_run_id, f.first_run_id) AS review_run_id,
-                    json_extract(rs.review_target, '$.repository') AS repository,
-                    CAST(json_extract(rs.review_target, '$.pull_request_number') AS INTEGER) AS pull_request_number,
-                    f.fingerprint,
-                    f.title,
-                    f.normalized_summary,
-                    f.severity,
-                    f.confidence,
-                    f.triage_state,
-                    f.outbound_state
-                FROM findings f
-                JOIN review_sessions rs ON rs.id = f.session_id
-                WHERE f.id = ?1
-                  AND json_extract(rs.review_target, '$.repository') = ?2",
-                params![finding_id, repository],
-                |row| {
-                    Ok(PriorReviewEvidenceHit {
-                        finding_id: row.get(0)?,
-                        session_id: row.get(1)?,
-                        review_run_id: row.get(2)?,
-                        repository: row.get(3)?,
-                        pull_request_number: row.get::<_, i64>(4).unwrap_or_default().max(0)
-                            as u64,
-                        fingerprint: row.get(5)?,
-                        title: row.get(6)?,
-                        normalized_summary: row.get(7)?,
-                        severity: row.get(8)?,
-                        confidence: row.get(9)?,
-                        triage_state: row.get(10)?,
-                        outbound_state: row.get(11)?,
-                        lexical_score: 0,
-                        semantic_score_milli: 0,
-                        fused_score: 0,
-                    })
-                },
-            )
-            .optional()
-            .map_err(StorageError::from)
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT
+                f.id,
+                f.session_id,
+                COALESCE(f.last_seen_run_id, f.first_run_id) AS review_run_id,
+                json_extract(rs.review_target, '$.repository') AS repository,
+                CAST(json_extract(rs.review_target, '$.pull_request_number') AS INTEGER) AS pull_request_number,
+                f.fingerprint,
+                f.title,
+                f.normalized_summary,
+                f.severity,
+                f.confidence,
+                f.triage_state,
+                f.outbound_state
+            FROM findings f
+            JOIN review_sessions rs ON rs.id = f.session_id
+            WHERE f.id = ?1
+              AND json_extract(rs.review_target, '$.repository') = ?2",
+        )?;
+        stmt.query_row(params![finding_id, repository], |row| {
+            Ok(PriorReviewEvidenceHit {
+                finding_id: row.get(0)?,
+                session_id: row.get(1)?,
+                review_run_id: row.get(2)?,
+                repository: row.get(3)?,
+                pull_request_number: row.get::<_, i64>(4).unwrap_or_default().max(0) as u64,
+                fingerprint: row.get(5)?,
+                title: row.get(6)?,
+                normalized_summary: row.get(7)?,
+                severity: row.get(8)?,
+                confidence: row.get(9)?,
+                triage_state: row.get(10)?,
+                outbound_state: row.get(11)?,
+                lexical_score: 0,
+                semantic_score_milli: 0,
+                fused_score: 0,
+            })
+        })
+        .optional()
+        .map_err(StorageError::from)
     }
 
     fn memory_hit_by_id(
@@ -3591,32 +3582,30 @@ impl RogerStore {
         scope_key: &str,
         memory_id: &str,
     ) -> Result<Option<PriorReviewMemoryHit>> {
-        self.conn
-            .query_row(
-                "SELECT id, scope_key, memory_class, state, statement, normalized_key,
-                    anchor_digest, source_kind
-                FROM memory_items
-                WHERE id = ?1
-                  AND scope_key = ?2",
-                params![memory_id, scope_key],
-                |row| {
-                    Ok(PriorReviewMemoryHit {
-                        memory_id: row.get(0)?,
-                        scope_key: row.get(1)?,
-                        memory_class: row.get(2)?,
-                        state: row.get(3)?,
-                        statement: row.get(4)?,
-                        normalized_key: row.get(5)?,
-                        anchor_digest: row.get(6)?,
-                        source_kind: row.get(7)?,
-                        lexical_score: 0,
-                        semantic_score_milli: 0,
-                        fused_score: 0,
-                    })
-                },
-            )
-            .optional()
-            .map_err(StorageError::from)
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, scope_key, memory_class, state, statement, normalized_key,
+                anchor_digest, source_kind
+            FROM memory_items
+            WHERE id = ?1
+              AND scope_key = ?2",
+        )?;
+        stmt.query_row(params![memory_id, scope_key], |row| {
+            Ok(PriorReviewMemoryHit {
+                memory_id: row.get(0)?,
+                scope_key: row.get(1)?,
+                memory_class: row.get(2)?,
+                state: row.get(3)?,
+                statement: row.get(4)?,
+                normalized_key: row.get(5)?,
+                anchor_digest: row.get(6)?,
+                source_kind: row.get(7)?,
+                lexical_score: 0,
+                semantic_score_milli: 0,
+                fused_score: 0,
+            })
+        })
+        .optional()
+        .map_err(StorageError::from)
     }
 
     pub fn store_artifact(
@@ -4200,20 +4189,22 @@ fn scope_bucket_for_class(scope_class: ScopeClass) -> &'static str {
     }
 }
 
-fn semantic_scores_for_target(
+fn semantic_scores_by_target(
     candidates: &[SemanticLookupCandidate],
-    target_kind: SemanticLookupTargetKind,
-) -> HashMap<&str, i64> {
-    let mut scores = HashMap::new();
+) -> (HashMap<&str, i64>, HashMap<&str, i64>) {
+    let mut evidence_scores = HashMap::with_capacity(candidates.len() / 2);
+    let mut memory_scores = HashMap::with_capacity(candidates.len() / 2);
     for candidate in candidates {
-        if candidate.target_kind != target_kind {
-            continue;
-        }
+        let scores = match candidate.target_kind {
+            SemanticLookupTargetKind::EvidenceFinding => &mut evidence_scores,
+            SemanticLookupTargetKind::MemoryItem => &mut memory_scores,
+        };
+
         let score = semantic_score_to_milli(candidate.score);
         let entry = scores.entry(candidate.target_id.as_str()).or_insert(score);
         *entry = (*entry).max(score);
     }
-    scores
+    (evidence_scores, memory_scores)
 }
 
 fn semantic_score_to_milli(score: f32) -> i64 {

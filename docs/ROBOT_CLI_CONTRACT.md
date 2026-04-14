@@ -256,23 +256,33 @@ Purpose: structured retrieval results over Roger's local-first search surface.
 Stable `data` fields:
 
 - `query`
+- `requested_query_mode`
+- `resolved_query_mode`
+- `retrieval_mode`
 - `mode`
+- `scope_key`
+- `candidate_included`
+- `allow_project_scope`
+- `allow_org_scope`
 - `items`
 - `count`
 - `truncated`
 - `degraded_reasons`
 - `scope_bucket`
+- `lane_counts`
 
 Search contract notes:
 
-- current shipped `rr search` uses `mode` as the executed `retrieval_mode`
-  field and does not yet require a separate `query_mode`
-- the canonical search contract now distinguishes `query_mode` from
-  `retrieval_mode`; when the richer search-mode slice lands, `query_mode`
-  should be added explicitly while `mode` remains a backwards-compatible alias
-  for `retrieval_mode` until a later schema revision removes the alias
-- current shipped `rr search` should be interpreted as `query_mode=auto`
-  unless a later surface adds an explicit selector
+- `requested_query_mode` is the ingress intent supplied by the operator,
+  baseline, or worker
+- `resolved_query_mode` is the concrete planner posture Roger actually
+  executed after resolving `auto` or omitted intent
+- `retrieval_mode` is the engine path Roger actually executed
+- `mode` remains a backwards-compatible alias for `retrieval_mode` during the
+  `0.1.x` transition, but machine consumers should migrate to the explicit
+  fields above
+- robot search output is required to preserve planner truth, not just final hit
+  ranking
 
 Each search item must include:
 
@@ -280,8 +290,17 @@ Each search item must include:
 - `id`
 - `title`
 - `score`
+- `memory_lane`
+- `scope_bucket`
+- `citation_posture`
+- `surface_posture`
 - `locator`
 - `snippet`
+
+Search items are the stable robot projection of the canonical `RecallEnvelope`
+contract. They may be thinner than the full envelope, but they must preserve
+lane, scope, degraded truth, and provenance semantics rather than inventing a
+separate robot-only meaning.
 
 Optional search item fields when available:
 

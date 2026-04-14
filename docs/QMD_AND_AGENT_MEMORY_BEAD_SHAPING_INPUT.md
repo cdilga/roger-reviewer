@@ -98,13 +98,16 @@ Promise:
 Own:
 
 - query-plan object
+- compatibility-ingress `auto` resolution into concrete planner intent
 - lexical field boosts
 - scope partitioning in the lexical layer
 - explainable lexical result metadata
+- explicit rejection of opaque simple-query execution as the steady-state path
 
 Primary proof:
 
-- integration tests over repo-first retrieval, scope fences, and explain output
+- integration tests over repo-first retrieval, scope fences, explain output,
+  and `auto`-to-concrete planner resolution
 
 ### G4. Hybrid retrieval, chunk selection, and rerank
 
@@ -119,11 +122,16 @@ Own:
 - fusion logic
 - chunk selection
 - rerank fallback rules
+- Roger-owned semantic asset install, verify, and status path rather than
+  hidden model downloads
+- explicit `recovery_scan` degraded mode when normal lexical sidecars are
+  unavailable, never silent fallback masquerading as healthy retrieval
 
 Primary proof:
 
 - integration tests proving lexical-only degradation, fusion behavior, and
-  deterministic explainability
+  deterministic explainability, plus explicit `recovery_scan` truth when the
+  normal lexical path is unavailable
 
 ### G5. Memory promotion and scope-recall gates
 
@@ -223,6 +231,8 @@ This order keeps the authority story ahead of the facade story.
 Do not create beads that:
 
 - say only “add QMD-like search” without naming the product promise
+- say “use the simple query/default query path for now” without naming the
+  planner-resolution and degraded-mode contract
 - merge retrieval internals, memory promotion, and MCP into one oversized task
 - imply all harnesses have the same in-session command support
 - let robot or MCP work become implicit approval/posting access
@@ -238,4 +248,3 @@ If the next bead pass follows this input, Roger should gain:
 - a clearer memory-learning model
 - a real active-agent operating contract
 - and a truthful path for future MCP-style access without architectural drift
-

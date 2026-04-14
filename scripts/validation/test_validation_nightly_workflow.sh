@@ -12,10 +12,6 @@ workflow = YAML.load_file(workflow_path)
 
 on_block = workflow["on"] || workflow[true]
 abort("validation-main workflow is missing an on block") unless on_block.is_a?(Hash)
-push = on_block.fetch("push")
-branches = push.fetch("branches")
-abort("validation-main must trigger on push to main") unless branches.include?("main")
-abort("validation-main must keep schedule trigger") unless on_block.key?("schedule")
 abort("validation-main must keep workflow_dispatch trigger") unless on_block.key?("workflow_dispatch")
 
 concurrency = workflow.fetch("concurrency")
@@ -31,7 +27,7 @@ steps = workflow.fetch("jobs").fetch("main").fetch("steps")
 select_step = steps.find { |step| step["id"] == "select" }
 abort("validation-main must select a tier dynamically") unless select_step.is_a?(Hash)
 
-puts "validation-main workflow includes push/schedule/manual tier selection and queued-run concurrency guard"
+puts "validation-main workflow includes manual tier selection and queued-run concurrency guard"
 RUBY
 
 echo "PASS: validation-main workflow guard"

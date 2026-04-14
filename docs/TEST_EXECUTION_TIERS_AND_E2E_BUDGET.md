@@ -12,20 +12,22 @@ and the release-facing validation matrix in
 
 Roger should not drift into an expensive test story before the product exists.
 The `0.1.0` validation contract needs three validation lanes, a small set of
-execution policies that invoke those lanes, one blessed automated end-to-end
-test, and a machine-readable budget file that makes E2E growth visible instead
-of ambient.
+execution policies that invoke those lanes, a capped six-slot catalog of major
+heavyweight end-to-end journeys, and a machine-readable budget file that makes
+E2E growth visible instead of ambient.
 
 Current repo truth as of 2026-04-07:
 
 - `tests/suites/e2e_core_review_happy_path.toml` is the suite-metadata contract
-  for the blessed E2E.
+  for the first implemented heavyweight E2E, `E2E-01`.
 - `packages/cli/tests/e2e_core_review_happy_path.rs` is now the executable
   functional implementation for `e2e_core_review_happy_path`.
 - Do not claim functional automated E2E coverage from lane policy or metadata
   alone; the suite must also be actually run in the relevant lane.
 - The metadata file reserves the suite id and budget slot, but the E2E exists
   because the executable suite landed, not because the metadata exists.
+- The remaining five budget-approved E2E slots are contract-shaping entries
+  only until their executable suites land and are run.
 - Historical metadata still includes labels such as `prop_*`, `accept_*`, and
   `smoke_*`; treat those as sub-kinds inside the three-lane model until the
   harness metadata is simplified.
@@ -94,15 +96,23 @@ cross several real Roger surfaces.
 
 Required posture:
 
-- include the one blessed automated E2E once implemented
-- admit additional E2Es only when lower-layer coverage leaves a meaningful gap
-- keep the lane small enough that failures are actionable rather than noisy
+- include the approved heavyweight E2E catalog once the relevant executable
+  suites exist
+- admit additions beyond the six budgeted journeys only when lower-layer
+  coverage leaves a meaningful gap and the budget contract is explicitly
+  widened
+- keep the lane small enough that failures are actionable rather than noisy,
+  and keep the major journeys split rather than fusing them into one omnibus
+  suite
 
 Required contents for `0.1.0`:
 
-- `E2E-01` core review happy path as an executable suite that is actually run;
-  metadata or budget registration alone does not satisfy this
-- any future E2E only after explicit justification and budget approval
+- the six budget-approved major journeys in
+  [`docs/AUTOMATED_E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/AUTOMATED_E2E_BUDGET.json)
+- only executable suites that have landed and actually run in the relevant
+  lane count as functional coverage for those journeys
+- any seventh heavyweight E2E only after explicit justification and budget
+  approval
 
 ## Execution Policies
 
@@ -161,27 +171,37 @@ Required posture:
 
 ## Automated E2E Budget
 
-Roger `0.1.0` carries one blessed automated heavyweight E2E:
+Roger `0.1.0` carries a capped six-slot budget for major heavyweight E2Es. The
+intent is not to encourage six giant suites. The intent is to avoid one
+sprawling omnibus scenario by splitting the main product journeys into
+separately owned proofs that can fail cleanly and run in parallel when needed.
+
+Budgeted catalog:
 
 - `E2E-01`: core review happy path
+- `E2E-02`: cross-surface review continuity with recall
+- `E2E-03`: TUI-first review with memory-assisted triage
+- `E2E-04`: refresh and draft reconciliation after new commits
+- `E2E-05`: browser setup and first PR-page launch
+- `E2E-06`: bare-harness dropout and return continuity
 
 Current implementation status:
 
-- implemented as `packages/cli/tests/e2e_core_review_happy_path.rs`
-- registered in budget and suite metadata
-- still requires a real run before any execution policy can claim that coverage
+- `E2E-01` is implemented as
+  `packages/cli/tests/e2e_core_review_happy_path.rs`
+- `E2E-02` through `E2E-06` are budget-approved scenario slots only and do not
+  count as functional coverage until executable suites land and run
 
-That test protects a product-defining promise across several boundaries:
+These six slots protect the main product-defining journeys across the surfaces
+Roger actually claims:
 
-- session-aware launch or resume
-- real supported-provider execution on the blessed path
-- findings normalization into Roger state
-- local draft review or approval flow
-- GitHub posting through a Roger-owned double
-- persisted audit chain
-
-Everything else should default downward into a cheaper tier unless a lower-cost
-test shape leaves a meaningful product-risk gap.
+- local entry, provider execution, findings normalization, draft review, and
+  audit persistence
+- browser or bridge-originated entry plus cross-surface continuity
+- TUI-first triage with truthful prior-review recall
+- refresh and target-change reconciliation without stale draft leakage
+- first-use browser setup and honest PR-page launch
+- deliberate dropout to the supported harness and return to Roger continuity
 
 If a future E2E defends a memory-assisted journey, it must assert the live
 memory contract explicitly: truthful retrieval mode, correct scope bucket,
@@ -193,10 +213,16 @@ test shape leaves a meaningful product-risk gap.
 
 Execution rule:
 
-- do not close an implementation bead for `E2E-01` by narrowing docs,
+- do not collapse several major journeys into one mega-E2E just because the
+  budget allows six; each slot exists for isolated ownership, diagnosability,
+  and parallel execution
+- do not close an implementation bead for any budgeted E2E by narrowing docs,
   registering metadata, or wiring lane policy alone
 - if docs need correction while the suite is still missing, that is a separate
   docs-truthfulness task and the implementation bead remains open
+- a single execution policy is not required to run every budgeted E2E in one
+  serial block; implemented journeys may be sharded or selected by claim
+  surface as long as release wording matches what actually ran
 
 The suite was exercised locally on 2026-04-07 with:
 
@@ -260,7 +286,8 @@ The machine-readable budget for automated heavyweight E2Es lives in
 Contract:
 
 - `blessed_automated_e2e_budget` is the current allowed baseline
-- `blessed_e2e_ids` lists approved heavyweight E2Es by stable id
+- `blessed_e2e_ids` lists approved heavyweight E2Es by stable id; entries may
+  be implemented or budget-approved-not-yet-implemented
 - `cataloged_candidate_e2e_ids`, when present, lists pre-shaped future E2Es
   that do not count toward the budget until they are promoted into
   `blessed_e2e_ids`
@@ -272,8 +299,8 @@ Contract:
 
 ## Growth Rules
 
-When a change increases the automated heavyweight E2E count above the budget
-baseline, Roger should require an explicit written defense.
+When a change increases the automated heavyweight E2E count above the six-slot
+budget baseline, Roger should require an explicit written defense.
 
 Minimum defense questions:
 
@@ -317,7 +344,7 @@ The warning should be direct:
 
 Once the warning workflow is proven, CI should fail either of these cases:
 
-- the heavyweight E2E count exceeds `blessed_automated_e2e_count` without a
+- the heavyweight E2E count exceeds `blessed_automated_e2e_budget` without a
   matching approved justification entry
 - a new heavyweight E2E id appears without budget-file updates
 
@@ -341,7 +368,7 @@ Use these rules before promoting any test into the heavyweight E2E lane.
 | --- | --- | --- |
 | Domain logic, findings, schema, prompt repair | `unit` | Prefer parameterized tests over fixtures where possible |
 | Storage, migrations, CLI robot shapes, TUI controller, adapter contracts | `integration` | Deterministic CI coverage |
-| Core review happy path | `e2e` | Keep intentionally small and curated |
+| Core review and the other five major budgeted journeys | `e2e` | Keep the catalog explicitly split rather than growing one omnibus suite |
 | Provider acceptance, bridge smoke, memory/search contract truth | `integration` plus operator stability where needed | Do not widen into E2E casually |
 | Packaging, checksums, install truthfulness, release smoke | `release-candidate` gate | Operator-facing release evidence |
 

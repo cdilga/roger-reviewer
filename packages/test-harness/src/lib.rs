@@ -433,16 +433,48 @@ mod tests {
         let policy = E2eBudgetPolicy {
             policy_version: 1,
             release_line: "0.1.x".into(),
-            blessed_automated_e2e_budget: 1,
-            current_planned_blessed_automated_e2e_count: 1,
+            blessed_automated_e2e_budget: 6,
+            current_planned_blessed_automated_e2e_count: 6,
             warning_mode: "warn_on_unjustified_growth".into(),
             future_ci_mode: "fail_on_unjustified_growth".into(),
-            blessed_e2e_ids: vec![BudgetedE2e {
-                id: "e2e_core_review_happy_path".into(),
-                name: "Core review happy path".into(),
-                status: "implemented".into(),
-                notes: String::new(),
-            }],
+            blessed_e2e_ids: vec![
+                BudgetedE2e {
+                    id: "e2e_core_review_happy_path".into(),
+                    name: "Core review happy path".into(),
+                    status: "implemented".into(),
+                    notes: String::new(),
+                },
+                BudgetedE2e {
+                    id: "e2e_cross_surface_review_continuity".into(),
+                    name: "Cross-surface review continuity with recall".into(),
+                    status: "budgeted_not_yet_implemented".into(),
+                    notes: String::new(),
+                },
+                BudgetedE2e {
+                    id: "e2e_tui_first_memory_triage".into(),
+                    name: "TUI-first review with memory-assisted triage".into(),
+                    status: "budgeted_not_yet_implemented".into(),
+                    notes: String::new(),
+                },
+                BudgetedE2e {
+                    id: "e2e_refresh_draft_reconciliation".into(),
+                    name: "Refresh and draft reconciliation after new commits".into(),
+                    status: "budgeted_not_yet_implemented".into(),
+                    notes: String::new(),
+                },
+                BudgetedE2e {
+                    id: "e2e_browser_setup_first_launch".into(),
+                    name: "Browser setup and first PR-page launch".into(),
+                    status: "budgeted_not_yet_implemented".into(),
+                    notes: String::new(),
+                },
+                BudgetedE2e {
+                    id: "e2e_harness_dropout_return".into(),
+                    name: "Bare-harness dropout and return continuity".into(),
+                    status: "budgeted_not_yet_implemented".into(),
+                    notes: String::new(),
+                },
+            ],
             required_justification_fields_for_growth: vec![],
         };
 
@@ -452,12 +484,37 @@ mod tests {
                 SuiteFamily::E2e,
                 SuiteTier::E2e,
             ),
-            sample_suite("e2e_second_path", SuiteFamily::E2e, SuiteTier::E2e),
+            sample_suite(
+                "e2e_cross_surface_review_continuity",
+                SuiteFamily::E2e,
+                SuiteTier::E2e,
+            ),
+            sample_suite(
+                "e2e_tui_first_memory_triage",
+                SuiteFamily::E2e,
+                SuiteTier::E2e,
+            ),
+            sample_suite(
+                "e2e_refresh_draft_reconciliation",
+                SuiteFamily::E2e,
+                SuiteTier::E2e,
+            ),
+            sample_suite(
+                "e2e_browser_setup_first_launch",
+                SuiteFamily::E2e,
+                SuiteTier::E2e,
+            ),
+            sample_suite(
+                "e2e_harness_dropout_return",
+                SuiteFamily::E2e,
+                SuiteTier::E2e,
+            ),
+            sample_suite("e2e_seventh_path", SuiteFamily::E2e, SuiteTier::E2e),
         ];
 
         let report = evaluate_e2e_budget(&policy, &suites);
         assert_eq!(report.status, BudgetStatus::Fail);
         assert_eq!(report.over_budget_by, 1);
-        assert_eq!(report.unexpected_ids, vec!["e2e_second_path"]);
+        assert_eq!(report.unexpected_ids, vec!["e2e_seventh_path"]);
     }
 }

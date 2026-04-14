@@ -1544,7 +1544,6 @@ fn search_reports_truthful_degraded_mode_and_stable_robot_fields() {
     assert_eq!(compact_payload["robot_format"], "compact");
     assert!(compact_payload["data"]["items"].is_array());
 }
-
 #[test]
 fn robot_docs_surfaces_schema_inventory_and_blocks_unknown_topics() {
     let temp = tempdir().expect("tempdir");

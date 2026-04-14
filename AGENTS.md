@@ -116,6 +116,7 @@ Read these to understand the full plan before touching code.
 | [`docs/EXTENSION_PACKAGING_AND_RELEASE_CONTRACT.md`](docs/EXTENSION_PACKAGING_AND_RELEASE_CONTRACT.md) | Support contract for the minimal extension toolchain, contract export, and bridge/extension release ownership |
 | [`docs/PLAN_FOR_EXTENSION_SETUP_AND_HAPPY_PATH_VALIDATION.md`](docs/PLAN_FOR_EXTENSION_SETUP_AND_HAPPY_PATH_VALIDATION.md) | Recovery plan for command-surface reconciliation and happy-path/browser validation uplift |
 | [`docs/ROUND_05_SURFACE_RECONCILIATION_BRIEF.md`](docs/ROUND_05_SURFACE_RECONCILIATION_BRIEF.md) | Focused implementation-time reconciliation brief for TUI, CLI, extension UX, action hierarchy, and defending validation layers |
+| [`docs/ROOT_LEVEL_FLOW_AND_ARCHITECTURE_DIAGRAMS.md`](docs/ROOT_LEVEL_FLOW_AND_ARCHITECTURE_DIAGRAMS.md) | Visual support doc with authoritative root-level Mermaid diagrams for the core review loop, software hierarchy, and elevation gates |
 | [`docs/CONFIGURATION_CAPABILITY_AND_DEFAULTING_CONTRACT.md`](docs/CONFIGURATION_CAPABILITY_AND_DEFAULTING_CONTRACT.md) | Support contract for layered config, defaulting, operator-versus-machine exposure, file/path-bearing settings, and launch/isolation UX integration |
 | [`docs/PLAN_FOR_SCHEMA_MIGRATIONS_AND_UPDATE_COMPATIBILITY.md`](docs/PLAN_FOR_SCHEMA_MIGRATIONS_AND_UPDATE_COMPATIBILITY.md) | Focused plan for introducing safe Roger store schema migrations, update compatibility envelopes, backup/journal recovery, and release validation |
 | [`docs/STORE_MIGRATION_COMPATIBILITY_AND_OPERATOR_CONTRACT.md`](docs/STORE_MIGRATION_COMPATIBILITY_AND_OPERATOR_CONTRACT.md) | Implementation-facing migration/update compatibility contract: envelope fields, migration classes, fail-closed boundaries, updater preflight output, and first-run auto-migration limits (closes `rr-1xhg.1`) |
@@ -131,6 +132,7 @@ Read these to understand the full plan before touching code.
 | [`docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md`](docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md) | Implementation-facing support contract for `0.1.0` test execution tiers, the one blessed automated E2E, and the machine-readable E2E budget guard |
 | [`docs/VALIDATION_INVARIANT_MATRIX.md`](docs/VALIDATION_INVARIANT_MATRIX.md) | Canonical registry of release-critical product invariants, owning suite families, proof artifacts, and bead-translation rules |
 | [`docs/REVIEW_FLOW_MATRIX.md`](docs/REVIEW_FLOW_MATRIX.md) | Scenario matrix mapping Roger user flows to happy-path, variant, and failure/recovery coverage for alignment across TUI, CLI, extension, and harness |
+| [`docs/PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md`](docs/PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md) | User-language persona journeys with stable scenario ids, chaos/recovery branches, and restart/corruption cuts; use with the flow matrix when shaping acceptance and E2E scenarios |
 | [`docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md) | Planning-stage matrix naming flow families, fixture families, suite families, and support-claim ownership; seeds the `rr-011.x` validation beads (closes `rr-025`) |
 | [`docs/VALIDATION_HARNESS_SCAFFOLD_CONTRACT.md`](docs/VALIDATION_HARNESS_SCAFFOLD_CONTRACT.md) | Implementation-facing contract for suite directory layout, naming conventions, metadata envelope schema, helper boundaries, fixture manifests, and failure-artifact preservation rules (closes `rr-025.1`) |
 | [`docs/VALIDATION_FIXTURE_CORPUS_AND_MANIFEST.md`](docs/VALIDATION_FIXTURE_CORPUS_AND_MANIFEST.md) | Canonical fixture corpus: all 13 initial fixture families with purpose, allowed consumers, degraded-condition annotations, provenance policy, and update rules (closes `rr-025.2`) |
@@ -222,6 +224,36 @@ Roger follows an agentic-first planning posture:
   critique, operator/runbook doc, or raw/archive context
 - broken doc links, stale planning references, and support-claim drift are
   bugs; fix them when discovered instead of preserving the ambiguity
+
+### README Rules
+
+`README.md` is the public developer-facing contract for Roger Reviewer. Treat it
+as product packaging, not as an internal notebook.
+
+Rules:
+
+- optimize section order for usefulness: identity, install, quickstart,
+  commands, blessed paths, architecture, and contribution policy
+- keep install commands copyable, minimal, and OS-specific when they differ;
+  prefer `macOS`, `Linux`, and `Windows` labels with one direct command each
+- keep claims truthful and contractual; if support is narrower than the plan,
+  narrow the wording instead of padding it with caveats
+- do not add dated "current state as of" notices, sprint snapshots, or similar
+  time-fragile prose; write durable support posture instead
+- do not leak maintainer-only or dev-only tools into the public README. This
+  includes personal tunneling, local wrappers, ad hoc scripts, local ports,
+  private dashboards, or one-off debugging commands such as `ngrok`
+- keep testing doctrine, CI internals, validation matrices, and release-smoke
+  details out of the README unless a normal user must act on them
+- high-level architecture is encouraged; implementation debt lists, internal
+  rehearsal notes, and repo triage history are not
+- public README visuals and social-preview assets must be original and
+  non-infringing; do not reference copyrighted characters, logos, or lookalike
+  brand art
+- contribution guidance in public docs must state that Roger accepts Issues and
+  does not accept unsolicited Pull Requests
+- when a release changes the shipped public surface materially, schedule a
+  README truth pass in that same release lane before widening the public claim
 
 ---
 

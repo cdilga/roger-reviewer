@@ -48,21 +48,28 @@ gh workflow run release.yml \
   -f operator_smoke_ack=true
 ```
 
-6. Post-publish live installer proof (required for stable readiness):
+6. Post-publish live install/update proof (required for stable readiness):
 - `curl -fsSL https://api.github.com/repos/cdilga/roger-reviewer/releases/latest`
   must resolve (HTTP 200) and return the expected stable tag.
 - `bash scripts/release/rr-install.sh --repo cdilga/roger-reviewer --dry-run`
   must exit 0 against the live release feed.
+- a fresh isolated install from the live release-hosted Unix installer must
+  succeed in a temp directory, and the installed binary must then pass
+  `rr update --dry-run --robot` against that same live release without a
+  release-asset inconsistency block such as `checksums_missing`
 - record these exact CI-evidence fields in closeout:
   - `--latest-proof-utc <YYYY-MM-DDTHH:MM:SSZ>`
   - `--latest-proof-tag <stable-tag>`
   - `--installer-dry-run-outcome success`
+  - `--fresh-install-update-dry-run-outcome <complete|blocked|...>`
+  - `--fresh-install-update-dry-run-reason-code <reason-or-none>`
 
 ## Evidence to retain
 
 - URL for the unified `release` workflow run used for publish
 - `release-publish-plan` artifact from the publish run
 - final release URL
-- live installer proof outputs (`releases/latest` response summary + dry-run output)
+- live installer/update proof outputs (`releases/latest` response summary + installer dry-run output + fresh-install update dry-run output)
 - explicit CI evidence fields for the closeout guard:
-  `latest_proof_utc`, `latest_proof_tag`, `installer_dry_run_outcome`
+  `latest_proof_utc`, `latest_proof_tag`, `installer_dry_run_outcome`,
+  `fresh_install_update_dry_run_outcome`, `fresh_install_update_dry_run_reason_code`

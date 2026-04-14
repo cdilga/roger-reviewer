@@ -36,6 +36,7 @@ impl PostingDouble {
 impl OutboundPostingAdapter for PostingDouble {
     fn post_approved_draft_batch(
         &self,
+        _target: &roger_app_core::ReviewTarget,
         _batch: &OutboundDraftBatch,
         drafts: &[OutboundDraft],
     ) -> std::result::Result<Vec<PostingAdapterItemResult>, String> {

@@ -1,7 +1,7 @@
 # QMD Lift And Agent Memory Reconciliation Brief
 
-Status: Proposed
-Class: bounded side-plan / reconciliation brief
+Status: merged into canonical/support contracts on 2026-04-14
+Class: historical side-plan / merged reconciliation brief
 Audience: Roger maintainers preparing the next search, memory, and agent-surface bead-shaping pass
 Scope: concepts to lift from QMD, memory-promotion evolution, and the missing in-session agent operating contract
 
@@ -125,6 +125,15 @@ Roger should lift and reimplement:
 - explainable scoring and retrieval provenance
 - stronger developer-facing search UX
 
+Translation rule:
+
+- QMD is an idea source, not a code donor
+- Roger should not copy QMD runtime assumptions, package layout, Node/Bun
+  dependencies, daemon shape, or model-install UX
+- every borrowed retrieval concept must be restated in Roger-owned terms:
+  `rr` commands, Roger config keys, Roger doctor/status output, Roger sidecar
+  rebuild rules, and Roger-owned degraded behavior
+
 ### D4. Memory recall is a gated surface, not a ranked blob
 
 The right memory at the right time should be determined by:
@@ -189,4 +198,3 @@ That means:
 - better retrieval than Roger has today
 - stricter authority boundaries than QMD provides
 - a real active-agent operating model, not just better search internals
-

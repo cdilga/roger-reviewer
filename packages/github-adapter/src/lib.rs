@@ -8,9 +8,8 @@ use std::collections::HashMap;
 use std::process::Command;
 
 use roger_app_core::{
-    ExplicitPostingResult, OutboundApprovalFlowStore, OutboundDraft, OutboundDraftBatch,
-    OutboundPostingAdapter, PostedActionRecordInput, PostedActionStatus, PostingAdapterItemResult,
-    PostingAdapterItemStatus, ReviewTarget, now_ts,
+    OutboundDraft, OutboundDraftBatch, OutboundPostingAdapter, PostingAdapterItemResult,
+    ReviewTarget, now_ts,
 };
 use serde::{Deserialize, Serialize};
 
@@ -345,49 +344,11 @@ impl ReadSafeGitHubAdapter for GhCliAdapter {
 impl OutboundPostingAdapter for GhCliAdapter {
     fn post_approved_draft_batch(
         &self,
-        target: &ReviewTarget,
+        _target: &ReviewTarget,
         _batch: &OutboundDraftBatch,
-        drafts: &[OutboundDraft],
+        _drafts: &[OutboundDraft],
     ) -> std::result::Result<Vec<PostingAdapterItemResult>, String> {
-        let mut results = Vec::with_capacity(drafts.len());
-
-        for draft in drafts {
-            // In 0.1.0 we use gh pr comment for simplicity.
-            // Future slices may use the review API for grouped comments.
-            let result = self.run_gh(&[
-                "pr",
-                "comment",
-                &target.pull_request_number.to_string(),
-                "--repo",
-                &target.repository,
-                "--body",
-                &draft.body,
-            ]);
-
-            match result {
-                Ok(_) => {
-                    results.push(PostingAdapterItemResult {
-                        draft_id: draft.id.clone(),
-                        status: PostingAdapterItemStatus::Posted,
-                        remote_identifier: Some(format!(
-                            "https://github.com/{}/pull/{}/comments/unknown",
-                            target.repository, target.pull_request_number
-                        )),
-                        failure_code: None,
-                    });
-                }
-                Err(err) => {
-                    results.push(PostingAdapterItemResult {
-                        draft_id: draft.id.clone(),
-                        status: PostingAdapterItemStatus::Failed,
-                        remote_identifier: None,
-                        failure_code: Some(format!("gh_error:{}", err)),
-                    });
-                }
-            }
-        }
-
-        Ok(results)
+        Err(GitHubAdapterError::MutationBlocked.to_string())
     }
 }
 

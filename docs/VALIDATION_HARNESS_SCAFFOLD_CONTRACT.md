@@ -93,7 +93,7 @@ Suite file and module names must use the prefix families defined in
 | `int_search_` | prior-review lookup, lexical-only degrade |
 | `accept_opencode_` | OpenCode provider-claim acceptance |
 | `accept_bounded_provider_` | bounded live-CLI provider-claim acceptance (`codex`, `claude`, `gemini`; later `copilot`) |
-| `e2e_` | full multi-boundary happy path (one blessed E2E only) |
+| `e2e_` | one of the six approved heavyweight multi-boundary product journeys |
 | `smoke_` | manual or release-lane smoke |
 
 No other prefix families may be introduced without updating
@@ -154,7 +154,7 @@ preserve_failure_artifacts = true     # must be true for acceptance, e2e, bridge
   testing non-parity or launch-only behavior; the suite must not silently
   pass for full-feature behavior.
 - `preserve_failure_artifacts = true` is mandatory for: all `accept_*`
-  suites, the one blessed `e2e_` suite, and all `int_bridge_*` and
+  suites, all blessed `e2e_` suites, and all `int_bridge_*` and
   `int_harness_*` suites.
 
 ---
@@ -242,9 +242,8 @@ Required behavior:
 - Acceptance suites (`accept_*`): always preserve on failure, structured
   output, raw provider output, `ResumeBundle` snapshot, and continuity
   quality report.
-- E2E suite (`e2e_core_review_happy_path`): always preserve on failure,
-  full session trace, CLI output, approval-chain snapshot, and GitHub
-  adapter response.
+- E2E suites (`e2e_*`): always preserve on failure, full session trace, CLI
+  output, approval-chain snapshot, and GitHub adapter response.
 - Bridge integration suites (`int_bridge_*`): always preserve on failure,
   Native Messaging envelope, host manifest state, and bridge error payloads.
 - Harness integration suites (`int_harness_*`): always preserve on failure,

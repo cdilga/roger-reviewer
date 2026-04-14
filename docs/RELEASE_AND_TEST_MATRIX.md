@@ -14,6 +14,8 @@ The implementation-facing harness contract lives in
 [`TEST_HARNESS_GUIDELINES.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TEST_HARNESS_GUIDELINES.md).
 The automated E2E budget file lives in
 [`AUTOMATED_E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/AUTOMATED_E2E_BUDGET.json).
+The user-language scenario source for those journeys lives in
+[`PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md).
 
 Roger now recognizes only three validation lanes:
 
@@ -427,15 +429,21 @@ Migration contract baseline for the `rr-1xhg` lane:
 
 Roger should not start with many slow end-to-end tests. It should start with a
 small set that covers the real failure boundaries. This catalog is prescriptive:
-it names the journeys Roger either already blesses or has intentionally
-pre-shaped for future budget growth.
+it names the six major journeys Roger intentionally budgets, even though they
+will be implemented incrementally rather than all at once.
 
 Budget posture:
 
-- currently blessed and budgeted: `E2E-01`
-- cataloged but not yet budget-approved: `E2E-02`, `E2E-03`
-- only entries moved into `AUTOMATED_E2E_BUDGET.json` `blessed_e2e_ids` consume
-  the heavyweight E2E budget
+- budget-approved major journey slots: `E2E-01` through `E2E-06`
+- executable today: `E2E-01`
+- `E2E-02` through `E2E-06` are approved scenario slots for planning and guard
+  purposes, but they do not count as functional coverage until executable
+  suites land and run
+- Roger intentionally keeps these as six distinct major proofs rather than one
+  sprawling omnibus E2E so failures stay diagnostic and the implemented journeys
+  can run in parallel when needed
+- persona scenario ids such as `PJ-03A` or `PJ-05D` should be used as the
+  human-readable story anchors when defining or defending one of these E2Es
 
 ### E2E-01: Core review happy path
 
@@ -452,13 +460,14 @@ Required shape:
 Purpose:
 
 - prove the full Roger loop works without the browser
+- primary persona anchors: `PJ-03A` and `PJ-05A`
 
 Rules:
 
-- this is the one blessed automated end-to-end test for `0.1.x`
-- any additional automated E2E needs explicit justification that lower-level
-  unit or integration coverage cannot defend the same product
-  promise more cheaply
+- this is the first implemented member of Roger's six-slot heavyweight E2E
+  catalog for `0.1.x`
+- any seventh automated E2E needs explicit justification that lower-level unit
+  or integration coverage cannot defend the same product promise more cheaply
 - Roger should track the blessed automated E2E count in a small Roger-owned
   budget file or manifest and emit an agent-facing warning when that count rises
 - that warning should explicitly ask whether the author can defend the new
@@ -473,7 +482,7 @@ Rules:
 
 Status:
 
-- cataloged candidate only; not yet budget-approved
+- budget-approved scenario slot; not yet implemented
 
 Required shape:
 
@@ -509,6 +518,7 @@ Purpose:
 - defend Roger's cross-surface continuity claim across extension or bridge
   entry, provider continuity, TUI triage, memory-aware recall, and local draft
   persistence
+- likely persona anchors: `PJ-02A`, `PJ-02D`, `PJ-04A`, and `PJ-04B`
 
 Execution posture:
 
@@ -520,7 +530,7 @@ Execution posture:
 
 Status:
 
-- cataloged candidate only; not yet budget-approved
+- budget-approved scenario slot; not yet implemented
 
 Required shape:
 
@@ -549,6 +559,8 @@ Purpose:
 
 - defend Roger's TUI-first operating model when review triage depends on prior
   review memory rather than only the current findings pack
+- likely persona anchors: `PJ-03A`, `PJ-03C`, and selected `PJ-04` recovery
+  cuts
 
 Execution posture:
 
@@ -556,6 +568,98 @@ Execution posture:
   multi-surface gap after `integration` coverage is strong
 - keep non-interactive `--robot` equivalents in `integration` by default unless
   a later justification proves a full E2E is necessary
+
+### E2E-04: Refresh and draft reconciliation after new commits
+
+Status:
+
+- budget-approved scenario slot; not yet implemented
+
+Required shape:
+
+- start from an active review that already has findings, triage state, and at
+  least one local outbound draft
+- introduce new commits or a rebase on the same review target
+- run refresh through Roger's normal surface
+- reconcile findings into at least `new`, `carried_forward`, and `resolved` or
+  `stale` outcomes with preserved lineage
+- prove draft state is either revalidated or marked for reconfirmation before
+  post
+- preserve audit history and return the operator to a truthful triage or drafts
+  state
+
+Purpose:
+
+- defend Roger's refresh contract as a real product journey rather than as a
+  pile of narrower reconciliation helpers
+- likely persona anchors: `PJ-02D`, `PJ-04D`, and `PJ-05B`
+
+Execution posture:
+
+- preferred in `operator stability` or `nightly` once implemented
+- most fingerprinting, invalidation, and anchor-remap rules still belong in
+  `unit`, `prop_*`, and `integration`
+
+### E2E-05: Browser setup and first PR-page launch
+
+Status:
+
+- budget-approved scenario slot; not yet implemented
+
+Required shape:
+
+- start from a machine that does not yet have Roger's browser companion path
+  fully configured
+- run `rr extension setup` through the product-facing command surface
+- complete the one required manual browser load step while Roger discovers or
+  self-registers the extension identity without manual typing
+- register the installed `rr` binary as the Native Messaging host
+- run `rr extension doctor` and prove the result is truthful
+- launch from a supported GitHub PR page and land in the correct local Roger
+  session
+
+Purpose:
+
+- defend Roger's first-use browser contract across setup, registration,
+  companion truth, and first PR-page launch
+- likely persona anchors: `PJ-01A`, `PJ-01B`, and `PJ-01C`
+
+Execution posture:
+
+- preferred in `operator stability` or `release-candidate` on the supported
+  browser matrix
+- low-level bridge envelope, doctor, and theme/readability proof should remain
+  in `integration` or smoke suites where possible
+
+### E2E-06: Bare-harness dropout and return continuity
+
+Status:
+
+- budget-approved scenario slot; not yet implemented
+
+Required shape:
+
+- start a local Roger review on a supported provider path
+- intentionally drop out to the underlying supported harness while preserving
+  Roger control context
+- inspect or continue the task in the bare harness without mutating approval or
+  posting state directly
+- return through `rr return` or the supported harness-native equivalent
+- land back in the same Roger session with truthful continuity, findings, and
+  task context intact
+
+Purpose:
+
+- defend Roger's OpenCode-first fallback story and the promise that the bare
+  harness path remains a real way out and back
+- likely persona anchors: selected `PJ-04` recovery cuts plus fallback-oriented
+  local re-entry from `PJ-03C`
+
+Execution posture:
+
+- preferred on the strongest supported direct-resume path first
+- bounded providers may assert a truthful reduced form later rather than
+  claiming parity too early
 
 ### High-value automated boundary paths
 

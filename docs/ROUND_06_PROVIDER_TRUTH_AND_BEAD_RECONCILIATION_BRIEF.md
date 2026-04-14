@@ -153,6 +153,29 @@ Why it matters:
   depend on the same missing worker contract
 - the current `StageHarness` shape is too thin to express this boundary
 
+### W1B. Search-planner truth and degraded retrieval boundary
+
+Status: newly elevated current-scope gap; not yet represented as an explicit
+proof group in the live graph
+
+What is missing:
+
+- an explicit bead group for replacing compatibility-ingress `query_mode=auto`
+  with concrete planned search intent before execution
+- an explicit bead group for `RecallEnvelope` fields that distinguish requested
+  versus resolved planner intent
+- an explicit bead group for `recovery_scan` as a degraded recovery mode rather
+  than a quiet fallback that can become the de facto search path
+
+Why it matters:
+
+- otherwise the implementation can drift back toward “just use the straight
+  simple query” under pressure
+- QMD-inspired uplift only matters if Roger actually lands a real planner rather
+  than a thin compatibility shim
+- active-agent memory access and future CLI/TUI search UX both depend on the
+  planner and degraded-mode contract being explicit and testable
+
 ### W2. Productize the explicit outbound approval/posting flow
 
 Status: partially captured
@@ -255,6 +278,17 @@ Copilot should be admitted as current-scope planned work, not as a shortcut arou
 The next bead wave should not treat review-worker semantics as an implementation
 detail hidden inside provider adapters or prompt-engine glue. The worker
 runtime/tool boundary is now a first-class planning and proof lane.
+
+### D6. Search-planner truth must be beaded explicitly
+
+The next bead wave should not allow search work to hide behind vague “query”
+language or a compatibility-only `auto` ingress.
+
+Required explicit proof groups:
+
+- planner-intent resolution
+- recall-envelope truth
+- degraded `recovery_scan` truth
 
 ---
 

@@ -1,7 +1,7 @@
 # Memory Integration Spec Inconsistency Audit
 
-Status: Proposed
-Class: bounded side-plan / audit brief
+Status: resolved into canonical/support contracts on 2026-04-14
+Class: historical side-plan / resolved audit
 Audience: maintainers reconciling the remaining Roger spec around search, memory, and active-agent operation
 
 Primary references:
@@ -389,4 +389,3 @@ It has a mostly coherent memory policy that now needs:
 - and one stronger validation story
 
 That is a much better place to be.
-

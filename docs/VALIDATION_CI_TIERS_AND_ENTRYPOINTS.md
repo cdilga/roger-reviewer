@@ -27,6 +27,8 @@ Current repo truth as of 2026-04-07:
   coverage unless the suite is actually run there.
 - The metadata file is a registration record, not an implementation milestone
   by itself.
+- `AUTOMATED_E2E_BUDGET.json` now budgets six major E2E journeys, but only the
+  implemented and actually executed subset counts as coverage.
 - Historical metadata still includes labels such as `prop_*`, `accept_*`, and
   `smoke_*`; treat those as sub-kinds inside the three-lane model until the
   harness metadata is simplified.
@@ -129,7 +131,7 @@ or any test that crosses more than two boundaries.
 
 ### Policy 3 — Gated (`gated`)
 
-**When:** Merge to main. May take longer than PR gate.
+**When:** Manual operator gate before higher-confidence merge/release decisions. May take longer than PR gate.
 
 **Command:**
 ```sh
@@ -150,7 +152,7 @@ automated E2E tests.
 
 ### Policy 4 — Nightly (`nightly`)
 
-**When:** Scheduled nightly CI run on the main branch.
+**When:** Manual or operator-scheduled higher-cost validation run.
 
 **Command:**
 ```sh
@@ -167,7 +169,7 @@ run here.
 **Budget guard:** **strictly enforced**. Before running, the budget guard
 reads `docs/AUTOMATED_E2E_BUDGET.json` and checks:
 - `current_planned_blessed_automated_e2e_count` ≤
-  `blessed_automated_e2e_budget` (currently 1)
+  `blessed_automated_e2e_budget` (currently 6)
 - if over budget: emit the five required justification fields as a CI
   failure with a `WARN` annotation and block merge until the fields are
   present in the budget file.
@@ -176,6 +178,9 @@ Important:
 - budget compliance and suite registration do not replace the executable suite
 - an implementation bead for `e2e_core_review_happy_path` closes only after the
   executable suite lands and is run
+- the six-slot budget is a ceiling, not a requirement that one nightly run
+  executes every major journey serially; implemented E2Es may be sharded or
+  selected by claim surface
 
 ---
 

@@ -127,6 +127,10 @@ Rules:
 - `reason_code` must be Roger-owned and stable enough for later filtering.
 - `source_surface` records where the transition was observed or initiated; it
   does not transfer state ownership away from Roger.
+- `source_surface` uses Roger's normalized enum:
+  `cli`, `tui`, `extension`, `external_link`, `harness_command`, `agent`, or
+  `system`; legacy `bridge`, `direct`, or `external-link` values normalize at
+  the boundary
 - A harness-specific wait flag or browser callback should be normalized into
   Roger's state vocabulary before persistence.
 

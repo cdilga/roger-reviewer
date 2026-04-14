@@ -53,6 +53,7 @@ Special rule for this cleanup:
 | `docs/EXTENSION_PACKAGING_AND_RELEASE_CONTRACT.md` | support contract | `keep` | Extension packaging and release contract |
 | `docs/HARNESS_SESSION_LINKAGE_CONTRACT.md` | support contract | `keep` | Roger-to-harness continuity boundary |
 | `docs/PROMPT_PRESET_AND_OUTCOME_CONTRACT.md` | support contract | `keep` | Prompt preset and outcome-event contract |
+| `docs/PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md` | support matrix | `keep` | User-language persona journeys with stable scenario ids, chaos/recovery scripts, and restart/corruption cuts for flow design and E2E selection |
 | `docs/RELEASE_AND_TEST_MATRIX.md` | support matrix | `keep` | Provider/browser/OS validation truth |
 | `docs/RELEASE_CALVER_VERSIONING_CONTRACT.md` | support contract | `keep` | Release-version authority |
 | `docs/REVIEW_FLOW_MATRIX.md` | support matrix | `keep` | Flow family coverage matrix |

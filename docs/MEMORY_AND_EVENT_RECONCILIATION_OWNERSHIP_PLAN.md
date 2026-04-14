@@ -1,7 +1,7 @@
 # Memory And Event Reconciliation Ownership Plan
 
-Status: Proposed
-Class: bounded side-plan / reconciliation ownership plan
+Status: merged into canonical/support contracts on 2026-04-14
+Class: historical side-plan / merged ownership input
 Audience: maintainers resolving memory, outcome-event, and active-agent spec drift before the next bead wave
 
 Primary inputs:
@@ -595,4 +595,3 @@ The best reconciliation posture is:
 
 That resolves the current issues with the least architectural churn and the
 highest future usefulness.
-

@@ -225,6 +225,26 @@ Rules:
 - `RR_STORE_ROOT` and `RR_OPENCODE_BIN` can remain compatibility channels, but
   their model should fold into `store.root` and `providers.opencode.binary_path`
 
+### A1. Search and semantic-asset defaults
+
+| Key | Concern | Allowed layers | Value shape | Paths? | Default owner | Surface class | Override channels | Fail-closed rule |
+|---|---|---|---|---:|---|---|---|---|
+| `search.semantic_assets.enabled` | Whether hybrid retrieval is allowed to use locally installed semantic assets | built-in, user-global, workspace, repo | bool | no | built-in/user-global | `baseline_visible` | config file, bounded settings UI | `false` or missing assets degrades truthfully to lexical-only retrieval. |
+| `search.semantic_assets.default_profile` | Roger-owned asset profile identifier such as `semantic-default` | built-in, user-global, workspace, repo | string | no | built-in/user-global | `advanced_visible` | config file, bounded CLI/TUI override | Unknown profile blocks asset install/verify; Roger must not guess a nearby profile. |
+| `search.semantic_assets.root` | Local install root for embedding and rerank assets | built-in, user-global, repair env | path | yes | built-in/user-global | `advanced_visible` | config file, env, asset command | Missing root resolves under `store.root`; unreadable root blocks asset install/verify truthfully. |
+| `search.semantic_assets.manifest_root` | Roger-owned metadata root for asset profile resolution | built-in, user-global, maintainer, repair | path/url root | yes | built-in | `repair_only` | config file, asset command, maintainer override | Invalid manifest root blocks asset install but must not break lexical search. |
+| `search.semantic_assets.auto_verify` | Whether Roger verifies semantic assets during startup/search preflight | built-in, user-global | bool | no | built-in | `advanced_visible` | config file | `true` by default; verification failure disables semantic retrieval rather than silently continuing. |
+
+Rules:
+
+- semantic asset config belongs to Roger's own config model, not to provider
+  config and not to a copied QMD runtime cache model
+- the canonical install path is through Roger-owned commands such as
+  `rr assets install --asset <profile>` and `rr assets verify`
+- ordinary `rr review` and `rr search` must not trigger hidden model downloads;
+  they may only report that semantic assets are unavailable and continue
+  lexically
+
 ### B. Launch-profile items
 
 | Key | Concern | Allowed layers | Value shape | Paths? | Default owner | Surface class | Override channels | Fail-closed rule |
@@ -332,6 +352,7 @@ override anything, what the operator should see, and where overrides belong.
 | Use case | Default resolved behavior | What the operator sees | Allowed overrides | Hidden or demoted details |
 |---|---|---|---|---|
 | Ordinary CLI review in the current checkout | Use the repo/default launch profile, default provider, `current_checkout`, and machine-resolved terminal/muxer routing. | Resolved provider, launch profile, isolation mode, and any degraded routing reason. | Provider, launch profile, `ui_target`, explicit isolation mode. | Binary paths, worktree root, port rewrites, env-file policy, bridge/setup internals. |
+| First semantic-search enablement on a healthy machine | Base `rr` install remains unchanged until the operator explicitly asks for semantic assets. `rr assets install --asset <profile>` downloads the Roger-owned asset profile into the configured semantic root, verifies it, and leaves ordinary review/search on lexical-only until verification completes. | Asset profile, install root, verification result, and whether hybrid retrieval is now available or still degraded to lexical-only. | Asset profile and semantic root override through bounded asset/config surfaces. | Raw downloader internals, mirror roots, and maintainer-only manifest overrides. |
 | Repo-local review where mutable resources would collide | Preflight prefers `named_instance` with declared per-resource rewrites. | `ready_with_actions` or equivalent preflight result naming the resources that would collide. | Explicit instance name, explicit worktree request, opt-down only when safe. | Underlying rewrite map details unless the user opens the preflight detail view. |
 | Dirty working tree plus target branch mismatch | Preflight recommends or requires `worktree`. No silent escalation. | A plain-language preflight prompt or blocked result showing why worktree isolation is needed. | Approve worktree, select worktree-capable profile/root, or abort. | Internal worktree-create hooks and resource materialization details. |
 | Browser-launched review from a PR page | Extension triggers the surface-default launch profile and provider; review starts locally if preflight is satisfied. | Start/resume/open-local CTA plus truthful status mirror only. | None from the PR page beyond the requested action; baseline changes happen locally. | Extension ID, host-binary path, manifest roots, repair flags. |

@@ -6,7 +6,9 @@ contract set.
 This document is the operator-facing entrypoint for Roger's testing posture.
 It summarizes how Roger turns support claims into runnable proof, and it points
 to the implementation-facing contracts that define suites, fixtures, artifacts,
-and execution policies in detail.
+execution policies in detail. It also treats Roger's user-facing persona and
+flow artifacts as first-class inputs to validation design rather than as loose
+planning notes.
 
 This file does not replace the detailed validation contracts under `docs/`.
 It tells humans and agents how those contracts fit together.
@@ -35,13 +37,15 @@ Use the testing docs in this order:
 1. `AGENTS.md`
 2. `docs/PLAN_FOR_ROGER_REVIEWER.md`
 3. this document
-4. `docs/VALIDATION_INVARIANT_MATRIX.md`
-5. `docs/TEST_HARNESS_GUIDELINES.md`
-6. `docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`
-7. `docs/VALIDATION_HARNESS_SCAFFOLD_CONTRACT.md`
-8. `docs/VALIDATION_CI_TIERS_AND_ENTRYPOINTS.md`
-9. `docs/RELEASE_AND_TEST_MATRIX.md`
-10. `docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md`
+4. `docs/PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md`
+5. `docs/REVIEW_FLOW_MATRIX.md`
+6. `docs/VALIDATION_INVARIANT_MATRIX.md`
+7. `docs/TEST_HARNESS_GUIDELINES.md`
+8. `docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`
+9. `docs/VALIDATION_HARNESS_SCAFFOLD_CONTRACT.md`
+10. `docs/VALIDATION_CI_TIERS_AND_ENTRYPOINTS.md`
+11. `docs/RELEASE_AND_TEST_MATRIX.md`
+12. `docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md`
 
 If these conflict, the canonical plan and `AGENTS.md` win.
 
@@ -49,13 +53,50 @@ If these conflict, the canonical plan and `AGENTS.md` win.
 
 - keep exactly three validation lanes: `unit`, `integration`, `e2e`
 - push confidence down the stack first
-- keep one blessed automated heavyweight E2E in `0.1.x`
+- keep the heavyweight E2E catalog small, explicit, and capped at six major
+  product journeys in `0.1.x`
+- treat persona scenario ids and flow families as first-class proof-shaping
+  artifacts, not as optional narrative garnish
 - use invariant ownership to defend critical truths
 - prefer deterministic fixtures and Roger-owned doubles over ambient
   environments
 - forbid success-only fantasy doubles
 - preserve replayable failure artifacts when diagnosis materially benefits
 - keep release promises narrower than the widest imaginable test matrix
+
+## Heavyweight E2E Posture
+
+Roger no longer treats one giant E2E as if it proves the whole product.
+Instead, `0.1.x` carries a six-slot budget for the main contract-shaped
+journeys Roger actually claims:
+
+- `E2E-01` core review happy path
+- `E2E-02` cross-surface review continuity with recall
+- `E2E-03` TUI-first review with memory-assisted triage
+- `E2E-04` refresh and draft reconciliation after new commits
+- `E2E-05` browser setup and first PR-page launch
+- `E2E-06` bare-harness dropout and return continuity
+
+Rules:
+
+- these are separate proof units for diagnosability, ownership, and
+  parallelism, not ingredients for one omnibus suite
+- only journeys that have executable suites and real runs count as functional
+  coverage
+- budget approval alone is not proof
+- anything beyond these six major journeys must justify why a cheaper unit,
+  integration, acceptance, or release-smoke shape is insufficient
+
+Current repo truth:
+
+- `E2E-01` is the first implemented executable heavyweight E2E
+- `E2E-02` through `E2E-06` are budget-approved scenario slots until their
+  suites land and run
+
+The detailed scenario contract lives in
+[`docs/RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md), and the
+machine-readable budget source of truth lives in
+[`docs/AUTOMATED_E2E_BUDGET.json`](docs/AUTOMATED_E2E_BUDGET.json).
 
 ## Current Tooling Posture
 
@@ -127,18 +168,53 @@ Examples:
 Roger's release-critical invariants live in
 [`docs/VALIDATION_INVARIANT_MATRIX.md`](docs/VALIDATION_INVARIANT_MATRIX.md).
 
+## User-Facing Journey Artifacts
+
+Roger's testing doctrine does not begin with suites. It begins with the user
+story Roger is claiming to support.
+
+Two artifacts are first-class here:
+
+- [`docs/PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md`](docs/PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md)
+  for user-language persona families and stable scenario ids such as `PJ-03A`,
+  `PJ-05D`, or `PJ-06C`
+- [`docs/REVIEW_FLOW_MATRIX.md`](docs/REVIEW_FLOW_MATRIX.md) for surface and
+  flow-family mapping such as `F01`, `F02.1`, or `F07`
+
+Rules:
+
+- a major testable claim should usually be traceable to at least one persona
+  scenario id and one flow family
+- crash, restart, corruption, stale-session, invalidation, and recovery
+  behavior are part of the product journey, not test afterthoughts
+- if a failure branch matters enough to affect trust, it deserves an explicit
+  scenario id rather than being buried in a generic "error handling" bucket
+- future E2E candidates should be described first in persona or flow language,
+  then translated into suites and fixtures
+
+Examples:
+
+- `PJ-03A` plus `F01` is a clean local-first review journey
+- `PJ-05D` plus `F07` and `F08` is a crash-after-approval or crash-during-post
+  journey
+- `PJ-06C` plus `F08` is a fail-closed local-damage or corruption journey
+
+If Roger cannot explain a proposed test in this user-facing language, the test
+is probably too implementation-shaped to anchor a support claim cleanly.
+
 ## Proof Ladder
 
 Every critical product claim should be traceable through this ladder:
 
 1. support claim or user-visible promise
-2. one or more invariant ids
-3. owning bead or beads
-4. owning suite families
-5. required fixture families or corpora
-6. execution policy where the proof must run
-7. artifact outputs and proof manifests
-8. release or docs wording that becomes safe
+2. persona scenario id and/or flow family
+3. one or more invariant ids
+4. owning bead or beads
+5. owning suite families
+6. required fixture families or corpora
+7. execution policy where the proof must run
+8. artifact outputs and proof manifests
+9. release or docs wording that becomes safe
 
 If any rung is missing, the claim is not yet fully defended.
 
@@ -154,6 +230,8 @@ bead that changes behavior should do one of the following:
 Each such bead should also name:
 
 - the concrete user-visible or operator-visible promise being defended
+- the relevant persona scenario id and flow family when the change affects a
+  user journey or recovery story
 - the primary failure, degraded, invalidation, or recovery cases in scope
 - the cheapest truthful proof lane
 - the owning suite families
@@ -237,11 +315,15 @@ If Roger follows this doctrine, users should get:
 - blessed workflows that are explicitly named and heavily defended
 - failure states that stop safely rather than bluffing through dangerous paths
 - degraded modes that are visible and auditable
+- crash, restart, stale-session, and corruption recovery stories that are
+  explicit rather than accidental
 - support claims that match current evidence, not aspiration
 - regressions that are diagnosable from artifacts rather than from guesswork
 
 ## Detailed Contracts
 
+- [`docs/PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md`](docs/PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md)
+- [`docs/REVIEW_FLOW_MATRIX.md`](docs/REVIEW_FLOW_MATRIX.md)
 - [`docs/VALIDATION_INVARIANT_MATRIX.md`](docs/VALIDATION_INVARIANT_MATRIX.md)
 - [`docs/TEST_HARNESS_GUIDELINES.md`](docs/TEST_HARNESS_GUIDELINES.md)
 - [`docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md)

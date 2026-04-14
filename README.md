@@ -1,352 +1,224 @@
 # Roger Reviewer
 
-> Local-first pull request review with durable sessions and explicit approval
-> gates before any GitHub write.
+<div align="center">
 
-## Status (As Of April 7, 2026)
+<img src="docs/roger-reviewer-project.png" alt="Roger Reviewer local-first review flow illustration" width="1100" />
 
-Roger Reviewer is in active `0.1.0` implementation.
+![Release](https://img.shields.io/github/v/release/cdilga/roger-reviewer?style=flat-square&label=release)
+![Rust](https://img.shields.io/badge/rust-2024%20edition-8C6A5D?style=flat-square)
+![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-7A8CA5?style=flat-square)
+![Browsers](https://img.shields.io/badge/browser-Chrome%20%7C%20Edge%20%7C%20Brave-A3B18A?style=flat-square)
+![License](https://img.shields.io/badge/license-MIT-C9A66B?style=flat-square)
 
-Default scope posture for this repo: planned `0.1.0` work is in scope now
-unless a doc explicitly marks it out of scope, optional, experimental, or `v2`.
-Sequence controls delivery order, not whether a planned feature “counts” yet.
+<p><strong>Local-first pull request review for GitHub.</strong></p>
+<p>Durable sessions, structured findings, explicit approval gates, and an optional PR-page companion.</p>
+<p><a href="#install">Install</a> · <a href="#quickstart">Quickstart</a> · <a href="#commands">Commands</a> · <a href="#blessed-paths">Blessed Paths</a> · <a href="#architecture">Architecture</a> · <a href="#contributing">Contributing</a></p>
 
-What is real in this repo right now:
+</div>
 
-- local-first CLI/domain workflow is under active implementation
-- the authoritative provider order is GitHub Copilot CLI, OpenCode, Codex,
-  Gemini, then Claude Code
-- OpenCode is still the strongest currently landed continuity path while the
-  Copilot-first golden path is being brought up to proof
-- extension support is optional and launch-focused, not the source of truth
-- safety model is explicit: no automatic posting and no hidden mutation path
+Roger Reviewer turns pull request review into a durable local workflow. Start
+from the shell or a GitHub pull request page, keep findings and drafts local,
+and approve before anything is posted back to GitHub.
 
-Current gaps that still need to land:
+This README tracks the public `0.1.0` product shape and the blessed workflows
+we intend to support publicly. The deeper planning and implementation contracts
+live under [`docs/`](docs/).
 
-- no GA signed installer distribution channel yet
-- no GA local-state/schema migration automation in `rr update` (migration-capable updates are deferred/fail-closed in `0.1.x`)
-- no in-extension approval or posting controls
+## Why Roger Reviewer
 
-## Who This Is For
+Most review tools are easy to start and hard to continue. Findings disappear
+into scrollback, follow-up context fragments across sessions, and the line
+between "drafted locally" and "posted remotely" is often too blurry.
 
-Primary audience for this slice:
+Roger takes a different position:
 
-- engineers reviewing GitHub PRs from terminal-first workflows
-- teams that want durable local review continuity rather than one-shot prompt output
-- users who require explicit approval gates before any remote write action
+- local state is authoritative
+- the terminal and TUI are the primary review surfaces
+- the browser companion is optional
+- GitHub writes stay behind an explicit approval gate
+- the underlying coding session remains a real fallback path
 
-## Product Shape (Current Slice)
+## Install
 
-Roger Reviewer is:
+Roger ships through GitHub Releases. That is the public install surface.
 
-- local-first (`SQLite` state is authoritative)
-- session-aware (`review`, `resume`, `refresh`, `return`, `sessions`)
-- approval-gated (draft + approve + post boundaries are explicit)
-- continuity-focused (Copilot is the golden-path target; OpenCode fallback stays
-  real)
-
-Roger Reviewer is not:
-
-- an automatic bug-fix bot by default
-- an automatic GitHub posting bot
-- a daemon-centered architecture
-
-## Core Architectural Contracts
-
-Roger's core architectural split is now:
-
-- Roger manages review lifecycle, canonical state, approval, posting, and memory policy
-- the review worker performs bounded review tasks and returns proposals/results
-- the provider/harness hosts that worker session but does not own Roger truth
-
-The main contract docs for that split are:
-
-- [`docs/HARNESS_SESSION_LINKAGE_CONTRACT.md`](docs/HARNESS_SESSION_LINKAGE_CONTRACT.md)
-- [`docs/REVIEW_WORKER_RUNTIME_AND_BOUNDARY_CONTRACT.md`](docs/REVIEW_WORKER_RUNTIME_AND_BOUNDARY_CONTRACT.md)
-- [`docs/PLAN_FOR_TRANSACTIONAL_LAUNCH_LIFECYCLE_AND_BRIDGE_TRUTH.md`](docs/PLAN_FOR_TRANSACTIONAL_LAUNCH_LIFECYCLE_AND_BRIDGE_TRUTH.md)
-
-Machine-facing boundary rule:
-
-- `rr --robot` is the machine-readable surface for operator-facing Roger
-  commands
-- `rr agent` is the agent-only in-session transport for the Roger-managed
-  review worker
-- they are intentionally different surfaces and must not be described as
-  interchangeable
-
-## Support Snapshot
-
-| Surface | Current reality | Notes |
-| --- | --- | --- |
-| Published `rr` CLI install | Available | One-line release installer ships on GitHub Releases |
-| `rr` CLI from source | Blocked currently | The intended source-run path is `packages/cli`, but the current workspace still fails before `rr --help` because `packages/cli/Cargo.toml` contains a duplicate `serde.workspace` entry |
-| GitHub Copilot CLI provider flow | Golden-path target, not yet live | Authoritative first-class provider target; do not claim live support until verified launch, policy, and continuity coverage are real |
-| OpenCode provider flow | Strongest currently landed path | Authoritative `#2` provider and fallback continuity reference for `0.1.x` |
-| Codex provider path | Supported, bounded Tier A | Authoritative `#3` provider; exposed in command surface without locator reopen or `rr return` claims |
-| Gemini provider path | Supported, bounded Tier A | Authoritative `#4` provider; exposed in command surface without locator reopen or `rr return` claims |
-| Claude Code provider path | Supported, bounded Tier A | Authoritative `#5` provider; exposed in command surface as `--provider claude` without locator reopen or `rr return` claims |
-| Browser extension | Optional launch helper | PR-page launch panel; local Roger remains authoritative |
-| In-extension posting controls | Not shipped | Approval/posting stays local and explicit |
-
-## Install Reality
-
-Installer/update metadata contracts now exist in-repo:
-
-- `scripts/release/rr-install.sh` and `scripts/release/rr-install.ps1` consume
-  `release-install-metadata-<version>.json` plus matching core/checksum assets
-- `rr update` is the Roger-owned updater for published releases and applies the
-  replacement in place after metadata, target, and checksum verification
-- current repo source includes explicit confirmation-bypass flags for
-  non-interactive apply, but release-hosted install guidance must follow the
-  installed binary's own `rr --help` until a published release carries those
-  exact flags
-- `--dry-run` remains a non-mutating metadata/preflight path
-- local/unpublished builds fail closed without embedded release markers; local
-  state/schema migrations remain deferred in `0.1.x`
-
-Public one-line installer entrypoints (CLI base product):
-
-- Stable/latest (Unix):
-  - `curl -fsSL https://github.com/cdilga/roger-reviewer/releases/latest/download/rr-install.sh | bash`
-- Stable/latest (PowerShell):
-  - `& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing 'https://github.com/cdilga/roger-reviewer/releases/latest/download/rr-install.ps1').Content))`
-- Pinned release (Unix, example `2026.04.07`):
-  - `curl -fsSL https://github.com/cdilga/roger-reviewer/releases/download/v2026.04.07/rr-install.sh | bash -s -- --version 2026.04.07`
-- Pinned release (PowerShell, example `2026.04.07`):
-  - `& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing 'https://github.com/cdilga/roger-reviewer/releases/download/v2026.04.07/rr-install.ps1').Content)) -Version '2026.04.07'`
-
-Optional browser workflow (separate from base CLI install, but still current
-repo scope when browser launch is needed):
-
-- bridge and extension packaging assets are optional; base `rr` install does not require them
-- use optional lanes only when browser launch/helper integration is needed
-- whether bridge/extension artifacts ship is release-specific; use the current
-  release notes and asset list to determine whether those optional lanes were
-  published for a given tag
-- when browser integration is needed, use `rr extension setup --browser <edge|chrome|brave>` followed by
-  `rr extension doctor --browser <edge|chrome|brave>`; normal setup should provision bridge registration
-  without requiring manual `rr bridge install`
-
-Safe isolated install example:
-
-```bash
-mkdir -p "$HOME/.local/rr-test-bin"
-curl -fsSL https://github.com/cdilga/roger-reviewer/releases/latest/download/rr-install.sh | \
-  bash -s -- --install-dir "$HOME/.local/rr-test-bin"
-alias rr-rel="$HOME/.local/rr-test-bin/rr"
-```
-
-Source-run onboarding remains the developer path:
-
-1. install Rust toolchain
-2. clone repo and run `rr` through Cargo
-3. keep state local (default `.roger/` store)
-
-Current repo truth: this path is presently blocked until the workspace manifest
-issue in `packages/cli/Cargo.toml` is repaired. Do not treat source-run support
-as live again until `cargo run -p roger-cli --bin rr -- --help` succeeds.
-
-Optional env overrides:
-
-```bash
-export RR_STORE_ROOT="$PWD/.roger"
-export RR_OPENCODE_BIN="opencode"
-```
-
-## Quickstart (Current Strongest Landed Path)
-
-### 1. Prerequisites
-
-- a Git repository with a GitHub `origin` remote
-- OpenCode CLI available on `PATH` (or `RR_OPENCODE_BIN` override)
-
-### 2. Install `rr`
-
-Stable/latest:
+### macOS
 
 ```bash
 curl -fsSL https://github.com/cdilga/roger-reviewer/releases/latest/download/rr-install.sh | bash
 ```
 
-Safe isolated install:
+### Linux
 
 ```bash
-mkdir -p "$HOME/.local/rr-test-bin"
-curl -fsSL https://github.com/cdilga/roger-reviewer/releases/latest/download/rr-install.sh | \
-  bash -s -- --install-dir "$HOME/.local/rr-test-bin"
-alias rr="$HOME/.local/rr-test-bin/rr"
+curl -fsSL https://github.com/cdilga/roger-reviewer/releases/latest/download/rr-install.sh | bash
 ```
 
-### 3. Check the installed CLI
+### Windows (PowerShell)
 
-```bash
-rr --help
-rr update --dry-run
+```powershell
+& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing 'https://github.com/cdilga/roger-reviewer/releases/latest/download/rr-install.ps1').Content))
 ```
 
-### 4. Start a review session (OpenCode, current strongest landed path)
+If you want a pinned release instead of `latest`, use the tagged installer
+assets from [GitHub Releases](https://github.com/cdilga/roger-reviewer/releases).
+
+## Quickstart
+
+The local-first path is the primary Roger experience.
+
+### 1. Start a review
 
 ```bash
 rr review --pr 123 --provider opencode
 ```
 
-### 5. Inspect local state
+### 2. Inspect what Roger found
 
 ```bash
 rr status
 rr findings
-rr sessions
-rr search --query "null pointer"
 ```
 
-### 6. Continue the same review safely
+### 3. Continue the same review later
 
 ```bash
 rr resume --pr 123
 rr refresh --pr 123
-rr return --pr 123
 ```
 
-If candidate sessions are ambiguous, Roger fails closed and requires explicit
-selection (for example `--session <id>`).
+Replace `123` with your pull request number. For `0.1.0`, the intended provider
+order is GitHub Copilot CLI, OpenCode, Codex, Gemini, then Claude Code.
+OpenCode remains the continuity reference path, and the browser companion is
+optional.
 
-## Developer Path (Run From Source)
+## Commands
 
-Prerequisites:
-
-- Rust toolchain
-
-Run `rr` from source:
-
-```bash
-cargo run -p roger-cli --bin rr -- help
-```
-
-Optional shell alias:
-
-```bash
-alias rr='cargo run -q -p roger-cli --bin rr --'
-```
-
-## Optional Browser Launch Surface
-
-The extension is optional and currently launch-oriented.
-
-Current source artifact:
-
-- `apps/extension/manifest.template.json`
-
-Current panel actions on GitHub PR pages:
-
-- `Start`
-- `Resume`
-- `Findings`
-- `Refresh`
-
-Current UX reality:
-
-- the extension is a bounded launch surface, not the source of truth for Roger state
-- PR-page entry is under active implementation toward a right-rail `Roger Reviewer`
-  host, lower-click primary actions, and more contextual secondary actions; this
-  is current scope, not a parking lot
-- `Refresh` exists as a real Roger command today, but its long-term UX direction
-  is contextual rather than always-primary
-
-Guided setup contract (normal path):
-
-1. run `rr extension setup --browser <edge|chrome|brave>`
-2. load the unpacked extension package in your browser
-3. run `rr extension doctor --browser <edge|chrome|brave>` to verify identity,
-   host registration, and helper reachability
-
-Normal onboarding should not require manual `rr bridge install`. Keep
-`rr bridge install [--extension-id <id>] [--bridge-binary <path>]` as a
-repair/admin path only (for example: newly added browser profile, local
-registration drift, or explicit dev override), and keep those override flags
-out of first-time setup instructions.
-
-Current artifact truth:
-
-- `0.1.x` uses the unpacked extension artifact as the primary setup/testing
-  surface
-- Roger will keep the setup contract stable while delivering packed/shippable
-  extension artifacts; that work is not excluded from current scope unless
-  explicitly fenced elsewhere
-
-Bridge dispatch order:
-
-1. Native Messaging (`com.roger_reviewer.bridge`)
-2. Fail closed when Native Messaging is unavailable; rerun `rr extension setup` and `rr extension doctor`
-
-Launch-only honesty in this slice:
-
-- no in-extension authoritative local status mirror
-- no in-extension approval/posting controls
-
-## Agent Mail Watch Over ngrok
-
-For a browser-readable, read-only Agent Mail view over ngrok, expose the local
-watcher instead of the raw Agent Mail MCP endpoint.
-
-Start the watcher:
-
-```bash
-AGENT_MAIL_WATCH_AGENTS=BlueCat scripts/run_agent_mail_watch.sh
-```
-
-It prints the local URL, the Basic Auth username (`watch`), the generated
-browser password, and the watcher port.
-
-Tunnel the watcher port, not Agent Mail's `8765` MCP port:
-
-```bash
-ngrok http 8781
-```
-
-The watcher proxies read-only inbox fetches to Agent Mail server-side, so your
-phone browser never needs the Agent Mail bearer token and never talks to the
-raw SSE/MCP endpoint directly.
-
-## Safety Model (Non-Negotiable)
-
-- No automatic GitHub posting.
-- No automatic bug-fixing unless explicitly enabled by the user.
-- No raw direct review writes outside Roger's approval/posting flow.
-- Mutation-capable flows must be explicit and visibly elevated.
-
-## Known Boundaries
-
-- `rr update` is the Roger-owned in-place updater for published releases, but
-  the exact shipped release semantics are narrowed by
-  [`docs/UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md`](docs/UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md)
-  rather than assumed from current source alone
-- local/unpublished builds still fail closed and require reinstall from a
-  published release
-- migration-capable update steps are intentionally deferred in `0.1.x`; future
-  migration-required releases must fail closed with explicit backup/export +
-  reinstall guidance
-- extension readback/status parity is not shipped yet
-- provider support order is GitHub Copilot CLI, OpenCode, Codex, Gemini, then
-  Claude Code
-- current landed continuity proof is strongest on OpenCode until the Copilot
-  golden path is verified end to end
-- degraded continuity states are expected to fail closed where ambiguity exists
-
-## Repo Orientation
-
-| Path | Purpose |
+| Command | What it does |
 | --- | --- |
-| `packages/cli` | `rr` command implementation |
-| `packages/app-core` | Domain model, finding lifecycle, approval/posting contracts |
-| `packages/session-opencode` | OpenCode session linkage and return model |
-| `packages/bridge` | Native Messaging bridge |
-| `apps/extension` | GitHub PR launch panel |
-| `packages/storage` | Canonical local store and retrieval |
+| `rr review --pr 123 --provider opencode` | Start a review for a pull request |
+| `rr resume --pr 123` | Re-enter the existing review for that pull request |
+| `rr status` | Show the current session, attention state, and next step |
+| `rr findings` | Inspect the structured findings Roger has materialized |
+| `rr sessions` | List local review sessions |
+| `rr refresh --pr 123` | Reconcile the review after new commits land |
+| `rr return --pr 123` | Return from the underlying coding session to Roger |
+| `rr extension setup --browser edge` | Set up the optional browser companion |
+| `rr extension doctor --browser edge` | Verify the browser companion path |
 
-## Canonical Docs
+## Blessed Paths
 
-- [`AGENTS.md`](AGENTS.md)
-- [`docs/PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md)
-- [`docs/HARNESS_SESSION_LINKAGE_CONTRACT.md`](docs/HARNESS_SESSION_LINKAGE_CONTRACT.md)
-- [`docs/REVIEW_WORKER_RUNTIME_AND_BOUNDARY_CONTRACT.md`](docs/REVIEW_WORKER_RUNTIME_AND_BOUNDARY_CONTRACT.md)
-- [`docs/RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md)
+### 1. Local-first review
+
+Install `rr`, start from the repo, and do the real review work locally. This is
+the primary Roger path.
+
+### 2. Browser-assisted launch
+
+The browser companion is for convenience, not authority. It helps you start or
+resume from a PR page, but Roger's local state remains the source of truth.
+
+### 3. Local draft, explicit approval, remote post
+
+Roger drafts locally first, asks for explicit approval second, and only then
+posts back to GitHub.
+
+### 4. Underlying session fallback
+
+Roger sessions stay tied to an underlying coding session so the fallback path
+remains real instead of decorative.
+
+## What Roger Refuses To Do
+
+- post review comments automatically
+- fix code automatically by default
+- hide mutation-capable actions inside ordinary navigation
+- require a long-running daemon as the center of the system
+
+## Architecture
+
+Roger is built around one shared local core. The CLI, TUI, and browser
+companion are surfaces over that core, not separate products with separate
+truth.
+
+```mermaid
+flowchart TD
+    classDef entry fill:#EAF2FF,stroke:#4F7CFF,color:#102033,stroke-width:1.4px;
+    classDef gate fill:#FFF3D9,stroke:#C68A00,color:#5B3A00,stroke-width:1.7px;
+    classDef core fill:#ECFDF3,stroke:#2F855A,color:#173A28,stroke-width:1.4px;
+    classDef data fill:#EEF8F6,stroke:#4C7A78,color:#102322,stroke-width:1.2px;
+    classDef blocked fill:#FFF0F0,stroke:#CB3A3A,color:#6B1F1F,stroke-width:1.6px;
+    classDef external fill:#F4F0FF,stroke:#7B61FF,color:#2D225E,stroke-width:1.3px;
+
+    ENTRY["Entry surfaces<br/>CLI / TUI / extension"]:::entry
+    INTAKE["Review intake<br/>repo + PR + baseline + prompt"]:::entry
+    PREFLIGHT{"Preflight safe<br/>and unambiguous?"}:::gate
+    ATTEMPT["LaunchAttempt<br/>recorded durably"]:::gate
+    VERIFY{"Real provider session<br/>verified?"}:::gate
+    WORKER["Review worker gets<br/>bounded task + context"]:::core
+    PACK["Structured findings pack<br/>plus raw output"]:::core
+    NORMALIZE["Roger normalizes findings,<br/>attention, and lineage"]:::core
+    INSPECT["TUI / CLI inspect, triage,<br/>clarify, and refresh"]:::core
+    DRAFT["Draft comments locally"]:::core
+    APPROVE{"Explicit human approval?"}:::gate
+    POST["GitHub adapter posts"]:::external
+    AUDIT["PostedAction audit trail"]:::data
+    STORE["SQLite + artifacts + search"]:::data
+    BLOCK["Fail closed<br/>status / doctor / repair guidance"]:::blocked
+
+    ENTRY --> INTAKE --> PREFLIGHT
+    PREFLIGHT -- no --> BLOCK
+    PREFLIGHT -- yes --> ATTEMPT
+    ATTEMPT --> STORE
+    ATTEMPT --> VERIFY
+    VERIFY -- no --> BLOCK
+    VERIFY -- yes --> WORKER --> PACK --> NORMALIZE --> INSPECT
+    NORMALIZE --> STORE
+    INSPECT -- follow-up / refresh --> WORKER
+    INSPECT --> DRAFT --> APPROVE
+    APPROVE -- not yet --> INSPECT
+    APPROVE -- approved --> POST --> AUDIT --> STORE
+```
+
+At the top level:
+
+- `rr` owns the review lifecycle, approval model, and posting boundary
+- findings, artifacts, and search stay local
+- the review worker runs a bounded task inside a provider session
+- GitHub is a target surface, not Roger's source of truth
+
+For the fuller architecture and diagram pack, see
+[`docs/ROOT_LEVEL_FLOW_AND_ARCHITECTURE_DIAGRAMS.md`](docs/ROOT_LEVEL_FLOW_AND_ARCHITECTURE_DIAGRAMS.md)
+and
+[`docs/PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md).
+
+## Browser Companion
+
+Roger's browser companion is optional and launch-oriented.
+
+- supported browsers: Chrome, Edge, and Brave
+- normal setup path: `rr extension setup --browser <edge|chrome|brave>`
+- verification path: `rr extension doctor --browser <edge|chrome|brave>`
+- the browser lane is for launch and resume convenience; approval and posting
+  stay local and explicit
+
+## Contributing
+
+Roger Reviewer accepts Issues, not Pull Requests.
+
+If you found a bug, want a feature, or want to challenge a workflow or product
+assumption, open an issue first:
+
+- [Open an issue](https://github.com/cdilga/roger-reviewer/issues)
+- [Contribution policy](CONTRIBUTING.md)
+
+## Docs
+
+- [Canonical plan](docs/PLAN_FOR_ROGER_REVIEWER.md)
+- [Architecture diagrams](docs/ROOT_LEVEL_FLOW_AND_ARCHITECTURE_DIAGRAMS.md)
+- [TUI workspace contract](docs/TUI_WORKSPACE_AND_OPERATOR_FLOW_CONTRACT.md)
+- [Harness session linkage contract](docs/HARNESS_SESSION_LINKAGE_CONTRACT.md)
+
+## License
+
+[MIT](LICENSE)

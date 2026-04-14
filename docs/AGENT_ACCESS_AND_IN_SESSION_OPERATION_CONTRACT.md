@@ -1,7 +1,7 @@
 # Agent Access And In-Session Operation Contract
 
-Status: Proposed
-Class: proposed support contract
+Status: merged into canonical/support contracts on 2026-04-14
+Class: historical side-plan / merged input
 Audience: maintainers shaping Roger’s active-agent surfaces across CLI, harness, TUI, and future MCP projections
 
 Authority:
@@ -12,8 +12,10 @@ Authority:
 - [`SEARCH_MEMORY_LIFECYCLE_AND_SEMANTIC_ASSET_POLICY.md`](./SEARCH_MEMORY_LIFECYCLE_AND_SEMANTIC_ASSET_POLICY.md)
 - [`ROBOT_CLI_CONTRACT.md`](./ROBOT_CLI_CONTRACT.md)
 
-If this document conflicts with the canonical plan, the canonical plan wins
-until it is deliberately updated.
+This document is no longer the live normative home. Use
+[`REVIEW_WORKER_RUNTIME_AND_BOUNDARY_CONTRACT.md`](./REVIEW_WORKER_RUNTIME_AND_BOUNDARY_CONTRACT.md),
+[`SEARCH_MEMORY_LIFECYCLE_AND_SEMANTIC_ASSET_POLICY.md`](./SEARCH_MEMORY_LIFECYCLE_AND_SEMANTIC_ASSET_POLICY.md),
+and [`ROBOT_CLI_CONTRACT.md`](./ROBOT_CLI_CONTRACT.md) for current truth.
 
 ---
 

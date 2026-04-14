@@ -81,7 +81,7 @@ Required fields:
 - `review_session_id`
 - `review_run_id`
 - `review_task_id`
-- `prompt_preset_id`
+- `prompt_preset_id` nullable
 - `source_surface`: Roger-owned origin enum such as `cli`, `tui`, `extension`,
   `external_link`, `harness_command`, `agent`, or `system`
 - `turn_index`
@@ -273,7 +273,7 @@ Optional payload:
 
 #### `draft_approved`
 
-Use when a draft or batch moves through approval, rejection, or invalidation.
+Use when a draft or batch moves into an approved state.
 
 Required payload:
 

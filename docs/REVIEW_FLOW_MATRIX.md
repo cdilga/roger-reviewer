@@ -15,6 +15,10 @@ Purpose:
 - use [`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md)
   as the explicit provider/browser/OS coverage matrix for which flows must run
   where
+- use
+  [`PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md)
+  as the user-language companion artifact when a flow needs a human-readable
+  narrative script or chaos story
 
 ## How to use this matrix
 
@@ -22,6 +26,10 @@ Purpose:
 - implementation beads can reference flow IDs in acceptance criteria
 - integration tests should cover the highest-risk happy path plus the most
   important degradation paths for each family
+- when a test needs a concrete operator story rather than a surface matrix,
+  pair the chosen flow family with one persona scenario id such as `PJ-03A`
+  from
+  [`PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md)
 - if a new surface or feature cannot be mapped cleanly onto an existing flow,
   either add a flow or explain why it is intentionally out of scope
 
@@ -260,14 +268,16 @@ Purpose:
 - Happy path: user searches prior findings, summaries, artifacts, or promoted
   memory without leaving the current review context, and Roger returns explicit
   lane/provenance truth such as `evidence_hits`, `tentative_candidates`, and
-  `promoted_memory`
+  `promoted_memory`, plus resolved planner intent rather than an opaque simple
+  query mode
 - Common variants: `query_mode=auto`, `exact_lookup`, `recall`, or
   `related_context`; search from inspector; compare with related prior finding;
   repo-only vs explicit broader overlay; candidate memory shown only for strong
   anchor overlap or explicit request; active-agent lookup through `rr --robot`
 - Failure/recovery: lexical-only degraded mode, conflicting history, no safe
   result, stale-memory suppression, overlay denied, or candidate memory withheld
-  because ordinary retrieval is not allowed to treat it as promoted memory
+  because ordinary retrieval is not allowed to treat it as promoted memory, or
+  explicit `recovery_scan` mode when normal lexical sidecars are unavailable
 - Test intent: prove retrieval is useful without causing silent scope bleed
 
 ### F09.1: Active Agent Memory Access During Review
@@ -281,7 +291,8 @@ Purpose:
   posting state directly
 - Common variants: `rr --robot` read/query flow, supported harness-native
   `roger-help`/`roger-status`/`roger-findings`/`roger-return`, explicit TUI
-  handoff for promotion review or approval-sensitive work
+  handoff for promotion review or approval-sensitive work, baseline-resolved
+  default search posture after dropout or reseed
 - Failure/recovery: unsupported harness-native command falls back to the
   equivalent `rr` guidance, unavailable overlays stay blocked, lexical-only
   recall remains explicit, or Roger requires a reseed/return path rather than

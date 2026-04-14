@@ -126,8 +126,8 @@ artifact_retention = "always"
 {
   "policy_version": 1,
   "release_line": "0.1.x",
-  "blessed_automated_e2e_budget": 1,
-  "current_planned_blessed_automated_e2e_count": 1,
+  "blessed_automated_e2e_budget": 6,
+  "current_planned_blessed_automated_e2e_count": 6,
   "warning_mode": "warn_on_unjustified_growth",
   "future_ci_mode": "fail_on_unjustified_growth",
   "blessed_e2e_ids": [
@@ -136,6 +136,36 @@ artifact_retention = "always"
       "name": "Core review happy path",
       "status": "implemented",
       "notes": "Blessed path"
+    },
+    {
+      "id": "E2E-02",
+      "name": "Cross-surface review continuity with recall",
+      "status": "budgeted_not_yet_implemented",
+      "notes": "Budget-approved scenario slot"
+    },
+    {
+      "id": "E2E-03",
+      "name": "TUI-first review with memory-assisted triage",
+      "status": "budgeted_not_yet_implemented",
+      "notes": "Budget-approved scenario slot"
+    },
+    {
+      "id": "E2E-04",
+      "name": "Refresh and draft reconciliation after new commits",
+      "status": "budgeted_not_yet_implemented",
+      "notes": "Budget-approved scenario slot"
+    },
+    {
+      "id": "E2E-05",
+      "name": "Browser setup and first PR-page launch",
+      "status": "budgeted_not_yet_implemented",
+      "notes": "Budget-approved scenario slot"
+    },
+    {
+      "id": "E2E-06",
+      "name": "Bare-harness dropout and return continuity",
+      "status": "budgeted_not_yet_implemented",
+      "notes": "Budget-approved scenario slot"
     }
   ],
   "required_justification_fields_for_growth": []
