@@ -493,6 +493,60 @@ impl MinimalTuiShell {
             .collect()
     }
 
+    pub fn apply_snapshot(&mut self, snapshot: ReadOnlySessionSnapshot) {
+        let preferred_session_id = self
+            .active_sessions
+            .get(self.active_session_index)
+            .map(|entry| entry.session_id.clone());
+        let selected_finding_id = self.selected_finding_id.clone();
+        let active_sessions = if snapshot.active_sessions.is_empty() {
+            vec![ActiveSessionEntry {
+                session_id: snapshot.chrome.session_id.clone(),
+                repository: snapshot.chrome.repository.clone(),
+                pull_request_number: snapshot.chrome.pull_request_number,
+                provider: snapshot.chrome.provider.clone(),
+                continuity_state: snapshot.chrome.continuity_state.clone(),
+                attention_state: snapshot.chrome.attention_state.clone(),
+                degraded: false,
+            }]
+        } else {
+            snapshot.active_sessions
+        };
+
+        self.chrome = snapshot.chrome;
+        self.jobs = snapshot.jobs;
+        self.supervisor = snapshot.supervisor;
+        self.finding_rows = snapshot.finding_rows;
+        self.finding_details = snapshot.finding_details;
+        self.local_draft_queue = snapshot.local_draft_queue;
+        self.active_sessions = active_sessions;
+        self.overview_lines = snapshot.overview_lines;
+        self.recent_run_lines = snapshot.recent_run_lines;
+        self.findings_preview_lines = snapshot.findings_preview_lines;
+        self.activity_lines = snapshot.activity_lines;
+        self.posting_requested = false;
+
+        self.active_session_index = preferred_session_id
+            .and_then(|session_id| {
+                self.active_sessions
+                    .iter()
+                    .position(|entry| entry.session_id == session_id)
+            })
+            .or_else(|| {
+                self.active_sessions
+                    .iter()
+                    .position(|entry| entry.session_id == self.chrome.session_id)
+            })
+            .unwrap_or(0);
+        self.apply_active_session_chrome();
+
+        self.selected_finding_id = selected_finding_id
+            .filter(|finding_id| self.has_finding(finding_id))
+            .or_else(|| self.default_selected_finding_id());
+
+        self.rebuild_panels();
+    }
+
     pub fn apply_wake_signal(&mut self, wake: WakeSignal) {
         self.wake_count += 1;
         self.jobs = wake.jobs;
@@ -712,5 +766,26 @@ impl MinimalTuiShell {
         self.chrome.provider = active.provider;
         self.chrome.continuity_state = active.continuity_state;
         self.chrome.attention_state = active.attention_state;
+    }
+
+    fn has_finding(&self, finding_id: &str) -> bool {
+        self.finding_rows
+            .iter()
+            .any(|row| row.finding_id == finding_id)
+            || self
+                .finding_details
+                .iter()
+                .any(|detail| detail.finding_id == finding_id)
+    }
+
+    fn default_selected_finding_id(&self) -> Option<String> {
+        self.finding_rows
+            .first()
+            .map(|row| row.finding_id.clone())
+            .or_else(|| {
+                self.finding_details
+                    .first()
+                    .map(|detail| detail.finding_id.clone())
+            })
     }
 }

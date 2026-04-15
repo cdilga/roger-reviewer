@@ -349,3 +349,145 @@ fn wake_signal_surfaces_background_jobs_and_supervisor_snapshot() {
     assert_eq!(shell.supervisor.queue_depth, 2);
     assert!(shell.supervisor.wake_requested);
 }
+
+#[test]
+fn apply_snapshot_clears_stale_pending_post_and_surfaces_canonical_invalidation() {
+    let mut shell = MinimalTuiShell::open(sample_snapshot());
+    assert!(shell.review_draft(
+        "draft-1",
+        DraftReviewDecision::Approved,
+        None,
+        None,
+        1_700_000_121,
+    ));
+    assert_eq!(shell.pending_post_drafts().len(), 1);
+
+    let mut refreshed = sample_snapshot();
+    refreshed.finding_rows[0].outbound_state = "invalidated".to_owned();
+    refreshed.local_draft_queue[0].decision = DraftReviewDecision::Invalidated;
+    refreshed.local_draft_queue[0].pending_post = false;
+    refreshed.local_draft_queue[0].invalidation_reason = Some("target_rebased".to_owned());
+    refreshed.activity_lines = vec!["posting blocked until draft is regenerated".to_owned()];
+
+    shell.apply_snapshot(refreshed);
+
+    assert_eq!(shell.pending_post_drafts().len(), 0);
+    assert!(!shell.posting_requested);
+    assert_eq!(
+        shell.local_draft_queue[0].decision,
+        DraftReviewDecision::Invalidated
+    );
+    assert_eq!(
+        shell.local_draft_queue[0].invalidation_reason.as_deref(),
+        Some("target_rebased")
+    );
+
+    let findings_lines = shell
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Findings")
+        .expect("findings panel")
+        .lines
+        .join("\n");
+    assert!(findings_lines.contains("outbound=invalidated"));
+
+    let draft_queue_lines = shell
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Draft Queue")
+        .expect("draft queue panel")
+        .lines
+        .join("\n");
+    assert!(draft_queue_lines.contains("invalidated"));
+    assert!(draft_queue_lines.contains("reason=target_rebased"));
+    assert!(!draft_queue_lines.contains("pending_post"));
+}
+
+#[test]
+fn apply_snapshot_preserves_selected_finding_and_panel_when_identity_survives() {
+    let mut shell = MinimalTuiShell::open(sample_snapshot());
+    shell.navigate_next_panel();
+    shell.navigate_next_panel();
+    shell.navigate_next_panel();
+    assert_eq!(shell.active_panel().title, "Finding Detail");
+    assert!(shell.select_finding("finding-1"));
+
+    let mut refreshed = sample_snapshot();
+    refreshed.chrome.attention_state = "outbound_approval_required".to_owned();
+    refreshed.finding_rows[0].outbound_state = "approved".to_owned();
+    refreshed.finding_details[0].normalized_summary =
+        "Approval token was revoked and re-approved after refresh".to_owned();
+    refreshed.local_draft_queue[0].decision = DraftReviewDecision::Approved;
+    refreshed.local_draft_queue[0].pending_post = true;
+    refreshed.active_sessions[0].attention_state = "outbound_approval_required".to_owned();
+
+    shell.apply_snapshot(refreshed);
+
+    assert_eq!(shell.active_panel().title, "Finding Detail");
+    assert_eq!(
+        shell
+            .selected_finding_detail()
+            .map(|detail| detail.finding_id.as_str()),
+        Some("finding-1")
+    );
+    assert_eq!(shell.chrome.attention_state, "outbound_approval_required");
+    assert_eq!(shell.pending_post_drafts().len(), 1);
+
+    let detail_lines = shell
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Finding Detail")
+        .expect("finding detail panel")
+        .lines
+        .join("\n");
+    assert!(detail_lines.contains("outbound=approved"));
+    assert!(detail_lines.contains("re-approved after refresh"));
+}
+
+#[test]
+fn apply_snapshot_falls_back_to_first_available_finding_when_selection_is_gone() {
+    let mut shell = MinimalTuiShell::open(sample_snapshot());
+    shell.navigate_next_panel();
+    shell.navigate_next_panel();
+    shell.navigate_next_panel();
+    assert!(shell.select_finding("finding-1"));
+
+    let mut refreshed = sample_snapshot();
+    refreshed.finding_rows = vec![FindingListRow {
+        finding_id: "finding-2".to_owned(),
+        title: "Posting retry blocked until approval is renewed".to_owned(),
+        severity: "medium".to_owned(),
+        triage_state: "accepted".to_owned(),
+        outbound_state: "awaiting_approval".to_owned(),
+        refresh_lineage: Some("revalidated".to_owned()),
+        degraded: false,
+    }];
+    refreshed.finding_details = vec![FindingDetail {
+        finding_id: "finding-2".to_owned(),
+        normalized_summary: "Refreshed snapshot replaced the prior finding selection".to_owned(),
+        refresh_lineage: Some("revalidated".to_owned()),
+        degraded_reason: None,
+        evidence: Vec::new(),
+    }];
+    refreshed.local_draft_queue[0].finding_id = Some("finding-2".to_owned());
+
+    shell.apply_snapshot(refreshed);
+
+    assert_eq!(shell.active_panel().title, "Finding Detail");
+    assert_eq!(
+        shell
+            .selected_finding_detail()
+            .map(|detail| detail.finding_id.as_str()),
+        Some("finding-2")
+    );
+
+    let detail_lines = shell
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Finding Detail")
+        .expect("finding detail panel")
+        .lines
+        .join("\n");
+    assert!(detail_lines.contains("Finding finding-2"));
+    assert!(detail_lines.contains("outbound=awaiting_approval"));
+}
