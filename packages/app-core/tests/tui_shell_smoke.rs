@@ -172,6 +172,71 @@ fn triage_and_clarification_actions_are_recorded_locally_only() {
 }
 
 #[test]
+fn queue_and_inspector_keep_outbound_states_and_posting_elevation_visible() {
+    let mut snapshot = sample_snapshot();
+    snapshot.finding_rows[0].outbound_state = "approved".to_owned();
+    snapshot.local_draft_queue[0].decision = DraftReviewDecision::Approved;
+    snapshot.local_draft_queue[0].pending_post = true;
+
+    let mut shell = MinimalTuiShell::open(snapshot);
+    shell.select_finding("finding-1");
+
+    let findings_lines = shell
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Findings")
+        .expect("findings panel")
+        .lines
+        .join("\n");
+    assert!(findings_lines.contains("outbound=approved"));
+
+    let detail_lines = shell
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Finding Detail")
+        .expect("finding detail panel")
+        .lines
+        .join("\n");
+    assert!(detail_lines.contains("triage=new · outbound=approved"));
+
+    let draft_queue_lines = shell
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Draft Queue")
+        .expect("draft queue panel")
+        .lines
+        .join("\n");
+    assert!(draft_queue_lines.contains("approved"));
+    assert!(draft_queue_lines.contains("pending_post"));
+
+    let mut invalidated_snapshot = sample_snapshot();
+    invalidated_snapshot.finding_rows[0].outbound_state = "invalidated".to_owned();
+    invalidated_snapshot.local_draft_queue[0].decision = DraftReviewDecision::Invalidated;
+    invalidated_snapshot.local_draft_queue[0].invalidation_reason =
+        Some("target_rebased".to_owned());
+    let mut invalidated_shell = MinimalTuiShell::open(invalidated_snapshot);
+    invalidated_shell.select_finding("finding-1");
+
+    let invalidated_detail = invalidated_shell
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Finding Detail")
+        .expect("finding detail panel")
+        .lines
+        .join("\n");
+    assert!(invalidated_detail.contains("outbound=invalidated"));
+
+    let invalidated_queue = invalidated_shell
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Draft Queue")
+        .expect("draft queue panel")
+        .lines
+        .join("\n");
+    assert!(invalidated_queue.contains("reason=target_rebased"));
+}
+
+#[test]
 fn local_draft_queue_transitions_keep_pending_post_visibility_local() {
     let mut shell = MinimalTuiShell::open(sample_snapshot());
     assert_eq!(shell.pending_post_drafts().len(), 0);

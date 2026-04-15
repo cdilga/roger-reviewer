@@ -83,6 +83,40 @@ impl From<serde_json::Error> for StorageError {
 
 pub type Result<T> = std::result::Result<T, StorageError>;
 
+fn projected_outbound_state_from_approval_state(raw: &str) -> &'static str {
+    match raw {
+        "NotDrafted" => "not_drafted",
+        "Drafted" => "awaiting_approval",
+        "Approved" => "approved",
+        "Invalidated" => "invalidated",
+        "Posted" => "posted",
+        "Failed" => "failed",
+        _ => "not_drafted",
+    }
+}
+
+fn projected_outbound_state_from_posted_status(raw: &str) -> &'static str {
+    match raw {
+        "Succeeded" | "posted" => "posted",
+        _ => "failed",
+    }
+}
+
+fn projected_outbound_state_from_finding_state(raw: &str) -> &'static str {
+    match raw {
+        "NotDrafted" | "not_drafted" => "not_drafted",
+        "Drafted" | "drafted" => "awaiting_approval",
+        "Approved" | "approved" => "approved",
+        "Posted" | "posted" => "posted",
+        "Failed" | "failed" => "failed",
+        _ => "not_drafted",
+    }
+}
+
+fn is_mutation_elevated_surface_state(state: &str) -> bool {
+    state == "approved"
+}
+
 fn approval_state_str(state: &ApprovalState) -> &'static str {
     match state {
         ApprovalState::NotDrafted => "NotDrafted",
@@ -1249,6 +1283,43 @@ pub struct SessionOverview {
     pub draft_count: i64,
     pub approval_count: i64,
     pub posted_action_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundSurfaceProjection {
+    pub state: String,
+    pub source: String,
+    pub draft_id: Option<String>,
+    pub draft_batch_id: Option<String>,
+    pub approval_id: Option<String>,
+    pub posted_action_id: Option<String>,
+    pub posted_action_status: Option<String>,
+    pub invalidation_reason_code: Option<String>,
+    pub mutation_elevated: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OutboundStateCounts {
+    pub not_drafted: i64,
+    pub awaiting_approval: i64,
+    pub approved: i64,
+    pub invalidated: i64,
+    pub posted: i64,
+    pub failed: i64,
+}
+
+impl OutboundStateCounts {
+    fn record(&mut self, state: &str) {
+        match state {
+            "not_drafted" => self.not_drafted += 1,
+            "awaiting_approval" => self.awaiting_approval += 1,
+            "approved" => self.approved += 1,
+            "invalidated" => self.invalidated += 1,
+            "posted" => self.posted += 1,
+            "failed" => self.failed += 1,
+            _ => {}
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4297,6 +4368,169 @@ impl RogerStore {
             )
             .optional()
             .map_err(StorageError::from)
+    }
+
+    fn canonical_outbound_surface_projection_for_finding(
+        &self,
+        finding_id: &str,
+    ) -> Result<Option<OutboundSurfaceProjection>> {
+        self.conn
+            .query_row(
+                "SELECT
+                    odi.id,
+                    odb.id,
+                    odb.approval_state,
+                    odb.invalidation_reason_code,
+                    oat.id,
+                    pba.id,
+                    pba.status
+                 FROM outbound_draft_items odi
+                 JOIN outbound_draft_batches odb ON odb.id = odi.draft_batch_id
+                 LEFT JOIN outbound_batch_approval_tokens oat ON oat.draft_batch_id = odb.id
+                 LEFT JOIN posted_batch_actions pba ON pba.id = (
+                    SELECT id
+                    FROM posted_batch_actions
+                    WHERE draft_batch_id = odb.id
+                    ORDER BY posted_at DESC, rowid DESC
+                    LIMIT 1
+                 )
+                 WHERE odi.finding_id = ?1
+                 ORDER BY odb.updated_at DESC, odb.row_version DESC,
+                    odi.updated_at DESC, odi.row_version DESC, odi.rowid DESC
+                 LIMIT 1",
+                params![finding_id],
+                |row| {
+                    let approval_state: String = row.get(2)?;
+                    let posted_action_status: Option<String> = row.get(6)?;
+                    let state = posted_action_status
+                        .as_deref()
+                        .map(projected_outbound_state_from_posted_status)
+                        .unwrap_or_else(|| {
+                            projected_outbound_state_from_approval_state(&approval_state)
+                        })
+                        .to_owned();
+                    Ok(OutboundSurfaceProjection {
+                        state: state.clone(),
+                        source: "canonical_batch".to_owned(),
+                        draft_id: row.get(0)?,
+                        draft_batch_id: row.get(1)?,
+                        approval_id: row.get(4)?,
+                        posted_action_id: row.get(5)?,
+                        posted_action_status,
+                        invalidation_reason_code: row.get(3)?,
+                        mutation_elevated: is_mutation_elevated_surface_state(&state),
+                    })
+                },
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    fn legacy_outbound_surface_projection_for_finding(
+        &self,
+        finding_id: &str,
+    ) -> Result<Option<OutboundSurfaceProjection>> {
+        self.conn
+            .query_row(
+                "SELECT
+                    od.id,
+                    oat.id,
+                    oat.revoked_at,
+                    pa.id,
+                    pa.status
+                 FROM outbound_drafts od
+                 LEFT JOIN outbound_approval_tokens oat ON oat.id = (
+                    SELECT id
+                    FROM outbound_approval_tokens
+                    WHERE draft_id = od.id
+                    ORDER BY updated_at DESC, rowid DESC
+                    LIMIT 1
+                 )
+                 LEFT JOIN posted_actions pa ON pa.id = (
+                    SELECT id
+                    FROM posted_actions
+                    WHERE draft_id = od.id
+                    ORDER BY created_at DESC, rowid DESC
+                    LIMIT 1
+                 )
+                 WHERE od.finding_id = ?1
+                 ORDER BY od.updated_at DESC, od.row_version DESC, od.rowid DESC
+                 LIMIT 1",
+                params![finding_id],
+                |row| {
+                    let posted_action_status: Option<String> = row.get(4)?;
+                    let approval_id: Option<String> = row.get(1)?;
+                    let revoked_at: Option<i64> = row.get(2)?;
+                    let state = if let Some(posted_status) = posted_action_status.as_deref() {
+                        projected_outbound_state_from_posted_status(posted_status).to_owned()
+                    } else if approval_id.is_some() {
+                        if revoked_at.is_some() {
+                            "invalidated".to_owned()
+                        } else {
+                            "approved".to_owned()
+                        }
+                    } else {
+                        "awaiting_approval".to_owned()
+                    };
+
+                    Ok(OutboundSurfaceProjection {
+                        state: state.clone(),
+                        source: "legacy_draft".to_owned(),
+                        draft_id: row.get(0)?,
+                        draft_batch_id: None,
+                        approval_id,
+                        posted_action_id: row.get(3)?,
+                        posted_action_status,
+                        invalidation_reason_code: revoked_at
+                            .map(|_| "legacy_revoked".to_owned()),
+                        mutation_elevated: is_mutation_elevated_surface_state(&state),
+                    })
+                },
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    pub fn outbound_surface_projection_for_finding(
+        &self,
+        finding_id: &str,
+        fallback_outbound_state: &str,
+    ) -> Result<OutboundSurfaceProjection> {
+        if let Some(projection) = self.canonical_outbound_surface_projection_for_finding(finding_id)?
+        {
+            return Ok(projection);
+        }
+        if let Some(projection) = self.legacy_outbound_surface_projection_for_finding(finding_id)? {
+            return Ok(projection);
+        }
+
+        let state = projected_outbound_state_from_finding_state(fallback_outbound_state).to_owned();
+        Ok(OutboundSurfaceProjection {
+            state: state.clone(),
+            source: "finding_record".to_owned(),
+            draft_id: None,
+            draft_batch_id: None,
+            approval_id: None,
+            posted_action_id: None,
+            posted_action_status: None,
+            invalidation_reason_code: None,
+            mutation_elevated: is_mutation_elevated_surface_state(&state),
+        })
+    }
+
+    pub fn outbound_state_counts_for_run(
+        &self,
+        review_session_id: &str,
+        review_run_id: &str,
+    ) -> Result<OutboundStateCounts> {
+        let findings = self.materialized_findings_for_run(review_session_id, review_run_id)?;
+        let mut counts = OutboundStateCounts::default();
+        for finding in findings {
+            let projection =
+                self.outbound_surface_projection_for_finding(&finding.id, &finding.outbound_state)?;
+            counts.record(&projection.state);
+        }
+        Ok(counts)
     }
 
     pub fn index_state(&self, scope_key: &str) -> Result<Option<IndexStateRecord>> {

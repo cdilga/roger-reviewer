@@ -3,7 +3,7 @@
 use roger_app_core::cli_config;
 use roger_app_core::time;
 use roger_app_core::{
-    AppError, ContinuityQuality, FindingOutboundState, FindingTriageState, HarnessAdapter,
+    AppError, ContinuityQuality, FindingTriageState, HarnessAdapter,
     LaunchAction, LaunchIntent, ResumeAttemptOutcome, ResumeBundle, ResumeBundleProfile,
     ReviewTarget, RogerCommand, RogerCommandId, RogerCommandInvocationSurface, RogerCommandResult,
     RogerCommandRouteStatus, SessionLocator, Surface, route_harness_command,
@@ -5336,21 +5336,17 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         0
     };
 
-    let awaiting_approval_count = if let Some(run) = latest_run.as_ref() {
-        match store.count_findings_by_outbound_state(
-            &session.id,
-            &run.id,
-            FindingOutboundState::Approved.as_str(),
-        ) {
-            Ok(count) => count as usize,
+    let outbound_counts = if let Some(run) = latest_run.as_ref() {
+        match store.outbound_state_counts_for_run(&session.id, &run.id) {
+            Ok(counts) => counts,
             Err(err) => {
                 return error_response(format!(
-                    "failed to count awaiting approval findings: {err}"
+                    "failed to project outbound approval state for status: {err}"
                 ));
             }
         }
     } else {
-        0
+        roger_storage::OutboundStateCounts::default()
     };
 
     let branch = infer_git_branch(&runtime.cwd);
@@ -5393,7 +5389,25 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 "needs_follow_up": needs_follow_up_count,
             },
             "drafts": {
-                "awaiting_approval": awaiting_approval_count,
+                "awaiting_approval": outbound_counts.awaiting_approval,
+                "approved": outbound_counts.approved,
+                "invalidated": outbound_counts.invalidated,
+                "posted": outbound_counts.posted,
+                "failed": outbound_counts.failed,
+            },
+            "outbound": {
+                "state_counts": {
+                    "not_drafted": outbound_counts.not_drafted,
+                    "awaiting_approval": outbound_counts.awaiting_approval,
+                    "approved": outbound_counts.approved,
+                    "invalidated": outbound_counts.invalidated,
+                    "posted": outbound_counts.posted,
+                    "failed": outbound_counts.failed,
+                },
+                "posting_gate": {
+                    "ready_count": outbound_counts.approved,
+                    "visibly_elevated": outbound_counts.approved > 0,
+                },
             },
             "continuity": {
                 "tier": provider_tier,
@@ -5480,12 +5494,34 @@ fn handle_findings(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
             }
         };
 
+        let outbound_projection =
+            match store.outbound_surface_projection_for_finding(&finding.id, &finding.outbound_state)
+            {
+                Ok(projection) => projection,
+                Err(err) => {
+                    return error_response(format!(
+                        "failed to project outbound approval state for finding {}: {err}",
+                        finding.id
+                    ));
+                }
+            };
+
         items.push(json!({
             "finding_id": finding.id,
             "fingerprint": finding.fingerprint,
             "title": finding.title,
             "triage_state": finding.triage_state,
-            "outbound_state": finding.outbound_state,
+            "outbound_state": outbound_projection.state,
+            "outbound_detail": {
+                "source": outbound_projection.source,
+                "draft_id": outbound_projection.draft_id,
+                "draft_batch_id": outbound_projection.draft_batch_id,
+                "approval_id": outbound_projection.approval_id,
+                "posted_action_id": outbound_projection.posted_action_id,
+                "posted_action_status": outbound_projection.posted_action_status,
+                "invalidation_reason_code": outbound_projection.invalidation_reason_code,
+                "mutation_elevated": outbound_projection.mutation_elevated,
+            },
             "evidence_count": evidence_count,
         }));
     }

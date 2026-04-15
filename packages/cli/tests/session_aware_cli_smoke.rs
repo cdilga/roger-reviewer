@@ -1,15 +1,18 @@
 #![cfg(unix)]
 
 use roger_app_core::{
-    ContinuityQuality, HarnessAdapter, HarnessCommandBinding, LaunchAction, LaunchIntent,
-    ResumeBundle, ResumeBundleProfile, ReviewTarget, RogerCommand, RogerCommandId,
-    RogerCommandInvocationSurface, RogerCommandRouteStatus, Surface, route_harness_command,
+    ApprovalState, ContinuityQuality, HarnessAdapter, HarnessCommandBinding, LaunchAction,
+    LaunchIntent, OutboundApprovalToken, OutboundDraft, OutboundDraftBatch, PostedAction,
+    PostedActionStatus, ResumeBundle, ResumeBundleProfile, ReviewTarget, RogerCommand,
+    RogerCommandId, RogerCommandInvocationSurface, RogerCommandRouteStatus, Surface,
+    outbound_target_tuple_json, route_harness_command,
 };
 use roger_bridge::{BridgeLaunchIntent, BridgePreflight, BridgeResponse, handle_bridge_intent};
 use roger_cli::{CliRuntime, HarnessCommandInvocation, run, run_harness_command};
 use roger_session_opencode::OpenCodeAdapter;
 use roger_storage::{
-    CreateReviewSession, CreateSessionLaunchBinding, LaunchAttemptState, LaunchSurface, RogerStore,
+    CreateMaterializedFinding, CreateReviewSession, CreateSessionLaunchBinding,
+    LaunchAttemptState, LaunchSurface, RogerStore,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -1389,6 +1392,294 @@ fn bounded_provider_outputs_are_truthful_for_status_resume_and_return() {
     assert_eq!(
         return_payload["data"]["provider_capability"]["required_tier_for_return"],
         "tier_b"
+    );
+}
+
+#[test]
+fn status_and_findings_surface_outbound_approval_states_truthfully() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let review = run_rr(
+        &["review", "--pr", "42", "--provider", "opencode", "--robot"],
+        &runtime,
+    );
+    assert_eq!(review.exit_code, 0, "{}", review.stderr);
+    let review_payload = parse_robot_payload(&review.stdout);
+    let session_id = review_payload["data"]["session_id"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+    let review_run_id = review_payload["data"]["review_run_id"]
+        .as_str()
+        .expect("review run id")
+        .to_owned();
+
+    let store = RogerStore::open(&runtime.store_root).expect("open store");
+    for (finding_id, fingerprint, title, outbound_state) in [
+        (
+            "finding-awaiting",
+            "fp-awaiting",
+            "Awaiting approval finding",
+            "drafted",
+        ),
+        (
+            "finding-approved",
+            "fp-approved",
+            "Approved draft finding",
+            "approved",
+        ),
+        (
+            "finding-invalidated",
+            "fp-invalidated",
+            "Invalidated draft finding",
+            "drafted",
+        ),
+        (
+            "finding-posted",
+            "fp-posted",
+            "Posted draft finding",
+            "posted",
+        ),
+        (
+            "finding-failed",
+            "fp-failed",
+            "Failed posting finding",
+            "failed",
+        ),
+    ] {
+        store
+            .upsert_materialized_finding(CreateMaterializedFinding {
+                id: finding_id,
+                session_id: &session_id,
+                review_run_id: &review_run_id,
+                stage: "deep_review",
+                fingerprint,
+                title,
+                normalized_summary: title,
+                severity: "medium",
+                confidence: "medium",
+                triage_state: "accepted",
+                outbound_state,
+            })
+            .expect("upsert materialized finding");
+    }
+
+    store
+        .create_outbound_draft(roger_storage::CreateOutboundDraft {
+            id: "legacy-awaiting",
+            session_id: &session_id,
+            finding_id: "finding-awaiting",
+            target_locator: "github:owner/repo#42/files#thread-awaiting",
+            payload_digest: "sha256:legacy-awaiting",
+            body: "Awaiting approval body",
+        })
+        .expect("create legacy awaiting draft");
+
+    let approved_batch = OutboundDraftBatch {
+        id: "batch-approved".to_owned(),
+        review_session_id: session_id.clone(),
+        review_run_id: review_run_id.clone(),
+        repo_id: "owner/repo".to_owned(),
+        remote_review_target_id: "pr-42".to_owned(),
+        payload_digest: "sha256:payload-approved".to_owned(),
+        approval_state: ApprovalState::Approved,
+        approved_at: Some(1_710_020_000),
+        invalidated_at: None,
+        invalidation_reason_code: None,
+        row_version: 1,
+    };
+    store
+        .store_outbound_draft_batch(&approved_batch)
+        .expect("store approved batch");
+    store
+        .store_outbound_draft_item(&OutboundDraft {
+            id: "draft-approved".to_owned(),
+            review_session_id: session_id.clone(),
+            review_run_id: review_run_id.clone(),
+            finding_id: Some("finding-approved".to_owned()),
+            draft_batch_id: approved_batch.id.clone(),
+            repo_id: approved_batch.repo_id.clone(),
+            remote_review_target_id: approved_batch.remote_review_target_id.clone(),
+            payload_digest: approved_batch.payload_digest.clone(),
+            approval_state: ApprovalState::Approved,
+            anchor_digest: "anchor:approved".to_owned(),
+            row_version: 1,
+        })
+        .expect("store approved draft item");
+    store
+        .store_outbound_approval_token(&OutboundApprovalToken {
+            id: "approval-approved".to_owned(),
+            draft_batch_id: approved_batch.id.clone(),
+            payload_digest: approved_batch.payload_digest.clone(),
+            target_tuple_json: outbound_target_tuple_json(&approved_batch),
+            approved_at: 1_710_020_001,
+            revoked_at: None,
+        })
+        .expect("store approved token");
+
+    let invalidated_batch = OutboundDraftBatch {
+        id: "batch-invalidated".to_owned(),
+        review_session_id: session_id.clone(),
+        review_run_id: review_run_id.clone(),
+        repo_id: "owner/repo".to_owned(),
+        remote_review_target_id: "pr-42".to_owned(),
+        payload_digest: "sha256:payload-invalidated".to_owned(),
+        approval_state: ApprovalState::Invalidated,
+        approved_at: Some(1_710_020_010),
+        invalidated_at: Some(1_710_020_020),
+        invalidation_reason_code: Some("target_rebased".to_owned()),
+        row_version: 2,
+    };
+    store
+        .store_outbound_draft_batch(&invalidated_batch)
+        .expect("store invalidated batch");
+    store
+        .store_outbound_draft_item(&OutboundDraft {
+            id: "draft-invalidated".to_owned(),
+            review_session_id: session_id.clone(),
+            review_run_id: review_run_id.clone(),
+            finding_id: Some("finding-invalidated".to_owned()),
+            draft_batch_id: invalidated_batch.id.clone(),
+            repo_id: invalidated_batch.repo_id.clone(),
+            remote_review_target_id: invalidated_batch.remote_review_target_id.clone(),
+            payload_digest: invalidated_batch.payload_digest.clone(),
+            approval_state: ApprovalState::Invalidated,
+            anchor_digest: "anchor:invalidated".to_owned(),
+            row_version: 2,
+        })
+        .expect("store invalidated draft item");
+
+    store
+        .create_outbound_draft(roger_storage::CreateOutboundDraft {
+            id: "legacy-posted",
+            session_id: &session_id,
+            finding_id: "finding-posted",
+            target_locator: "github:owner/repo#42/files#thread-posted",
+            payload_digest: "sha256:legacy-posted",
+            body: "Posted body",
+        })
+        .expect("create legacy posted draft");
+    store
+        .approve_outbound_draft(
+            "legacy-approval-posted",
+            "legacy-posted",
+            "sha256:legacy-posted",
+            "github:owner/repo#42/files#thread-posted",
+        )
+        .expect("approve legacy posted draft");
+    store
+        .record_posted_action(
+            "legacy-posted-action",
+            "legacy-posted",
+            "github:owner/repo#42/files#thread-posted",
+            "sha256:legacy-posted",
+            "posted",
+        )
+        .expect("record legacy posted action");
+
+    let failed_batch = OutboundDraftBatch {
+        id: "batch-failed".to_owned(),
+        review_session_id: session_id.clone(),
+        review_run_id: review_run_id.clone(),
+        repo_id: "owner/repo".to_owned(),
+        remote_review_target_id: "pr-42".to_owned(),
+        payload_digest: "sha256:payload-failed".to_owned(),
+        approval_state: ApprovalState::Approved,
+        approved_at: Some(1_710_020_030),
+        invalidated_at: None,
+        invalidation_reason_code: None,
+        row_version: 1,
+    };
+    store
+        .store_outbound_draft_batch(&failed_batch)
+        .expect("store failed batch");
+    store
+        .store_outbound_draft_item(&OutboundDraft {
+            id: "draft-failed".to_owned(),
+            review_session_id: session_id.clone(),
+            review_run_id: review_run_id.clone(),
+            finding_id: Some("finding-failed".to_owned()),
+            draft_batch_id: failed_batch.id.clone(),
+            repo_id: failed_batch.repo_id.clone(),
+            remote_review_target_id: failed_batch.remote_review_target_id.clone(),
+            payload_digest: failed_batch.payload_digest.clone(),
+            approval_state: ApprovalState::Approved,
+            anchor_digest: "anchor:failed".to_owned(),
+            row_version: 1,
+        })
+        .expect("store failed draft item");
+    store
+        .store_posted_batch_action(&PostedAction {
+            id: "posted-failed".to_owned(),
+            draft_batch_id: failed_batch.id.clone(),
+            provider: "github".to_owned(),
+            remote_identifier: "review-comment-failed".to_owned(),
+            status: PostedActionStatus::Failed,
+            posted_payload_digest: failed_batch.payload_digest.clone(),
+            posted_at: 1_710_020_040,
+            failure_code: Some("github_write_denied".to_owned()),
+        })
+        .expect("store failed posted action");
+
+    let status = run_rr(&["status", "--session", &session_id, "--robot"], &runtime);
+    assert_eq!(status.exit_code, 0, "{}", status.stderr);
+    let status_payload = parse_robot_payload(&status.stdout);
+    assert_eq!(status_payload["data"]["outbound"]["state_counts"]["awaiting_approval"], 1);
+    assert_eq!(status_payload["data"]["outbound"]["state_counts"]["approved"], 1);
+    assert_eq!(status_payload["data"]["outbound"]["state_counts"]["invalidated"], 1);
+    assert_eq!(status_payload["data"]["outbound"]["state_counts"]["posted"], 1);
+    assert_eq!(status_payload["data"]["outbound"]["state_counts"]["failed"], 1);
+    assert_eq!(status_payload["data"]["outbound"]["posting_gate"]["ready_count"], 1);
+    assert_eq!(
+        status_payload["data"]["outbound"]["posting_gate"]["visibly_elevated"],
+        serde_json::json!(true)
+    );
+
+    let findings = run_rr(&["findings", "--session", &session_id, "--robot"], &runtime);
+    assert_eq!(findings.exit_code, 0, "{}", findings.stderr);
+    let findings_payload = parse_robot_payload(&findings.stdout);
+    let items = findings_payload["data"]["items"]
+        .as_array()
+        .expect("findings items");
+    let indexed = items
+        .iter()
+        .map(|item| {
+            (
+                item["finding_id"]
+                    .as_str()
+                    .expect("finding id")
+                    .to_owned(),
+                item,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    assert_eq!(indexed["finding-awaiting"]["outbound_state"], "awaiting_approval");
+    assert_eq!(indexed["finding-awaiting"]["outbound_detail"]["source"], "legacy_draft");
+    assert_eq!(indexed["finding-approved"]["outbound_state"], "approved");
+    assert_eq!(
+        indexed["finding-approved"]["outbound_detail"]["mutation_elevated"],
+        serde_json::json!(true)
+    );
+    assert_eq!(indexed["finding-invalidated"]["outbound_state"], "invalidated");
+    assert_eq!(
+        indexed["finding-invalidated"]["outbound_detail"]["invalidation_reason_code"],
+        "target_rebased"
+    );
+    assert_eq!(indexed["finding-posted"]["outbound_state"], "posted");
+    assert_eq!(indexed["finding-posted"]["outbound_detail"]["source"], "legacy_draft");
+    assert_eq!(indexed["finding-failed"]["outbound_state"], "failed");
+    assert_eq!(
+        indexed["finding-failed"]["outbound_detail"]["posted_action_status"],
+        "Failed"
     );
 }
 

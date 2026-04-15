@@ -382,3 +382,209 @@ fn canonical_outbound_storage_upserts_state_transitions_for_invalidation() -> Re
 
     Ok(())
 }
+
+#[test]
+fn outbound_surface_projection_reconciles_canonical_and_legacy_state_paths() -> Result<()> {
+    let temp = tempdir()?;
+    let root = temp.path().join("profile");
+    let store = RogerStore::open(&root)?;
+    seed_review(&store)?;
+    store.create_finding(CreateFinding {
+        id: "finding-3",
+        session_id: "session-1",
+        first_run_id: "run-1",
+        fingerprint: "fp:three",
+        title: "Third outbound finding",
+        triage_state: "accepted",
+        outbound_state: "drafted",
+    })?;
+    store.create_finding(CreateFinding {
+        id: "finding-4",
+        session_id: "session-1",
+        first_run_id: "run-1",
+        fingerprint: "fp:four",
+        title: "Fourth outbound finding",
+        triage_state: "accepted",
+        outbound_state: "posted",
+    })?;
+    store.create_finding(CreateFinding {
+        id: "finding-5",
+        session_id: "session-1",
+        first_run_id: "run-1",
+        fingerprint: "fp:five",
+        title: "Fifth outbound finding",
+        triage_state: "accepted",
+        outbound_state: "failed",
+    })?;
+
+    store.create_outbound_draft(roger_storage::CreateOutboundDraft {
+        id: "legacy-awaiting",
+        session_id: "session-1",
+        finding_id: "finding-1",
+        target_locator: "github:owner/repo#42/files#thread-1",
+        payload_digest: "sha256:legacy-awaiting",
+        body: "Awaiting approval body",
+    })?;
+
+    let approved_batch = OutboundDraftBatch {
+        id: "batch-approved".to_owned(),
+        review_session_id: "session-1".to_owned(),
+        review_run_id: "run-1".to_owned(),
+        repo_id: "owner/repo".to_owned(),
+        remote_review_target_id: "pr-42".to_owned(),
+        payload_digest: "sha256:payload-approved".to_owned(),
+        approval_state: ApprovalState::Approved,
+        approved_at: Some(1_710_010_000),
+        invalidated_at: None,
+        invalidation_reason_code: None,
+        row_version: 1,
+    };
+    store.store_outbound_draft_batch(&approved_batch)?;
+    store.store_outbound_draft_item(&OutboundDraft {
+        id: "draft-approved".to_owned(),
+        review_session_id: "session-1".to_owned(),
+        review_run_id: "run-1".to_owned(),
+        finding_id: Some("finding-2".to_owned()),
+        draft_batch_id: approved_batch.id.clone(),
+        repo_id: approved_batch.repo_id.clone(),
+        remote_review_target_id: approved_batch.remote_review_target_id.clone(),
+        payload_digest: approved_batch.payload_digest.clone(),
+        approval_state: ApprovalState::Approved,
+        anchor_digest: "anchor:approved".to_owned(),
+        row_version: 1,
+    })?;
+    store.store_outbound_approval_token(&OutboundApprovalToken {
+        id: "approval-approved".to_owned(),
+        draft_batch_id: approved_batch.id.clone(),
+        payload_digest: approved_batch.payload_digest.clone(),
+        target_tuple_json: outbound_target_tuple_json(&approved_batch),
+        approved_at: 1_710_010_001,
+        revoked_at: None,
+    })?;
+
+    let invalidated_batch = OutboundDraftBatch {
+        id: "batch-invalidated".to_owned(),
+        review_session_id: "session-1".to_owned(),
+        review_run_id: "run-1".to_owned(),
+        repo_id: "owner/repo".to_owned(),
+        remote_review_target_id: "pr-42".to_owned(),
+        payload_digest: "sha256:payload-invalidated".to_owned(),
+        approval_state: ApprovalState::Invalidated,
+        approved_at: Some(1_710_010_010),
+        invalidated_at: Some(1_710_010_020),
+        invalidation_reason_code: Some("target_rebased".to_owned()),
+        row_version: 2,
+    };
+    store.store_outbound_draft_batch(&invalidated_batch)?;
+    store.store_outbound_draft_item(&OutboundDraft {
+        id: "draft-invalidated".to_owned(),
+        review_session_id: "session-1".to_owned(),
+        review_run_id: "run-1".to_owned(),
+        finding_id: Some("finding-3".to_owned()),
+        draft_batch_id: invalidated_batch.id.clone(),
+        repo_id: invalidated_batch.repo_id.clone(),
+        remote_review_target_id: invalidated_batch.remote_review_target_id.clone(),
+        payload_digest: invalidated_batch.payload_digest.clone(),
+        approval_state: ApprovalState::Invalidated,
+        anchor_digest: "anchor:invalidated".to_owned(),
+        row_version: 2,
+    })?;
+
+    store.create_outbound_draft(roger_storage::CreateOutboundDraft {
+        id: "legacy-posted",
+        session_id: "session-1",
+        finding_id: "finding-4",
+        target_locator: "github:owner/repo#42/files#thread-4",
+        payload_digest: "sha256:legacy-posted",
+        body: "Posted body",
+    })?;
+    store.approve_outbound_draft(
+        "legacy-approval-posted",
+        "legacy-posted",
+        "sha256:legacy-posted",
+        "github:owner/repo#42/files#thread-4",
+    )?;
+    store.record_posted_action(
+        "legacy-posted-action",
+        "legacy-posted",
+        "github:owner/repo#42/files#thread-4",
+        "sha256:legacy-posted",
+        "posted",
+    )?;
+
+    let failed_batch = OutboundDraftBatch {
+        id: "batch-failed".to_owned(),
+        review_session_id: "session-1".to_owned(),
+        review_run_id: "run-1".to_owned(),
+        repo_id: "owner/repo".to_owned(),
+        remote_review_target_id: "pr-42".to_owned(),
+        payload_digest: "sha256:payload-failed".to_owned(),
+        approval_state: ApprovalState::Approved,
+        approved_at: Some(1_710_010_030),
+        invalidated_at: None,
+        invalidation_reason_code: None,
+        row_version: 1,
+    };
+    store.store_outbound_draft_batch(&failed_batch)?;
+    store.store_outbound_draft_item(&OutboundDraft {
+        id: "draft-failed".to_owned(),
+        review_session_id: "session-1".to_owned(),
+        review_run_id: "run-1".to_owned(),
+        finding_id: Some("finding-5".to_owned()),
+        draft_batch_id: failed_batch.id.clone(),
+        repo_id: failed_batch.repo_id.clone(),
+        remote_review_target_id: failed_batch.remote_review_target_id.clone(),
+        payload_digest: failed_batch.payload_digest.clone(),
+        approval_state: ApprovalState::Approved,
+        anchor_digest: "anchor:failed".to_owned(),
+        row_version: 1,
+    })?;
+    store.store_posted_batch_action(&PostedAction {
+        id: "posted-failed".to_owned(),
+        draft_batch_id: failed_batch.id.clone(),
+        provider: "github".to_owned(),
+        remote_identifier: "review-comment-2005".to_owned(),
+        status: PostedActionStatus::Failed,
+        posted_payload_digest: failed_batch.payload_digest.clone(),
+        posted_at: 1_710_010_040,
+        failure_code: Some("github_write_denied".to_owned()),
+    })?;
+
+    let counts = store.outbound_state_counts_for_run("session-1", "run-1")?;
+    assert_eq!(counts.awaiting_approval, 1);
+    assert_eq!(counts.approved, 1);
+    assert_eq!(counts.invalidated, 1);
+    assert_eq!(counts.posted, 1);
+    assert_eq!(counts.failed, 1);
+
+    let awaiting =
+        store.outbound_surface_projection_for_finding("finding-1", "drafted")?;
+    assert_eq!(awaiting.state, "awaiting_approval");
+    assert_eq!(awaiting.source, "legacy_draft");
+    assert!(!awaiting.mutation_elevated);
+
+    let approved =
+        store.outbound_surface_projection_for_finding("finding-2", "approved")?;
+    assert_eq!(approved.state, "approved");
+    assert_eq!(approved.source, "canonical_batch");
+    assert!(approved.mutation_elevated);
+
+    let invalidated =
+        store.outbound_surface_projection_for_finding("finding-3", "drafted")?;
+    assert_eq!(invalidated.state, "invalidated");
+    assert_eq!(
+        invalidated.invalidation_reason_code.as_deref(),
+        Some("target_rebased")
+    );
+
+    let posted = store.outbound_surface_projection_for_finding("finding-4", "posted")?;
+    assert_eq!(posted.state, "posted");
+    assert_eq!(posted.source, "legacy_draft");
+
+    let failed = store.outbound_surface_projection_for_finding("finding-5", "failed")?;
+    assert_eq!(failed.state, "failed");
+    assert_eq!(failed.source, "canonical_batch");
+    assert_eq!(failed.posted_action_status.as_deref(), Some("Failed"));
+
+    Ok(())
+}
