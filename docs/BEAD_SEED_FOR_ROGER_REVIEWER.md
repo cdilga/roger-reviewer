@@ -6,6 +6,10 @@ The live beads workspace already exists under `.beads/`; this file must stay
 aligned with that execution layer rather than acting like a stale pre-import
 draft.
 
+Rust toolchain note: Roger's repo-local compiler channel is pinned to
+`nightly` through `rust-toolchain.toml`, while the workspace language edition
+remains `2024`.
+
 ## Epic 1: Repo Foundation
 
 ### 1.1 Create package and app layout
@@ -22,7 +26,8 @@ draft.
 - Objective: add README, AGENTS, and any initial architecture decision records.
 - Depends on: 1.1.
 - Acceptance: a fresh contributor can understand product intent, repo layout,
-  and core constraints.
+  core constraints, and the repo's `nightly` Rust toolchain posture without
+  confusing it with the `2024` language edition.
 
 ### 1.3 Run architecture risk spikes and ADRs
 

@@ -111,6 +111,9 @@ Current pinned posture:
   plumbing today
 - release-critical claims should depend on named suites, artifacts, and proof
   manifests rather than on raw line-coverage percentages alone
+- the repo-pinned Rust compiler channel is `nightly` via
+  [`rust-toolchain.toml`](../rust-toolchain.toml); the workspace language
+  edition remains `2024`
 - the Rust command baseline is:
   - `cargo fmt --check`
   - `cargo clippy --workspace --all-targets -- -D warnings`

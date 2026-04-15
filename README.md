@@ -5,7 +5,7 @@
 <img src="docs/roger-reviewer-project.png" alt="Roger Reviewer local-first review flow illustration" width="1100" />
 
 ![Release](https://img.shields.io/github/v/release/cdilga/roger-reviewer?style=flat-square&label=release)
-![Rust](https://img.shields.io/badge/rust-2024%20edition-8C6A5D?style=flat-square)
+![Rust](https://img.shields.io/badge/rust-nightly%20toolchain-8C6A5D?style=flat-square)
 ![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-7A8CA5?style=flat-square)
 ![Browsers](https://img.shields.io/badge/browser-Chrome%20%7C%20Edge%20%7C%20Brave-A3B18A?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-C9A66B?style=flat-square)
@@ -56,6 +56,24 @@ curl -fsSL https://github.com/cdilga/roger-reviewer/releases/latest/download/rr-
 
 If you want a pinned release instead of `latest`, use the tagged installer
 assets from [GitHub Releases](https://github.com/cdilga/roger-reviewer/releases).
+
+### Source Build / Contributor Toolchain
+
+Roger's source tree is pinned to the Rust `nightly` channel through
+[`rust-toolchain.toml`](rust-toolchain.toml). The workspace language edition
+remains `2024` because the Rust edition and the compiler channel are separate
+settings.
+
+Minimal contributor setup:
+
+```bash
+rustup update nightly
+cargo --version
+cargo test --workspace --all-targets
+```
+
+Run those commands from the repo root so Cargo picks up the repo-local nightly
+override automatically.
 
 ## Quickstart
 

@@ -681,9 +681,6 @@ Operational caveat for FrankenSQLite:
   rather than mature commodity plumbing
 - pin the Rust toolchain deliberately, rebuild and test frequently, and keep the
   storage adapter thin so upstream breakage is isolated
-- Roger's repo-local default should be the `nightly` Rust toolchain via
-  `rust-toolchain.toml`; the workspace edition remains `2024` until Rust ships
-  a newer edition
 - contribute measured bug reports with minimal repros rather than baking local
   assumptions deep into Roger
 

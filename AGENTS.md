@@ -58,6 +58,15 @@ main expected exception because it is web-native.
 | Browser extension | TypeScript/JS | WebExtension; Native Messaging is the only supported `0.1.x` browser bridge, with the installed `rr` binary as the intended host runtime; keep runtime deps near zero and allow only a small typed toolchain |
 | Search | Rust | Tantivy + FastEmbed hybrid targeted for the first Roger search slice |
 
+Rust toolchain posture:
+
+- the repo pins the Rust compiler channel through [`rust-toolchain.toml`](rust-toolchain.toml)
+  and should track `nightly`
+- the workspace language edition remains `2024`; do not treat "Rust 2024" as if
+  it were the compiler version
+- contributor docs, CI, and release automation should describe Roger as a
+  nightly-toolchain repo that currently uses the `2024` edition
+
 ## Repo Layout (Current High-Level Shape)
 
 ```
@@ -436,22 +445,18 @@ br doctor            # workspace health check
 
 Important 2026-04-15 follow-up:
 
-- GitHub `beads_rust` latest official release is still `v0.1.39`
-  (published `2026-04-14T21:11:16Z`), but this repo now pins a locally built
+- GitHub `beads_rust` latest official release is `v0.1.40`
+  (published `2026-04-15T00:45:55Z`), and this repo now pins a locally built
   `0.1.40` from upstream `main` commit
-  `32f4a1616deea380c4f47ea40c542fb26e7e6e59`
-  (`2026-04-14T22:48:28-04:00`,
-  `fix(import): reject --dry-run with --file, fix 3 broken tests`).
-- local Linux `x86_64` repro history now shows:
-  - `br-0.1.36.pinned` still failed fresh temp-workspace
-    `sqlite3 integrity_check` with `Page 17: never used` corruption
-  - upstream `v0.1.38` still failed the same matrix with
-    `Tree 50 page 50: free space corruption`
-  - upstream `v0.1.39` passed the fresh-init matrix
-  - source-built `0.1.40` still did not salvage the malformed Roger DB in
-    place, but it did successfully rebuild a clean DB from
-    `.beads/issues.jsonl`, restoring exact issue lookup and DB/JSONL trust on
-    the live workspace
+  `766559a4207e30cab0680ae814a668c7961fb027`
+  (`2026-04-15T00:47:07-04:00`,
+  `fix(doctor): remove stale mention of out-of-order from VACUUM comment`).
+- verified validation matrix on 2026-04-15:
+  - fresh temp-workspace
+    `git init -> br init -> br create -> br create -> sqlite3 integrity_check -> br doctor`
+    passed with the source-built `0.1.40`
+  - live Roger workspace `br ready`, `br sync --status`, and `br doctor`
+    passed with the same source-built `0.1.40`
 - `scripts/swarm/resolve_br.sh` and `scripts/swarm/br_pinned.sh` now default to
   `br-0.1.40.pinned` so swarm and onboarding flows converge on the latest
   locally revalidated binary.

@@ -105,6 +105,24 @@ codex --version
 test -f ~/.codex/auth.json && echo "auth ok"
 ```
 
+## Rust Toolchain Setup
+
+Roger's source tree is pinned to the Rust `nightly` channel through the
+repo-local [`rust-toolchain.toml`](../rust-toolchain.toml). The workspace still
+uses the `2024` edition; that is the language edition, not the compiler
+channel.
+
+On a fresh machine, install or update nightly before running Cargo commands in
+this repo:
+
+```bash
+rustup update nightly
+cargo +nightly --version
+```
+
+From the repo root, plain `cargo ...` commands should then resolve through the
+repo-local nightly override automatically.
+
 ## Agent Mail Setup for Codex
 
 ### Important design choice
@@ -277,15 +295,15 @@ Do not run backup binary filenames directly in automation or runbooks.
 
 Current validated pin update (2026-04-15):
 
-- latest upstream `beads_rust` release is still `v0.1.39`
+- latest upstream `beads_rust` release is `v0.1.40`
+  (published `2026-04-15T00:45:55Z`)
 - Roger now pins a locally built `0.1.40` from upstream `main` commit
-  `32f4a1616deea380c4f47ea40c542fb26e7e6e59`
-- local Linux `x86_64` repro for
-  `init -> create -> create -> sqlite3 integrity_check -> br doctor`
-  passed on `0.1.39` and the source-built `0.1.40`, failed on `0.1.36` and
-  `0.1.38`
-- the live Roger workspace trust repair on 2026-04-15 used `0.1.40` to rebuild
-  `.beads/beads.db` from canonical `issues.jsonl`, so use the
+  `766559a4207e30cab0680ae814a668c7961fb027`
+- fresh temp-workspace
+  `git init -> br init -> br create -> br create -> sqlite3 integrity_check -> br doctor`
+  passed with the source-built `0.1.40`
+- live Roger workspace `br ready`, `br sync --status`, and `br doctor`
+  also passed with the same source-built `0.1.40`, so use the
   `0.1.40.pinned` expectation above for live setup work
 
 ## Rehearsal Transcript Summary (2026-04-02)
@@ -304,12 +322,16 @@ Manual smoke commands run from this repo:
 - `codex exec --ephemeral ...` Agent Mail tool probe -> pass
 - `bash -n /path/to/mcp_agent_mail/scripts/integrate_codex_cli.sh` -> pass
 - `scripts/swarm/resolve_br.sh --print-path` -> `~/.local/bin/br`
-- `readlink ~/.local/bin/br` -> `~/.local/bin/br-0.1.34.pinned`
-- `br --version` -> `br 0.1.34`
+- `readlink ~/.local/bin/br` -> historical 2026-04-02 output:
+  `~/.local/bin/br-0.1.34.pinned` (superseded by the current
+  `~/.local/bin/br-0.1.40.pinned` pin above)
+- `br --version` -> historical 2026-04-02 output:
+  `br 0.1.34` (superseded by the current `br 0.1.40` pin above)
 
 Fixes applied from this rehearsal:
 
-- updated stale `br` pin guidance from `0.1.28` to current `0.1.34.pinned`
+- updated stale `br` pin guidance from `0.1.28` to the then-current
+  `0.1.34.pinned` (superseded by the 2026-04-15 `0.1.40.pinned` update above)
 - updated stale Agent Mail integration-script status text
 
 Fresh-eyes intake evidence from this rehearsal:

@@ -17,6 +17,8 @@ members = [
 resolver = "2"
 
 [workspace.package]
+# The workspace stays on the latest shipped edition while the compiler
+# channel is pinned separately via rust-toolchain.toml.
 edition = "2024"
 license = "MIT"
 version = "0.1.0"

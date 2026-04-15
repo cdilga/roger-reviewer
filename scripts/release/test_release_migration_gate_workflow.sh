@@ -21,9 +21,9 @@ end
 
 steps = migration.fetch("steps")
 toolchain = steps.any? do |step|
-  step.is_a?(Hash) && step["uses"] == "dtolnay/rust-toolchain@stable"
+  step.is_a?(Hash) && step["uses"] == "dtolnay/rust-toolchain@nightly"
 end
-abort("migration-rehearsal must install stable Rust toolchain") unless toolchain
+abort("migration-rehearsal must install nightly Rust toolchain") unless toolchain
 
 rehearsal_step = steps.find do |step|
   step.is_a?(Hash) && step["run"].to_s.include?("cargo test -p roger-storage --test release_migration_gate")
