@@ -9,6 +9,18 @@ use tempfile::tempdir;
 const LIVE_PROVIDERS: &[&str] = &["opencode", "codex", "gemini", "claude"];
 const PLANNED_NOT_LIVE_PROVIDERS: &[&str] = &["copilot"];
 const NOT_SUPPORTED_PROVIDERS: &[&str] = &["pi-agent"];
+const LIVE_AGENT_OPERATIONS: &[&str] = &[
+    "worker.get_review_context",
+    "worker.search_memory",
+    "worker.get_status",
+    "worker.list_findings",
+    "worker.get_finding_detail",
+    "worker.get_artifact_excerpt",
+    "worker.request_clarification",
+    "worker.request_memory_review",
+    "worker.propose_follow_up",
+    "worker.submit_stage_result",
+];
 
 const OPENCODE_NOTE: &str = "first-class tier-b continuity path with locator reopen and rr return";
 const BOUNDED_PROVIDER_NOTE: &str =
@@ -65,6 +77,28 @@ fn assert_provider_entry(
     assert_eq!(entry["notes"], notes);
 }
 
+fn assert_string_array_matches(actual: &Value, expected: &[&str], context: &str) {
+    assert!(actual.is_array(), "{context} should be an array");
+    let mut actual_items = actual
+        .as_array()
+        .expect("array should exist after shape assertion")
+        .iter()
+        .map(|item| {
+            assert!(item.is_string(), "{context} should contain only strings");
+            item.as_str()
+                .expect("string should exist after element-type assertion")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    let mut expected_items = expected
+        .iter()
+        .map(|item| (*item).to_owned())
+        .collect::<Vec<_>>();
+    actual_items.sort();
+    expected_items.sort();
+    assert_eq!(actual_items, expected_items, "{context}");
+}
+
 #[test]
 fn provider_support_truth_guard_matches_live_cli_help_and_docs() {
     let temp = tempdir().expect("tempdir");
@@ -79,6 +113,10 @@ fn provider_support_truth_guard_matches_live_cli_help_and_docs() {
     assert_contains_all(
         &help.stdout,
         &[
+            "rr agent <operation> --task-file <path>",
+            "rr agent is the dedicated in-session worker transport; it is separate from --robot",
+            "current live rr agent operations cover context/status/search/finding/artifact reads, advisory clarification or follow-up proposals, and worker.submit_stage_result",
+            "rr agent emits rr.agent.response.v1 envelopes over the canonical worker operation response payload instead of reusing the --robot surface",
             "opencode is the first-class tier-b continuity path; rr resume can reopen and rr return is supported",
             "codex, gemini, and claude are bounded tier-a providers; start/reseed/raw-capture only, no locator reopen or rr return",
             "copilot is planned but not yet a live --provider value",
@@ -201,6 +239,32 @@ fn provider_support_truth_guard_matches_live_cli_help_and_docs() {
             BOUNDED_PROVIDER_NOTE,
         );
     }
+    let inside_roger = guide_items
+        .iter()
+        .find(|item| item["context"] == "inside_roger")
+        .expect("inside Roger guide item");
+    assert_eq!(
+        inside_roger["finding_return_contract"]["canonical_transport"],
+        "rr agent worker.submit_stage_result"
+    );
+    assert_string_array_matches(
+        &inside_roger["finding_return_contract"]["supported_operations"],
+        LIVE_AGENT_OPERATIONS,
+        "inside Roger supported_operations",
+    );
+    assert_eq!(
+        inside_roger["finding_return_contract"]["availability"],
+        "live dedicated worker transport for bound context/status/search/finding/artifact reads plus advisory worker proposals and stage-result submission; separate from the --robot command shortlist"
+    );
+    assert_eq!(
+        inside_roger["finding_return_contract"]["binding_fields"],
+        json!([
+            "review_session_id",
+            "review_run_id",
+            "review_task_id",
+            "task_nonce"
+        ])
+    );
 
     let commands = run(
         &[
@@ -228,6 +292,37 @@ fn provider_support_truth_guard_matches_live_cli_help_and_docs() {
         review_dry_run["not_supported_providers"],
         json!(NOT_SUPPORTED_PROVIDERS)
     );
+    let agent_command = command_items
+        .iter()
+        .find(|item| item["command"] == "rr agent <operation>")
+        .expect("rr agent command docs item");
+    assert_string_array_matches(
+        &agent_command["supported_operations"],
+        LIVE_AGENT_OPERATIONS,
+        "rr agent command supported_operations",
+    );
+    assert_eq!(agent_command["surface"], "dedicated_worker_transport");
+    assert_eq!(agent_command["separate_from_robot"], true);
+
+    let schemas = run(
+        &[
+            "robot-docs".to_owned(),
+            "schemas".to_owned(),
+            "--robot".to_owned(),
+        ],
+        &runtime,
+    );
+    assert_eq!(schemas.exit_code, 0, "{}", schemas.stderr);
+    let schemas_payload = parse_robot_payload(&schemas.stdout);
+    let schema_items = schemas_payload["data"]["items"]
+        .as_array()
+        .expect("schema items");
+    let agent_schema = schema_items
+        .iter()
+        .find(|item| item["command"] == "rr agent")
+        .expect("rr agent schema item");
+    assert_eq!(agent_schema["schema_id"], "rr.agent.response.v1");
+    assert_eq!(agent_schema["surface"], "dedicated_worker_transport");
 
     let readme = fs::read_to_string(workspace_root().join("README.md")).expect("read README");
     assert_contains_all(
@@ -265,11 +360,25 @@ fn provider_support_truth_guard_matches_live_cli_help_and_docs() {
     assert_contains_all(
         &robot_contract,
         &[
+            "`rr agent ...` worker transport",
+            "`rr agent` is not part of the `--robot` contract and must remain a separate",
             "`rr robot-docs guide` should also expose the current `rr review` provider-support",
             "`supported_providers`",
             "`planned_not_live_providers`",
             "`not_supported_providers`",
         ],
         "robot CLI contract provider inventory",
+    );
+
+    let inside_roger_skill =
+        fs::read_to_string(workspace_root().join("docs/skills/ROGER_INSIDE_ROGER_AGENT.md"))
+            .expect("read inside Roger skill doc");
+    assert_contains_all(
+        &inside_roger_skill,
+        &[
+            "it remains narrower than the dedicated `rr agent` worker transport",
+            "present an unsupported in-harness affordance, or parity with `rr agent`, as if it were shipped",
+        ],
+        "inside Roger skill truth snapshot",
     );
 }

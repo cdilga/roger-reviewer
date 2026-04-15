@@ -3,18 +3,21 @@
 use roger_app_core::{
     ApprovalState, ContinuityQuality, HarnessAdapter, HarnessCommandBinding, LaunchAction,
     LaunchIntent, OutboundApprovalToken, OutboundDraft, OutboundDraftBatch, PostedAction,
-    PostedActionStatus, ResumeBundle, ResumeBundleProfile, ReviewTarget, RogerCommand,
-    RogerCommandId, RogerCommandInvocationSurface, RogerCommandRouteStatus, Surface,
+    PostedActionStatus, ResumeBundle, ResumeBundleProfile, ReviewTarget, ReviewTask,
+    ReviewTaskKind, RogerCommand, RogerCommandId, RogerCommandInvocationSurface,
+    RogerCommandRouteStatus, Surface, WORKER_OPERATION_REQUEST_SCHEMA_V1,
+    WORKER_STAGE_RESULT_SCHEMA_V1, WorkerContextPacket, WorkerGitHubPosture, WorkerMutationPosture,
+    WorkerOperationResponseStatus, WorkerStageOutcome, WorkerStageResult, WorkerTransportKind,
     outbound_target_tuple_json, route_harness_command,
 };
 use roger_bridge::{BridgeLaunchIntent, BridgePreflight, BridgeResponse, handle_bridge_intent};
 use roger_cli::{CliRuntime, HarnessCommandInvocation, run, run_harness_command};
 use roger_session_opencode::OpenCodeAdapter;
 use roger_storage::{
-    CreateMaterializedFinding, CreateReviewSession, CreateSessionLaunchBinding,
-    LaunchAttemptState, LaunchSurface, RogerStore,
+    ArtifactBudgetClass, CreateMaterializedFinding, CreateReviewRun, CreateReviewSession,
+    CreateSessionLaunchBinding, LaunchAttemptState, LaunchSurface, RogerStore,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
@@ -35,6 +38,138 @@ fn sample_target(pr_number: u64) -> ReviewTarget {
         base_commit: "aaa".to_owned(),
         head_commit: "bbb".to_owned(),
     }
+}
+
+fn sample_worker_task() -> ReviewTask {
+    ReviewTask {
+        id: "task-rr-agent-1".to_owned(),
+        review_session_id: "session-rr-agent-1".to_owned(),
+        review_run_id: "run-rr-agent-1".to_owned(),
+        stage: "deep_review".to_owned(),
+        task_kind: ReviewTaskKind::DeepReviewPass,
+        task_nonce: "nonce-rr-agent-1".to_owned(),
+        objective: "Review approval and posting safety regressions.".to_owned(),
+        turn_strategy: roger_app_core::WorkerTurnStrategy::SingleTurnReport,
+        allowed_scopes: vec!["repo".to_owned()],
+        allowed_operations: vec![
+            "worker.get_review_context".to_owned(),
+            "worker.search_memory".to_owned(),
+            "worker.get_status".to_owned(),
+            "worker.list_findings".to_owned(),
+            "worker.get_finding_detail".to_owned(),
+            "worker.get_artifact_excerpt".to_owned(),
+            "worker.request_clarification".to_owned(),
+            "worker.request_memory_review".to_owned(),
+            "worker.propose_follow_up".to_owned(),
+            "worker.submit_stage_result".to_owned(),
+        ],
+        expected_result_schema: WORKER_STAGE_RESULT_SCHEMA_V1.to_owned(),
+        prompt_preset_id: Some("preset-deep-review".to_owned()),
+        created_at: 100,
+    }
+}
+
+fn sample_worker_context(task: &ReviewTask) -> WorkerContextPacket {
+    WorkerContextPacket {
+        review_target: sample_target(42),
+        review_session_id: task.review_session_id.clone(),
+        review_run_id: task.review_run_id.clone(),
+        review_task_id: task.id.clone(),
+        task_nonce: task.task_nonce.clone(),
+        baseline_snapshot_ref: Some("baseline-rr-agent-1".to_owned()),
+        provider: "opencode".to_owned(),
+        transport_kind: WorkerTransportKind::AgentCli,
+        stage: task.stage.clone(),
+        objective: task.objective.clone(),
+        allowed_scopes: task.allowed_scopes.clone(),
+        allowed_operations: task.allowed_operations.clone(),
+        mutation_posture: WorkerMutationPosture::ReviewOnly,
+        github_posture: WorkerGitHubPosture::Blocked,
+        unresolved_findings: Vec::new(),
+        continuity_summary: Some("provider continuity is usable".to_owned()),
+        memory_cards: Vec::new(),
+        artifact_refs: Vec::new(),
+    }
+}
+
+fn sample_stage_result(task: &ReviewTask) -> WorkerStageResult {
+    WorkerStageResult {
+        schema_id: WORKER_STAGE_RESULT_SCHEMA_V1.to_owned(),
+        review_session_id: task.review_session_id.clone(),
+        review_run_id: task.review_run_id.clone(),
+        review_task_id: task.id.clone(),
+        worker_invocation_id: None,
+        task_nonce: task.task_nonce.clone(),
+        stage: task.stage.clone(),
+        task_kind: task.task_kind,
+        outcome: WorkerStageOutcome::Completed,
+        summary: "Found one likely invalidation issue.".to_owned(),
+        structured_findings_pack: Some(json!({
+            "schema_version": "structured_findings_pack.v1",
+            "findings": [
+                {
+                    "title": "Approval token survives stale refresh",
+                    "summary": "The refresh path reports success without invalidating an approval token.",
+                    "severity": "high",
+                    "confidence": "medium"
+                }
+            ]
+        })),
+        clarification_requests: Vec::new(),
+        memory_review_requests: Vec::new(),
+        follow_up_proposals: Vec::new(),
+        memory_citations: Vec::new(),
+        artifact_refs: Vec::new(),
+        provider_metadata: Some(json!({"provider": "opencode"})),
+        warnings: Vec::new(),
+    }
+}
+
+fn sample_worker_request(task: &ReviewTask, operation: &str, payload: Option<Value>) -> Value {
+    json!({
+        "schema_id": WORKER_OPERATION_REQUEST_SCHEMA_V1,
+        "review_session_id": task.review_session_id,
+        "review_run_id": task.review_run_id,
+        "review_task_id": task.id,
+        "task_nonce": task.task_nonce,
+        "operation": operation,
+        "requested_scopes": ["repo"],
+        "payload": payload,
+    })
+}
+
+fn write_json_fixture(path: &Path, value: &impl serde::Serialize) {
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(value).expect("serialize fixture json"),
+    )
+    .expect("write fixture json");
+}
+
+fn seed_rr_agent_session(runtime: &CliRuntime, task: &ReviewTask) {
+    let store = RogerStore::open(&runtime.store_root).expect("open store");
+    store
+        .create_review_session(CreateReviewSession {
+            id: &task.review_session_id,
+            review_target: &sample_target(42),
+            provider: "opencode",
+            session_locator: None,
+            resume_bundle_artifact_id: None,
+            continuity_state: "resume:usable",
+            attention_state: "awaiting_user_input",
+            launch_profile_id: Some("profile-open-pr"),
+        })
+        .expect("create review session");
+    store
+        .create_review_run(CreateReviewRun {
+            id: &task.review_run_id,
+            session_id: &task.review_session_id,
+            run_kind: "deep_review",
+            repo_snapshot: "{\"head\":\"bbb\"}",
+            continuity_quality: "usable",
+            session_locator_artifact_id: None,
+        })
+        .expect("create review run");
 }
 
 fn sample_launch_intent(action: LaunchAction) -> LaunchIntent {
@@ -1277,7 +1412,7 @@ fn codex_review_and_resume_are_truthful_tier_a_degraded_paths() {
 }
 
 #[test]
-fn bounded_provider_outputs_are_truthful_for_status_resume_and_return() {
+fn bounded_provider_outputs_are_truthful_for_claude_and_gemini() {
     let temp = tempdir().expect("tempdir");
     let repo = init_repo(&temp);
     let (_stub_dir, opencode_bin) = write_stub_binary(false);
@@ -1287,112 +1422,135 @@ fn bounded_provider_outputs_are_truthful_for_status_resume_and_return() {
         store_root: temp.path().join("roger-store"),
         opencode_bin: opencode_bin.to_string_lossy().to_string(),
     };
-    seed_session_with_provider(&runtime, "gemini", 42, "session-gemini-1");
+    for (provider, pr) in [("claude", "42"), ("gemini", "43")] {
+        let session_id = format!("session-{provider}-1");
+        seed_session_with_provider(
+            &runtime,
+            provider,
+            pr.parse().expect("pr number"),
+            &session_id,
+        );
 
-    let status = run_rr(&["status", "--pr", "42", "--robot"], &runtime);
-    assert_eq!(status.exit_code, 0, "{}", status.stderr);
-    let status_payload = parse_robot_payload(&status.stdout);
-    assert_eq!(status_payload["outcome"], "complete");
-    assert_eq!(status_payload["data"]["session"]["provider"], "gemini");
-    assert_eq!(
-        status_payload["data"]["session"]["resume_mode"],
-        "bounded_provider"
-    );
-    assert_eq!(status_payload["data"]["continuity"]["tier"], "tier_a");
-    assert_eq!(status_payload["data"]["provider_capability"]["provider"], "gemini");
-    assert_eq!(
-        status_payload["data"]["provider_capability"]["status"],
-        "bounded_live"
-    );
-    assert_eq!(status_payload["data"]["provider_capability"]["tier"], "tier_a");
-    assert_eq!(
-        status_payload["data"]["provider_capability"]["supports"]["status"],
-        serde_json::json!(true)
-    );
-    assert_eq!(
-        status_payload["data"]["provider_capability"]["supports"]["findings"],
-        serde_json::json!(true)
-    );
-    assert_eq!(
-        status_payload["data"]["provider_capability"]["supports"]["resume_reopen"],
-        serde_json::json!(false)
-    );
-    assert_eq!(
-        status_payload["data"]["provider_capability"]["supports"]["return"],
-        serde_json::json!(false)
-    );
-    assert!(
-        status_payload["warnings"]
-            .as_array()
-            .expect("status warnings")
-            .iter()
-            .any(|warning| warning
-                .as_str()
-                .expect("warning string")
-                .contains("bounded support"))
-    );
+        let status = run_rr(&["status", "--pr", pr, "--robot"], &runtime);
+        assert_eq!(status.exit_code, 0, "{provider}: {}", status.stderr);
+        let status_payload = parse_robot_payload(&status.stdout);
+        assert_eq!(status_payload["outcome"], "complete");
+        assert_eq!(status_payload["data"]["session"]["provider"], provider);
+        assert_eq!(
+            status_payload["data"]["session"]["resume_mode"],
+            "bounded_provider"
+        );
+        assert_eq!(status_payload["data"]["continuity"]["tier"], "tier_a");
+        assert_eq!(
+            status_payload["data"]["provider_capability"]["provider"],
+            provider
+        );
+        assert_eq!(
+            status_payload["data"]["provider_capability"]["status"],
+            "bounded_live"
+        );
+        assert_eq!(
+            status_payload["data"]["provider_capability"]["tier"],
+            "tier_a"
+        );
+        assert_eq!(
+            status_payload["data"]["provider_capability"]["supports"]["status"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            status_payload["data"]["provider_capability"]["supports"]["findings"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            status_payload["data"]["provider_capability"]["supports"]["resume_reopen"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            status_payload["data"]["provider_capability"]["supports"]["return"],
+            serde_json::json!(false)
+        );
+        assert!(
+            status_payload["warnings"]
+                .as_array()
+                .expect("status warnings")
+                .iter()
+                .any(|warning| warning
+                    .as_str()
+                    .expect("warning string")
+                    .contains("bounded support"))
+        );
 
-    let resume = run_rr(&["resume", "--pr", "42", "--robot"], &runtime);
-    assert_eq!(resume.exit_code, 5, "{}", resume.stderr);
-    let resume_payload = parse_robot_payload(&resume.stdout);
-    assert_eq!(resume_payload["outcome"], "degraded");
-    assert_eq!(resume_payload["data"]["provider"], "gemini");
-    assert_eq!(
-        resume_payload["data"]["resume_path"],
-        "reseeded_from_bundle"
-    );
-    assert_eq!(resume_payload["data"]["continuity_quality"], "degraded");
-    assert_eq!(resume_payload["data"]["provider_capability"]["provider"], "gemini");
-    assert_eq!(
-        resume_payload["data"]["provider_capability"]["status"],
-        "bounded_live"
-    );
-    assert_eq!(resume_payload["data"]["provider_capability"]["tier"], "tier_a");
-    assert_eq!(
-        resume_payload["data"]["provider_capability"]["supports"]["resume_reseed"],
-        serde_json::json!(true)
-    );
-    assert_eq!(
-        resume_payload["data"]["provider_capability"]["supports"]["resume_reopen"],
-        serde_json::json!(false)
-    );
-    assert_eq!(
-        resume_payload["data"]["provider_capability"]["supports"]["return"],
-        serde_json::json!(false)
-    );
-    assert!(
-        resume_payload["warnings"]
-            .as_array()
-            .expect("resume warnings")
-            .iter()
-            .any(|warning| warning
-                .as_str()
-                .expect("warning string")
-                .contains("bounded support"))
-    );
+        let resume = run_rr(&["resume", "--pr", pr, "--robot"], &runtime);
+        assert_eq!(resume.exit_code, 5, "{provider}: {}", resume.stderr);
+        let resume_payload = parse_robot_payload(&resume.stdout);
+        assert_eq!(resume_payload["outcome"], "degraded");
+        assert_eq!(resume_payload["data"]["provider"], provider);
+        assert_eq!(
+            resume_payload["data"]["resume_path"],
+            "reseeded_from_bundle"
+        );
+        assert_eq!(resume_payload["data"]["continuity_quality"], "degraded");
+        assert_eq!(
+            resume_payload["data"]["provider_capability"]["provider"],
+            provider
+        );
+        assert_eq!(
+            resume_payload["data"]["provider_capability"]["status"],
+            "bounded_live"
+        );
+        assert_eq!(
+            resume_payload["data"]["provider_capability"]["tier"],
+            "tier_a"
+        );
+        assert_eq!(
+            resume_payload["data"]["provider_capability"]["supports"]["resume_reseed"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            resume_payload["data"]["provider_capability"]["supports"]["resume_reopen"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            resume_payload["data"]["provider_capability"]["supports"]["return"],
+            serde_json::json!(false)
+        );
+        assert!(
+            resume_payload["warnings"]
+                .as_array()
+                .expect("resume warnings")
+                .iter()
+                .any(|warning| warning
+                    .as_str()
+                    .expect("warning string")
+                    .contains("bounded support"))
+        );
 
-    let ret = run_rr(&["return", "--pr", "42", "--robot"], &runtime);
-    assert_eq!(ret.exit_code, 3, "{}", ret.stderr);
-    let return_payload = parse_robot_payload(&ret.stdout);
-    assert_eq!(return_payload["outcome"], "blocked");
-    assert_eq!(return_payload["data"]["provider"], "gemini");
-    assert_eq!(return_payload["data"]["provider_capability"]["provider"], "gemini");
-    assert_eq!(
-        return_payload["data"]["provider_capability"]["status"],
-        "bounded_live"
-    );
-    assert_eq!(
-        return_payload["data"]["provider_capability"]["tier"],
-        "tier_a"
-    );
-    assert_eq!(
-        return_payload["data"]["provider_capability"]["supports"]["return"],
-        serde_json::json!(false)
-    );
-    assert_eq!(
-        return_payload["data"]["provider_capability"]["required_tier_for_return"],
-        "tier_b"
-    );
+        let ret = run_rr(&["return", "--pr", pr, "--robot"], &runtime);
+        assert_eq!(ret.exit_code, 3, "{provider}: {}", ret.stderr);
+        let return_payload = parse_robot_payload(&ret.stdout);
+        assert_eq!(return_payload["outcome"], "blocked");
+        assert_eq!(return_payload["data"]["provider"], provider);
+        assert_eq!(
+            return_payload["data"]["provider_capability"]["provider"],
+            provider
+        );
+        assert_eq!(
+            return_payload["data"]["provider_capability"]["status"],
+            "bounded_live"
+        );
+        assert_eq!(
+            return_payload["data"]["provider_capability"]["tier"],
+            "tier_a"
+        );
+        assert_eq!(
+            return_payload["data"]["provider_capability"]["supports"]["return"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            return_payload["data"]["provider_capability"]["required_tier_for_return"],
+            "tier_b"
+        );
+    }
 }
 
 #[test]
@@ -1632,12 +1790,30 @@ fn status_and_findings_surface_outbound_approval_states_truthfully() {
     let status = run_rr(&["status", "--session", &session_id, "--robot"], &runtime);
     assert_eq!(status.exit_code, 0, "{}", status.stderr);
     let status_payload = parse_robot_payload(&status.stdout);
-    assert_eq!(status_payload["data"]["outbound"]["state_counts"]["awaiting_approval"], 1);
-    assert_eq!(status_payload["data"]["outbound"]["state_counts"]["approved"], 1);
-    assert_eq!(status_payload["data"]["outbound"]["state_counts"]["invalidated"], 1);
-    assert_eq!(status_payload["data"]["outbound"]["state_counts"]["posted"], 1);
-    assert_eq!(status_payload["data"]["outbound"]["state_counts"]["failed"], 1);
-    assert_eq!(status_payload["data"]["outbound"]["posting_gate"]["ready_count"], 1);
+    assert_eq!(
+        status_payload["data"]["outbound"]["state_counts"]["awaiting_approval"],
+        1
+    );
+    assert_eq!(
+        status_payload["data"]["outbound"]["state_counts"]["approved"],
+        1
+    );
+    assert_eq!(
+        status_payload["data"]["outbound"]["state_counts"]["invalidated"],
+        1
+    );
+    assert_eq!(
+        status_payload["data"]["outbound"]["state_counts"]["posted"],
+        1
+    );
+    assert_eq!(
+        status_payload["data"]["outbound"]["state_counts"]["failed"],
+        1
+    );
+    assert_eq!(
+        status_payload["data"]["outbound"]["posting_gate"]["ready_count"],
+        1
+    );
     assert_eq!(
         status_payload["data"]["outbound"]["posting_gate"]["visibly_elevated"],
         serde_json::json!(true)
@@ -1653,29 +1829,38 @@ fn status_and_findings_surface_outbound_approval_states_truthfully() {
         .iter()
         .map(|item| {
             (
-                item["finding_id"]
-                    .as_str()
-                    .expect("finding id")
-                    .to_owned(),
+                item["finding_id"].as_str().expect("finding id").to_owned(),
                 item,
             )
         })
         .collect::<HashMap<_, _>>();
 
-    assert_eq!(indexed["finding-awaiting"]["outbound_state"], "awaiting_approval");
-    assert_eq!(indexed["finding-awaiting"]["outbound_detail"]["source"], "legacy_draft");
+    assert_eq!(
+        indexed["finding-awaiting"]["outbound_state"],
+        "awaiting_approval"
+    );
+    assert_eq!(
+        indexed["finding-awaiting"]["outbound_detail"]["source"],
+        "legacy_draft"
+    );
     assert_eq!(indexed["finding-approved"]["outbound_state"], "approved");
     assert_eq!(
         indexed["finding-approved"]["outbound_detail"]["mutation_elevated"],
         serde_json::json!(true)
     );
-    assert_eq!(indexed["finding-invalidated"]["outbound_state"], "invalidated");
+    assert_eq!(
+        indexed["finding-invalidated"]["outbound_state"],
+        "invalidated"
+    );
     assert_eq!(
         indexed["finding-invalidated"]["outbound_detail"]["invalidation_reason_code"],
         "target_rebased"
     );
     assert_eq!(indexed["finding-posted"]["outbound_state"], "posted");
-    assert_eq!(indexed["finding-posted"]["outbound_detail"]["source"], "legacy_draft");
+    assert_eq!(
+        indexed["finding-posted"]["outbound_detail"]["source"],
+        "legacy_draft"
+    );
     assert_eq!(indexed["finding-failed"]["outbound_state"], "failed");
     assert_eq!(
         indexed["finding-failed"]["outbound_detail"]["posted_action_status"],
@@ -1966,7 +2151,11 @@ fn search_reports_truthful_degraded_mode_and_stable_robot_fields() {
     assert_eq!(payload["schema_id"], "rr.robot.search.v1");
     assert_eq!(payload["outcome"], "degraded");
     assert_eq!(payload["data"]["query"], "stale draft");
+    assert_eq!(payload["data"]["requested_query_mode"], "auto");
+    assert_eq!(payload["data"]["resolved_query_mode"], "recall");
+    assert_eq!(payload["data"]["retrieval_mode"], "lexical_only");
     assert_eq!(payload["data"]["mode"], "lexical_only");
+    assert_eq!(payload["data"]["candidate_included"], false);
     assert!(payload["data"]["items"].is_array());
     assert!(payload["data"]["count"].is_number());
     assert!(payload["data"]["truncated"].is_boolean());
@@ -1996,7 +2185,57 @@ fn search_reports_truthful_degraded_mode_and_stable_robot_fields() {
     let compact_payload = parse_robot_payload(&compact.stdout);
     assert_eq!(compact_payload["schema_id"], "rr.robot.search.v1");
     assert_eq!(compact_payload["robot_format"], "compact");
+    assert_eq!(compact_payload["data"]["requested_query_mode"], "auto");
+    assert_eq!(compact_payload["data"]["resolved_query_mode"], "recall");
+    assert_eq!(compact_payload["data"]["retrieval_mode"], "lexical_only");
     assert!(compact_payload["data"]["items"].is_array());
+}
+
+#[test]
+fn search_resolves_auto_to_exact_lookup_and_blocks_anchor_free_related_context() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let exact = run_rr(
+        &["search", "--query", "packages/cli/src/lib.rs", "--robot"],
+        &runtime,
+    );
+    assert_eq!(exact.exit_code, 5, "{}", exact.stderr);
+    let exact_payload = parse_robot_payload(&exact.stdout);
+    assert_eq!(exact_payload["outcome"], "degraded");
+    assert_eq!(exact_payload["data"]["requested_query_mode"], "auto");
+    assert_eq!(exact_payload["data"]["resolved_query_mode"], "exact_lookup");
+    assert_eq!(exact_payload["data"]["retrieval_mode"], "lexical_only");
+
+    let blocked = run_rr(
+        &[
+            "search",
+            "--query",
+            "stale draft",
+            "--query-mode",
+            "related_context",
+            "--robot",
+        ],
+        &runtime,
+    );
+    assert_eq!(blocked.exit_code, 3, "{}", blocked.stderr);
+    let blocked_payload = parse_robot_payload(&blocked.stdout);
+    assert_eq!(blocked_payload["outcome"], "blocked");
+    assert_eq!(
+        blocked_payload["data"]["reason_code"],
+        "query_mode_requires_anchor_hints"
+    );
+    assert_eq!(
+        blocked_payload["data"]["requested_query_mode"],
+        "related_context"
+    );
 }
 #[test]
 fn robot_docs_surfaces_schema_inventory_and_blocks_unknown_topics() {
@@ -2353,6 +2592,603 @@ fn provider_support_claim_guard_keeps_help_robot_and_docs_in_lockstep() {
         &canonical_plan,
         "CLI help, status output, and docs must describe only the provider surfaces and command paths that actually exist in the product",
         "docs/PLAN_FOR_ROGER_REVIEWER.md",
+    );
+}
+
+#[test]
+fn rr_agent_reads_bound_context_and_rejects_robot_flag() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let task = sample_worker_task();
+    let context = sample_worker_context(&task);
+    let task_path = temp.path().join("worker-task.json");
+    let context_path = temp.path().join("worker-context.json");
+    let request_path = temp.path().join("worker-context-request.json");
+    write_json_fixture(&task_path, &task);
+    write_json_fixture(&context_path, &context);
+    seed_rr_agent_session(&runtime, &task);
+    write_json_fixture(
+        &request_path,
+        &sample_worker_request(&task, "worker.get_review_context", None),
+    );
+
+    let result = run_rr(
+        &[
+            "agent",
+            "worker.get_review_context",
+            "--task-file",
+            task_path.to_str().expect("task path"),
+            "--context-file",
+            context_path.to_str().expect("context path"),
+            "--request-file",
+            request_path.to_str().expect("request path"),
+        ],
+        &runtime,
+    );
+    assert_eq!(result.exit_code, 0, "{}", result.stderr);
+    let payload = parse_robot_payload(&result.stdout);
+    assert_eq!(payload["schema_id"], "rr.agent.response.v1");
+    assert_eq!(payload["status"], "succeeded");
+    assert_eq!(payload["transport_kind"], "agent_cli");
+    let operation_response = &payload["operation_response"];
+    assert_eq!(
+        operation_response["schema_id"],
+        "worker_operation_response.v1"
+    );
+    assert_eq!(
+        operation_response["status"],
+        json!(WorkerOperationResponseStatus::Succeeded)
+    );
+    assert_eq!(operation_response["operation"], "worker.get_review_context");
+    assert_eq!(operation_response["authorization"]["lane"], "read");
+    assert_eq!(operation_response["authorization"]["advisory_only"], false);
+    assert_eq!(
+        operation_response["payload"]["review_session_id"],
+        task.review_session_id
+    );
+    assert_eq!(
+        operation_response["payload"]["review_run_id"],
+        task.review_run_id
+    );
+    assert_eq!(operation_response["payload"]["review_task_id"], task.id);
+    assert_eq!(operation_response["payload"]["task_nonce"], task.task_nonce);
+    assert!(result.stderr.trim().is_empty(), "{}", result.stderr);
+
+    let blocked = run_rr(
+        &[
+            "agent",
+            "worker.get_review_context",
+            "--task-file",
+            task_path.to_str().expect("task path"),
+            "--context-file",
+            context_path.to_str().expect("context path"),
+            "--request-file",
+            request_path.to_str().expect("request path"),
+            "--robot",
+        ],
+        &runtime,
+    );
+    assert_eq!(blocked.exit_code, 2);
+    assert!(
+        blocked
+            .stderr
+            .contains("rr agent is a separate transport from --robot; omit --robot"),
+        "{}",
+        blocked.stderr
+    );
+}
+
+#[test]
+fn rr_agent_surfaces_bound_status_findings_and_finding_detail() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let task = sample_worker_task();
+    let task_path = temp.path().join("worker-task.json");
+    write_json_fixture(&task_path, &task);
+    seed_rr_agent_session(&runtime, &task);
+
+    let store = RogerStore::open(&runtime.store_root).expect("open store");
+    store
+        .upsert_materialized_finding(CreateMaterializedFinding {
+            id: "finding-rr-agent-1",
+            session_id: &task.review_session_id,
+            review_run_id: &task.review_run_id,
+            stage: &task.stage,
+            fingerprint: "fp-rr-agent-1",
+            title: "Approval token survives stale refresh",
+            normalized_summary: "Approval token survives stale refresh",
+            severity: "high",
+            confidence: "medium",
+            triage_state: "accepted",
+            outbound_state: "awaiting_approval",
+        })
+        .expect("seed materialized finding");
+
+    let status_request_path = temp.path().join("worker-status-request.json");
+    write_json_fixture(
+        &status_request_path,
+        &sample_worker_request(&task, "worker.get_status", None),
+    );
+    let status = run_rr(
+        &[
+            "agent",
+            "worker.get_status",
+            "--task-file",
+            task_path.to_str().expect("task path"),
+            "--request-file",
+            status_request_path.to_str().expect("request path"),
+        ],
+        &runtime,
+    );
+    assert_eq!(status.exit_code, 0, "{}", status.stderr);
+    let status_payload = parse_robot_payload(&status.stdout);
+    assert_eq!(status_payload["schema_id"], "rr.agent.response.v1");
+    assert_eq!(status_payload["status"], "succeeded");
+    let status_operation = &status_payload["operation_response"];
+    assert_eq!(
+        status_operation["status"],
+        json!(WorkerOperationResponseStatus::Succeeded)
+    );
+    assert_eq!(
+        status_operation["payload"]["review_session_id"],
+        task.review_session_id
+    );
+    assert_eq!(
+        status_operation["payload"]["review_run_id"],
+        task.review_run_id
+    );
+    assert_eq!(
+        status_operation["payload"]["attention_state"],
+        "awaiting_user_input"
+    );
+    assert_eq!(
+        status_operation["payload"]["continuity_summary"],
+        "resume:usable"
+    );
+    assert_eq!(status_operation["payload"]["unresolved_finding_count"], 1);
+    assert_eq!(status_operation["payload"]["draft_count"], 0);
+
+    let list_request_path = temp.path().join("worker-findings-request.json");
+    write_json_fixture(
+        &list_request_path,
+        &sample_worker_request(&task, "worker.list_findings", None),
+    );
+    let list = run_rr(
+        &[
+            "agent",
+            "worker.list_findings",
+            "--task-file",
+            task_path.to_str().expect("task path"),
+            "--request-file",
+            list_request_path.to_str().expect("request path"),
+        ],
+        &runtime,
+    );
+    assert_eq!(list.exit_code, 0, "{}", list.stderr);
+    let list_payload = parse_robot_payload(&list.stdout);
+    assert_eq!(list_payload["schema_id"], "rr.agent.response.v1");
+    assert_eq!(list_payload["status"], "succeeded");
+    let list_operation = &list_payload["operation_response"];
+    assert_eq!(
+        list_operation["status"],
+        json!(WorkerOperationResponseStatus::Succeeded)
+    );
+    let items = list_operation["payload"]["items"]
+        .as_array()
+        .expect("finding items");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["finding_id"], "finding-rr-agent-1");
+    assert_eq!(items[0]["fingerprint"], "fp-rr-agent-1");
+    assert_eq!(items[0]["outbound_state"], "awaiting_approval");
+
+    let detail_request_path = temp.path().join("worker-finding-detail-request.json");
+    write_json_fixture(
+        &detail_request_path,
+        &sample_worker_request(
+            &task,
+            "worker.get_finding_detail",
+            Some(json!({ "finding_id": "finding-rr-agent-1" })),
+        ),
+    );
+    let detail = run_rr(
+        &[
+            "agent",
+            "worker.get_finding_detail",
+            "--task-file",
+            task_path.to_str().expect("task path"),
+            "--request-file",
+            detail_request_path.to_str().expect("request path"),
+        ],
+        &runtime,
+    );
+    assert_eq!(detail.exit_code, 0, "{}", detail.stderr);
+    let detail_payload = parse_robot_payload(&detail.stdout);
+    assert_eq!(detail_payload["schema_id"], "rr.agent.response.v1");
+    assert_eq!(detail_payload["status"], "succeeded");
+    let detail_operation = &detail_payload["operation_response"];
+    assert_eq!(
+        detail_operation["status"],
+        json!(WorkerOperationResponseStatus::Succeeded)
+    );
+    assert_eq!(
+        detail_operation["payload"]["finding"]["finding_id"],
+        "finding-rr-agent-1"
+    );
+    assert_eq!(
+        detail_operation["payload"]["finding"]["summary"],
+        "Approval token survives stale refresh"
+    );
+    assert_eq!(detail_operation["payload"]["evidence_locations"], json!([]));
+    assert!(detail.stderr.trim().is_empty(), "{}", detail.stderr);
+}
+
+#[test]
+fn rr_agent_accepts_stage_results_and_denies_unimplemented_memory_search() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let task = sample_worker_task();
+    let task_path = temp.path().join("worker-task.json");
+    write_json_fixture(&task_path, &task);
+    seed_rr_agent_session(&runtime, &task);
+
+    let stage_result_request = sample_worker_request(
+        &task,
+        "worker.submit_stage_result",
+        Some(serde_json::to_value(sample_stage_result(&task)).expect("stage result value")),
+    );
+    let stage_output = run_rr_process_with_stdin(
+        &[
+            "agent",
+            "worker.submit_stage_result",
+            "--task-file",
+            task_path.to_str().expect("task path"),
+        ],
+        &runtime,
+        &serde_json::to_vec_pretty(&stage_result_request).expect("stage result request"),
+    );
+    assert_eq!(
+        stage_output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&stage_output.stderr)
+    );
+    let stage_payload =
+        parse_robot_payload(std::str::from_utf8(&stage_output.stdout).expect("stage stdout utf8"));
+    assert_eq!(stage_payload["schema_id"], "rr.agent.response.v1");
+    assert_eq!(stage_payload["status"], "succeeded");
+    let stage_operation = &stage_payload["operation_response"];
+    assert_eq!(
+        stage_operation["status"],
+        json!(WorkerOperationResponseStatus::Succeeded)
+    );
+    assert_eq!(stage_operation["authorization"]["lane"], "proposal");
+    assert_eq!(stage_operation["authorization"]["advisory_only"], true);
+    assert_eq!(stage_operation["payload"]["review_task_id"], task.id);
+    assert_eq!(
+        stage_operation["payload"]["result_schema_id"],
+        WORKER_STAGE_RESULT_SCHEMA_V1
+    );
+    assert_eq!(
+        stage_operation["payload"]["structured_findings_pack_present"],
+        true
+    );
+
+    let capability_path = temp.path().join("rr-agent-capability.json");
+    write_json_fixture(
+        &capability_path,
+        &json!({
+            "transport_kind": "agent_cli",
+            "supports_context_reads": true,
+            "supports_memory_search": false,
+            "supports_finding_reads": true,
+            "supports_artifact_reads": true,
+            "supports_stage_result_submission": true,
+            "supports_clarification_requests": true,
+            "supports_follow_up_hints": true,
+            "supports_fix_mode": false
+        }),
+    );
+    let denied_request_path = temp.path().join("worker-search-memory-request.json");
+    write_json_fixture(
+        &denied_request_path,
+        &sample_worker_request(
+            &task,
+            "worker.search_memory",
+            Some(json!({
+                "query_text": "stale approval token",
+                "query_mode": "recall"
+            })),
+        ),
+    );
+    let denied = run_rr(
+        &[
+            "agent",
+            "worker.search_memory",
+            "--task-file",
+            task_path.to_str().expect("task path"),
+            "--capability-file",
+            capability_path.to_str().expect("capability path"),
+            "--request-file",
+            denied_request_path.to_str().expect("request path"),
+        ],
+        &runtime,
+    );
+    assert_eq!(denied.exit_code, 3, "{}", denied.stderr);
+    let denied_payload = parse_robot_payload(&denied.stdout);
+    assert_eq!(denied_payload["schema_id"], "rr.agent.response.v1");
+    assert_eq!(denied_payload["status"], "denied");
+    assert_eq!(denied_payload["transport_kind"], "agent_cli");
+    let denied_operation = &denied_payload["operation_response"];
+    assert_eq!(
+        denied_operation["status"],
+        json!(WorkerOperationResponseStatus::Denied)
+    );
+    assert_eq!(denied_operation["authorization"], Value::Null);
+    assert_eq!(denied_operation["denial"]["code"], "capability_denied");
+    assert_eq!(denied_operation["denial"]["denied_scopes"], json!(["repo"]));
+    assert_eq!(denied_operation["operation"], "worker.search_memory");
+    assert!(
+        denied_operation["denial"]["message"]
+            .as_str()
+            .expect("denial message")
+            .contains("requires capability 'supports_memory_search'"),
+        "{}",
+        denied.stdout
+    );
+}
+
+#[test]
+fn rr_agent_supports_search_artifact_and_advisory_operations() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let task = sample_worker_task();
+    let task_path = temp.path().join("worker-task.json");
+    write_json_fixture(&task_path, &task);
+    seed_rr_agent_session(&runtime, &task);
+
+    let store = RogerStore::open(&runtime.store_root).expect("open store");
+    let artifact = store
+        .store_artifact(
+            "artifact-rr-agent-1",
+            ArtifactBudgetClass::EvidenceExcerpt,
+            "text/plain",
+            b"approval excerpt line one\nline two\n",
+        )
+        .expect("store artifact");
+
+    let search_request_path = temp.path().join("worker-search-memory-success.json");
+    write_json_fixture(
+        &search_request_path,
+        &sample_worker_request(
+            &task,
+            "worker.search_memory",
+            Some(json!({
+                "query_text": "approval token stale refresh",
+                "query_mode": "recall"
+            })),
+        ),
+    );
+    let search = run_rr(
+        &[
+            "agent",
+            "worker.search_memory",
+            "--task-file",
+            task_path.to_str().expect("task path"),
+            "--request-file",
+            search_request_path.to_str().expect("request path"),
+        ],
+        &runtime,
+    );
+    assert_eq!(search.exit_code, 0, "{}", search.stderr);
+    let search_payload = parse_robot_payload(&search.stdout);
+    assert_eq!(search_payload["schema_id"], "rr.agent.response.v1");
+    assert_eq!(search_payload["status"], "succeeded");
+    let search_operation = &search_payload["operation_response"];
+    assert_eq!(
+        search_operation["status"],
+        json!(WorkerOperationResponseStatus::Succeeded)
+    );
+    assert_eq!(
+        search_operation["payload"]["requested_query_mode"],
+        "recall"
+    );
+    assert_eq!(search_operation["payload"]["resolved_query_mode"], "recall");
+    assert!(search_operation["payload"]["promoted_memory"].is_array());
+    assert!(search_operation["payload"]["tentative_candidates"].is_array());
+    assert!(search_operation["payload"]["evidence_hits"].is_array());
+
+    let artifact_request_path = temp.path().join("worker-artifact-request.json");
+    write_json_fixture(
+        &artifact_request_path,
+        &sample_worker_request(
+            &task,
+            "worker.get_artifact_excerpt",
+            Some(json!({ "artifact_id": artifact.id })),
+        ),
+    );
+    let artifact_result = run_rr(
+        &[
+            "agent",
+            "worker.get_artifact_excerpt",
+            "--task-file",
+            task_path.to_str().expect("task path"),
+            "--request-file",
+            artifact_request_path.to_str().expect("request path"),
+        ],
+        &runtime,
+    );
+    assert_eq!(artifact_result.exit_code, 0, "{}", artifact_result.stderr);
+    let artifact_payload = parse_robot_payload(&artifact_result.stdout);
+    let artifact_operation = &artifact_payload["operation_response"];
+    assert_eq!(
+        artifact_operation["status"],
+        json!(WorkerOperationResponseStatus::Succeeded)
+    );
+    assert_eq!(artifact_operation["payload"]["artifact_id"], artifact.id);
+    assert!(
+        artifact_operation["payload"]["excerpt"]
+            .as_str()
+            .expect("artifact excerpt")
+            .contains("approval excerpt line one"),
+        "{}",
+        artifact_result.stdout
+    );
+
+    let clarification_request_path = temp.path().join("worker-clarification-request.json");
+    write_json_fixture(
+        &clarification_request_path,
+        &sample_worker_request(
+            &task,
+            "worker.request_clarification",
+            Some(json!({
+                "id": "clarify-1",
+                "question": "Should Roger preserve this approval token after refresh?",
+                "reason": "Need operator intent",
+                "blocking": true
+            })),
+        ),
+    );
+    let clarification = run_rr(
+        &[
+            "agent",
+            "worker.request_clarification",
+            "--task-file",
+            task_path.to_str().expect("task path"),
+            "--request-file",
+            clarification_request_path.to_str().expect("request path"),
+        ],
+        &runtime,
+    );
+    assert_eq!(clarification.exit_code, 0, "{}", clarification.stderr);
+    let clarification_payload = parse_robot_payload(&clarification.stdout);
+    let clarification_operation = &clarification_payload["operation_response"];
+    assert_eq!(
+        clarification_operation["status"],
+        json!(WorkerOperationResponseStatus::Succeeded)
+    );
+    assert_eq!(
+        clarification_operation["payload"]["question"],
+        "Should Roger preserve this approval token after refresh?"
+    );
+    assert_eq!(clarification_operation["payload"]["blocking"], true);
+
+    let memory_review_request_path = temp.path().join("worker-memory-review-request.json");
+    write_json_fixture(
+        &memory_review_request_path,
+        &sample_worker_request(
+            &task,
+            "worker.request_memory_review",
+            Some(json!({
+                "id": "memory-review-1",
+                "query": "approval token invalidation",
+                "requested_scopes": ["repo"],
+                "rationale": "Need prior-review context"
+            })),
+        ),
+    );
+    let memory_review = run_rr(
+        &[
+            "agent",
+            "worker.request_memory_review",
+            "--task-file",
+            task_path.to_str().expect("task path"),
+            "--request-file",
+            memory_review_request_path
+                .to_str()
+                .expect("memory review request path"),
+        ],
+        &runtime,
+    );
+    assert_eq!(memory_review.exit_code, 0, "{}", memory_review.stderr);
+    let memory_review_payload = parse_robot_payload(&memory_review.stdout);
+    let memory_review_operation = &memory_review_payload["operation_response"];
+    assert_eq!(
+        memory_review_operation["status"],
+        json!(WorkerOperationResponseStatus::Succeeded)
+    );
+    assert_eq!(
+        memory_review_operation["payload"]["query"],
+        "approval token invalidation"
+    );
+    assert_eq!(
+        memory_review_operation["payload"]["requested_scopes"],
+        json!(["repo"])
+    );
+
+    let follow_up_request_path = temp.path().join("worker-follow-up-request.json");
+    write_json_fixture(
+        &follow_up_request_path,
+        &sample_worker_request(
+            &task,
+            "worker.propose_follow_up",
+            Some(json!({
+                "id": "follow-up-1",
+                "title": "Audit approval invalidation after refresh",
+                "objective": "Verify refresh invalidates stale approvals before posting",
+                "proposed_task_kind": "deep_review_pass",
+                "suggested_scopes": ["repo"]
+            })),
+        ),
+    );
+    let follow_up = run_rr(
+        &[
+            "agent",
+            "worker.propose_follow_up",
+            "--task-file",
+            task_path.to_str().expect("task path"),
+            "--request-file",
+            follow_up_request_path
+                .to_str()
+                .expect("follow-up request path"),
+        ],
+        &runtime,
+    );
+    assert_eq!(follow_up.exit_code, 0, "{}", follow_up.stderr);
+    let follow_up_payload = parse_robot_payload(&follow_up.stdout);
+    let follow_up_operation = &follow_up_payload["operation_response"];
+    assert_eq!(
+        follow_up_operation["status"],
+        json!(WorkerOperationResponseStatus::Succeeded)
+    );
+    assert_eq!(
+        follow_up_operation["payload"]["title"],
+        "Audit approval invalidation after refresh"
+    );
+    assert_eq!(
+        follow_up_operation["payload"]["suggested_scopes"],
+        json!(["repo"])
     );
 }
 

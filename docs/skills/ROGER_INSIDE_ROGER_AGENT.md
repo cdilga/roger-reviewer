@@ -8,7 +8,8 @@ session or bare-harness continuation and needs the smallest safe Roger-native
 command subset.
 
 This skill is intentionally narrow. It does not widen the in-harness command
-surface and it does not imply that `rr agent` is already shipped.
+surface, and it remains narrower than the dedicated `rr agent` worker
+transport.
 
 ## When to use it
 
@@ -70,4 +71,5 @@ Do not:
 - treat provider-local memory or chat state as Roger truth
 - assume `roger-clarify` or `roger-open-drafts` exist, or invent a manual
   refresh command instead of relying on Roger's automatic reconciliation model
-- present an unsupported in-harness affordance as if it were shipped
+- present an unsupported in-harness affordance, or parity with `rr agent`, as
+  if it were shipped
