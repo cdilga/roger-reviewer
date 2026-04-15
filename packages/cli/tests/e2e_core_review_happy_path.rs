@@ -3,8 +3,8 @@
 use roger_app_core::{
     ApprovalState, ExplicitPostingInput, ExplicitPostingOutcome, OutboundApprovalToken,
     OutboundDraft, OutboundDraftBatch, OutboundPostingAdapter, PostedActionStatus,
-    PostingAdapterItemResult, PostingAdapterItemStatus, execute_explicit_posting_flow,
-    outbound_target_tuple_json, ReviewTarget,
+    PostingAdapterItemResult, PostingAdapterItemStatus, ReviewTarget,
+    execute_explicit_posting_flow, outbound_target_tuple_json,
 };
 use roger_cli::{CliRuntime, run};
 use roger_storage::{

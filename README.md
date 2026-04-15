@@ -80,10 +80,13 @@ rr findings
 rr resume --pr 123
 ```
 
-Replace `123` with your pull request number. For `0.1.0`, the intended provider
-order is GitHub Copilot CLI, OpenCode, Codex, Gemini, then Claude Code.
-OpenCode remains the continuity reference path, and the browser companion is
-optional.
+Replace `123` with your pull request number. In the live `0.1.0` CLI surface,
+`rr review --provider` currently supports `opencode`, `codex`, `gemini`, and
+`claude`. OpenCode remains the strongest continuity path. Codex, Gemini, and
+Claude Code are live only as bounded Tier A paths: Roger can start a review,
+reseed from a `ResumeBundle`, and preserve raw capture, but it does not claim
+locator reopen or `rr return` for those providers. GitHub Copilot CLI is still
+planned rather than live, and the browser companion is optional.
 
 Roger reconciles stale review state automatically when you re-enter with
 `rr review`, `rr resume`, `rr return`, `rr status`, or `rr findings`.

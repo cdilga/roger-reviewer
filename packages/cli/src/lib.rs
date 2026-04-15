@@ -6,7 +6,8 @@ use roger_app_core::{
     AppError, ContinuityQuality, FindingOutboundState, FindingTriageState, HarnessAdapter,
     LaunchAction, LaunchIntent, ResumeAttemptOutcome, ResumeBundle, ResumeBundleProfile,
     ReviewTarget, RogerCommand, RogerCommandId, RogerCommandInvocationSurface, RogerCommandResult,
-    RogerCommandRouteStatus, Surface, route_harness_command, safe_harness_command_bindings,
+    RogerCommandRouteStatus, SessionLocator, Surface, route_harness_command,
+    safe_harness_command_bindings,
 };
 use roger_bridge::{
     NativeHostManifest, SupportedBrowser, SupportedOs, native_host_install_path_for,
@@ -19,10 +20,12 @@ use roger_session_opencode::{
     OpenCodeAdapter, OpenCodeReturnPath, OpenCodeSessionPath, rr_return_to_roger_session,
 };
 use roger_storage::{
-    CreateReviewRun, CreateReviewSession, CreateSessionLaunchBinding, LaunchSurface,
+    CreateLaunchAttempt, CreateReviewRun, CreateReviewSession, CreateSessionLaunchBinding,
+    FinalizeReviewLaunchAttempt, LaunchAttemptAction, LaunchAttemptState, LaunchSurface,
     PriorReviewLookupQuery, PriorReviewRetrievalMode, ResolveSessionLaunchBinding,
-    ResolveSessionReentry, RogerStore, SessionFinderEntry, SessionFinderQuery,
-    SessionBindingResolution, SessionLaunchBindingRecord, SessionReentryResolution, StorageLayout,
+    ResolveSessionReentry, ReviewLaunchFinalizationError, RogerStore, SessionBindingResolution,
+    SessionFinderEntry, SessionFinderQuery, SessionLaunchBindingRecord, SessionReentryResolution,
+    StorageLayout, UpdateLaunchAttempt,
 };
 use rusqlite::Connection as SqliteConnection;
 use serde::Serialize;
@@ -41,6 +44,9 @@ use std::time::{Duration, Instant};
 use toon_format::encode_default as encode_toon_default;
 
 static ID_SEQ: AtomicU64 = AtomicU64::new(1);
+const SUPPORTED_REVIEW_PROVIDERS: [&str; 4] = ["opencode", "codex", "gemini", "claude"];
+const PLANNED_REVIEW_PROVIDERS: [&str; 1] = ["copilot"];
+const NOT_LIVE_REVIEW_PROVIDERS: [&str; 1] = ["pi-agent"];
 
 #[derive(Clone, Debug)]
 pub struct CliRuntime {
@@ -2243,8 +2249,53 @@ fn handle_bridge(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     }
 }
 
+fn persist_launch_attempt_state(
+    store: &RogerStore,
+    attempt_id: &str,
+    state: LaunchAttemptState,
+    final_session_id: Option<&str>,
+    launch_binding_id: Option<&str>,
+    provider_session_id: Option<&str>,
+    verified_locator: Option<&SessionLocator>,
+    failure_reason: Option<&str>,
+) -> std::result::Result<(), String> {
+    store
+        .update_launch_attempt(UpdateLaunchAttempt {
+            id: attempt_id,
+            state,
+            final_session_id,
+            launch_binding_id,
+            provider_session_id,
+            verified_locator,
+            failure_reason,
+        })
+        .map(|_| ())
+        .map_err(|err| format!("failed to persist launch attempt {attempt_id}: {err}"))
+}
+
+fn verified_provider_session_id<'a>(
+    expected_provider: &str,
+    locator: &'a SessionLocator,
+) -> std::result::Result<&'a str, String> {
+    if locator.provider != expected_provider {
+        return Err(format!(
+            "provider verification mismatch: expected '{expected_provider}', got '{}'",
+            locator.provider
+        ));
+    }
+    let session_id = locator.session_id.trim();
+    if session_id.is_empty() {
+        Err(format!(
+            "provider '{}' returned an empty session identifier",
+            locator.provider
+        ))
+    } else {
+        Ok(session_id)
+    }
+}
+
 fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
-    if parsed.provider != "opencode" && parsed.provider != "codex" && parsed.provider != "claude" && parsed.provider != "gemini" {
+    if !SUPPORTED_REVIEW_PROVIDERS.contains(&parsed.provider.as_str()) {
         return blocked_response(
             format!(
                 "provider '{}' is not supported for rr review in this slice",
@@ -2258,7 +2309,10 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             ],
             json!({
                 "provider": parsed.provider,
-                "supported_providers": ["opencode", "codex", "gemini", "claude"],
+                "supported_providers": SUPPORTED_REVIEW_PROVIDERS,
+                "planned_not_live_providers": PLANNED_REVIEW_PROVIDERS,
+                "not_supported_providers": NOT_LIVE_REVIEW_PROVIDERS,
+                "live_review_provider_support": review_provider_support_matrix(),
             }),
         );
     }
@@ -2290,16 +2344,7 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 "repository": repository,
                 "pull_request": pr,
                 "launch_profile_id": cli_config::PROFILE_ID,
-                "provider_capability": {
-                    "provider": parsed.provider,
-                    "tier": provider_tier(&parsed.provider),
-                    "supports": {
-                        "review_start": true,
-                        "resume_reseed": parsed.provider == "codex" || parsed.provider == "claude" || parsed.provider == "gemini" || parsed.provider == "opencode",
-                        "resume_reopen": parsed.provider == "opencode",
-                        "return": parsed.provider == "opencode",
-                    }
-                }
+                "provider_capability": provider_capability(&parsed.provider),
             }),
             warnings: provider_support_warning(&parsed.provider, "rr review")
                 .into_iter()
@@ -2314,7 +2359,45 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         Err(err) => return error_response(format!("failed to open Roger store: {err}")),
     };
 
+    let attempt_id = next_id("attempt");
+    if let Err(err) = store.create_launch_attempt(CreateLaunchAttempt {
+        id: &attempt_id,
+        action: LaunchAttemptAction::StartReview,
+        provider: &parsed.provider,
+        source_surface: LaunchSurface::Cli,
+        review_target: &target,
+        requested_session_id: None,
+        state: LaunchAttemptState::Pending,
+    }) {
+        return error_response(format!("failed to create launch attempt: {err}"));
+    }
+
+    if let Err(err) = persist_launch_attempt_state(
+        &store,
+        &attempt_id,
+        LaunchAttemptState::Dispatching,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ) {
+        return error_response(err);
+    }
+
     let intent = launch_intent(LaunchAction::StartReview, runtime);
+    let record_failure = |state: LaunchAttemptState, reason: &str| {
+        persist_launch_attempt_state(
+            &store,
+            &attempt_id,
+            state,
+            None,
+            None,
+            None,
+            None,
+            Some(reason),
+        )
+    };
     let (session_locator, session_path, continuity_quality, warnings) =
         match parsed.provider.as_str() {
             "opencode" => {
@@ -2322,10 +2405,19 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 let linkage = match adapter.link_session(&target, &intent, None, None) {
                     Ok(linkage) => linkage,
                     Err(err) => {
+                        let detail = err.to_string();
+                        if let Err(update_err) =
+                            record_failure(LaunchAttemptState::FailedSpawn, &detail)
+                        {
+                            return error_response(update_err);
+                        }
                         return blocked_response(
-                            format!("failed to start OpenCode session: {err}"),
+                            format!("failed to start OpenCode session: {detail}"),
                             vec!["verify OpenCode is installed and reachable".to_owned()],
-                            json!({"reason_code": "opencode_start_failed"}),
+                            json!({
+                                "reason_code": "opencode_start_failed",
+                                "launch_attempt_id": attempt_id,
+                            }),
                         );
                     }
                 };
@@ -2341,10 +2433,19 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 let linkage = match adapter.link_session(&target, &intent, None, None) {
                     Ok(linkage) => linkage,
                     Err(err) => {
+                        let detail = err.to_string();
+                        if let Err(update_err) =
+                            record_failure(LaunchAttemptState::FailedSpawn, &detail)
+                        {
+                            return error_response(update_err);
+                        }
                         return blocked_response(
-                            format!("failed to start Codex session: {err}"),
+                            format!("failed to start Codex session: {detail}"),
                             vec!["verify Codex CLI is installed and reachable".to_owned()],
-                            json!({"reason_code": "codex_start_failed"}),
+                            json!({
+                                "reason_code": "codex_start_failed",
+                                "launch_attempt_id": attempt_id,
+                            }),
                         );
                     }
                 };
@@ -2362,10 +2463,19 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 let linkage = match adapter.link_session(&target, &intent, None, None) {
                     Ok(linkage) => linkage,
                     Err(err) => {
+                        let detail = err.to_string();
+                        if let Err(update_err) =
+                            record_failure(LaunchAttemptState::FailedSpawn, &detail)
+                        {
+                            return error_response(update_err);
+                        }
                         return blocked_response(
-                            format!("failed to start Claude session: {err}"),
+                            format!("failed to start Claude session: {detail}"),
                             vec!["verify Claude CLI is installed and reachable".to_owned()],
-                            json!({"reason_code": "claude_start_failed"}),
+                            json!({
+                                "reason_code": "claude_start_failed",
+                                "launch_attempt_id": attempt_id,
+                            }),
                         );
                     }
                 };
@@ -2383,10 +2493,19 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 let linkage = match adapter.link_session(&target, &intent, None, None) {
                     Ok(linkage) => linkage,
                     Err(err) => {
+                        let detail = err.to_string();
+                        if let Err(update_err) =
+                            record_failure(LaunchAttemptState::FailedSpawn, &detail)
+                        {
+                            return error_response(update_err);
+                        }
                         return blocked_response(
-                            format!("failed to start Gemini session: {err}"),
+                            format!("failed to start Gemini session: {detail}"),
                             vec!["verify Gemini CLI is installed and reachable".to_owned()],
-                            json!({"reason_code": "gemini_start_failed"}),
+                            json!({
+                                "reason_code": "gemini_start_failed",
+                                "launch_attempt_id": attempt_id,
+                            }),
                         );
                     }
                 };
@@ -2401,6 +2520,47 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             }
             _ => unreachable!("provider validated above"),
         };
+
+    if let Err(err) = persist_launch_attempt_state(
+        &store,
+        &attempt_id,
+        LaunchAttemptState::AwaitingProviderVerification,
+        None,
+        None,
+        None,
+        Some(&session_locator),
+        None,
+    ) {
+        return error_response(err);
+    }
+
+    let provider_session_id = match verified_provider_session_id(&parsed.provider, &session_locator)
+    {
+        Ok(session_id) => session_id.to_owned(),
+        Err(detail) => {
+            if let Err(update_err) = persist_launch_attempt_state(
+                &store,
+                &attempt_id,
+                LaunchAttemptState::FailedProviderVerification,
+                None,
+                None,
+                None,
+                Some(&session_locator),
+                Some(&detail),
+            ) {
+                return error_response(update_err);
+            }
+            return blocked_response(
+                format!("failed to verify provider session: {detail}"),
+                vec!["re-run rr review after verifying provider launch output".to_owned()],
+                json!({
+                    "reason_code": "provider_session_unverified",
+                    "launch_attempt_id": attempt_id,
+                    "provider": parsed.provider,
+                }),
+            );
+        }
+    };
 
     let session_id = next_id("session");
     let run_id = next_id("run");
@@ -2418,7 +2578,22 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
 
     let bundle_payload = match serde_json::to_vec(&bundle) {
         Ok(payload) => payload,
-        Err(err) => return error_response(format!("failed to serialize ResumeBundle: {err}")),
+        Err(err) => {
+            let detail = format!("failed to serialize ResumeBundle: {err}");
+            if let Err(update_err) = persist_launch_attempt_state(
+                &store,
+                &attempt_id,
+                LaunchAttemptState::FailedSessionBinding,
+                None,
+                None,
+                Some(&provider_session_id),
+                Some(&session_locator),
+                Some(&detail),
+            ) {
+                return error_response(update_err);
+            }
+            return error_response(detail);
+        }
     };
     let bundle_digest = sha256_hex(&bundle_payload);
     let bundle_artifact_id = match store.artifact_id_by_digest(&bundle_digest) {
@@ -2433,63 +2608,134 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 match store.artifact_id_by_digest(&bundle_digest) {
                     Ok(Some(existing_id)) => existing_id,
                     Ok(None) => {
-                        return error_response(
-                            "failed to persist ResumeBundle: duplicate digest detected but no stored artifact could be resolved".to_owned(),
-                        );
+                        let detail =
+                            "failed to persist ResumeBundle: duplicate digest detected but no stored artifact could be resolved".to_owned();
+                        if let Err(update_err) = persist_launch_attempt_state(
+                            &store,
+                            &attempt_id,
+                            LaunchAttemptState::FailedSessionBinding,
+                            None,
+                            None,
+                            Some(&provider_session_id),
+                            Some(&session_locator),
+                            Some(&detail),
+                        ) {
+                            return error_response(update_err);
+                        }
+                        return error_response(detail);
                     }
                     Err(lookup_err) => {
-                        return error_response(format!(
+                        let detail = format!(
                             "failed to persist ResumeBundle: duplicate digest lookup failed: {lookup_err}"
-                        ));
+                        );
+                        if let Err(update_err) = persist_launch_attempt_state(
+                            &store,
+                            &attempt_id,
+                            LaunchAttemptState::FailedSessionBinding,
+                            None,
+                            None,
+                            Some(&provider_session_id),
+                            Some(&session_locator),
+                            Some(&detail),
+                        ) {
+                            return error_response(update_err);
+                        }
+                        return error_response(detail);
                     }
                 }
             }
-            Err(err) => return error_response(format!("failed to persist ResumeBundle: {err}")),
+            Err(err) => {
+                let detail = format!("failed to persist ResumeBundle: {err}");
+                if let Err(update_err) = persist_launch_attempt_state(
+                    &store,
+                    &attempt_id,
+                    LaunchAttemptState::FailedSessionBinding,
+                    None,
+                    None,
+                    Some(&provider_session_id),
+                    Some(&session_locator),
+                    Some(&detail),
+                ) {
+                    return error_response(update_err);
+                }
+                return error_response(detail);
+            }
         },
         Err(err) => {
-            return error_response(format!(
-                "failed to resolve existing ResumeBundle artifact by digest: {err}"
-            ));
+            let detail =
+                format!("failed to resolve existing ResumeBundle artifact by digest: {err}");
+            if let Err(update_err) = persist_launch_attempt_state(
+                &store,
+                &attempt_id,
+                LaunchAttemptState::FailedSessionBinding,
+                None,
+                None,
+                Some(&provider_session_id),
+                Some(&session_locator),
+                Some(&detail),
+            ) {
+                return error_response(update_err);
+            }
+            return error_response(detail);
         }
     };
 
-    if let Err(err) = store.create_review_session(CreateReviewSession {
-        id: &session_id,
-        review_target: &target,
-        provider: &parsed.provider,
-        session_locator: Some(&session_locator),
-        resume_bundle_artifact_id: Some(&bundle_artifact_id),
-        continuity_state: continuity_state_label(&continuity_quality),
-        attention_state: "review_launched",
-        launch_profile_id: Some(cli_config::PROFILE_ID),
+    if let Err(err) = store.finalize_review_launch_attempt(FinalizeReviewLaunchAttempt {
+        attempt_id: &attempt_id,
+        terminal_state: LaunchAttemptState::VerifiedStarted,
+        provider_session_id: &provider_session_id,
+        verified_locator: &session_locator,
+        review_session: CreateReviewSession {
+            id: &session_id,
+            review_target: &target,
+            provider: &parsed.provider,
+            session_locator: Some(&session_locator),
+            resume_bundle_artifact_id: Some(&bundle_artifact_id),
+            continuity_state: continuity_state_label(&continuity_quality),
+            attention_state: "review_launched",
+            launch_profile_id: Some(cli_config::PROFILE_ID),
+        },
+        review_run: CreateReviewRun {
+            id: &run_id,
+            session_id: &session_id,
+            run_kind: "review",
+            repo_snapshot: &format!("{}#{}", target.repository, target.pull_request_number),
+            continuity_quality: continuity_state_label(&continuity_quality),
+            session_locator_artifact_id: None,
+        },
+        launch_binding: CreateSessionLaunchBinding {
+            id: &binding_id,
+            session_id: &session_id,
+            repo_locator: &target.repository,
+            review_target: Some(&target),
+            surface: LaunchSurface::Cli,
+            launch_profile_id: Some(cli_config::PROFILE_ID),
+            ui_target: Some(cli_config::UI_TARGET),
+            instance_preference: Some(cli_config::INSTANCE_PREFERENCE),
+            cwd: Some(runtime.cwd.to_string_lossy().as_ref()),
+            worktree_root: None,
+        },
     }) {
-        return error_response(format!("failed to create review session: {err}"));
-    }
-
-    if let Err(err) = store.create_review_run(CreateReviewRun {
-        id: &run_id,
-        session_id: &session_id,
-        run_kind: "review",
-        repo_snapshot: &format!("{}#{}", target.repository, target.pull_request_number),
-        continuity_quality: continuity_state_label(&continuity_quality),
-        session_locator_artifact_id: None,
-    }) {
-        return error_response(format!("failed to create review run: {err}"));
-    }
-
-    if let Err(err) = store.put_session_launch_binding(CreateSessionLaunchBinding {
-        id: &binding_id,
-        session_id: &session_id,
-        repo_locator: &target.repository,
-        review_target: Some(&target),
-        surface: LaunchSurface::Cli,
-        launch_profile_id: Some(cli_config::PROFILE_ID),
-        ui_target: Some(cli_config::UI_TARGET),
-        instance_preference: Some(cli_config::INSTANCE_PREFERENCE),
-        cwd: Some(runtime.cwd.to_string_lossy().as_ref()),
-        worktree_root: None,
-    }) {
-        return error_response(format!("failed to persist launch binding: {err}"));
+        let detail = format!("failed to finalize review launch: {err}");
+        let failure_state = match err {
+            ReviewLaunchFinalizationError::SessionBinding(_) => {
+                LaunchAttemptState::FailedSessionBinding
+            }
+            ReviewLaunchFinalizationError::Commit(_) => LaunchAttemptState::FailedCommit,
+        };
+        if let Err(update_err) = persist_launch_attempt_state(
+            &store,
+            &attempt_id,
+            failure_state,
+            None,
+            None,
+            Some(&provider_session_id),
+            Some(&session_locator),
+            Some(&detail),
+        ) {
+            return error_response(update_err);
+        }
+        return error_response(detail);
     }
 
     let outcome = if matches!(continuity_quality, ContinuityQuality::Usable) {
@@ -2501,6 +2747,7 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     CommandResponse {
         outcome,
         data: json!({
+            "launch_attempt_id": attempt_id,
             "session_id": session_id,
             "review_run_id": run_id,
             "resume_bundle_artifact_id": bundle_artifact_id,
@@ -2570,11 +2817,7 @@ fn select_unique_strongest_score_index(scores: &[ReentryInferenceScore]) -> Opti
         }
     }
 
-    if best_is_tied {
-        None
-    } else {
-        Some(best_index)
-    }
+    if best_is_tied { None } else { Some(best_index) }
 }
 
 fn picker_reason_supports_auto_selection(reason: &str, candidates: &[SessionFinderEntry]) -> bool {
@@ -2592,12 +2835,22 @@ fn infer_strongest_reentry_selection(
     source_surface: LaunchSurface,
     ui_target: Option<&str>,
     instance_preference: Option<&str>,
-) -> std::result::Result<Option<(String, Option<SessionLaunchBindingRecord>, ReentryInferenceScore)>, String> {
+) -> std::result::Result<
+    Option<(
+        String,
+        Option<SessionLaunchBindingRecord>,
+        ReentryInferenceScore,
+    )>,
+    String,
+> {
     let mut ranked = Vec::new();
     for candidate in candidates {
-        let Some(session) = store
-            .review_session(&candidate.session_id)
-            .map_err(|err| format!("failed to load candidate session {}: {err}", candidate.session_id))?
+        let Some(session) = store.review_session(&candidate.session_id).map_err(|err| {
+            format!(
+                "failed to load candidate session {}: {err}",
+                candidate.session_id
+            )
+        })?
         else {
             continue;
         };
@@ -2716,19 +2969,22 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         }
     };
 
-    if session.provider != "opencode" && session.provider != "codex" && session.provider != "claude" && session.provider != "gemini" {
+    if !SUPPORTED_REVIEW_PROVIDERS.contains(&session.provider.as_str()) {
         return blocked_response(
             format!(
                 "session {} uses provider '{}' which cannot be resumed by this CLI slice",
                 session.id, session.provider
             ),
             vec![
-                "resume is currently available for opencode, codex, gemini, and claude sessions".to_owned(),
+                "resume is currently available for opencode, codex, gemini, and claude sessions"
+                    .to_owned(),
             ],
             json!({
                 "session_id": session.id,
                 "provider": session.provider,
-                "supported_providers": ["opencode", "codex", "gemini", "claude"],
+                "supported_providers": SUPPORTED_REVIEW_PROVIDERS,
+                "planned_not_live_providers": PLANNED_REVIEW_PROVIDERS,
+                "not_supported_providers": NOT_LIVE_REVIEW_PROVIDERS,
             }),
         );
     }
@@ -2749,14 +3005,17 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         } else {
             "usable"
         };
-        let inferred_resume_path =
-            if session.provider == "codex" || session.provider == "claude" || session.provider == "gemini" || continuity_state.contains("reseed") {
-                "reseeded_from_bundle"
-            } else if continuity_state.contains("reopen") {
-                "reopened_by_locator"
-            } else {
-                "launch_suppressed_non_interactive"
-            };
+        let inferred_resume_path = if session.provider == "codex"
+            || session.provider == "claude"
+            || session.provider == "gemini"
+            || continuity_state.contains("reseed")
+        {
+            "reseeded_from_bundle"
+        } else if continuity_state.contains("reopen") {
+            "reopened_by_locator"
+        } else {
+            "launch_suppressed_non_interactive"
+        };
         return CommandResponse {
             outcome: if degraded {
                 OutcomeKind::Degraded
@@ -3272,7 +3531,7 @@ fn handle_sessions(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
                 }
             })
         })
-            .collect::<Vec<_>>();
+        .collect::<Vec<_>>();
 
     let outcome = if count == 0 {
         OutcomeKind::Empty
@@ -3332,19 +3591,17 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     };
 
     let limit = parsed.limit.unwrap_or(10).min(100);
-    let lookup = match store.prior_review_lookup(
-        PriorReviewLookupQuery {
-            scope_key: &format!("repo:{repository}"),
-            repository: &repository,
-            query_text,
-            limit: limit.saturating_add(1),
-            include_tentative_candidates: false,
-            allow_project_scope: false,
-            allow_org_scope: false,
-            semantic_assets_verified: false,
-            semantic_candidates: Vec::new(),
-        },
-    ) {
+    let lookup = match store.prior_review_lookup(PriorReviewLookupQuery {
+        scope_key: &format!("repo:{repository}"),
+        repository: &repository,
+        query_text,
+        limit: limit.saturating_add(1),
+        include_tentative_candidates: false,
+        allow_project_scope: false,
+        allow_org_scope: false,
+        semantic_assets_verified: false,
+        semantic_candidates: Vec::new(),
+    }) {
         Ok(result) => result,
         Err(err) => return error_response(format!("failed to run prior-review lookup: {err}")),
     };
@@ -4819,6 +5076,14 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                 json!({"command": "rr sessions --robot", "purpose": "global session finder"}),
                 json!({"command": "rr findings --robot", "purpose": "structured findings list"}),
                 json!({"command": "rr search --query <text> --robot", "purpose": "prior-review lookup"}),
+                json!({
+                    "kind": "provider_support",
+                    "command": "rr review --provider <name>",
+                    "summary": "OpenCode is the only live tier-b continuity path in 0.1.0. Codex, Gemini, and Claude Code are exposed as bounded tier-a start/reseed/raw-capture providers only. Copilot is planned but not yet live, and Pi-Agent remains out of scope for 0.1.0.",
+                    "live_review_providers": review_provider_support_matrix(),
+                    "planned_not_live_providers": PLANNED_REVIEW_PROVIDERS,
+                    "not_supported_providers": NOT_LIVE_REVIEW_PROVIDERS,
+                }),
                 json!({"command": "rr update --channel stable --dry-run --robot", "purpose": "update metadata preflight (non-mutating)"}),
                 json!({"command": "rr update --channel stable --yes --robot", "purpose": "non-interactive in-place apply after explicit confirmation bypass"}),
                 json!({"command": "rr bridge verify-contracts --robot", "purpose": "bridge contract drift check"}),
@@ -4924,7 +5189,14 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                 json!({"command": "rr findings", "required_formats": ["json"], "optional_formats": ["compact"]}),
                 json!({"command": "rr search", "required_formats": ["json"], "optional_formats": ["compact"]}),
                 json!({"command": "rr update", "required_formats": ["json"], "optional_formats": []}),
-                json!({"command": "rr review --dry-run", "required_formats": ["json"], "optional_formats": []}),
+                json!({
+                    "command": "rr review --dry-run",
+                    "required_formats": ["json"],
+                    "optional_formats": [],
+                    "supported_providers": SUPPORTED_REVIEW_PROVIDERS,
+                    "planned_not_live_providers": PLANNED_REVIEW_PROVIDERS,
+                    "not_supported_providers": NOT_LIVE_REVIEW_PROVIDERS,
+                }),
                 json!({"command": "rr resume --dry-run", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr bridge export-contracts", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr bridge verify-contracts", "required_formats": ["json"], "optional_formats": []}),
@@ -5558,12 +5830,68 @@ fn provider_tier(provider: &str) -> &'static str {
     }
 }
 
+fn provider_display_name(provider: &str) -> &'static str {
+    match provider {
+        "opencode" => "OpenCode",
+        "codex" => "Codex",
+        "gemini" => "Gemini",
+        "claude" => "Claude Code",
+        "copilot" => "GitHub Copilot CLI",
+        "pi-agent" => "Pi-Agent",
+        _ => "Unknown provider",
+    }
+}
+
+fn provider_live_support_notes(provider: &str) -> &'static str {
+    match provider {
+        "opencode" => "first-class tier-b continuity path with locator reopen and rr return",
+        "codex" | "gemini" | "claude" => {
+            "bounded tier-a start/reseed/raw-capture path only; no locator reopen or rr return"
+        }
+        "copilot" => "planned target, not yet a live rr review --provider value",
+        "pi-agent" => "not part of the 0.1.0 live CLI surface",
+        _ => "provider is not part of the current live rr review surface",
+    }
+}
+
+fn provider_capability(provider: &str) -> Value {
+    json!({
+        "provider": provider,
+        "display_name": provider_display_name(provider),
+        "tier": provider_tier(provider),
+        "supports": {
+            "review_start": SUPPORTED_REVIEW_PROVIDERS.contains(&provider),
+            "resume_reseed": SUPPORTED_REVIEW_PROVIDERS.contains(&provider),
+            "resume_reopen": provider == "opencode",
+            "return": provider == "opencode",
+        }
+    })
+}
+
+fn review_provider_support_matrix() -> Vec<Value> {
+    SUPPORTED_REVIEW_PROVIDERS
+        .iter()
+        .map(|provider| {
+            let provider = *provider;
+            let capability = provider_capability(provider);
+            json!({
+                "provider": provider,
+                "display_name": provider_display_name(provider),
+                "tier": provider_tier(provider),
+                "status": if provider == "opencode" { "first_class_live" } else { "bounded_live" },
+                "supports": capability["supports"].clone(),
+                "notes": provider_live_support_notes(provider),
+            })
+        })
+        .collect()
+}
+
 fn provider_support_warning(provider: &str, command: &str) -> Option<String> {
     if provider == "opencode" {
         None
-    } else if provider == "codex" {
+    } else if provider == "codex" || provider == "gemini" || provider == "claude" {
         Some(format!(
-            "provider '{}' has bounded support (tier-a start/reseed/raw-capture); '{}' does not support locator reopen or rr return",
+            "provider '{}' has bounded support (tier-a start/reseed/raw-capture only); '{}' does not support locator reopen or rr return",
             provider, command
         ))
     } else {
@@ -5896,7 +6224,7 @@ fn next_id(prefix: &str) -> String {
 }
 
 fn usage_text() -> &'static str {
-    "Usage:\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--repo owner/repo] [--limit <n>] [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--yes|-y] [--dry-run] [--robot]\n  rr bridge export-contracts [--robot]\n  rr bridge verify-contracts [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge install [--extension-id <id>] [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr extension setup [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr extension doctor [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n\nUpdate notes:\n  - default rr update apply prompts for confirmation on interactive TTY\n  - pass --yes|-y for non-interactive apply confirmation; --robot apply requires --yes|-y\n  - --dry-run and --robot without --yes are non-mutating metadata checks\n  - local/unpublished builds fail closed; migration-capable updates are deferred in 0.1.x"
+    "Usage:\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--repo owner/repo] [--limit <n>] [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--yes|-y] [--dry-run] [--robot]\n  rr bridge export-contracts [--robot]\n  rr bridge verify-contracts [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge install [--extension-id <id>] [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr extension setup [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr extension doctor [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n\nProvider support in 0.1.0:\n  - opencode is the first-class tier-b continuity path; rr resume can reopen and rr return is supported\n  - codex, gemini, and claude are bounded tier-a providers; start/reseed/raw-capture only, no locator reopen or rr return\n  - copilot is planned but not yet a live --provider value\n  - pi-agent is not part of the 0.1.0 live CLI surface\n\nUpdate notes:\n  - default rr update apply prompts for confirmation on interactive TTY\n  - pass --yes|-y for non-interactive apply confirmation; --robot apply requires --yes|-y\n  - --dry-run and --robot without --yes are non-mutating metadata checks\n  - local/unpublished builds fail closed; migration-capable updates are deferred in 0.1.x"
 }
 
 #[cfg(test)]
@@ -6929,6 +7257,30 @@ mod tests {
         assert!(
             usage_text().contains("rr update")
                 && usage_text().contains("[--yes|-y] [--dry-run] [--robot]"),
+            "{}",
+            usage_text()
+        );
+    }
+
+    #[test]
+    fn usage_text_summarizes_live_provider_tiers_truthfully() {
+        assert!(
+            usage_text().contains("opencode is the first-class tier-b continuity path"),
+            "{}",
+            usage_text()
+        );
+        assert!(
+            usage_text().contains("codex, gemini, and claude are bounded tier-a providers"),
+            "{}",
+            usage_text()
+        );
+        assert!(
+            usage_text().contains("copilot is planned but not yet a live --provider value"),
+            "{}",
+            usage_text()
+        );
+        assert!(
+            usage_text().contains("pi-agent is not part of the 0.1.0 live CLI surface"),
             "{}",
             usage_text()
         );

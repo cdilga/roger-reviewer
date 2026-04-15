@@ -1,6 +1,6 @@
 pub use crate::time::now_ts;
 use serde::{Deserialize, Serialize};
-use serde_json::from_str;
+use serde_json::{Value, from_str};
 use std::collections::{HashMap, HashSet};
 
 pub mod cli_config;
@@ -606,6 +606,541 @@ pub struct ReviewRun {
     pub created_at: Timestamp,
 }
 
+pub const WORKER_STAGE_RESULT_SCHEMA_V1: &str = "rr.worker.stage_result.v1";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewTaskKind {
+    ExplorationPass,
+    DeepReviewPass,
+    FollowUpPass,
+    RefreshCompare,
+    ClarificationPass,
+    RecheckFinding,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerTurnStrategy {
+    SingleTurnReport,
+    ConfiguredMultiTurnProgram,
+    ManualFollowUp,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerTransportKind {
+    LegacyStageHarness,
+    AgentCli,
+    Mcp,
+}
+
+impl WorkerTransportKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LegacyStageHarness => "legacy_stage_harness",
+            Self::AgentCli => "agent_cli",
+            Self::Mcp => "mcp",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerMutationPosture {
+    ReviewOnly,
+    FixMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerGitHubPosture {
+    Blocked,
+    ApprovalRequired,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerStageOutcome {
+    Completed,
+    CompletedPartial,
+    NeedsClarification,
+    NeedsContext,
+    Abstained,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerInvocationOutcomeState {
+    Running,
+    Completed,
+    CompletedPartial,
+    NeedsClarification,
+    NeedsContext,
+    Abstained,
+    Failed,
+}
+
+impl WorkerStageOutcome {
+    pub fn invocation_state(self) -> WorkerInvocationOutcomeState {
+        match self {
+            Self::Completed => WorkerInvocationOutcomeState::Completed,
+            Self::CompletedPartial => WorkerInvocationOutcomeState::CompletedPartial,
+            Self::NeedsClarification => WorkerInvocationOutcomeState::NeedsClarification,
+            Self::NeedsContext => WorkerInvocationOutcomeState::NeedsContext,
+            Self::Abstained => WorkerInvocationOutcomeState::Abstained,
+            Self::Failed => WorkerInvocationOutcomeState::Failed,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerToolCallOutcomeState {
+    Succeeded,
+    Denied,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewTask {
+    pub id: String,
+    pub review_session_id: String,
+    pub review_run_id: String,
+    pub stage: String,
+    pub task_kind: ReviewTaskKind,
+    pub task_nonce: String,
+    pub objective: String,
+    pub turn_strategy: WorkerTurnStrategy,
+    #[serde(default)]
+    pub allowed_scopes: Vec<String>,
+    #[serde(default)]
+    pub allowed_operations: Vec<String>,
+    pub expected_result_schema: String,
+    pub prompt_preset_id: Option<String>,
+    pub created_at: Timestamp,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerFindingSummary {
+    pub finding_id: String,
+    pub fingerprint: String,
+    pub summary: String,
+    pub triage_state: String,
+    pub outbound_state: String,
+    pub primary_evidence_ref: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerMemoryCard {
+    pub citation_id: String,
+    pub scope: String,
+    pub title: String,
+    pub summary: String,
+    pub provenance: String,
+    pub trust_tier: String,
+    pub tentative: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerArtifactRef {
+    pub artifact_id: String,
+    pub role: String,
+    pub media_type: Option<String>,
+    pub summary: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerContextPacket {
+    pub review_target: ReviewTarget,
+    pub review_session_id: String,
+    pub review_run_id: String,
+    pub review_task_id: String,
+    pub task_nonce: String,
+    pub baseline_snapshot_ref: Option<String>,
+    pub provider: String,
+    pub transport_kind: WorkerTransportKind,
+    pub stage: String,
+    pub objective: String,
+    #[serde(default)]
+    pub allowed_scopes: Vec<String>,
+    #[serde(default)]
+    pub allowed_operations: Vec<String>,
+    pub mutation_posture: WorkerMutationPosture,
+    pub github_posture: WorkerGitHubPosture,
+    #[serde(default)]
+    pub unresolved_findings: Vec<WorkerFindingSummary>,
+    pub continuity_summary: Option<String>,
+    #[serde(default)]
+    pub memory_cards: Vec<WorkerMemoryCard>,
+    #[serde(default)]
+    pub artifact_refs: Vec<WorkerArtifactRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerCapabilityProfile {
+    pub transport_kind: WorkerTransportKind,
+    pub supports_context_reads: bool,
+    pub supports_memory_search: bool,
+    pub supports_finding_reads: bool,
+    pub supports_artifact_reads: bool,
+    pub supports_stage_result_submission: bool,
+    pub supports_clarification_requests: bool,
+    pub supports_follow_up_hints: bool,
+    pub supports_fix_mode: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerInvocation {
+    pub id: String,
+    pub review_session_id: String,
+    pub review_run_id: String,
+    pub review_task_id: String,
+    pub provider: String,
+    pub provider_session_id: Option<String>,
+    pub transport_kind: WorkerTransportKind,
+    pub started_at: Timestamp,
+    pub completed_at: Option<Timestamp>,
+    pub outcome_state: WorkerInvocationOutcomeState,
+    pub prompt_invocation_id: Option<String>,
+    pub raw_output_artifact_id: Option<String>,
+    pub result_artifact_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerToolCallEvent {
+    pub id: String,
+    pub review_task_id: String,
+    pub worker_invocation_id: String,
+    pub operation: String,
+    pub request_digest: String,
+    pub response_digest: Option<String>,
+    pub outcome_state: WorkerToolCallOutcomeState,
+    pub occurred_at: Timestamp,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerClarificationRequest {
+    pub id: String,
+    pub question: String,
+    pub reason: Option<String>,
+    pub blocking: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerMemoryReviewRequest {
+    pub id: String,
+    pub query: String,
+    #[serde(default)]
+    pub requested_scopes: Vec<String>,
+    pub rationale: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerFollowUpProposal {
+    pub id: String,
+    pub title: String,
+    pub objective: String,
+    pub proposed_task_kind: ReviewTaskKind,
+    #[serde(default)]
+    pub suggested_scopes: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerMemoryCitation {
+    pub citation_id: String,
+    pub source_kind: String,
+    pub source_id: String,
+    pub summary: String,
+    pub scope: String,
+    pub trust_tier: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkerStageResult {
+    pub schema_id: String,
+    pub review_session_id: String,
+    pub review_run_id: String,
+    pub review_task_id: String,
+    pub worker_invocation_id: Option<String>,
+    pub task_nonce: String,
+    pub stage: String,
+    pub task_kind: ReviewTaskKind,
+    pub outcome: WorkerStageOutcome,
+    pub summary: String,
+    #[serde(default)]
+    pub structured_findings_pack: Option<Value>,
+    #[serde(default)]
+    pub clarification_requests: Vec<WorkerClarificationRequest>,
+    #[serde(default)]
+    pub memory_review_requests: Vec<WorkerMemoryReviewRequest>,
+    #[serde(default, alias = "follow_up_hints")]
+    pub follow_up_proposals: Vec<WorkerFollowUpProposal>,
+    #[serde(default)]
+    pub memory_citations: Vec<WorkerMemoryCitation>,
+    #[serde(default)]
+    pub artifact_refs: Vec<WorkerArtifactRef>,
+    #[serde(default)]
+    pub provider_metadata: Option<Value>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+impl WorkerStageResult {
+    pub fn structured_findings_pack_json(
+        &self,
+    ) -> std::result::Result<Option<String>, serde_json::Error> {
+        self.structured_findings_pack
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+    }
+
+    pub fn with_worker_invocation_id(mut self, worker_invocation_id: impl Into<String>) -> Self {
+        self.worker_invocation_id = Some(worker_invocation_id.into());
+        self
+    }
+}
+
+pub type ReviewWorkerContractResult<T> = std::result::Result<T, ReviewWorkerContractError>;
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ReviewWorkerContractError {
+    #[error(
+        "worker context packet review_session_id '{found}' does not match review task '{expected}'"
+    )]
+    ContextSessionMismatch { expected: String, found: String },
+    #[error(
+        "worker context packet review_run_id '{found}' does not match review task '{expected}'"
+    )]
+    ContextRunMismatch { expected: String, found: String },
+    #[error(
+        "worker context packet review_task_id '{found}' does not match review task '{expected}'"
+    )]
+    ContextTaskMismatch { expected: String, found: String },
+    #[error("worker context packet task_nonce '{found}' does not match review task '{expected}'")]
+    ContextNonceMismatch { expected: String, found: String },
+    #[error("worker context packet stage '{found}' does not match review task '{expected}'")]
+    ContextStageMismatch { expected: String, found: String },
+    #[error("worker context packet objective does not match review task objective")]
+    ContextObjectiveMismatch,
+    #[error("worker context packet allowed scopes do not match review task allowed scopes")]
+    ContextAllowedScopesMismatch,
+    #[error("worker context packet allowed operations do not match review task allowed operations")]
+    ContextAllowedOperationsMismatch,
+    #[error("worker capability profile does not support stage result submission")]
+    StageResultSubmissionUnsupported,
+    #[error(
+        "worker stage result schema_id '{found}' does not match review task expectation '{expected}'"
+    )]
+    ResultSchemaMismatch { expected: String, found: String },
+    #[error(
+        "worker stage result review_session_id '{found}' does not match review task '{expected}'"
+    )]
+    ResultSessionMismatch { expected: String, found: String },
+    #[error("worker stage result review_run_id '{found}' does not match review task '{expected}'")]
+    ResultRunMismatch { expected: String, found: String },
+    #[error("worker stage result review_task_id '{found}' does not match review task '{expected}'")]
+    ResultTaskMismatch { expected: String, found: String },
+    #[error("worker stage result task_nonce '{found}' does not match review task '{expected}'")]
+    ResultNonceMismatch { expected: String, found: String },
+    #[error("worker stage result stage '{found}' does not match review task '{expected}'")]
+    ResultStageMismatch { expected: String, found: String },
+    #[error("worker stage result task_kind '{found:?}' does not match review task '{expected:?}'")]
+    ResultTaskKindMismatch {
+        expected: ReviewTaskKind,
+        found: ReviewTaskKind,
+    },
+    #[error("worker stage result summary must not be empty")]
+    EmptyResultSummary,
+    #[error(
+        "worker stage result worker_invocation_id '{found}' does not match expected worker invocation '{expected}'"
+    )]
+    ResultWorkerInvocationMismatch { expected: String, found: String },
+    #[error(
+        "worker tool call event '{event_id}' review_task_id '{found}' does not match review task '{expected}'"
+    )]
+    ToolCallTaskMismatch {
+        event_id: String,
+        expected: String,
+        found: String,
+    },
+    #[error(
+        "worker tool call event '{event_id}' worker_invocation_id '{found}' does not match expected worker invocation '{expected}'"
+    )]
+    ToolCallInvocationMismatch {
+        event_id: String,
+        expected: String,
+        found: String,
+    },
+    #[error("review task prompt_preset_id '{expected}' does not match resolved prompt '{found}'")]
+    PromptPresetMismatch { expected: String, found: String },
+}
+
+impl ReviewTask {
+    pub fn validate_context_packet(
+        &self,
+        packet: &WorkerContextPacket,
+    ) -> ReviewWorkerContractResult<()> {
+        if packet.review_session_id != self.review_session_id {
+            return Err(ReviewWorkerContractError::ContextSessionMismatch {
+                expected: self.review_session_id.clone(),
+                found: packet.review_session_id.clone(),
+            });
+        }
+        if packet.review_run_id != self.review_run_id {
+            return Err(ReviewWorkerContractError::ContextRunMismatch {
+                expected: self.review_run_id.clone(),
+                found: packet.review_run_id.clone(),
+            });
+        }
+        if packet.review_task_id != self.id {
+            return Err(ReviewWorkerContractError::ContextTaskMismatch {
+                expected: self.id.clone(),
+                found: packet.review_task_id.clone(),
+            });
+        }
+        if packet.task_nonce != self.task_nonce {
+            return Err(ReviewWorkerContractError::ContextNonceMismatch {
+                expected: self.task_nonce.clone(),
+                found: packet.task_nonce.clone(),
+            });
+        }
+        if packet.stage != self.stage {
+            return Err(ReviewWorkerContractError::ContextStageMismatch {
+                expected: self.stage.clone(),
+                found: packet.stage.clone(),
+            });
+        }
+        if packet.objective != self.objective {
+            return Err(ReviewWorkerContractError::ContextObjectiveMismatch);
+        }
+        if packet.allowed_scopes != self.allowed_scopes {
+            return Err(ReviewWorkerContractError::ContextAllowedScopesMismatch);
+        }
+        if packet.allowed_operations != self.allowed_operations {
+            return Err(ReviewWorkerContractError::ContextAllowedOperationsMismatch);
+        }
+        Ok(())
+    }
+
+    pub fn validate_capability_profile(
+        &self,
+        profile: &WorkerCapabilityProfile,
+    ) -> ReviewWorkerContractResult<()> {
+        if !profile.supports_stage_result_submission {
+            return Err(ReviewWorkerContractError::StageResultSubmissionUnsupported);
+        }
+        Ok(())
+    }
+
+    pub fn validate_prompt_preset_id(
+        &self,
+        prompt_preset_id: &str,
+    ) -> ReviewWorkerContractResult<()> {
+        if let Some(expected) = self.prompt_preset_id.as_deref() {
+            if expected != prompt_preset_id {
+                return Err(ReviewWorkerContractError::PromptPresetMismatch {
+                    expected: expected.to_owned(),
+                    found: prompt_preset_id.to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_stage_result(
+        &self,
+        result: &WorkerStageResult,
+    ) -> ReviewWorkerContractResult<()> {
+        if result.schema_id != self.expected_result_schema {
+            return Err(ReviewWorkerContractError::ResultSchemaMismatch {
+                expected: self.expected_result_schema.clone(),
+                found: result.schema_id.clone(),
+            });
+        }
+        if result.review_session_id != self.review_session_id {
+            return Err(ReviewWorkerContractError::ResultSessionMismatch {
+                expected: self.review_session_id.clone(),
+                found: result.review_session_id.clone(),
+            });
+        }
+        if result.review_run_id != self.review_run_id {
+            return Err(ReviewWorkerContractError::ResultRunMismatch {
+                expected: self.review_run_id.clone(),
+                found: result.review_run_id.clone(),
+            });
+        }
+        if result.review_task_id != self.id {
+            return Err(ReviewWorkerContractError::ResultTaskMismatch {
+                expected: self.id.clone(),
+                found: result.review_task_id.clone(),
+            });
+        }
+        if result.task_nonce != self.task_nonce {
+            return Err(ReviewWorkerContractError::ResultNonceMismatch {
+                expected: self.task_nonce.clone(),
+                found: result.task_nonce.clone(),
+            });
+        }
+        if result.stage != self.stage {
+            return Err(ReviewWorkerContractError::ResultStageMismatch {
+                expected: self.stage.clone(),
+                found: result.stage.clone(),
+            });
+        }
+        if result.task_kind != self.task_kind {
+            return Err(ReviewWorkerContractError::ResultTaskKindMismatch {
+                expected: self.task_kind,
+                found: result.task_kind,
+            });
+        }
+        if result.summary.trim().is_empty() {
+            return Err(ReviewWorkerContractError::EmptyResultSummary);
+        }
+        Ok(())
+    }
+
+    pub fn validate_worker_invocation_binding(
+        &self,
+        result: &WorkerStageResult,
+        expected_worker_invocation_id: &str,
+    ) -> ReviewWorkerContractResult<()> {
+        if let Some(found) = result.worker_invocation_id.as_deref() {
+            if found != expected_worker_invocation_id {
+                return Err(ReviewWorkerContractError::ResultWorkerInvocationMismatch {
+                    expected: expected_worker_invocation_id.to_owned(),
+                    found: found.to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_tool_call_event(
+        &self,
+        event: &WorkerToolCallEvent,
+        expected_worker_invocation_id: &str,
+    ) -> ReviewWorkerContractResult<()> {
+        if event.review_task_id != self.id {
+            return Err(ReviewWorkerContractError::ToolCallTaskMismatch {
+                event_id: event.id.clone(),
+                expected: self.id.clone(),
+                found: event.review_task_id.clone(),
+            });
+        }
+        if event.worker_invocation_id != expected_worker_invocation_id {
+            return Err(ReviewWorkerContractError::ToolCallInvocationMismatch {
+                event_id: event.id.clone(),
+                expected: expected_worker_invocation_id.to_owned(),
+                found: event.worker_invocation_id.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {
     pub id: String,
@@ -930,28 +1465,29 @@ pub fn execute_explicit_posting_flow(
         .map(|draft| draft.id.clone())
         .collect::<Vec<_>>();
 
-    let item_results = match adapter.post_approved_draft_batch(input.target, input.batch, input.drafts) {
-        Ok(results) => results,
-        Err(err) => {
-            let reason_code = format!("adapter_error:{err}");
-            return ExplicitPostingResult {
-                outcome: ExplicitPostingOutcome::Failed,
-                reason_code: Some(reason_code.clone()),
-                posted_action: Some(PostedAction {
-                    id: input.action_id.to_owned(),
-                    draft_batch_id: input.batch.id.clone(),
-                    provider: input.provider.to_owned(),
-                    remote_identifier: "adapter_error".to_owned(),
-                    status: PostedActionStatus::Failed,
-                    posted_payload_digest: input.batch.payload_digest.clone(),
-                    posted_at: now_ts(),
-                    failure_code: Some(reason_code),
-                }),
-                item_results: Vec::new(),
-                retry_draft_ids: retry_all_drafts,
-            };
-        }
-    };
+    let item_results =
+        match adapter.post_approved_draft_batch(input.target, input.batch, input.drafts) {
+            Ok(results) => results,
+            Err(err) => {
+                let reason_code = format!("adapter_error:{err}");
+                return ExplicitPostingResult {
+                    outcome: ExplicitPostingOutcome::Failed,
+                    reason_code: Some(reason_code.clone()),
+                    posted_action: Some(PostedAction {
+                        id: input.action_id.to_owned(),
+                        draft_batch_id: input.batch.id.clone(),
+                        provider: input.provider.to_owned(),
+                        remote_identifier: "adapter_error".to_owned(),
+                        status: PostedActionStatus::Failed,
+                        posted_payload_digest: input.batch.payload_digest.clone(),
+                        posted_at: now_ts(),
+                        failure_code: Some(reason_code),
+                    }),
+                    item_results: Vec::new(),
+                    retry_draft_ids: retry_all_drafts,
+                };
+            }
+        };
 
     if let Err(reason_code) = validate_posting_adapter_results(input.drafts, &item_results) {
         return ExplicitPostingResult {

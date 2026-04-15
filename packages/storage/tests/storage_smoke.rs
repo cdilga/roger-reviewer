@@ -6,10 +6,11 @@ use roger_app_core::{
     ReviewTarget, SessionLocator, Surface, decide_resume_strategy,
 };
 use roger_storage::{
-    ArtifactBudgetClass, ArtifactStorageKind, CreateFinding, CreateLaunchProfile,
-    CreateOutboundDraft, CreateReviewRun, CreateReviewSession, CreateSessionLaunchBinding,
-    LaunchSurface, ResolveSessionLaunchBinding, Result, RogerStore, SessionBindingResolution,
-    UpdateIndexState,
+    ArtifactBudgetClass, ArtifactStorageKind, CreateFinding, CreateLaunchAttempt,
+    CreateLaunchProfile, CreateOutboundDraft, CreateReviewRun, CreateReviewSession,
+    CreateSessionLaunchBinding, FinalizeReviewLaunchAttempt, LaunchAttemptAction,
+    LaunchAttemptState, LaunchSurface, ResolveSessionLaunchBinding, Result, RogerStore,
+    SessionBindingResolution, UpdateIndexState, UpdateLaunchAttempt,
 };
 
 fn sample_target() -> ReviewTarget {
@@ -53,7 +54,7 @@ fn storage_smoke_persists_resume_and_approval_state_across_restart() -> Result<(
 
     {
         let store = RogerStore::open(&root)?;
-        assert_eq!(store.schema_version()?, 10);
+        assert_eq!(store.schema_version()?, 11);
 
         store.put_launch_profile(CreateLaunchProfile {
             id: "profile-open-pr",
@@ -329,6 +330,197 @@ fn storage_smoke_persists_resume_and_approval_state_across_restart() -> Result<(
         let by_target_none = reopened.find_sessions_by_target("owner/repo", 43)?;
         assert!(by_target_none.is_empty());
     }
+
+    Ok(())
+}
+
+#[test]
+fn review_launch_attempt_finalize_is_atomic_and_records_verified_binding() -> Result<()> {
+    let temp = tempdir()?;
+    let store = RogerStore::open(temp.path())?;
+    let target = sample_target();
+    let locator = SessionLocator {
+        provider: "opencode".to_owned(),
+        session_id: "oc-verified-1".to_owned(),
+        invocation_context_json: "{\"cwd\":\"/tmp/repo\"}".to_owned(),
+        captured_at: 1,
+        last_tested_at: Some(1),
+    };
+
+    store.create_launch_attempt(CreateLaunchAttempt {
+        id: "attempt-1",
+        action: LaunchAttemptAction::StartReview,
+        provider: "opencode",
+        source_surface: LaunchSurface::Cli,
+        review_target: &target,
+        requested_session_id: None,
+        state: LaunchAttemptState::Pending,
+    })?;
+    store.update_launch_attempt(UpdateLaunchAttempt {
+        id: "attempt-1",
+        state: LaunchAttemptState::Dispatching,
+        final_session_id: None,
+        launch_binding_id: None,
+        provider_session_id: None,
+        verified_locator: None,
+        failure_reason: None,
+    })?;
+
+    let finalized = store.finalize_review_launch_attempt(FinalizeReviewLaunchAttempt {
+        attempt_id: "attempt-1",
+        terminal_state: LaunchAttemptState::VerifiedStarted,
+        provider_session_id: "oc-verified-1",
+        verified_locator: &locator,
+        review_session: CreateReviewSession {
+            id: "session-1",
+            review_target: &target,
+            provider: "opencode",
+            session_locator: Some(&locator),
+            resume_bundle_artifact_id: None,
+            continuity_state: "usable",
+            attention_state: "review_launched",
+            launch_profile_id: Some("profile-open-pr"),
+        },
+        review_run: CreateReviewRun {
+            id: "run-1",
+            session_id: "session-1",
+            run_kind: "review",
+            repo_snapshot: "owner/repo#42",
+            continuity_quality: "usable",
+            session_locator_artifact_id: None,
+        },
+        launch_binding: CreateSessionLaunchBinding {
+            id: "binding-1",
+            session_id: "session-1",
+            repo_locator: "owner/repo",
+            review_target: Some(&target),
+            surface: LaunchSurface::Cli,
+            launch_profile_id: Some("profile-open-pr"),
+            ui_target: Some("cli"),
+            instance_preference: Some("reuse_if_possible"),
+            cwd: Some("/tmp/repo"),
+            worktree_root: None,
+        },
+    })?;
+
+    assert_eq!(finalized.state, LaunchAttemptState::VerifiedStarted);
+    assert_eq!(finalized.final_session_id.as_deref(), Some("session-1"));
+    assert_eq!(finalized.launch_binding_id.as_deref(), Some("binding-1"));
+    assert_eq!(
+        finalized.provider_session_id.as_deref(),
+        Some("oc-verified-1")
+    );
+    assert_eq!(
+        finalized
+            .verified_locator
+            .as_ref()
+            .expect("verified locator")
+            .session_id,
+        "oc-verified-1"
+    );
+    assert!(finalized.finalized_at.is_some());
+
+    let session = store.review_session("session-1")?.expect("review session");
+    assert_eq!(session.provider, "opencode");
+    let run = store.latest_review_run("session-1")?.expect("review run");
+    assert_eq!(run.id, "run-1");
+    let bindings = store.launch_bindings_for_session("session-1")?;
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].id, "binding-1");
+
+    Ok(())
+}
+
+#[test]
+fn failed_review_launch_attempt_finalize_rolls_back_partial_session_writes() -> Result<()> {
+    let temp = tempdir()?;
+    let store = RogerStore::open(temp.path())?;
+    let target = sample_target();
+    let locator = SessionLocator {
+        provider: "opencode".to_owned(),
+        session_id: "oc-rollback-1".to_owned(),
+        invocation_context_json: "{\"cwd\":\"/tmp/repo\"}".to_owned(),
+        captured_at: 1,
+        last_tested_at: Some(1),
+    };
+
+    store.create_launch_attempt(CreateLaunchAttempt {
+        id: "attempt-rollback",
+        action: LaunchAttemptAction::StartReview,
+        provider: "opencode",
+        source_surface: LaunchSurface::Cli,
+        review_target: &target,
+        requested_session_id: None,
+        state: LaunchAttemptState::Dispatching,
+    })?;
+
+    let err = store
+        .finalize_review_launch_attempt(FinalizeReviewLaunchAttempt {
+            attempt_id: "attempt-rollback",
+            terminal_state: LaunchAttemptState::VerifiedStarted,
+            provider_session_id: "oc-rollback-1",
+            verified_locator: &locator,
+            review_session: CreateReviewSession {
+                id: "session-rollback",
+                review_target: &target,
+                provider: "opencode",
+                session_locator: Some(&locator),
+                resume_bundle_artifact_id: None,
+                continuity_state: "usable",
+                attention_state: "review_launched",
+                launch_profile_id: None,
+            },
+            review_run: CreateReviewRun {
+                id: "run-rollback",
+                session_id: "missing-session",
+                run_kind: "review",
+                repo_snapshot: "owner/repo#42",
+                continuity_quality: "usable",
+                session_locator_artifact_id: None,
+            },
+            launch_binding: CreateSessionLaunchBinding {
+                id: "binding-rollback",
+                session_id: "session-rollback",
+                repo_locator: "owner/repo",
+                review_target: Some(&target),
+                surface: LaunchSurface::Cli,
+                launch_profile_id: None,
+                ui_target: Some("cli"),
+                instance_preference: Some("reuse_if_possible"),
+                cwd: Some("/tmp/repo"),
+                worktree_root: None,
+            },
+        })
+        .expect_err("finalize should fail closed when the run points at a missing session");
+    assert!(err.to_string().contains("FOREIGN KEY"));
+
+    store.update_launch_attempt(UpdateLaunchAttempt {
+        id: "attempt-rollback",
+        state: LaunchAttemptState::FailedCommit,
+        final_session_id: None,
+        launch_binding_id: None,
+        provider_session_id: Some("oc-rollback-1"),
+        verified_locator: Some(&locator),
+        failure_reason: Some("failed to finalize review launch"),
+    })?;
+
+    assert!(store.review_session("session-rollback")?.is_none());
+    assert!(store.latest_review_run("session-rollback")?.is_none());
+    let attempt = store
+        .launch_attempt("attempt-rollback")?
+        .expect("attempt record remains durable");
+    assert_eq!(attempt.state, LaunchAttemptState::FailedCommit);
+    assert!(attempt.final_session_id.is_none());
+    assert!(attempt.finalized_at.is_some());
+    assert_eq!(
+        attempt.provider_session_id.as_deref(),
+        Some("oc-rollback-1")
+    );
+    assert!(attempt.verified_locator.is_some());
+    assert_eq!(
+        attempt.failure_reason.as_deref(),
+        Some("failed to finalize review launch")
+    );
 
     Ok(())
 }

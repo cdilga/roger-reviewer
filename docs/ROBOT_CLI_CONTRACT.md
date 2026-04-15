@@ -362,6 +362,17 @@ Stable `data` fields:
 `rr robot-docs schemas` must expose the current `schema_id` inventory for every
 shortlisted command in this contract.
 
+`rr robot-docs guide` should also expose the current `rr review` provider-support
+inventory explicitly enough that automation can distinguish:
+
+- live CLI-exposed review providers
+- planned-but-not-live provider targets
+- providers that are out of scope for the live `0.1.0` surface
+
+`rr robot-docs commands` may mirror that truth on the `rr review --dry-run`
+entry using fields such as `supported_providers`,
+`planned_not_live_providers`, and `not_supported_providers`.
+
 `rr robot-docs guide` and `rr robot-docs workflows` may also carry advisory
 inside-Roger examples for agents, including:
 

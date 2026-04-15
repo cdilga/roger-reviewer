@@ -8,7 +8,9 @@ use roger_app_core::{
 use roger_bridge::{BridgeLaunchIntent, BridgePreflight, BridgeResponse, handle_bridge_intent};
 use roger_cli::{CliRuntime, HarnessCommandInvocation, run, run_harness_command};
 use roger_session_opencode::OpenCodeAdapter;
-use roger_storage::{CreateReviewSession, CreateSessionLaunchBinding, LaunchSurface, RogerStore};
+use roger_storage::{
+    CreateReviewSession, CreateSessionLaunchBinding, LaunchAttemptState, LaunchSurface, RogerStore,
+};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
@@ -495,11 +497,7 @@ fn rr_binary_native_host_path_handles_all_primary_launch_actions_without_hanging
         opencode_bin: "opencode".to_owned(),
     };
 
-    for action in [
-        "start_review",
-        "resume_review",
-        "show_findings",
-    ] {
+    for action in ["start_review", "resume_review", "show_findings"] {
         let intent = BridgeLaunchIntent {
             action: action.to_owned(),
             owner: "owner".to_owned(),
@@ -639,6 +637,48 @@ fn shell_commands_work_without_extension_on_blessed_opencode_path() {
 
     let ret = run_rr(&["return", "--pr", "42", "--robot"], &runtime);
     assert_eq!(ret.exit_code, 0, "{}", ret.stderr);
+}
+
+#[test]
+fn review_records_verified_launch_attempt_for_robot_launch() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let review = run_rr(&["review", "--pr", "42", "--robot"], &runtime);
+    assert_eq!(review.exit_code, 0, "{}", review.stderr);
+    let payload = parse_robot_payload(&review.stdout);
+    let attempt_id = payload["data"]["launch_attempt_id"]
+        .as_str()
+        .expect("launch attempt id");
+    let session_id = payload["data"]["session_id"].as_str().expect("session id");
+
+    let store = RogerStore::open(&runtime.store_root).expect("open store");
+    let attempt = store
+        .launch_attempt(attempt_id)
+        .expect("read launch attempt")
+        .expect("launch attempt record");
+    assert_eq!(attempt.state, LaunchAttemptState::VerifiedStarted);
+    assert_eq!(attempt.final_session_id.as_deref(), Some(session_id));
+    assert_eq!(attempt.review_target.pull_request_number, 42);
+    assert_eq!(attempt.provider, "opencode");
+    assert_eq!(
+        attempt
+            .verified_locator
+            .as_ref()
+            .expect("verified locator")
+            .session_id,
+        attempt
+            .provider_session_id
+            .as_deref()
+            .expect("provider session id")
+    );
 }
 
 #[test]
@@ -1091,6 +1131,31 @@ fn review_blocks_truthfully_for_unsupported_provider() {
             .iter()
             .any(|p| p.as_str() == Some("opencode"))
     );
+    assert_eq!(
+        payload["data"]["planned_not_live_providers"],
+        serde_json::json!(["copilot"])
+    );
+    assert_eq!(
+        payload["data"]["not_supported_providers"],
+        serde_json::json!(["pi-agent"])
+    );
+    let live_review_provider_support = payload["data"]["live_review_provider_support"]
+        .as_array()
+        .expect("live review provider support");
+    let opencode = live_review_provider_support
+        .iter()
+        .find(|item| item["provider"] == "opencode")
+        .expect("opencode provider support");
+    assert_eq!(opencode["display_name"], "OpenCode");
+    assert_eq!(opencode["supports"]["return"], true);
+    let gemini = live_review_provider_support
+        .iter()
+        .find(|item| item["provider"] == "gemini")
+        .expect("gemini provider support");
+    assert_eq!(
+        gemini["notes"],
+        "bounded tier-a start/reseed/raw-capture path only; no locator reopen or rr return"
+    );
 }
 
 #[test]
@@ -1111,11 +1176,39 @@ fn review_succeeds_with_degraded_outcome_for_claude_and_gemini() {
             &runtime,
         );
         // Exits 5 for Degraded because Tier A providers (Claude/Gemini) are always degraded
-        assert_eq!(review.exit_code, 5, "provider {} failed: {}", provider, review.stderr);
+        assert_eq!(
+            review.exit_code, 5,
+            "provider {} failed: {}",
+            provider, review.stderr
+        );
 
         let payload = parse_robot_payload(&review.stdout);
         assert_eq!(payload["outcome"], "degraded");
         assert_eq!(payload["data"]["provider"], provider);
+        assert!(
+            payload["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|warning| warning
+                    .as_str()
+                    .expect("warning string")
+                    .contains("start/reseed/raw-capture only")
+                    || warning
+                        .as_str()
+                        .expect("warning string")
+                        .contains("start/reseed/raw-capture"))
+        );
+        assert!(
+            payload["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|warning| warning
+                    .as_str()
+                    .expect("warning string")
+                    .contains("does not support locator reopen or rr return"))
+        );
     }
 }
 
@@ -1588,6 +1681,22 @@ fn robot_docs_surfaces_schema_inventory_and_blocks_unknown_topics() {
             .iter()
             .any(|item| item["command"] == "rr update")
     );
+    let review_dry_run = command_items
+        .iter()
+        .find(|item| item["command"] == "rr review --dry-run")
+        .expect("review dry-run command item");
+    assert_eq!(
+        review_dry_run["supported_providers"],
+        serde_json::json!(["opencode", "codex", "gemini", "claude"])
+    );
+    assert_eq!(
+        review_dry_run["planned_not_live_providers"],
+        serde_json::json!(["copilot"])
+    );
+    assert_eq!(
+        review_dry_run["not_supported_providers"],
+        serde_json::json!(["pi-agent"])
+    );
 
     let guide = run_rr(&["robot-docs", "guide", "--robot"], &runtime);
     assert_eq!(guide.exit_code, 0, "{}", guide.stderr);
@@ -1596,6 +1705,40 @@ fn robot_docs_surfaces_schema_inventory_and_blocks_unknown_topics() {
     let guide_items = guide_payload["data"]["items"]
         .as_array()
         .expect("guide items");
+    let provider_support = guide_items
+        .iter()
+        .find(|item| item["kind"] == "provider_support")
+        .expect("provider support guide item");
+    assert_eq!(
+        provider_support["planned_not_live_providers"],
+        serde_json::json!(["copilot"])
+    );
+    assert_eq!(
+        provider_support["not_supported_providers"],
+        serde_json::json!(["pi-agent"])
+    );
+    let live_review_providers = provider_support["live_review_providers"]
+        .as_array()
+        .expect("live review providers");
+    let opencode = live_review_providers
+        .iter()
+        .find(|item| item["provider"] == "opencode")
+        .expect("opencode support entry");
+    assert_eq!(opencode["display_name"], "OpenCode");
+    assert_eq!(opencode["tier"], "tier_b");
+    assert_eq!(opencode["supports"]["return"], true);
+    let gemini = live_review_providers
+        .iter()
+        .find(|item| item["provider"] == "gemini")
+        .expect("gemini support entry");
+    assert_eq!(gemini["display_name"], "Gemini");
+    assert_eq!(gemini["tier"], "tier_a");
+    assert_eq!(gemini["supports"]["resume_reopen"], false);
+    assert_eq!(gemini["supports"]["return"], false);
+    assert_eq!(
+        gemini["notes"],
+        "bounded tier-a start/reseed/raw-capture path only; no locator reopen or rr return"
+    );
     let inside_roger = guide_items
         .iter()
         .find(|item| item["context"] == "inside_roger")

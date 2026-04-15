@@ -1,7 +1,12 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use roger_app_core::{LaunchAction, LaunchIntent, ReviewTarget, SessionLocator, Surface};
+use roger_app_core::{
+    LaunchAction, LaunchIntent, ReviewTarget, ReviewTask, ReviewTaskKind, SessionLocator, Surface,
+    WORKER_STAGE_RESULT_SCHEMA_V1, WorkerCapabilityProfile, WorkerContextPacket,
+    WorkerGitHubPosture, WorkerMutationPosture, WorkerStageOutcome, WorkerStageResult,
+    WorkerToolCallEvent, WorkerTransportKind, WorkerTurnStrategy,
+};
 use roger_prompt_engine::stage_execution::{
     PROMPT_INVOKED_EVENT_TYPE, ReviewStage, StageExecutionRequest, StageHarness,
     StageHarnessOutput, StageOutcomeMetadata, StagePrompt, execute_review_stage,
@@ -32,14 +37,26 @@ impl StageHarness for StubStageHarness {
     fn execute_stage(
         &self,
         _locator: &SessionLocator,
-        stage: ReviewStage,
+        review_task: &ReviewTask,
+        _worker_context: &WorkerContextPacket,
+        _capability_profile: &WorkerCapabilityProfile,
+        worker_invocation_id: &str,
         _prompt_text: &str,
     ) -> std::result::Result<StageHarnessOutput, String> {
+        let stage = match review_task.stage.as_str() {
+            "exploration" => ReviewStage::Exploration,
+            "deep_review" => ReviewStage::DeepReview,
+            "follow_up" => ReviewStage::FollowUp,
+            other => return Err(format!("unsupported review task stage {other}")),
+        };
         self.calls.borrow_mut().push(stage);
-        self.responses
+        let mut response = self
+            .responses
             .get(&stage)
             .cloned()
-            .ok_or_else(|| format!("missing stub output for stage {}", stage.as_str()))
+            .ok_or_else(|| format!("missing stub output for stage {}", stage.as_str()))?;
+        response.worker_stage_result.worker_invocation_id = Some(worker_invocation_id.to_owned());
+        Ok(response)
     }
 }
 
@@ -129,19 +146,126 @@ fn valid_structured_pack(title: &str, summary: &str) -> String {
     )
 }
 
+fn sample_review_task(stage: ReviewStage, prompt_preset_id: &str) -> ReviewTask {
+    let (task_id, task_kind) = match stage {
+        ReviewStage::Exploration => ("task-exploration", ReviewTaskKind::ExplorationPass),
+        ReviewStage::DeepReview => ("task-deep-review", ReviewTaskKind::DeepReviewPass),
+        ReviewStage::FollowUp => ("task-follow-up", ReviewTaskKind::FollowUpPass),
+    };
+
+    ReviewTask {
+        id: task_id.to_owned(),
+        review_session_id: "session-1".to_owned(),
+        review_run_id: "run-1".to_owned(),
+        stage: stage.as_str().to_owned(),
+        task_kind,
+        task_nonce: format!("nonce-{}", stage.as_str()),
+        objective: format!("execute {} review work", stage.as_str()),
+        turn_strategy: WorkerTurnStrategy::SingleTurnReport,
+        allowed_scopes: vec!["repo".to_owned()],
+        allowed_operations: vec![
+            "worker.get_review_context".to_owned(),
+            "worker.submit_stage_result".to_owned(),
+        ],
+        expected_result_schema: WORKER_STAGE_RESULT_SCHEMA_V1.to_owned(),
+        prompt_preset_id: Some(prompt_preset_id.to_owned()),
+        created_at: 50,
+    }
+}
+
+fn sample_context_packet(task: &ReviewTask) -> WorkerContextPacket {
+    WorkerContextPacket {
+        review_target: sample_target(),
+        review_session_id: task.review_session_id.clone(),
+        review_run_id: task.review_run_id.clone(),
+        review_task_id: task.id.clone(),
+        task_nonce: task.task_nonce.clone(),
+        baseline_snapshot_ref: Some("baseline-1".to_owned()),
+        provider: "opencode".to_owned(),
+        transport_kind: WorkerTransportKind::LegacyStageHarness,
+        stage: task.stage.clone(),
+        objective: task.objective.clone(),
+        allowed_scopes: task.allowed_scopes.clone(),
+        allowed_operations: task.allowed_operations.clone(),
+        mutation_posture: WorkerMutationPosture::ReviewOnly,
+        github_posture: WorkerGitHubPosture::Blocked,
+        unresolved_findings: Vec::new(),
+        continuity_summary: Some("usable continuity".to_owned()),
+        memory_cards: Vec::new(),
+        artifact_refs: Vec::new(),
+    }
+}
+
+fn sample_capability_profile() -> WorkerCapabilityProfile {
+    WorkerCapabilityProfile {
+        transport_kind: WorkerTransportKind::LegacyStageHarness,
+        supports_context_reads: true,
+        supports_memory_search: false,
+        supports_finding_reads: true,
+        supports_artifact_reads: false,
+        supports_stage_result_submission: true,
+        supports_clarification_requests: true,
+        supports_follow_up_hints: true,
+        supports_fix_mode: false,
+    }
+}
+
+fn sample_stage_result(
+    task: &ReviewTask,
+    summary: &str,
+    structured_pack_json: Option<String>,
+    outcome: WorkerStageOutcome,
+) -> WorkerStageResult {
+    WorkerStageResult {
+        schema_id: WORKER_STAGE_RESULT_SCHEMA_V1.to_owned(),
+        review_session_id: task.review_session_id.clone(),
+        review_run_id: task.review_run_id.clone(),
+        review_task_id: task.id.clone(),
+        worker_invocation_id: None,
+        task_nonce: task.task_nonce.clone(),
+        stage: task.stage.clone(),
+        task_kind: task.task_kind,
+        outcome,
+        summary: summary.to_owned(),
+        structured_findings_pack: structured_pack_json.map(|json| {
+            serde_json::from_str(&json).expect("structured findings pack json should be valid")
+        }),
+        clarification_requests: Vec::new(),
+        memory_review_requests: Vec::new(),
+        follow_up_proposals: Vec::new(),
+        memory_citations: Vec::new(),
+        artifact_refs: Vec::new(),
+        provider_metadata: None,
+        warnings: Vec::new(),
+    }
+}
+
 #[test]
 fn stage_passes_run_independently_and_capture_raw_output_even_when_degraded() {
     let (_tempdir, store) = setup_store("session-1", "run-1");
     let locator = sample_locator();
+    let exploration_task = sample_review_task(ReviewStage::Exploration, "preset-exploration");
+    let deep_review_task = sample_review_task(ReviewStage::DeepReview, "preset-deep-review");
+    let follow_up_task = sample_review_task(ReviewStage::FollowUp, "preset-follow-up");
+    let exploration_context = sample_context_packet(&exploration_task);
+    let deep_review_context = sample_context_packet(&deep_review_task);
+    let follow_up_context = sample_context_packet(&follow_up_task);
+    let capability_profile = sample_capability_profile();
     let harness = StubStageHarness::new(HashMap::from([
         (
             ReviewStage::Exploration,
             StageHarnessOutput {
                 raw_output: "exploration raw transcript".to_owned(),
-                structured_pack_json: Some(valid_structured_pack(
-                    "Exploration finding",
-                    "Something needs attention.",
-                )),
+                worker_stage_result: sample_stage_result(
+                    &exploration_task,
+                    "Found one exploratory issue worth deeper review.",
+                    Some(valid_structured_pack(
+                        "Exploration finding",
+                        "Something needs attention.",
+                    )),
+                    WorkerStageOutcome::Completed,
+                ),
+                tool_call_events: Vec::<WorkerToolCallEvent>::new(),
                 degraded_reason: None,
             },
         ),
@@ -149,7 +273,13 @@ fn stage_passes_run_independently_and_capture_raw_output_even_when_degraded() {
             ReviewStage::DeepReview,
             StageHarnessOutput {
                 raw_output: "deep review raw transcript".to_owned(),
-                structured_pack_json: None,
+                worker_stage_result: sample_stage_result(
+                    &deep_review_task,
+                    "No structured findings pack was returned from the deep review pass.",
+                    None,
+                    WorkerStageOutcome::CompletedPartial,
+                ),
+                tool_call_events: Vec::<WorkerToolCallEvent>::new(),
                 degraded_reason: None,
             },
         ),
@@ -157,7 +287,13 @@ fn stage_passes_run_independently_and_capture_raw_output_even_when_degraded() {
             ReviewStage::FollowUp,
             StageHarnessOutput {
                 raw_output: "follow-up raw transcript".to_owned(),
-                structured_pack_json: None,
+                worker_stage_result: sample_stage_result(
+                    &follow_up_task,
+                    "Provider continuation degraded before a structured follow-up report.",
+                    None,
+                    WorkerStageOutcome::NeedsContext,
+                ),
+                tool_call_events: Vec::<WorkerToolCallEvent>::new(),
                 degraded_reason: Some("provider flagged degraded continuation".to_owned()),
             },
         ),
@@ -167,8 +303,9 @@ fn stage_passes_run_independently_and_capture_raw_output_even_when_degraded() {
         &store,
         &harness,
         StageExecutionRequest {
-            review_session_id: "session-1",
-            review_run_id: "run-1",
+            review_task: &exploration_task,
+            worker_context: &exploration_context,
+            capability_profile: &capability_profile,
             stage: ReviewStage::Exploration,
             session_locator: &locator,
             prompt: StagePrompt {
@@ -193,8 +330,9 @@ fn stage_passes_run_independently_and_capture_raw_output_even_when_degraded() {
         &store,
         &harness,
         StageExecutionRequest {
-            review_session_id: "session-1",
-            review_run_id: "run-1",
+            review_task: &deep_review_task,
+            worker_context: &deep_review_context,
+            capability_profile: &capability_profile,
             stage: ReviewStage::DeepReview,
             session_locator: &locator,
             prompt: StagePrompt {
@@ -219,8 +357,9 @@ fn stage_passes_run_independently_and_capture_raw_output_even_when_degraded() {
         &store,
         &harness,
         StageExecutionRequest {
-            review_session_id: "session-1",
-            review_run_id: "run-1",
+            review_task: &follow_up_task,
+            worker_context: &follow_up_context,
+            capability_profile: &capability_profile,
             stage: ReviewStage::FollowUp,
             session_locator: &locator,
             prompt: StagePrompt {
@@ -323,17 +462,69 @@ fn stage_passes_run_independently_and_capture_raw_output_even_when_degraded() {
             ReviewStage::FollowUp
         ]
     );
+    assert_eq!(
+        exploration.worker_stage_result.summary,
+        "Found one exploratory issue worth deeper review."
+    );
+    assert_eq!(
+        exploration.outcome_metadata.worker_outcome,
+        WorkerStageOutcome::Completed
+    );
+    assert_eq!(
+        exploration.outcome_metadata.worker_result_schema_id,
+        WORKER_STAGE_RESULT_SCHEMA_V1
+    );
+    assert_eq!(
+        deep_review.outcome_metadata.worker_outcome,
+        WorkerStageOutcome::CompletedPartial
+    );
+    assert_eq!(
+        follow_up.outcome_metadata.worker_outcome,
+        WorkerStageOutcome::NeedsContext
+    );
+    assert_eq!(
+        store
+            .artifact_bytes(&exploration.result_artifact_id)
+            .expect("worker result bytes"),
+        serde_json::to_vec(&exploration.worker_stage_result).expect("serialize stage result")
+    );
 }
 
 #[test]
 fn stage_outcome_metadata_retains_repair_state_for_audit_and_refresh() {
     let (_tempdir, store) = setup_store("session-2", "run-2");
     let locator = sample_locator();
+    let deep_review_task = ReviewTask {
+        review_session_id: "session-2".to_owned(),
+        review_run_id: "run-2".to_owned(),
+        ..sample_review_task(ReviewStage::DeepReview, "preset-deep-review")
+    };
+    let deep_review_context = WorkerContextPacket {
+        review_session_id: "session-2".to_owned(),
+        review_run_id: "run-2".to_owned(),
+        review_task_id: deep_review_task.id.clone(),
+        task_nonce: deep_review_task.task_nonce.clone(),
+        stage: deep_review_task.stage.clone(),
+        objective: deep_review_task.objective.clone(),
+        allowed_scopes: deep_review_task.allowed_scopes.clone(),
+        allowed_operations: deep_review_task.allowed_operations.clone(),
+        ..sample_context_packet(&deep_review_task)
+    };
+    let capability_profile = sample_capability_profile();
     let harness = StubStageHarness::new(HashMap::from([(
         ReviewStage::DeepReview,
         StageHarnessOutput {
             raw_output: "raw deep review transcript".to_owned(),
-            structured_pack_json: Some("{bad-json".to_owned()),
+            worker_stage_result: WorkerStageResult {
+                structured_findings_pack: Some(serde_json::Value::String("{bad-json".to_owned())),
+                ..sample_stage_result(
+                    &deep_review_task,
+                    "The provider returned malformed structured findings JSON.",
+                    None,
+                    WorkerStageOutcome::CompletedPartial,
+                )
+            },
+            tool_call_events: Vec::<WorkerToolCallEvent>::new(),
             degraded_reason: None,
         },
     )]));
@@ -342,8 +533,9 @@ fn stage_outcome_metadata_retains_repair_state_for_audit_and_refresh() {
         &store,
         &harness,
         StageExecutionRequest {
-            review_session_id: "session-2",
-            review_run_id: "run-2",
+            review_task: &deep_review_task,
+            worker_context: &deep_review_context,
+            capability_profile: &capability_profile,
             stage: ReviewStage::DeepReview,
             session_locator: &locator,
             prompt: StagePrompt {
@@ -385,12 +577,18 @@ fn stage_outcome_metadata_retains_repair_state_for_audit_and_refresh() {
     let payload: StageOutcomeMetadata =
         serde_json::from_str(&event.payload_json).expect("decode payload");
     assert_eq!(payload.stage, "deep_review");
+    assert_eq!(payload.review_task_id, deep_review_task.id);
     assert_eq!(payload.stage_state, StageState::RepairNeeded);
     assert_eq!(payload.repair_action, RepairAction::RetryRepair);
     assert!(payload.structured_pack_present);
     assert_eq!(payload.finding_count, 0);
     assert!(payload.issue_count > 0);
     assert!(!payload.degraded);
+    assert_eq!(
+        payload.worker_result_schema_id,
+        WORKER_STAGE_RESULT_SCHEMA_V1
+    );
+    assert_eq!(payload.worker_outcome, WorkerStageOutcome::CompletedPartial);
 
     let invocation = store
         .prompt_invocation(&result.prompt_invocation_id)
@@ -401,4 +599,68 @@ fn stage_outcome_metadata_retains_repair_state_for_audit_and_refresh() {
     assert_eq!(invocation.source_surface, "cli");
 
     let _ = sample_intent();
+}
+
+#[test]
+fn stage_execution_rejects_result_with_stale_task_nonce() {
+    let (_tempdir, store) = setup_store("session-3", "run-3");
+    let locator = sample_locator();
+    let deep_review_task = ReviewTask {
+        review_session_id: "session-3".to_owned(),
+        review_run_id: "run-3".to_owned(),
+        ..sample_review_task(ReviewStage::DeepReview, "preset-deep-review")
+    };
+    let deep_review_context = sample_context_packet(&deep_review_task);
+    let capability_profile = sample_capability_profile();
+    let harness = StubStageHarness::new(HashMap::from([(
+        ReviewStage::DeepReview,
+        StageHarnessOutput {
+            raw_output: "deep review raw transcript".to_owned(),
+            worker_stage_result: WorkerStageResult {
+                task_nonce: "stale-nonce".to_owned(),
+                ..sample_stage_result(
+                    &deep_review_task,
+                    "Returned a result bound to the wrong nonce.",
+                    None,
+                    WorkerStageOutcome::Failed,
+                )
+            },
+            tool_call_events: Vec::<WorkerToolCallEvent>::new(),
+            degraded_reason: None,
+        },
+    )]));
+
+    let err = execute_review_stage(
+        &store,
+        &harness,
+        StageExecutionRequest {
+            review_task: &deep_review_task,
+            worker_context: &deep_review_context,
+            capability_profile: &capability_profile,
+            stage: ReviewStage::DeepReview,
+            session_locator: &locator,
+            prompt: StagePrompt {
+                prompt_preset_id: "preset-deep-review",
+                resolved_text: "Deep review this patch for regressions.",
+                source_surface: "cli",
+                explicit_objective: Some("ensure wrong task binding fails closed"),
+                provider: Some("opencode"),
+                model: Some("o4"),
+                scope_context_json: None,
+                config_layer_digest: Some("cfg-3"),
+                launch_intake_id: Some("launch-3"),
+            },
+            repair_attempt: 0,
+            repair_retry_budget: 1,
+            actor_id: Some("azure-river"),
+        },
+    )
+    .expect_err("stale nonce should fail closed");
+
+    assert!(matches!(
+        err,
+        roger_prompt_engine::stage_execution::StageExecutionError::WorkerContract(
+            roger_app_core::ReviewWorkerContractError::ResultNonceMismatch { .. }
+        )
+    ));
 }

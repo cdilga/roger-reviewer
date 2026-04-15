@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 
 pub use semantic_embedder::{SemanticEmbedderStatus, semantic_embedder_status};
 
-const CURRENT_SCHEMA_VERSION: i64 = 10;
+const CURRENT_SCHEMA_VERSION: i64 = 11;
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_session_ledger.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_launch_binding_context.sql");
@@ -27,6 +27,7 @@ const MIGRATION_0007: &str =
 const MIGRATION_0008: &str = include_str!("../migrations/0008_worktree_preflight_plans.sql");
 const MIGRATION_0009: &str = include_str!("../migrations/0009_outcome_event_usefulness.sql");
 const MIGRATION_0010: &str = include_str!("../migrations/0010_migration_journal.sql");
+const MIGRATION_0011: &str = include_str!("../migrations/0011_launch_attempts.sql");
 
 const MIGRATION_TERMINAL_STARTED: &str = "started";
 const MIGRATION_TERMINAL_COMMITTED: &str = "committed";
@@ -545,6 +546,194 @@ impl LaunchSurface {
             Self::Tui => "tui",
             Self::Extension => "extension",
             Self::Bridge => "bridge",
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "cli" => Some(Self::Cli),
+            "tui" => Some(Self::Tui),
+            "extension" => Some(Self::Extension),
+            "bridge" => Some(Self::Bridge),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchAttemptAction {
+    StartReview,
+    ResumeReview,
+    ReturnToRoger,
+}
+
+impl LaunchAttemptAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::StartReview => "start_review",
+            Self::ResumeReview => "resume_review",
+            Self::ReturnToRoger => "return_to_roger",
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "start_review" => Some(Self::StartReview),
+            "resume_review" => Some(Self::ResumeReview),
+            "return_to_roger" => Some(Self::ReturnToRoger),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchAttemptState {
+    Pending,
+    Dispatching,
+    AwaitingProviderVerification,
+    Committing,
+    VerifiedStarted,
+    VerifiedReopened,
+    VerifiedReseeded,
+    FailedPreflight,
+    FailedSpawn,
+    FailedProviderVerification,
+    FailedSessionBinding,
+    FailedCommit,
+    Abandoned,
+}
+
+impl LaunchAttemptState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Dispatching => "dispatching",
+            Self::AwaitingProviderVerification => "awaiting_provider_verification",
+            Self::Committing => "committing",
+            Self::VerifiedStarted => "verified_started",
+            Self::VerifiedReopened => "verified_reopened",
+            Self::VerifiedReseeded => "verified_reseeded",
+            Self::FailedPreflight => "failed_preflight",
+            Self::FailedSpawn => "failed_spawn",
+            Self::FailedProviderVerification => "failed_provider_verification",
+            Self::FailedSessionBinding => "failed_session_binding",
+            Self::FailedCommit => "failed_commit",
+            Self::Abandoned => "abandoned",
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "pending" => Some(Self::Pending),
+            "dispatching" => Some(Self::Dispatching),
+            "awaiting_provider_verification" => Some(Self::AwaitingProviderVerification),
+            "committing" => Some(Self::Committing),
+            "verified_started" => Some(Self::VerifiedStarted),
+            "verified_reopened" => Some(Self::VerifiedReopened),
+            "verified_reseeded" => Some(Self::VerifiedReseeded),
+            "failed_preflight" => Some(Self::FailedPreflight),
+            "failed_spawn" => Some(Self::FailedSpawn),
+            "failed_provider_verification" => Some(Self::FailedProviderVerification),
+            "failed_session_binding" => Some(Self::FailedSessionBinding),
+            "failed_commit" => Some(Self::FailedCommit),
+            "abandoned" => Some(Self::Abandoned),
+            _ => None,
+        }
+    }
+
+    fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::VerifiedStarted
+                | Self::VerifiedReopened
+                | Self::VerifiedReseeded
+                | Self::FailedPreflight
+                | Self::FailedSpawn
+                | Self::FailedProviderVerification
+                | Self::FailedSessionBinding
+                | Self::FailedCommit
+                | Self::Abandoned
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateLaunchAttempt<'a> {
+    pub id: &'a str,
+    pub action: LaunchAttemptAction,
+    pub provider: &'a str,
+    pub source_surface: LaunchSurface,
+    pub review_target: &'a ReviewTarget,
+    pub requested_session_id: Option<&'a str>,
+    pub state: LaunchAttemptState,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateLaunchAttempt<'a> {
+    pub id: &'a str,
+    pub state: LaunchAttemptState,
+    pub final_session_id: Option<&'a str>,
+    pub launch_binding_id: Option<&'a str>,
+    pub provider_session_id: Option<&'a str>,
+    pub verified_locator: Option<&'a SessionLocator>,
+    pub failure_reason: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchAttemptRecord {
+    pub id: String,
+    pub action: LaunchAttemptAction,
+    pub provider: String,
+    pub source_surface: LaunchSurface,
+    pub review_target: ReviewTarget,
+    pub requested_session_id: Option<String>,
+    pub final_session_id: Option<String>,
+    pub launch_binding_id: Option<String>,
+    pub state: LaunchAttemptState,
+    pub provider_session_id: Option<String>,
+    pub verified_locator: Option<SessionLocator>,
+    pub failure_reason: Option<String>,
+    pub row_version: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub finalized_at: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FinalizeReviewLaunchAttempt<'a> {
+    pub attempt_id: &'a str,
+    pub terminal_state: LaunchAttemptState,
+    pub provider_session_id: &'a str,
+    pub verified_locator: &'a SessionLocator,
+    pub review_session: CreateReviewSession<'a>,
+    pub review_run: CreateReviewRun<'a>,
+    pub launch_binding: CreateSessionLaunchBinding<'a>,
+}
+
+#[derive(Debug)]
+pub enum ReviewLaunchFinalizationError {
+    SessionBinding(StorageError),
+    Commit(StorageError),
+}
+
+impl Display for ReviewLaunchFinalizationError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SessionBinding(err) => write!(f, "review launch session binding failed: {err}"),
+            Self::Commit(err) => write!(f, "review launch commit failed: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for ReviewLaunchFinalizationError {}
+
+impl From<ReviewLaunchFinalizationError> for StorageError {
+    fn from(value: ReviewLaunchFinalizationError) -> Self {
+        match value {
+            ReviewLaunchFinalizationError::SessionBinding(err)
+            | ReviewLaunchFinalizationError::Commit(err) => err,
         }
     }
 }
@@ -1136,6 +1325,257 @@ impl RogerStore {
             ],
         )?;
         Ok(())
+    }
+
+    pub fn create_launch_attempt(
+        &self,
+        input: CreateLaunchAttempt<'_>,
+    ) -> Result<LaunchAttemptRecord> {
+        let now = time::now_ts();
+        self.conn.execute(
+            "INSERT INTO launch_attempts (
+                id, action, provider, source_surface, review_target,
+                requested_session_id, final_session_id, launch_binding_id, state,
+                provider_session_id, verified_locator, failure_reason,
+                row_version, created_at, updated_at, finalized_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, ?7, NULL, NULL, NULL, 0, ?8, ?8, ?9)",
+            params![
+                input.id,
+                input.action.as_str(),
+                input.provider,
+                input.source_surface.as_str(),
+                serde_json::to_string(input.review_target)?,
+                input.requested_session_id,
+                input.state.as_str(),
+                now,
+                input.state.is_terminal().then_some(now),
+            ],
+        )?;
+
+        Ok(LaunchAttemptRecord {
+            id: input.id.to_owned(),
+            action: input.action,
+            provider: input.provider.to_owned(),
+            source_surface: input.source_surface,
+            review_target: input.review_target.clone(),
+            requested_session_id: input.requested_session_id.map(ToOwned::to_owned),
+            final_session_id: None,
+            launch_binding_id: None,
+            state: input.state,
+            provider_session_id: None,
+            verified_locator: None,
+            failure_reason: None,
+            row_version: 0,
+            created_at: now,
+            updated_at: now,
+            finalized_at: input.state.is_terminal().then_some(now),
+        })
+    }
+
+    pub fn update_launch_attempt(
+        &self,
+        input: UpdateLaunchAttempt<'_>,
+    ) -> Result<LaunchAttemptRecord> {
+        let now = time::now_ts();
+        self.conn.execute(
+            "UPDATE launch_attempts
+             SET state = ?1,
+                 final_session_id = COALESCE(?2, final_session_id),
+                 launch_binding_id = COALESCE(?3, launch_binding_id),
+                 provider_session_id = COALESCE(?4, provider_session_id),
+                 verified_locator = COALESCE(?5, verified_locator),
+                 failure_reason = ?6,
+                 row_version = row_version + 1,
+                 updated_at = ?7,
+                 finalized_at = CASE
+                    WHEN ?8 IS NOT NULL THEN ?8
+                    ELSE finalized_at
+                 END
+             WHERE id = ?9",
+            params![
+                input.state.as_str(),
+                input.final_session_id,
+                input.launch_binding_id,
+                input.provider_session_id,
+                input
+                    .verified_locator
+                    .map(serde_json::to_string)
+                    .transpose()?,
+                input.failure_reason,
+                now,
+                input.state.is_terminal().then_some(now),
+                input.id,
+            ],
+        )?;
+
+        self.launch_attempt(input.id)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "launch_attempt",
+                id: input.id.to_owned(),
+            })
+    }
+
+    pub fn finalize_review_launch_attempt(
+        &self,
+        input: FinalizeReviewLaunchAttempt<'_>,
+    ) -> std::result::Result<LaunchAttemptRecord, ReviewLaunchFinalizationError> {
+        let now = time::now_ts();
+        let verified_locator_json = serde_json::to_string(input.verified_locator)
+            .map_err(StorageError::from)
+            .map_err(ReviewLaunchFinalizationError::Commit)?;
+        let review_target_json = serde_json::to_string(input.review_session.review_target)
+            .map_err(StorageError::from)
+            .map_err(ReviewLaunchFinalizationError::SessionBinding)?;
+        let session_locator_json = input
+            .review_session
+            .session_locator
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(StorageError::from)
+            .map_err(ReviewLaunchFinalizationError::SessionBinding)?;
+        let binding_review_target_json = input
+            .launch_binding
+            .review_target
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(StorageError::from)
+            .map_err(ReviewLaunchFinalizationError::SessionBinding)?;
+
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(StorageError::from)
+            .map_err(ReviewLaunchFinalizationError::Commit)?;
+
+        let committed = tx
+            .execute(
+                "UPDATE launch_attempts
+             SET state = ?1, row_version = row_version + 1, updated_at = ?2
+             WHERE id = ?3",
+                params![
+                    LaunchAttemptState::Committing.as_str(),
+                    now,
+                    input.attempt_id
+                ],
+            )
+            .map_err(StorageError::from)
+            .map_err(ReviewLaunchFinalizationError::Commit)?;
+        if committed == 0 {
+            return Err(ReviewLaunchFinalizationError::Commit(
+                StorageError::NotFound {
+                    entity: "launch_attempt",
+                    id: input.attempt_id.to_owned(),
+                },
+            ));
+        }
+
+        tx.execute(
+            "INSERT INTO review_sessions (
+                id, review_target, provider, session_locator, resume_bundle_artifact_id,
+                continuity_state, attention_state, launch_profile_id, row_version, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?9)",
+            params![
+                input.review_session.id,
+                review_target_json,
+                input.review_session.provider,
+                session_locator_json,
+                input.review_session.resume_bundle_artifact_id,
+                input.review_session.continuity_state,
+                input.review_session.attention_state,
+                input.review_session.launch_profile_id,
+                now,
+            ],
+        )
+        .map_err(StorageError::from)
+        .map_err(ReviewLaunchFinalizationError::SessionBinding)?;
+
+        tx.execute(
+            "INSERT INTO session_launch_bindings (
+                id, session_id, repo_locator, review_target, surface, launch_profile_id,
+                ui_target, instance_preference, cwd, worktree_root,
+                row_version, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?11)",
+            params![
+                input.launch_binding.id,
+                input.launch_binding.session_id,
+                input.launch_binding.repo_locator,
+                binding_review_target_json,
+                input.launch_binding.surface.as_str(),
+                input.launch_binding.launch_profile_id,
+                input.launch_binding.ui_target,
+                input.launch_binding.instance_preference,
+                input.launch_binding.cwd,
+                input.launch_binding.worktree_root,
+                now,
+            ],
+        )
+        .map_err(StorageError::from)
+        .map_err(ReviewLaunchFinalizationError::SessionBinding)?;
+
+        tx.execute(
+            "INSERT INTO review_runs (
+                id, session_id, run_kind, repo_snapshot,
+                continuity_quality, session_locator_artifact_id, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                input.review_run.id,
+                input.review_run.session_id,
+                input.review_run.run_kind,
+                input.review_run.repo_snapshot,
+                input.review_run.continuity_quality,
+                input.review_run.session_locator_artifact_id,
+                now,
+            ],
+        )
+        .map_err(StorageError::from)
+        .map_err(ReviewLaunchFinalizationError::Commit)?;
+
+        let finalized = tx
+            .execute(
+                "UPDATE launch_attempts
+             SET final_session_id = ?1,
+                 launch_binding_id = ?2,
+                 state = ?3,
+                 provider_session_id = ?4,
+                 verified_locator = ?5,
+                 failure_reason = NULL,
+                 row_version = row_version + 1,
+                 updated_at = ?6,
+                 finalized_at = ?6
+             WHERE id = ?7",
+                params![
+                    input.review_session.id,
+                    input.launch_binding.id,
+                    input.terminal_state.as_str(),
+                    input.provider_session_id,
+                    verified_locator_json,
+                    now,
+                    input.attempt_id,
+                ],
+            )
+            .map_err(StorageError::from)
+            .map_err(ReviewLaunchFinalizationError::Commit)?;
+        if finalized == 0 {
+            return Err(ReviewLaunchFinalizationError::Commit(
+                StorageError::NotFound {
+                    entity: "launch_attempt",
+                    id: input.attempt_id.to_owned(),
+                },
+            ));
+        }
+
+        tx.commit()
+            .map_err(StorageError::from)
+            .map_err(ReviewLaunchFinalizationError::Commit)?;
+
+        self.launch_attempt(input.attempt_id)
+            .map_err(ReviewLaunchFinalizationError::Commit)?
+            .ok_or_else(|| {
+                ReviewLaunchFinalizationError::Commit(StorageError::NotFound {
+                    entity: "launch_attempt",
+                    id: input.attempt_id.to_owned(),
+                })
+            })
     }
 
     pub fn record_prompt_invocation(
@@ -2928,6 +3368,44 @@ impl RogerStore {
             .map_err(StorageError::from)
     }
 
+    pub fn launch_attempt(&self, attempt_id: &str) -> Result<Option<LaunchAttemptRecord>> {
+        self.conn
+            .query_row(
+                "SELECT id, action, provider, source_surface, review_target,
+                    requested_session_id, final_session_id, launch_binding_id, state,
+                    provider_session_id, verified_locator, failure_reason,
+                    row_version, created_at, updated_at, finalized_at
+                 FROM launch_attempts
+                 WHERE id = ?1",
+                params![attempt_id],
+                launch_attempt_from_row,
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    pub fn launch_attempts_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<LaunchAttemptRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, action, provider, source_surface, review_target,
+                requested_session_id, final_session_id, launch_binding_id, state,
+                provider_session_id, verified_locator, failure_reason,
+                row_version, created_at, updated_at, finalized_at
+             FROM launch_attempts
+             WHERE final_session_id = ?1 OR requested_session_id = ?1
+             ORDER BY created_at ASC, rowid ASC",
+        )?;
+        let rows = stmt.query_map(params![session_id], launch_attempt_from_row)?;
+
+        let mut attempts = Vec::new();
+        for row in rows {
+            attempts.push(row?);
+        }
+        Ok(attempts)
+    }
+
     pub fn launch_bindings_for_session(
         &self,
         session_id: &str,
@@ -4084,6 +4562,16 @@ impl RogerStore {
                 self.conn.pragma_update(None, "user_version", 10)?;
             }
 
+            if version < 11 {
+                self.conn.execute_batch(MIGRATION_0011)?;
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at)
+                    VALUES (11, 'launch_attempt_ledger', ?1)",
+                    params![time::now_ts()],
+                )?;
+                self.conn.pragma_update(None, "user_version", 11)?;
+            }
+
             if migration_class.requires_sidecar_invalidation() {
                 self.invalidate_sidecars_for_migration()?;
             }
@@ -4122,6 +4610,76 @@ fn path_relative_to(base: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/")
+}
+
+fn launch_attempt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LaunchAttemptRecord> {
+    let action_raw: String = row.get(1)?;
+    let action = LaunchAttemptAction::parse(&action_raw).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            1,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid launch_attempts.action value: {action_raw}"),
+            )),
+        )
+    })?;
+
+    let surface_raw: String = row.get(3)?;
+    let source_surface = LaunchSurface::parse(&surface_raw).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid launch_attempts.source_surface value: {surface_raw}"),
+            )),
+        )
+    })?;
+
+    let state_raw: String = row.get(8)?;
+    let state = LaunchAttemptState::parse(&state_raw).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            8,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid launch_attempts.state value: {state_raw}"),
+            )),
+        )
+    })?;
+
+    Ok(LaunchAttemptRecord {
+        id: row.get(0)?,
+        action,
+        provider: row.get(2)?,
+        source_surface,
+        review_target: serde_json::from_str(&row.get::<_, String>(4)?).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(err))
+        })?,
+        requested_session_id: row.get(5)?,
+        final_session_id: row.get(6)?,
+        launch_binding_id: row.get(7)?,
+        state,
+        provider_session_id: row.get(9)?,
+        verified_locator: row
+            .get::<_, Option<String>>(10)?
+            .map(|json| {
+                serde_json::from_str(&json).map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        10,
+                        rusqlite::types::Type::Text,
+                        Box::new(err),
+                    )
+                })
+            })
+            .transpose()?,
+        failure_reason: row.get(11)?,
+        row_version: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
+        finalized_at: row.get(15)?,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

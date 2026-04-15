@@ -1,6 +1,10 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use roger_app_core::{SessionLocator, now_ts};
+use roger_app_core::{
+    ReviewTask, ReviewWorkerContractError, SessionLocator, WorkerCapabilityProfile,
+    WorkerContextPacket, WorkerInvocation, WorkerStageOutcome, WorkerStageResult,
+    WorkerToolCallEvent, now_ts,
+};
 use roger_storage::{
     ArtifactBudgetClass, CreateCodeEvidenceLocation, CreateMaterializedFinding, CreateOutcomeEvent,
     CreatePromptInvocation, MaterializedFindingRecord, RogerStore, StorageError,
@@ -49,8 +53,9 @@ pub struct StagePrompt<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StageExecutionRequest<'a> {
-    pub review_session_id: &'a str,
-    pub review_run_id: &'a str,
+    pub review_task: &'a ReviewTask,
+    pub worker_context: &'a WorkerContextPacket,
+    pub capability_profile: &'a WorkerCapabilityProfile,
     pub stage: ReviewStage,
     pub session_locator: &'a SessionLocator,
     pub prompt: StagePrompt<'a>,
@@ -59,25 +64,46 @@ pub struct StageExecutionRequest<'a> {
     pub actor_id: Option<&'a str>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StageHarnessOutput {
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReviewWorkerTransportOutput {
     pub raw_output: String,
-    pub structured_pack_json: Option<String>,
+    pub worker_stage_result: WorkerStageResult,
+    pub tool_call_events: Vec<WorkerToolCallEvent>,
     pub degraded_reason: Option<String>,
 }
 
-pub trait StageHarness {
+pub use self::ReviewWorkerTransport as StageHarness;
+pub use self::ReviewWorkerTransportOutput as StageHarnessOutput;
+
+pub trait ReviewWorkerTransport {
     fn execute_stage(
         &self,
         locator: &SessionLocator,
-        stage: ReviewStage,
+        review_task: &ReviewTask,
+        worker_context: &WorkerContextPacket,
+        capability_profile: &WorkerCapabilityProfile,
+        worker_invocation_id: &str,
         prompt_text: &str,
-    ) -> std::result::Result<StageHarnessOutput, String>;
+    ) -> std::result::Result<ReviewWorkerTransportOutput, String>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StageOutcomeMetadata {
     pub stage: String,
+    pub review_task_id: String,
+    pub task_nonce: String,
+    pub task_kind: roger_app_core::ReviewTaskKind,
+    pub turn_strategy: roger_app_core::WorkerTurnStrategy,
+    pub worker_invocation_id: String,
+    pub worker_transport_kind: String,
+    pub worker_result_schema_id: String,
+    pub worker_outcome: WorkerStageOutcome,
+    pub summary: String,
+    pub clarification_request_count: usize,
+    pub memory_review_request_count: usize,
+    pub follow_up_proposal_count: usize,
+    pub tool_call_count: usize,
+    pub warning_count: usize,
     pub stage_state: StageState,
     pub repair_action: RepairAction,
     pub issue_count: usize,
@@ -86,16 +112,21 @@ pub struct StageOutcomeMetadata {
     pub structured_pack_present: bool,
     pub degraded: bool,
     pub degraded_reason: Option<String>,
+    pub result_artifact_id: String,
     pub raw_output_artifact_id: String,
     pub raw_output_digest: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StageExecutionResult {
     pub stage: ReviewStage,
+    pub worker_invocation: WorkerInvocation,
+    pub worker_stage_result: WorkerStageResult,
+    pub worker_tool_call_events: Vec<WorkerToolCallEvent>,
     pub prompt_invocation_id: String,
     pub prompt_text_artifact_id: String,
     pub raw_output_artifact_id: String,
+    pub result_artifact_id: String,
     pub outcome_event_id: String,
     pub validation_outcome: ValidationOutcome,
     pub materialized_findings: Vec<MaterializedFindingRecord>,
@@ -106,6 +137,8 @@ pub struct StageExecutionResult {
 pub enum StageExecutionError {
     #[error("harness stage execution failed: {0}")]
     Harness(String),
+    #[error("worker contract error: {0}")]
+    WorkerContract(#[from] ReviewWorkerContractError),
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
     #[error("validation error: {0}")]
@@ -116,15 +149,29 @@ pub enum StageExecutionError {
 
 pub fn execute_review_stage(
     store: &RogerStore,
-    harness: &impl StageHarness,
+    harness: &impl ReviewWorkerTransport,
     request: StageExecutionRequest<'_>,
 ) -> std::result::Result<StageExecutionResult, StageExecutionError> {
+    request
+        .review_task
+        .validate_context_packet(request.worker_context)?;
+    request
+        .review_task
+        .validate_capability_profile(request.capability_profile)?;
+    request
+        .review_task
+        .validate_prompt_preset_id(request.prompt.prompt_preset_id)?;
+
     let used_at = now_ts();
     let base_nonce = now_nonce();
 
     let prompt_digest = digest_hex(request.prompt.resolved_text.as_bytes());
-    let prompt_text_artifact_id =
-        next_id("prompt", request.review_run_id, request.stage, base_nonce);
+    let prompt_text_artifact_id = next_id(
+        "prompt",
+        &request.review_task.review_run_id,
+        request.stage,
+        base_nonce,
+    );
     store.store_artifact(
         &prompt_text_artifact_id,
         ArtifactBudgetClass::InlineSummary,
@@ -132,19 +179,45 @@ pub fn execute_review_stage(
         request.prompt.resolved_text.as_bytes(),
     )?;
 
+    let worker_invocation_id = next_id(
+        "worker",
+        &request.review_task.review_run_id,
+        request.stage,
+        base_nonce.wrapping_add(1),
+    );
     let harness_output = harness
         .execute_stage(
             request.session_locator,
-            request.stage,
+            request.review_task,
+            request.worker_context,
+            request.capability_profile,
+            &worker_invocation_id,
             request.prompt.resolved_text,
         )
         .map_err(StageExecutionError::Harness)?;
 
+    for event in &harness_output.tool_call_events {
+        request
+            .review_task
+            .validate_tool_call_event(event, &worker_invocation_id)?;
+    }
+
+    let mut worker_stage_result = harness_output.worker_stage_result;
+    request
+        .review_task
+        .validate_stage_result(&worker_stage_result)?;
+    request
+        .review_task
+        .validate_worker_invocation_binding(&worker_stage_result, &worker_invocation_id)?;
+    if worker_stage_result.worker_invocation_id.is_none() {
+        worker_stage_result.worker_invocation_id = Some(worker_invocation_id.clone());
+    }
+
     let raw_output_artifact_id = next_id(
         "raw",
-        request.review_run_id,
+        &request.review_task.review_run_id,
         request.stage,
-        base_nonce.wrapping_add(1),
+        base_nonce.wrapping_add(2),
     );
     let raw_artifact = store.store_artifact(
         &raw_output_artifact_id,
@@ -153,16 +226,31 @@ pub fn execute_review_stage(
         harness_output.raw_output.as_bytes(),
     )?;
 
-    let invocation_id = next_id(
-        "invocation",
-        request.review_run_id,
+    let structured_pack_json = worker_stage_result.structured_findings_pack_json()?;
+    let result_artifact_id = next_id(
+        "result",
+        &request.review_task.review_run_id,
         request.stage,
-        base_nonce.wrapping_add(2),
+        base_nonce.wrapping_add(3),
+    );
+    let result_artifact_bytes = serde_json::to_vec(&worker_stage_result)?;
+    store.store_artifact(
+        &result_artifact_id,
+        ArtifactBudgetClass::ColdArtifact,
+        "application/json",
+        &result_artifact_bytes,
+    )?;
+
+    let prompt_invocation_id = next_id(
+        "invocation",
+        &request.review_task.review_run_id,
+        request.stage,
+        base_nonce.wrapping_add(4),
     );
     store.record_prompt_invocation(CreatePromptInvocation {
-        id: &invocation_id,
-        review_session_id: request.review_session_id,
-        review_run_id: request.review_run_id,
+        id: &prompt_invocation_id,
+        review_session_id: &request.review_task.review_session_id,
+        review_run_id: &request.review_task.review_run_id,
         stage: request.stage.as_str(),
         prompt_preset_id: request.prompt.prompt_preset_id,
         source_surface: request.prompt.source_surface,
@@ -180,41 +268,74 @@ pub fn execute_review_stage(
 
     let validation_outcome = validate_structured_findings_pack(
         &ValidationContext {
-            review_session_id: request.review_session_id,
-            review_run_id: request.review_run_id,
+            review_session_id: &request.review_task.review_session_id,
+            review_run_id: &request.review_task.review_run_id,
             repair_attempt: request.repair_attempt,
             repair_retry_budget: request.repair_retry_budget,
         },
-        harness_output.structured_pack_json.as_deref(),
+        structured_pack_json.as_deref(),
         &harness_output.raw_output,
     )?;
 
     let materialized_findings = materialize_findings(
         store,
-        request.review_session_id,
-        request.review_run_id,
+        &request.review_task.review_session_id,
+        &request.review_task.review_run_id,
         request.stage,
         &validation_outcome,
-        base_nonce.wrapping_add(4),
+        base_nonce.wrapping_add(6),
     )?;
     let materialized_finding_ids = materialized_findings
         .iter()
         .map(|finding| finding.id.clone())
         .collect::<Vec<_>>();
 
+    let completed_at = now_ts();
+    let worker_invocation = WorkerInvocation {
+        id: worker_invocation_id.clone(),
+        review_session_id: request.review_task.review_session_id.clone(),
+        review_run_id: request.review_task.review_run_id.clone(),
+        review_task_id: request.review_task.id.clone(),
+        provider: request.worker_context.provider.clone(),
+        provider_session_id: Some(request.session_locator.session_id.clone()),
+        transport_kind: request.capability_profile.transport_kind,
+        started_at: used_at,
+        completed_at: Some(completed_at),
+        outcome_state: worker_stage_result.outcome.invocation_state(),
+        prompt_invocation_id: Some(prompt_invocation_id.clone()),
+        raw_output_artifact_id: Some(raw_output_artifact_id.clone()),
+        result_artifact_id: Some(result_artifact_id.clone()),
+    };
+
     let outcome_metadata = StageOutcomeMetadata {
-        stage: request.stage.as_str().to_owned(),
+        stage: request.review_task.stage.clone(),
+        review_task_id: request.review_task.id.clone(),
+        task_nonce: request.review_task.task_nonce.clone(),
+        task_kind: request.review_task.task_kind,
+        turn_strategy: request.review_task.turn_strategy,
+        worker_invocation_id: worker_invocation.id.clone(),
+        worker_transport_kind: request
+            .capability_profile
+            .transport_kind
+            .as_str()
+            .to_owned(),
+        worker_result_schema_id: worker_stage_result.schema_id.clone(),
+        worker_outcome: worker_stage_result.outcome,
+        summary: worker_stage_result.summary.clone(),
+        clarification_request_count: worker_stage_result.clarification_requests.len(),
+        memory_review_request_count: worker_stage_result.memory_review_requests.len(),
+        follow_up_proposal_count: worker_stage_result.follow_up_proposals.len(),
+        tool_call_count: harness_output.tool_call_events.len(),
+        warning_count: worker_stage_result.warnings.len(),
         stage_state: validation_outcome.stage_state,
         repair_action: validation_outcome.repair_action,
         issue_count: validation_outcome.issues.len(),
         finding_count: validation_outcome.findings.len(),
         materialized_finding_ids,
-        structured_pack_present: harness_output
-            .structured_pack_json
-            .as_ref()
-            .is_some_and(|json| !json.trim().is_empty()),
+        structured_pack_present: worker_stage_result.structured_findings_pack.is_some(),
         degraded: harness_output.degraded_reason.is_some(),
         degraded_reason: harness_output.degraded_reason,
+        result_artifact_id: result_artifact_id.clone(),
         raw_output_artifact_id: raw_output_artifact_id.clone(),
         raw_output_digest: raw_artifact.digest,
     };
@@ -222,16 +343,16 @@ pub fn execute_review_stage(
     let payload_json = serde_json::to_string(&outcome_metadata)?;
     let outcome_event_id = next_id(
         "event",
-        request.review_run_id,
+        &request.review_task.review_run_id,
         request.stage,
-        base_nonce.wrapping_add(3),
+        base_nonce.wrapping_add(5),
     );
     store.record_outcome_event(CreateOutcomeEvent {
         id: &outcome_event_id,
         event_type: PROMPT_INVOKED_EVENT_TYPE,
-        review_session_id: request.review_session_id,
-        review_run_id: Some(request.review_run_id),
-        prompt_invocation_id: Some(&invocation_id),
+        review_session_id: &request.review_task.review_session_id,
+        review_run_id: Some(&request.review_task.review_run_id),
+        prompt_invocation_id: Some(&prompt_invocation_id),
         actor_kind: "agent",
         actor_id: request.actor_id,
         source_surface: request.prompt.source_surface,
@@ -241,9 +362,13 @@ pub fn execute_review_stage(
 
     Ok(StageExecutionResult {
         stage: request.stage,
-        prompt_invocation_id: invocation_id,
+        worker_invocation,
+        worker_stage_result,
+        worker_tool_call_events: harness_output.tool_call_events,
+        prompt_invocation_id,
         prompt_text_artifact_id,
         raw_output_artifact_id,
+        result_artifact_id,
         outcome_event_id,
         validation_outcome,
         materialized_findings,
