@@ -438,6 +438,40 @@ the user back on track.
 - `PJ-06C` and `PJ-06D` are strong corruption, fail-closed, and restart-truth
   scenarios
 
+## Ownership reconciliation for PJ-04 through PJ-06
+
+This reconciliation makes the recovery-heavy persona families point at concrete
+product owners instead of leaving them spread only across flow and testing
+docs.
+
+Closed baseline beads remain authoritative current owners until a newer Round 06
+hardening bead replaces them. This pass does not create additional follow-on
+beads because the remaining executable and hardening gaps already have explicit
+owners in `rr-6iah.1` through `rr-6iah.5`, `rr-x51h.8.2`, `rr-x51h.8.4`,
+`rr-8isd.5.2`, `rr-8isd.5.3`, `rr-g7j6.8`, `rr-ph77.5`, `rr-1pz7`, and
+`rr-x51h.9.1`.
+
+Shared degraded-recall rule:
+
+- when recovery drops into recovery-oriented search instead of normal recall,
+  `rr-x51h.9.1` owns the requirement that `recovery_scan` stays explicit and
+  degraded across the affected `PJ-04` and `PJ-06` paths
+
+| Scenario id | Primary product owners | Current proof lane | Recovery truth carried here |
+|-------------|------------------------|--------------------|-----------------------------|
+| `PJ-04A` | `rr-003.3`, `rr-003.8`, `rr-x51h.3.2` | `rr-6iah.1`, `rr-6iah.5` | crash or reboot resumes the same review when possible and degrades to explicit reseed when not |
+| `PJ-04B` | `rr-003.3`, `rr-003.4`, `rr-x51h.3.2` | `rr-6iah.1`, `rr-6iah.5` | local review state survives even when live harness continuity is stale or gone |
+| `PJ-04C` | `rr-004.1`, `rr-016.3`, `rr-x51h.3.2` | `rr-011.3`, `rr-x51h.8.2` | partial refresh or structure work preserves raw artifacts, bounded repair state, and retry-safe lifecycle truth |
+| `PJ-04D` | `rr-011.2`, `rr-x51h.3.2`, `rr-x51h.5.2` | `rr-6iah.3`, `rr-x51h.8.2` | restart after drift or partial refresh keeps stale trust boundaries explicit instead of silently reusing old findings or drafts |
+| `PJ-05A` | `rr-ph77.1`, `rr-x51h.5.1`, `rr-1pz7` | `E2E-01` | draft, approve, and post remain one Roger-mediated path rather than ambient GitHub mutation |
+| `PJ-05B` | `rr-ph77.1`, `rr-x51h.5.2` | `rr-011.2`, `rr-011.4`, `rr-6iah.3`, `rr-x51h.8.4` | approvals revoke automatically on refresh, rebase, retarget, or drift |
+| `PJ-05C` | `rr-008.1`, `rr-ph77.5`, `rr-1pz7` | `rr-011.4`, `rr-x51h.5.2`, `rr-x51h.8.4` | partial post preserves exact posted-versus-pending lineage and a safe retry path |
+| `PJ-05D` | `rr-ph77.5`, `rr-x51h.5.1`, `rr-1pz7` | `rr-011.4`, `rr-x51h.5.2`, `rr-x51h.8.4` | crash after approval or during posting must reconstruct exact remote and local truth before another post attempt |
+| `PJ-06A` | `rr-8isd.5.1`, `rr-8isd.5.2`, `rr-8isd.5.3`, `rr-b58q.4.4` | `rr-6iah.4` | update or setup drift routes back through `rr init` and `rr doctor`, not ad hoc bridge repair paths |
+| `PJ-06B` | `rr-005.2`, `rr-005.2.1`, `rr-009.1` | `rr-011.6` | duplicate or stale sessions fail closed into an explicit chooser instead of silent guesswork |
+| `PJ-06C` | `rr-1xhg.2`, `rr-1xhg.3`, `rr-1xhg.4`, `rr-1xhg.5` | `rr-8isd.5.2` | damaged or migration-sensitive local state fails closed with checkpoint or journal evidence and one safe next step |
+| `PJ-06D` | `rr-8isd.5.2`, `rr-g7j6.8`, `rr-8isd.5.3` | `rr-1xhg.5`, `rr-x51h.8.2` | restart after partial repair must say whether health is verified, deferred to first launch, or still blocked |
+
 ## Cross-journey expectations
 
 These should feel true across all six personas:
