@@ -6,8 +6,11 @@ use std::path::{Path, PathBuf};
 mod semantic_embedder;
 
 use roger_app_core::{
-    ProviderContinuityCapability, ResumeAttemptOutcome, ResumeBundle, ResumeDecision,
-    ResumeSessionState, ReviewTarget, SessionLocator, Surface, decide_resume_strategy, time,
+    ApprovalState, OutboundApprovalToken, OutboundDraft, OutboundDraftBatch, PostedAction,
+    PostedActionStatus, ProviderContinuityCapability, ResumeAttemptOutcome, ResumeBundle,
+    ResumeDecision, ResumeSessionState, ReviewTarget, SessionLocator, Surface,
+    decide_resume_strategy, outbound_target_tuple_json, time,
+    validate_outbound_draft_batch_linkage,
 };
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value};
 use serde::{Deserialize, Serialize};
@@ -15,7 +18,7 @@ use sha2::{Digest, Sha256};
 
 pub use semantic_embedder::{SemanticEmbedderStatus, semantic_embedder_status};
 
-const CURRENT_SCHEMA_VERSION: i64 = 12;
+const CURRENT_SCHEMA_VERSION: i64 = 13;
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_session_ledger.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_launch_binding_context.sql");
@@ -30,6 +33,7 @@ const MIGRATION_0010: &str = include_str!("../migrations/0010_migration_journal.
 const MIGRATION_0011: &str = include_str!("../migrations/0011_launch_attempts.sql");
 const MIGRATION_0012: &str =
     include_str!("../migrations/0012_prompt_invocation_worker_lineage.sql");
+const MIGRATION_0013: &str = include_str!("../migrations/0013_outbound_batch_storage.sql");
 
 const MIGRATION_TERMINAL_STARTED: &str = "started";
 const MIGRATION_TERMINAL_COMMITTED: &str = "committed";
@@ -78,6 +82,114 @@ impl From<serde_json::Error> for StorageError {
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;
+
+fn approval_state_str(state: &ApprovalState) -> &'static str {
+    match state {
+        ApprovalState::NotDrafted => "NotDrafted",
+        ApprovalState::Drafted => "Drafted",
+        ApprovalState::Approved => "Approved",
+        ApprovalState::Invalidated => "Invalidated",
+        ApprovalState::Posted => "Posted",
+        ApprovalState::Failed => "Failed",
+    }
+}
+
+fn parse_approval_state(raw: &str) -> Result<ApprovalState> {
+    match raw {
+        "NotDrafted" => Ok(ApprovalState::NotDrafted),
+        "Drafted" => Ok(ApprovalState::Drafted),
+        "Approved" => Ok(ApprovalState::Approved),
+        "Invalidated" => Ok(ApprovalState::Invalidated),
+        "Posted" => Ok(ApprovalState::Posted),
+        "Failed" => Ok(ApprovalState::Failed),
+        _ => Err(StorageError::Conflict {
+            entity: "approval_state",
+            id: raw.to_owned(),
+        }),
+    }
+}
+
+fn posted_action_status_str(status: &PostedActionStatus) -> &'static str {
+    match status {
+        PostedActionStatus::Succeeded => "Succeeded",
+        PostedActionStatus::Failed => "Failed",
+        PostedActionStatus::Partial => "Partial",
+    }
+}
+
+fn parse_posted_action_status(raw: &str) -> Result<PostedActionStatus> {
+    match raw {
+        "Succeeded" => Ok(PostedActionStatus::Succeeded),
+        "Failed" => Ok(PostedActionStatus::Failed),
+        "Partial" => Ok(PostedActionStatus::Partial),
+        _ => Err(StorageError::Conflict {
+            entity: "posted_action_status",
+            id: raw.to_owned(),
+        }),
+    }
+}
+
+fn ensure_outbound_batch_identity(
+    existing: &OutboundDraftBatch,
+    candidate: &OutboundDraftBatch,
+) -> Result<()> {
+    let reason_code = if existing.review_session_id != candidate.review_session_id {
+        Some("session_mismatch")
+    } else if existing.review_run_id != candidate.review_run_id {
+        Some("run_mismatch")
+    } else if existing.repo_id != candidate.repo_id
+        || existing.remote_review_target_id != candidate.remote_review_target_id
+    {
+        Some("target_mismatch")
+    } else if existing.payload_digest != candidate.payload_digest {
+        Some("payload_digest_mismatch")
+    } else {
+        None
+    };
+
+    if let Some(reason_code) = reason_code {
+        return Err(StorageError::Conflict {
+            entity: "outbound_draft_batch_identity",
+            id: format!("{}:{reason_code}", candidate.id),
+        });
+    }
+
+    Ok(())
+}
+
+fn ensure_outbound_draft_identity(
+    existing: &OutboundDraft,
+    candidate: &OutboundDraft,
+) -> Result<()> {
+    let reason_code = if existing.review_session_id != candidate.review_session_id {
+        Some("session_mismatch")
+    } else if existing.review_run_id != candidate.review_run_id {
+        Some("run_mismatch")
+    } else if existing.finding_id != candidate.finding_id {
+        Some("finding_link_mismatch")
+    } else if existing.draft_batch_id != candidate.draft_batch_id {
+        Some("batch_mismatch")
+    } else if existing.repo_id != candidate.repo_id
+        || existing.remote_review_target_id != candidate.remote_review_target_id
+    {
+        Some("target_mismatch")
+    } else if existing.payload_digest != candidate.payload_digest {
+        Some("payload_digest_mismatch")
+    } else if existing.anchor_digest != candidate.anchor_digest {
+        Some("anchor_digest_mismatch")
+    } else {
+        None
+    };
+
+    if let Some(reason_code) = reason_code {
+        return Err(StorageError::Conflict {
+            entity: "outbound_draft_item_identity",
+            id: format!("{}:{reason_code}", candidate.id),
+        });
+    }
+
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactStorageKind {
@@ -2467,6 +2579,341 @@ impl RogerStore {
         Ok(())
     }
 
+    pub fn store_outbound_draft_batch(&self, batch: &OutboundDraftBatch) -> Result<()> {
+        if let Some(existing) = self.outbound_draft_batch(&batch.id)? {
+            ensure_outbound_batch_identity(&existing, batch)?;
+        }
+        let now = time::now_ts();
+        self.conn.execute(
+            "INSERT INTO outbound_draft_batches (
+                id, review_session_id, review_run_id, repo_id, remote_review_target_id,
+                payload_digest, approval_state, approved_at, invalidated_at,
+                invalidation_reason_code, row_version, created_at, updated_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5,
+                ?6, ?7, ?8, ?9,
+                ?10, ?11, ?12, ?12
+            )
+            ON CONFLICT(id) DO UPDATE SET
+                approval_state = excluded.approval_state,
+                approved_at = excluded.approved_at,
+                invalidated_at = excluded.invalidated_at,
+                invalidation_reason_code = excluded.invalidation_reason_code,
+                row_version = excluded.row_version,
+                updated_at = excluded.updated_at",
+            params![
+                batch.id.as_str(),
+                batch.review_session_id.as_str(),
+                batch.review_run_id.as_str(),
+                batch.repo_id.as_str(),
+                batch.remote_review_target_id.as_str(),
+                batch.payload_digest.as_str(),
+                approval_state_str(&batch.approval_state),
+                batch.approved_at,
+                batch.invalidated_at,
+                batch.invalidation_reason_code.as_deref(),
+                batch.row_version,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn outbound_draft_batch(&self, batch_id: &str) -> Result<Option<OutboundDraftBatch>> {
+        self.conn
+            .query_row(
+                "SELECT id, review_session_id, review_run_id, repo_id, remote_review_target_id,
+                    payload_digest, approval_state, approved_at, invalidated_at,
+                    invalidation_reason_code, row_version
+                 FROM outbound_draft_batches
+                 WHERE id = ?1",
+                params![batch_id],
+                |row| {
+                    let approval_state: String = row.get(6)?;
+                    Ok(OutboundDraftBatch {
+                        id: row.get(0)?,
+                        review_session_id: row.get(1)?,
+                        review_run_id: row.get(2)?,
+                        repo_id: row.get(3)?,
+                        remote_review_target_id: row.get(4)?,
+                        payload_digest: row.get(5)?,
+                        approval_state: parse_approval_state(&approval_state).map_err(|err| {
+                            rusqlite::Error::ToSqlConversionFailure(Box::new(err))
+                        })?,
+                        approved_at: row.get(7)?,
+                        invalidated_at: row.get(8)?,
+                        invalidation_reason_code: row.get(9)?,
+                        row_version: row.get(10)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    pub fn store_outbound_draft_item(&self, draft: &OutboundDraft) -> Result<()> {
+        let batch = self
+            .outbound_draft_batch(&draft.draft_batch_id)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "outbound_draft_batch",
+                id: draft.draft_batch_id.clone(),
+            })?;
+        let validation = validate_outbound_draft_batch_linkage(&batch, std::slice::from_ref(draft));
+        if !validation.valid {
+            let reasons = validation
+                .issues
+                .iter()
+                .map(|issue| issue.reason_code.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            return Err(StorageError::Conflict {
+                entity: "outbound_draft_batch_binding",
+                id: format!("{}:{reasons}", draft.id),
+            });
+        }
+        if let Some(existing) = self.outbound_draft_item(&draft.id)? {
+            ensure_outbound_draft_identity(&existing, draft)?;
+        }
+
+        let now = time::now_ts();
+        self.conn.execute(
+            "INSERT INTO outbound_draft_items (
+                id, review_session_id, review_run_id, finding_id, draft_batch_id, repo_id,
+                remote_review_target_id, payload_digest, approval_state, anchor_digest,
+                row_version, created_at, updated_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6,
+                ?7, ?8, ?9, ?10,
+                ?11, ?12, ?12
+            )
+            ON CONFLICT(id) DO UPDATE SET
+                approval_state = excluded.approval_state,
+                row_version = excluded.row_version,
+                updated_at = excluded.updated_at",
+            params![
+                draft.id.as_str(),
+                draft.review_session_id.as_str(),
+                draft.review_run_id.as_str(),
+                draft.finding_id.as_deref(),
+                draft.draft_batch_id.as_str(),
+                draft.repo_id.as_str(),
+                draft.remote_review_target_id.as_str(),
+                draft.payload_digest.as_str(),
+                approval_state_str(&draft.approval_state),
+                draft.anchor_digest.as_str(),
+                draft.row_version,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn outbound_draft_item(&self, draft_id: &str) -> Result<Option<OutboundDraft>> {
+        self.conn
+            .query_row(
+                "SELECT id, review_session_id, review_run_id, finding_id, draft_batch_id, repo_id,
+                    remote_review_target_id, payload_digest, approval_state, anchor_digest, row_version
+                 FROM outbound_draft_items
+                 WHERE id = ?1",
+                params![draft_id],
+                |row| {
+                    let approval_state: String = row.get(8)?;
+                    Ok(OutboundDraft {
+                        id: row.get(0)?,
+                        review_session_id: row.get(1)?,
+                        review_run_id: row.get(2)?,
+                        finding_id: row.get(3)?,
+                        draft_batch_id: row.get(4)?,
+                        repo_id: row.get(5)?,
+                        remote_review_target_id: row.get(6)?,
+                        payload_digest: row.get(7)?,
+                        approval_state: parse_approval_state(&approval_state)
+                            .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?,
+                        anchor_digest: row.get(9)?,
+                        row_version: row.get(10)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    pub fn outbound_draft_items_for_batch(&self, batch_id: &str) -> Result<Vec<OutboundDraft>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, review_session_id, review_run_id, finding_id, draft_batch_id, repo_id,
+                remote_review_target_id, payload_digest, approval_state, anchor_digest, row_version
+             FROM outbound_draft_items
+             WHERE draft_batch_id = ?1
+             ORDER BY rowid ASC",
+        )?;
+        let rows = stmt.query_map(params![batch_id], |row| {
+            let approval_state: String = row.get(8)?;
+            Ok(OutboundDraft {
+                id: row.get(0)?,
+                review_session_id: row.get(1)?,
+                review_run_id: row.get(2)?,
+                finding_id: row.get(3)?,
+                draft_batch_id: row.get(4)?,
+                repo_id: row.get(5)?,
+                remote_review_target_id: row.get(6)?,
+                payload_digest: row.get(7)?,
+                approval_state: parse_approval_state(&approval_state)
+                    .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?,
+                anchor_digest: row.get(9)?,
+                row_version: row.get(10)?,
+            })
+        })?;
+
+        let mut drafts = Vec::new();
+        for row in rows {
+            drafts.push(row?);
+        }
+        Ok(drafts)
+    }
+
+    pub fn store_outbound_approval_token(&self, approval: &OutboundApprovalToken) -> Result<()> {
+        let batch = self
+            .outbound_draft_batch(&approval.draft_batch_id)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "outbound_draft_batch",
+                id: approval.draft_batch_id.clone(),
+            })?;
+        if approval.payload_digest != batch.payload_digest {
+            return Err(StorageError::Conflict {
+                entity: "outbound_approval_token_binding",
+                id: format!("{}:payload_digest_mismatch", approval.id),
+            });
+        }
+        let expected_target = outbound_target_tuple_json(&batch);
+        if approval.target_tuple_json != expected_target {
+            return Err(StorageError::Conflict {
+                entity: "outbound_approval_token_binding",
+                id: format!("{}:target_tuple_mismatch", approval.id),
+            });
+        }
+        if let Some(existing) = self.approval_token_for_batch(&approval.draft_batch_id)? {
+            if existing.id != approval.id {
+                return Err(StorageError::Conflict {
+                    entity: "outbound_approval_token_binding",
+                    id: format!("{}:approval_id_mismatch", approval.id),
+                });
+            }
+        }
+
+        let now = time::now_ts();
+        self.conn.execute(
+            "INSERT INTO outbound_batch_approval_tokens (
+                id, draft_batch_id, payload_digest, target_tuple_json, approved_at,
+                revoked_at, row_version, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?7)
+            ON CONFLICT(id) DO UPDATE SET
+                payload_digest = excluded.payload_digest,
+                target_tuple_json = excluded.target_tuple_json,
+                approved_at = excluded.approved_at,
+                revoked_at = excluded.revoked_at,
+                row_version = outbound_batch_approval_tokens.row_version + 1,
+                updated_at = excluded.updated_at",
+            params![
+                approval.id.as_str(),
+                approval.draft_batch_id.as_str(),
+                approval.payload_digest.as_str(),
+                approval.target_tuple_json.as_str(),
+                approval.approved_at,
+                approval.revoked_at,
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn approval_token_for_batch(
+        &self,
+        batch_id: &str,
+    ) -> Result<Option<OutboundApprovalToken>> {
+        self.conn
+            .query_row(
+                "SELECT id, draft_batch_id, payload_digest, target_tuple_json, approved_at, revoked_at
+                 FROM outbound_batch_approval_tokens
+                 WHERE draft_batch_id = ?1",
+                params![batch_id],
+                |row| {
+                    Ok(OutboundApprovalToken {
+                        id: row.get(0)?,
+                        draft_batch_id: row.get(1)?,
+                        payload_digest: row.get(2)?,
+                        target_tuple_json: row.get(3)?,
+                        approved_at: row.get(4)?,
+                        revoked_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    pub fn store_posted_batch_action(&self, action: &PostedAction) -> Result<()> {
+        let batch = self
+            .outbound_draft_batch(&action.draft_batch_id)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "outbound_draft_batch",
+                id: action.draft_batch_id.clone(),
+            })?;
+        if action.posted_payload_digest != batch.payload_digest {
+            return Err(StorageError::Conflict {
+                entity: "posted_batch_action_binding",
+                id: format!("{}:payload_digest_mismatch", action.id),
+            });
+        }
+
+        self.conn.execute(
+            "INSERT INTO posted_batch_actions (
+                id, draft_batch_id, provider, remote_identifier, status,
+                posted_payload_digest, posted_at, failure_code
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                action.id.as_str(),
+                action.draft_batch_id.as_str(),
+                action.provider.as_str(),
+                action.remote_identifier.as_str(),
+                posted_action_status_str(&action.status),
+                action.posted_payload_digest.as_str(),
+                action.posted_at,
+                action.failure_code.as_deref(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn posted_actions_for_batch(&self, batch_id: &str) -> Result<Vec<PostedAction>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, draft_batch_id, provider, remote_identifier, status,
+                posted_payload_digest, posted_at, failure_code
+             FROM posted_batch_actions
+             WHERE draft_batch_id = ?1
+             ORDER BY rowid ASC",
+        )?;
+        let rows = stmt.query_map(params![batch_id], |row| {
+            let status: String = row.get(4)?;
+            Ok(PostedAction {
+                id: row.get(0)?,
+                draft_batch_id: row.get(1)?,
+                provider: row.get(2)?,
+                remote_identifier: row.get(3)?,
+                status: parse_posted_action_status(&status)
+                    .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?,
+                posted_payload_digest: row.get(5)?,
+                posted_at: row.get(6)?,
+                failure_code: row.get(7)?,
+            })
+        })?;
+
+        let mut actions = Vec::new();
+        for row in rows {
+            actions.push(row?);
+        }
+        Ok(actions)
+    }
+
     pub fn put_launch_profile(&self, profile: CreateLaunchProfile<'_>) -> Result<()> {
         let now = time::now_ts();
         self.conn.execute(
@@ -3333,21 +3780,44 @@ impl RogerStore {
 
         let run_count = count_for_session(&self.conn, "review_runs", session_id)?;
         let finding_count = count_for_session(&self.conn, "findings", session_id)?;
-        let draft_count = count_for_session(&self.conn, "outbound_drafts", session_id)?;
-        let approval_count = self.conn.query_row(
+        let legacy_draft_count = count_for_session(&self.conn, "outbound_drafts", session_id)?;
+        let canonical_draft_count = self.conn.query_row(
+            "SELECT COUNT(*) FROM outbound_draft_items
+            WHERE review_session_id = ?1",
+            params![session_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let draft_count = legacy_draft_count + canonical_draft_count;
+        let legacy_approval_count = self.conn.query_row(
             "SELECT COUNT(*) FROM outbound_approval_tokens oat
             JOIN outbound_drafts od ON od.id = oat.draft_id
             WHERE od.session_id = ?1",
             params![session_id],
-            |row| row.get(0),
+            |row| row.get::<_, i64>(0),
         )?;
-        let posted_action_count = self.conn.query_row(
+        let canonical_approval_count = self.conn.query_row(
+            "SELECT COUNT(*) FROM outbound_batch_approval_tokens oat
+            JOIN outbound_draft_batches odb ON odb.id = oat.draft_batch_id
+            WHERE odb.review_session_id = ?1",
+            params![session_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let approval_count = legacy_approval_count + canonical_approval_count;
+        let legacy_posted_action_count = self.conn.query_row(
             "SELECT COUNT(*) FROM posted_actions pa
             JOIN outbound_drafts od ON od.id = pa.draft_id
             WHERE od.session_id = ?1",
             params![session_id],
-            |row| row.get(0),
+            |row| row.get::<_, i64>(0),
         )?;
+        let canonical_posted_action_count = self.conn.query_row(
+            "SELECT COUNT(*) FROM posted_batch_actions pba
+            JOIN outbound_draft_batches odb ON odb.id = pba.draft_batch_id
+            WHERE odb.review_session_id = ?1",
+            params![session_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let posted_action_count = legacy_posted_action_count + canonical_posted_action_count;
 
         Ok(SessionOverview {
             attention_state: session.attention_state,
@@ -4598,6 +5068,16 @@ impl RogerStore {
                     params![time::now_ts()],
                 )?;
                 self.conn.pragma_update(None, "user_version", 12)?;
+            }
+
+            if version < 13 {
+                self.conn.execute_batch(MIGRATION_0013)?;
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at)
+                    VALUES (13, 'outbound_batch_storage', ?1)",
+                    params![time::now_ts()],
+                )?;
+                self.conn.pragma_update(None, "user_version", 13)?;
             }
 
             if migration_class.requires_sidecar_invalidation() {

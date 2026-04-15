@@ -44,4 +44,8 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
         "0012_prompt_invocation_worker_lineage",
         include_str!("../migrations/0012_prompt_invocation_worker_lineage.sql"),
     ),
+    (
+        "0013_outbound_batch_storage",
+        include_str!("../migrations/0013_outbound_batch_storage.sql"),
+    ),
 ];
