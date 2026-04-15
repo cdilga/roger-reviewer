@@ -1,8 +1,13 @@
 use roger_app_core::{
     ReviewTarget, ReviewTask, ReviewTaskKind, ReviewWorkerContractError,
-    WORKER_STAGE_RESULT_SCHEMA_V1, WorkerArtifactRef, WorkerCapabilityProfile, WorkerContextPacket,
-    WorkerFindingSummary, WorkerGitHubPosture, WorkerInvocation, WorkerInvocationOutcomeState,
-    WorkerMemoryCard, WorkerMutationPosture, WorkerStageOutcome, WorkerStageResult,
+    WORKER_OPERATION_REQUEST_SCHEMA_V1, WORKER_STAGE_RESULT_SCHEMA_V1, WorkerArtifactRef,
+    WorkerArtifactExcerpt, WorkerCapabilityProfile, WorkerContextPacket, WorkerEvidenceLocation,
+    WorkerFindingDetail, WorkerFindingListResponse, WorkerFindingSummary, WorkerGitHubPosture,
+    WorkerInvocation, WorkerInvocationOutcomeState, WorkerMemoryCard, WorkerMutationPosture,
+    WorkerOperation, WorkerOperationDenial, WorkerOperationDenialCode,
+    WorkerOperationLane, WorkerOperationRequestEnvelope, WorkerOperationResponseEnvelope,
+    WorkerOperationResponseStatus, WorkerRecallEnvelope, WorkerSearchMemoryRequest,
+    WorkerSearchMemoryResponse, WorkerStageOutcome, WorkerStageResult, WorkerStatusSnapshot,
     WorkerToolCallEvent, WorkerToolCallOutcomeState, WorkerTransportKind, WorkerTurnStrategy,
 };
 use serde_json::json;
@@ -31,8 +36,15 @@ fn sample_task() -> ReviewTask {
         allowed_scopes: vec!["repo".to_owned()],
         allowed_operations: vec![
             "worker.get_review_context".to_owned(),
+            "worker.search_memory".to_owned(),
             "worker.list_findings".to_owned(),
+            "worker.get_finding_detail".to_owned(),
+            "worker.get_artifact_excerpt".to_owned(),
+            "worker.get_status".to_owned(),
             "worker.submit_stage_result".to_owned(),
+            "worker.request_clarification".to_owned(),
+            "worker.request_memory_review".to_owned(),
+            "worker.propose_follow_up".to_owned(),
         ],
         expected_result_schema: WORKER_STAGE_RESULT_SCHEMA_V1.to_owned(),
         prompt_preset_id: Some("preset-deep-review".to_owned()),
@@ -55,8 +67,15 @@ fn sample_context() -> WorkerContextPacket {
         allowed_scopes: vec!["repo".to_owned()],
         allowed_operations: vec![
             "worker.get_review_context".to_owned(),
+            "worker.search_memory".to_owned(),
             "worker.list_findings".to_owned(),
+            "worker.get_finding_detail".to_owned(),
+            "worker.get_artifact_excerpt".to_owned(),
+            "worker.get_status".to_owned(),
             "worker.submit_stage_result".to_owned(),
+            "worker.request_clarification".to_owned(),
+            "worker.request_memory_review".to_owned(),
+            "worker.propose_follow_up".to_owned(),
         ],
         mutation_posture: WorkerMutationPosture::ReviewOnly,
         github_posture: WorkerGitHubPosture::Blocked,
@@ -129,6 +148,19 @@ fn sample_tool_call_event() -> WorkerToolCallEvent {
         response_digest: Some("response-digest-1".to_owned()),
         outcome_state: WorkerToolCallOutcomeState::Succeeded,
         occurred_at: 205,
+    }
+}
+
+fn sample_operation_request(operation: &str) -> WorkerOperationRequestEnvelope {
+    WorkerOperationRequestEnvelope {
+        schema_id: WORKER_OPERATION_REQUEST_SCHEMA_V1.to_owned(),
+        review_session_id: "session-1".to_owned(),
+        review_run_id: "run-1".to_owned(),
+        review_task_id: "task-1".to_owned(),
+        task_nonce: "nonce-1".to_owned(),
+        operation: operation.to_owned(),
+        requested_scopes: Vec::new(),
+        payload: None,
     }
 }
 
@@ -254,6 +286,159 @@ fn worker_contract_objects_round_trip_and_validate_binding() {
 }
 
 #[test]
+fn worker_operation_contract_authorizes_read_and_proposal_lanes() {
+    let task = sample_task();
+    let capability = sample_capability_profile();
+
+    let mut search_request = sample_operation_request("worker.search_memory");
+    search_request.requested_scopes = vec!["repo".to_owned()];
+    search_request.payload = Some(
+        serde_json::to_value(WorkerSearchMemoryRequest {
+            query_text: "approval invalidation refresh".to_owned(),
+            query_mode: "auto".to_owned(),
+            requested_retrieval_classes: vec![
+                "promoted_memory".to_owned(),
+                "evidence_hits".to_owned(),
+            ],
+            anchor_hints: vec!["finding-1".to_owned()],
+        })
+        .expect("serialize search payload"),
+    );
+
+    let search_auth = task
+        .validate_operation_request(&search_request, &capability)
+        .expect("search request should authorize");
+    assert_eq!(search_auth.operation, WorkerOperation::SearchMemory);
+    assert_eq!(search_auth.lane, WorkerOperationLane::Read);
+    assert_eq!(search_auth.granted_scopes, vec!["repo".to_owned()]);
+    assert!(!search_auth.advisory_only);
+
+    let response = WorkerOperationResponseEnvelope::success(
+        &search_request,
+        search_auth.clone(),
+        Some(
+            serde_json::to_value(WorkerSearchMemoryResponse {
+                query_mode: "auto".to_owned(),
+                retrieval_mode: "hybrid".to_owned(),
+                degraded_flags: Vec::new(),
+                promoted_memory: vec![WorkerRecallEnvelope {
+                    citation_id: "memory-1".to_owned(),
+                    source_kind: "memory".to_owned(),
+                    source_id: "mem-1".to_owned(),
+                    summary: "Prior approval invalidation regression".to_owned(),
+                    scope: "repo".to_owned(),
+                    provenance: "promoted_memory".to_owned(),
+                    trust_tier: Some("validated".to_owned()),
+                    citation_posture: "citeable".to_owned(),
+                }],
+                tentative_candidates: Vec::new(),
+                evidence_hits: vec![WorkerRecallEnvelope {
+                    citation_id: "finding-1".to_owned(),
+                    source_kind: "finding".to_owned(),
+                    source_id: "finding-1".to_owned(),
+                    summary: "Approval batch survives stale refresh".to_owned(),
+                    scope: "repo".to_owned(),
+                    provenance: "evidence_hits".to_owned(),
+                    trust_tier: Some("observed".to_owned()),
+                    citation_posture: "citeable".to_owned(),
+                }],
+            })
+            .expect("serialize search response"),
+        ),
+    );
+    assert_eq!(response.status, WorkerOperationResponseStatus::Succeeded);
+    assert_eq!(response.authorization, Some(search_auth));
+    assert_eq!(response.denial, None);
+
+    let search_payload: WorkerSearchMemoryResponse =
+        serde_json::from_value(response.payload.clone().expect("response payload"))
+            .expect("deserialize search response");
+    assert_eq!(search_payload.query_mode, "auto");
+    assert_eq!(search_payload.promoted_memory.len(), 1);
+    assert_eq!(search_payload.evidence_hits.len(), 1);
+
+    let round_trip: WorkerOperationResponseEnvelope =
+        serde_json::from_str(&serde_json::to_string(&response).expect("serialize response"))
+            .expect("deserialize response");
+    assert_eq!(round_trip, response);
+
+    let clarification_request = sample_operation_request("worker.request_clarification");
+    let clarification_auth = task
+        .validate_operation_request(&clarification_request, &capability)
+        .expect("clarification request should authorize");
+    assert_eq!(
+        clarification_auth.operation,
+        WorkerOperation::RequestClarification
+    );
+    assert_eq!(clarification_auth.lane, WorkerOperationLane::Proposal);
+    assert!(clarification_auth.advisory_only);
+}
+
+#[test]
+fn worker_read_contract_payloads_round_trip_as_roger_owned_types() {
+    let finding = WorkerFindingSummary {
+        finding_id: "finding-1".to_owned(),
+        fingerprint: "fp-1".to_owned(),
+        summary: "Approval invalidation can be skipped after stale refresh.".to_owned(),
+        triage_state: "new".to_owned(),
+        outbound_state: "not_drafted".to_owned(),
+        primary_evidence_ref: Some("artifact-1".to_owned()),
+    };
+
+    let list = WorkerFindingListResponse {
+        items: vec![finding.clone()],
+    };
+    let list_round_trip: WorkerFindingListResponse =
+        serde_json::from_str(&serde_json::to_string(&list).expect("serialize finding list"))
+            .expect("deserialize finding list");
+    assert_eq!(list_round_trip, list);
+
+    let detail = WorkerFindingDetail {
+        finding: finding.clone(),
+        evidence_locations: vec![WorkerEvidenceLocation {
+            artifact_id: "artifact-1".to_owned(),
+            repo_rel_path: Some("packages/cli/src/lib.rs".to_owned()),
+            start_line: Some(1200),
+            end_line: Some(1218),
+            evidence_role: Some("primary".to_owned()),
+        }],
+        clarification_ids: vec!["clarify-1".to_owned()],
+        outbound_draft_ids: vec!["draft-1".to_owned()],
+    };
+    let detail_round_trip: WorkerFindingDetail =
+        serde_json::from_str(&serde_json::to_string(&detail).expect("serialize finding detail"))
+            .expect("deserialize finding detail");
+    assert_eq!(detail_round_trip, detail);
+
+    let excerpt = WorkerArtifactExcerpt {
+        artifact_id: "artifact-1".to_owned(),
+        excerpt: "if approval token is stale { ... }".to_owned(),
+        digest: Some("sha256:abc".to_owned()),
+        truncated: false,
+        byte_count: 34,
+    };
+    let excerpt_round_trip: WorkerArtifactExcerpt =
+        serde_json::from_str(&serde_json::to_string(&excerpt).expect("serialize excerpt"))
+            .expect("deserialize excerpt");
+    assert_eq!(excerpt_round_trip, excerpt);
+
+    let status = WorkerStatusSnapshot {
+        review_session_id: "session-1".to_owned(),
+        review_run_id: "run-1".to_owned(),
+        attention_state: "needs_review".to_owned(),
+        continuity_summary: Some("resume bundle remains usable".to_owned()),
+        degraded_flags: vec!["lexical_only_search".to_owned()],
+        unresolved_finding_count: 1,
+        pending_clarification_count: 1,
+        draft_count: 0,
+    };
+    let status_round_trip: WorkerStatusSnapshot =
+        serde_json::from_str(&serde_json::to_string(&status).expect("serialize status"))
+            .expect("deserialize status");
+    assert_eq!(status_round_trip, status);
+}
+
+#[test]
 fn worker_contract_rejects_stale_nonce_and_wrong_invocation_binding() {
     let task = sample_task();
 
@@ -279,6 +464,50 @@ fn worker_contract_rejects_stale_nonce_and_wrong_invocation_binding() {
 }
 
 #[test]
+fn worker_operation_contract_denies_scope_escalation_and_unknown_mutation_ops() {
+    let task = sample_task();
+    let capability = sample_capability_profile();
+
+    let mut scope_request = sample_operation_request("worker.search_memory");
+    scope_request.requested_scopes = vec!["org".to_owned()];
+    assert_eq!(
+        task.validate_operation_request(&scope_request, &capability),
+        Err(ReviewWorkerContractError::ScopeEscalationDenied {
+            requested: "org".to_owned(),
+            allowed: vec!["repo".to_owned()],
+        })
+    );
+
+    let unsupported_request = sample_operation_request("worker.promote_memory");
+    assert_eq!(
+        task.validate_operation_request(&unsupported_request, &capability),
+        Err(ReviewWorkerContractError::UnsupportedOperation {
+            operation: "worker.promote_memory".to_owned(),
+        })
+    );
+
+    let denied = WorkerOperationResponseEnvelope::denied(
+        &unsupported_request,
+        WorkerOperationDenial {
+            code: WorkerOperationDenialCode::UnsupportedOperation,
+            message: "worker.promote_memory is not part of the review-mode worker API".to_owned(),
+            denied_scopes: Vec::new(),
+        },
+        vec!["proposal-only memory review remains manager-owned".to_owned()],
+    );
+    assert_eq!(denied.status, WorkerOperationResponseStatus::Denied);
+    assert_eq!(denied.authorization, None);
+    assert_eq!(
+        denied.denial,
+        Some(WorkerOperationDenial {
+            code: WorkerOperationDenialCode::UnsupportedOperation,
+            message: "worker.promote_memory is not part of the review-mode worker API".to_owned(),
+            denied_scopes: Vec::new(),
+        })
+    );
+}
+
+#[test]
 fn worker_contract_rejects_missing_stage_result_submission_capability() {
     let task = sample_task();
     let mut capability = sample_capability_profile();
@@ -287,5 +516,41 @@ fn worker_contract_rejects_missing_stage_result_submission_capability() {
     assert_eq!(
         task.validate_capability_profile(&capability),
         Err(ReviewWorkerContractError::StageResultSubmissionUnsupported)
+    );
+}
+
+#[test]
+fn worker_operation_contract_rejects_out_of_policy_and_stale_requests() {
+    let mut task = sample_task();
+    let capability = sample_capability_profile();
+
+    let mut stale_request = sample_operation_request("worker.get_status");
+    stale_request.task_nonce = "stale-nonce".to_owned();
+    assert_eq!(
+        task.validate_operation_request(&stale_request, &capability),
+        Err(ReviewWorkerContractError::RequestNonceMismatch {
+            expected: "nonce-1".to_owned(),
+            found: "stale-nonce".to_owned(),
+        })
+    );
+
+    task.allowed_operations = vec!["worker.get_review_context".to_owned()];
+    let search_request = sample_operation_request("worker.search_memory");
+    assert_eq!(
+        task.validate_operation_request(&search_request, &capability),
+        Err(ReviewWorkerContractError::OperationNotAllowed {
+            operation: "worker.search_memory".to_owned(),
+        })
+    );
+
+    let mut memory_capability = sample_capability_profile();
+    memory_capability.supports_memory_search = false;
+    let full_task = sample_task();
+    assert_eq!(
+        full_task.validate_operation_request(&search_request, &memory_capability),
+        Err(ReviewWorkerContractError::OperationCapabilityUnsupported {
+            operation: "worker.search_memory".to_owned(),
+            capability: "supports_memory_search".to_owned(),
+        })
     );
 }

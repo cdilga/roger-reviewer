@@ -2985,6 +2985,7 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 "supported_providers": SUPPORTED_REVIEW_PROVIDERS,
                 "planned_not_live_providers": PLANNED_REVIEW_PROVIDERS,
                 "not_supported_providers": NOT_LIVE_REVIEW_PROVIDERS,
+                "live_review_provider_support": review_provider_support_matrix(),
             }),
         );
     }
@@ -3034,6 +3035,7 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 "resume_path": inferred_resume_path,
                 "continuity_quality": continuity_quality,
                 "continuity_state_snapshot": session.continuity_state,
+                "provider_capability": provider_capability(&session.provider),
             }),
             warnings: {
                 let mut warnings: Vec<String> =
@@ -3055,6 +3057,8 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 "repository": session.review_target.repository,
                 "pull_request": session.review_target.pull_request_number,
                 "command": "resume",
+                "provider": session.provider,
+                "provider_capability": provider_capability(&session.provider),
             }),
             warnings: {
                 let mut warnings: Vec<String> =
@@ -3356,6 +3360,9 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     };
 
     if session.provider != "opencode" {
+        let mut capability = provider_capability(&session.provider);
+        capability["required_tier_for_return"] = json!("tier_b");
+        capability["supports_rr_return"] = json!(false);
         return blocked_response(
             format!(
                 "rr return is unsupported for provider '{}' in 0.1.0",
@@ -3365,12 +3372,7 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             json!({
                 "session_id": session.id,
                 "provider": session.provider,
-                "provider_capability": {
-                    "provider": session.provider,
-                    "tier": provider_tier(&session.provider),
-                    "supports_rr_return": false,
-                    "required_tier_for_return": "tier_b",
-                }
+                "provider_capability": capability,
             }),
         );
     }
@@ -3466,18 +3468,19 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         } else {
             OutcomeKind::Complete
         },
-        data: json!({
+        data: {
+            let mut capability = provider_capability(&session.provider);
+            capability["supports_rr_return"] = json!(true);
+            capability["required_tier_for_return"] = json!("tier_b");
+            json!({
             "session_id": outcome.session_id,
             "review_run_id": run_id,
-            "provider_capability": {
-                "provider": session.provider,
-                "tier": provider_tier(&session.provider),
-                "supports_rr_return": true,
-            },
+            "provider_capability": capability,
             "return_path": return_path_label(outcome.path),
             "continuity_quality": continuity_state_label(&outcome.continuity_quality),
             "decision_reason": format!("{:?}", outcome.decision.reason_code),
-        }),
+        })
+        },
         warnings: Vec::new(),
         repair_actions: Vec::new(),
         message: "rr return completed".to_owned(),
@@ -3522,6 +3525,7 @@ fn handle_sessions(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
                 },
                 "attention_state": entry.attention_state,
                 "provider": entry.provider,
+                "provider_capability": provider_capability(&entry.provider),
                 "updated_at": entry.updated_at,
                 "follow_on": {
                     "requires_explicit_session": true,
@@ -5396,15 +5400,7 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 "resume_locator_present": session.session_locator.is_some(),
                 "state": session.continuity_state,
             },
-            "provider_capability": {
-                "provider": session.provider,
-                "tier": provider_tier,
-                "supports": {
-                    "status": true,
-                    "findings": true,
-                    "return": session.provider == "opencode",
-                },
-            }
+            "provider_capability": provider_capability(&session.provider)
         }),
         warnings,
         repair_actions: Vec::new(),
@@ -5465,7 +5461,6 @@ fn handle_findings(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
             return error_response(format!("failed to load findings for latest run: {err}"));
         }
     };
-    let provider_tier = provider_tier(&session.provider);
     let mut warnings: Vec<String> = provider_support_warning(&session.provider, "rr findings")
         .into_iter()
         .collect();
@@ -5515,15 +5510,7 @@ fn handle_findings(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
                 "fractional_staleness_allowed": true,
                 "stale_target_detected": session.attention_state == "refresh_recommended",
             },
-            "provider_capability": {
-                "provider": session.provider,
-                "tier": provider_tier,
-                "supports": {
-                    "findings": true,
-                    "status": true,
-                    "return": session.provider == "opencode",
-                },
-            },
+            "provider_capability": provider_capability(&session.provider),
         }),
         warnings,
         repair_actions: Vec::new(),
@@ -5823,10 +5810,19 @@ fn continuity_state_label(quality: &ContinuityQuality) -> &'static str {
 }
 
 fn provider_tier(provider: &str) -> &'static str {
-    if provider == "opencode" {
-        "tier_b"
-    } else {
-        "tier_a"
+    match provider {
+        "opencode" => "tier_b",
+        "codex" | "gemini" | "claude" => "tier_a",
+        _ => "unavailable",
+    }
+}
+
+fn provider_support_status(provider: &str) -> &'static str {
+    match provider {
+        "opencode" => "first_class_live",
+        "codex" | "gemini" | "claude" => "bounded_live",
+        "copilot" => "planned_not_live",
+        _ => "not_supported",
     }
 }
 
@@ -5858,12 +5854,16 @@ fn provider_capability(provider: &str) -> Value {
     json!({
         "provider": provider,
         "display_name": provider_display_name(provider),
+        "status": provider_support_status(provider),
         "tier": provider_tier(provider),
         "supports": {
             "review_start": SUPPORTED_REVIEW_PROVIDERS.contains(&provider),
             "resume_reseed": SUPPORTED_REVIEW_PROVIDERS.contains(&provider),
             "resume_reopen": provider == "opencode",
             "return": provider == "opencode",
+            "status": true,
+            "findings": true,
+            "sessions": true,
         }
     })
 }
@@ -5878,7 +5878,7 @@ fn review_provider_support_matrix() -> Vec<Value> {
                 "provider": provider,
                 "display_name": provider_display_name(provider),
                 "tier": provider_tier(provider),
-                "status": if provider == "opencode" { "first_class_live" } else { "bounded_live" },
+                "status": provider_support_status(provider),
                 "supports": capability["supports"].clone(),
                 "notes": provider_live_support_notes(provider),
             })

@@ -1296,6 +1296,28 @@ fn bounded_provider_outputs_are_truthful_for_status_resume_and_return() {
         "bounded_provider"
     );
     assert_eq!(status_payload["data"]["continuity"]["tier"], "tier_a");
+    assert_eq!(status_payload["data"]["provider_capability"]["provider"], "gemini");
+    assert_eq!(
+        status_payload["data"]["provider_capability"]["status"],
+        "bounded_live"
+    );
+    assert_eq!(status_payload["data"]["provider_capability"]["tier"], "tier_a");
+    assert_eq!(
+        status_payload["data"]["provider_capability"]["supports"]["status"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        status_payload["data"]["provider_capability"]["supports"]["findings"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        status_payload["data"]["provider_capability"]["supports"]["resume_reopen"],
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        status_payload["data"]["provider_capability"]["supports"]["return"],
+        serde_json::json!(false)
+    );
     assert!(
         status_payload["warnings"]
             .as_array()
@@ -1317,6 +1339,24 @@ fn bounded_provider_outputs_are_truthful_for_status_resume_and_return() {
         "reseeded_from_bundle"
     );
     assert_eq!(resume_payload["data"]["continuity_quality"], "degraded");
+    assert_eq!(resume_payload["data"]["provider_capability"]["provider"], "gemini");
+    assert_eq!(
+        resume_payload["data"]["provider_capability"]["status"],
+        "bounded_live"
+    );
+    assert_eq!(resume_payload["data"]["provider_capability"]["tier"], "tier_a");
+    assert_eq!(
+        resume_payload["data"]["provider_capability"]["supports"]["resume_reseed"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        resume_payload["data"]["provider_capability"]["supports"]["resume_reopen"],
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        resume_payload["data"]["provider_capability"]["supports"]["return"],
+        serde_json::json!(false)
+    );
     assert!(
         resume_payload["warnings"]
             .as_array()
@@ -1333,6 +1373,23 @@ fn bounded_provider_outputs_are_truthful_for_status_resume_and_return() {
     let return_payload = parse_robot_payload(&ret.stdout);
     assert_eq!(return_payload["outcome"], "blocked");
     assert_eq!(return_payload["data"]["provider"], "gemini");
+    assert_eq!(return_payload["data"]["provider_capability"]["provider"], "gemini");
+    assert_eq!(
+        return_payload["data"]["provider_capability"]["status"],
+        "bounded_live"
+    );
+    assert_eq!(
+        return_payload["data"]["provider_capability"]["tier"],
+        "tier_a"
+    );
+    assert_eq!(
+        return_payload["data"]["provider_capability"]["supports"]["return"],
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        return_payload["data"]["provider_capability"]["required_tier_for_return"],
+        "tier_b"
+    );
 }
 
 #[test]
@@ -1533,6 +1590,17 @@ fn sessions_lists_filters_and_compacts_with_explicit_follow_on_hints() {
         assert!(item["target"].get("repository").is_some());
         assert!(item["target"].get("pull_request").is_some());
         assert!(item.get("attention_state").is_some());
+        assert_eq!(item["provider_capability"]["provider"], "opencode");
+        assert_eq!(item["provider_capability"]["status"], "first_class_live");
+        assert_eq!(item["provider_capability"]["tier"], "tier_b");
+        assert_eq!(
+            item["provider_capability"]["supports"]["sessions"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            item["provider_capability"]["supports"]["resume_reopen"],
+            serde_json::json!(true)
+        );
         assert!(item.get("updated_at").is_some());
         assert_eq!(
             item["follow_on"]["requires_explicit_session"].as_bool(),

@@ -791,6 +791,310 @@ pub struct WorkerCapabilityProfile {
     pub supports_fix_mode: bool,
 }
 
+pub const WORKER_OPERATION_REQUEST_SCHEMA_V1: &str = "worker_operation_request.v1";
+pub const WORKER_OPERATION_RESPONSE_SCHEMA_V1: &str = "worker_operation_response.v1";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerOperationLane {
+    Read,
+    Proposal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkerOperation {
+    #[serde(rename = "worker.get_review_context")]
+    GetReviewContext,
+    #[serde(rename = "worker.search_memory")]
+    SearchMemory,
+    #[serde(rename = "worker.list_findings")]
+    ListFindings,
+    #[serde(rename = "worker.get_finding_detail")]
+    GetFindingDetail,
+    #[serde(rename = "worker.get_artifact_excerpt")]
+    GetArtifactExcerpt,
+    #[serde(rename = "worker.get_status")]
+    GetStatus,
+    #[serde(rename = "worker.submit_stage_result")]
+    SubmitStageResult,
+    #[serde(rename = "worker.request_clarification")]
+    RequestClarification,
+    #[serde(rename = "worker.request_memory_review")]
+    RequestMemoryReview,
+    #[serde(rename = "worker.propose_follow_up")]
+    ProposeFollowUp,
+}
+
+impl WorkerOperation {
+    pub fn parse(raw: &str) -> ReviewWorkerContractResult<Self> {
+        match raw {
+            "worker.get_review_context" => Ok(Self::GetReviewContext),
+            "worker.search_memory" => Ok(Self::SearchMemory),
+            "worker.list_findings" => Ok(Self::ListFindings),
+            "worker.get_finding_detail" => Ok(Self::GetFindingDetail),
+            "worker.get_artifact_excerpt" => Ok(Self::GetArtifactExcerpt),
+            "worker.get_status" => Ok(Self::GetStatus),
+            "worker.submit_stage_result" => Ok(Self::SubmitStageResult),
+            "worker.request_clarification" => Ok(Self::RequestClarification),
+            "worker.request_memory_review" => Ok(Self::RequestMemoryReview),
+            "worker.propose_follow_up" => Ok(Self::ProposeFollowUp),
+            other => Err(ReviewWorkerContractError::UnsupportedOperation {
+                operation: other.to_owned(),
+            }),
+        }
+    }
+
+    pub fn logical_name(self) -> &'static str {
+        match self {
+            Self::GetReviewContext => "worker.get_review_context",
+            Self::SearchMemory => "worker.search_memory",
+            Self::ListFindings => "worker.list_findings",
+            Self::GetFindingDetail => "worker.get_finding_detail",
+            Self::GetArtifactExcerpt => "worker.get_artifact_excerpt",
+            Self::GetStatus => "worker.get_status",
+            Self::SubmitStageResult => "worker.submit_stage_result",
+            Self::RequestClarification => "worker.request_clarification",
+            Self::RequestMemoryReview => "worker.request_memory_review",
+            Self::ProposeFollowUp => "worker.propose_follow_up",
+        }
+    }
+
+    pub fn lane(self) -> WorkerOperationLane {
+        match self {
+            Self::GetReviewContext
+            | Self::SearchMemory
+            | Self::ListFindings
+            | Self::GetFindingDetail
+            | Self::GetArtifactExcerpt
+            | Self::GetStatus => WorkerOperationLane::Read,
+            Self::SubmitStageResult
+            | Self::RequestClarification
+            | Self::RequestMemoryReview
+            | Self::ProposeFollowUp => WorkerOperationLane::Proposal,
+        }
+    }
+
+    pub fn is_advisory(self) -> bool {
+        matches!(self.lane(), WorkerOperationLane::Proposal)
+    }
+
+    pub fn required_capability(self) -> &'static str {
+        match self {
+            Self::GetReviewContext | Self::GetStatus => "supports_context_reads",
+            Self::SearchMemory => "supports_memory_search",
+            Self::ListFindings | Self::GetFindingDetail => "supports_finding_reads",
+            Self::GetArtifactExcerpt => "supports_artifact_reads",
+            Self::SubmitStageResult => "supports_stage_result_submission",
+            Self::RequestClarification => "supports_clarification_requests",
+            Self::RequestMemoryReview | Self::ProposeFollowUp => "supports_follow_up_hints",
+        }
+    }
+
+    pub fn is_supported_by(self, profile: &WorkerCapabilityProfile) -> bool {
+        match self {
+            Self::GetReviewContext | Self::GetStatus => profile.supports_context_reads,
+            Self::SearchMemory => profile.supports_memory_search,
+            Self::ListFindings | Self::GetFindingDetail => profile.supports_finding_reads,
+            Self::GetArtifactExcerpt => profile.supports_artifact_reads,
+            Self::SubmitStageResult => profile.supports_stage_result_submission,
+            Self::RequestClarification => profile.supports_clarification_requests,
+            Self::RequestMemoryReview | Self::ProposeFollowUp => profile.supports_follow_up_hints,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkerOperationRequestEnvelope {
+    pub schema_id: String,
+    pub review_session_id: String,
+    pub review_run_id: String,
+    pub review_task_id: String,
+    pub task_nonce: String,
+    pub operation: String,
+    #[serde(default)]
+    pub requested_scopes: Vec<String>,
+    #[serde(default)]
+    pub payload: Option<Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerOperationAuthorization {
+    pub operation: WorkerOperation,
+    pub lane: WorkerOperationLane,
+    #[serde(default)]
+    pub granted_scopes: Vec<String>,
+    pub advisory_only: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerOperationResponseStatus {
+    Succeeded,
+    Denied,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerOperationDenialCode {
+    UnsupportedOperation,
+    OperationNotAllowed,
+    ScopeDenied,
+    CapabilityDenied,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerOperationDenial {
+    pub code: WorkerOperationDenialCode,
+    pub message: String,
+    #[serde(default)]
+    pub denied_scopes: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkerOperationResponseEnvelope {
+    pub schema_id: String,
+    pub review_session_id: String,
+    pub review_run_id: String,
+    pub review_task_id: String,
+    pub task_nonce: String,
+    pub operation: String,
+    pub status: WorkerOperationResponseStatus,
+    #[serde(default)]
+    pub authorization: Option<WorkerOperationAuthorization>,
+    #[serde(default)]
+    pub denial: Option<WorkerOperationDenial>,
+    #[serde(default)]
+    pub payload: Option<Value>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+impl WorkerOperationResponseEnvelope {
+    pub fn success(
+        request: &WorkerOperationRequestEnvelope,
+        authorization: WorkerOperationAuthorization,
+        payload: Option<Value>,
+    ) -> Self {
+        Self {
+            schema_id: WORKER_OPERATION_RESPONSE_SCHEMA_V1.to_owned(),
+            review_session_id: request.review_session_id.clone(),
+            review_run_id: request.review_run_id.clone(),
+            review_task_id: request.review_task_id.clone(),
+            task_nonce: request.task_nonce.clone(),
+            operation: request.operation.clone(),
+            status: WorkerOperationResponseStatus::Succeeded,
+            authorization: Some(authorization),
+            denial: None,
+            payload,
+            warnings: Vec::new(),
+        }
+    }
+
+    pub fn denied(
+        request: &WorkerOperationRequestEnvelope,
+        denial: WorkerOperationDenial,
+        warnings: Vec<String>,
+    ) -> Self {
+        Self {
+            schema_id: WORKER_OPERATION_RESPONSE_SCHEMA_V1.to_owned(),
+            review_session_id: request.review_session_id.clone(),
+            review_run_id: request.review_run_id.clone(),
+            review_task_id: request.review_task_id.clone(),
+            task_nonce: request.task_nonce.clone(),
+            operation: request.operation.clone(),
+            status: WorkerOperationResponseStatus::Denied,
+            authorization: None,
+            denial: Some(denial),
+            payload: None,
+            warnings,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerSearchMemoryRequest {
+    pub query_text: String,
+    pub query_mode: String,
+    #[serde(default)]
+    pub requested_retrieval_classes: Vec<String>,
+    #[serde(default)]
+    pub anchor_hints: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerRecallEnvelope {
+    pub citation_id: String,
+    pub source_kind: String,
+    pub source_id: String,
+    pub summary: String,
+    pub scope: String,
+    pub provenance: String,
+    pub trust_tier: Option<String>,
+    pub citation_posture: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerSearchMemoryResponse {
+    pub query_mode: String,
+    pub retrieval_mode: String,
+    #[serde(default)]
+    pub degraded_flags: Vec<String>,
+    #[serde(default)]
+    pub promoted_memory: Vec<WorkerRecallEnvelope>,
+    #[serde(default)]
+    pub tentative_candidates: Vec<WorkerRecallEnvelope>,
+    #[serde(default)]
+    pub evidence_hits: Vec<WorkerRecallEnvelope>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerFindingListResponse {
+    #[serde(default)]
+    pub items: Vec<WorkerFindingSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerEvidenceLocation {
+    pub artifact_id: String,
+    pub repo_rel_path: Option<String>,
+    pub start_line: Option<u32>,
+    pub end_line: Option<u32>,
+    pub evidence_role: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerFindingDetail {
+    pub finding: WorkerFindingSummary,
+    #[serde(default)]
+    pub evidence_locations: Vec<WorkerEvidenceLocation>,
+    #[serde(default)]
+    pub clarification_ids: Vec<String>,
+    #[serde(default)]
+    pub outbound_draft_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerArtifactExcerpt {
+    pub artifact_id: String,
+    pub excerpt: String,
+    pub digest: Option<String>,
+    pub truncated: bool,
+    pub byte_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerStatusSnapshot {
+    pub review_session_id: String,
+    pub review_run_id: String,
+    pub attention_state: String,
+    pub continuity_summary: Option<String>,
+    #[serde(default)]
+    pub degraded_flags: Vec<String>,
+    pub unresolved_finding_count: usize,
+    pub pending_clarification_count: usize,
+    pub draft_count: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerInvocation {
     pub id: String,
@@ -929,6 +1233,42 @@ pub enum ReviewWorkerContractError {
     ContextAllowedScopesMismatch,
     #[error("worker context packet allowed operations do not match review task allowed operations")]
     ContextAllowedOperationsMismatch,
+    #[error(
+        "worker operation request schema_id '{found}' does not match review task expectation '{expected}'"
+    )]
+    RequestSchemaMismatch { expected: String, found: String },
+    #[error(
+        "worker operation request review_session_id '{found}' does not match review task '{expected}'"
+    )]
+    RequestSessionMismatch { expected: String, found: String },
+    #[error(
+        "worker operation request review_run_id '{found}' does not match review task '{expected}'"
+    )]
+    RequestRunMismatch { expected: String, found: String },
+    #[error(
+        "worker operation request review_task_id '{found}' does not match review task '{expected}'"
+    )]
+    RequestTaskMismatch { expected: String, found: String },
+    #[error("worker operation request task_nonce '{found}' does not match review task '{expected}'")]
+    RequestNonceMismatch { expected: String, found: String },
+    #[error("worker operation '{operation}' is not part of the canonical Roger worker API")]
+    UnsupportedOperation { operation: String },
+    #[error("worker operation '{operation}' is not allowed for this review task")]
+    OperationNotAllowed { operation: String },
+    #[error(
+        "worker operation requested scope '{requested}' outside allowed task scopes {allowed:?}"
+    )]
+    ScopeEscalationDenied {
+        requested: String,
+        allowed: Vec<String>,
+    },
+    #[error(
+        "worker operation '{operation}' requires capability '{capability}' which the transport does not support"
+    )]
+    OperationCapabilityUnsupported {
+        operation: String,
+        capability: String,
+    },
     #[error("worker capability profile does not support stage result submission")]
     StageResultSubmissionUnsupported,
     #[error(
@@ -1023,6 +1363,81 @@ impl ReviewTask {
             return Err(ReviewWorkerContractError::ContextAllowedOperationsMismatch);
         }
         Ok(())
+    }
+
+    pub fn validate_operation_request(
+        &self,
+        request: &WorkerOperationRequestEnvelope,
+        profile: &WorkerCapabilityProfile,
+    ) -> ReviewWorkerContractResult<WorkerOperationAuthorization> {
+        if request.schema_id != WORKER_OPERATION_REQUEST_SCHEMA_V1 {
+            return Err(ReviewWorkerContractError::RequestSchemaMismatch {
+                expected: WORKER_OPERATION_REQUEST_SCHEMA_V1.to_owned(),
+                found: request.schema_id.clone(),
+            });
+        }
+        if request.review_session_id != self.review_session_id {
+            return Err(ReviewWorkerContractError::RequestSessionMismatch {
+                expected: self.review_session_id.clone(),
+                found: request.review_session_id.clone(),
+            });
+        }
+        if request.review_run_id != self.review_run_id {
+            return Err(ReviewWorkerContractError::RequestRunMismatch {
+                expected: self.review_run_id.clone(),
+                found: request.review_run_id.clone(),
+            });
+        }
+        if request.review_task_id != self.id {
+            return Err(ReviewWorkerContractError::RequestTaskMismatch {
+                expected: self.id.clone(),
+                found: request.review_task_id.clone(),
+            });
+        }
+        if request.task_nonce != self.task_nonce {
+            return Err(ReviewWorkerContractError::RequestNonceMismatch {
+                expected: self.task_nonce.clone(),
+                found: request.task_nonce.clone(),
+            });
+        }
+
+        let operation = WorkerOperation::parse(&request.operation)?;
+        if !self
+            .allowed_operations
+            .iter()
+            .any(|allowed| allowed == operation.logical_name())
+        {
+            return Err(ReviewWorkerContractError::OperationNotAllowed {
+                operation: request.operation.clone(),
+            });
+        }
+        for requested_scope in &request.requested_scopes {
+            if !self.allowed_scopes.iter().any(|allowed| allowed == requested_scope) {
+                return Err(ReviewWorkerContractError::ScopeEscalationDenied {
+                    requested: requested_scope.clone(),
+                    allowed: self.allowed_scopes.clone(),
+                });
+            }
+        }
+        if !operation.is_supported_by(profile) {
+            return Err(ReviewWorkerContractError::OperationCapabilityUnsupported {
+                operation: operation.logical_name().to_owned(),
+                capability: operation.required_capability().to_owned(),
+            });
+        }
+
+        let granted_scopes = if request.requested_scopes.is_empty() {
+            self.allowed_scopes.clone()
+        } else {
+            request.requested_scopes.clone()
+        };
+
+        Ok(WorkerOperationAuthorization {
+            operation,
+            lane: operation.lane(),
+            granted_scopes,
+            advisory_only: operation.is_advisory(),
+        })
     }
 
     pub fn validate_capability_profile(
