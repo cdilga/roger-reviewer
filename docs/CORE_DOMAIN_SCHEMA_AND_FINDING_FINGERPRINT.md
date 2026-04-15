@@ -185,9 +185,12 @@ Terminal result proposal returned from one `WorkerInvocation`.
 Required invariants:
 
 - binds back to the originating session/run/task plus task nonce
-- may include findings, clarification requests, or follow-up hints
+- may include findings packs, clarification requests, memory-review requests,
+  or follow-up proposals
 - is validated by Roger before canonical `Finding` or `ClarificationThread`
   state is materialized
+- all clarification, memory-review, and follow-up payloads remain advisory
+  until Roger materializes canonical state from them
 
 ### `Finding`
 

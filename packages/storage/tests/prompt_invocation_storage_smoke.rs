@@ -63,8 +63,11 @@ fn prompt_invocation_snapshots_and_outcome_events_survive_restart() -> Result<()
             id: "invocation-1",
             review_session_id: "session-1",
             review_run_id: "run-1",
+            review_task_id: Some("task-1"),
+            worker_invocation_id: Some("worker-1"),
             stage: "deep_review",
             prompt_preset_id: "security-deep-review",
+            turn_index: 0,
             source_surface: "cli",
             resolved_text_digest: &prompt_artifact.digest,
             resolved_text_artifact_id: Some("artifact-prompt-text"),
@@ -79,6 +82,9 @@ fn prompt_invocation_snapshots_and_outcome_events_survive_restart() -> Result<()
         })?;
 
         assert_eq!(invocation.prompt_preset_id, "security-deep-review");
+        assert_eq!(invocation.review_task_id.as_deref(), Some("task-1"));
+        assert_eq!(invocation.worker_invocation_id.as_deref(), Some("worker-1"));
+        assert_eq!(invocation.turn_index, 0);
         assert_eq!(
             invocation.resolved_text_artifact_id.as_deref(),
             Some("artifact-prompt-text")
@@ -161,6 +167,9 @@ fn prompt_invocation_snapshots_and_outcome_events_survive_restart() -> Result<()
             .expect("prompt invocation");
         assert_eq!(invocation.review_session_id, "session-1");
         assert_eq!(invocation.review_run_id, "run-1");
+        assert_eq!(invocation.review_task_id.as_deref(), Some("task-1"));
+        assert_eq!(invocation.worker_invocation_id.as_deref(), Some("worker-1"));
+        assert_eq!(invocation.turn_index, 0);
         assert_eq!(
             invocation.explicit_objective.as_deref(),
             Some("focus on refresh invalidation and stale drafts")
@@ -234,8 +243,11 @@ fn prompt_usefulness_links_fail_closed_on_cross_session_or_unbound_event_links()
         id: "invocation-1",
         review_session_id: "session-1",
         review_run_id: "run-1",
+        review_task_id: Some("task-1"),
+        worker_invocation_id: Some("worker-1"),
         stage: "deep_review",
         prompt_preset_id: "security-deep-review",
+        turn_index: 0,
         source_surface: "cli",
         resolved_text_digest: "sha256:prompt",
         resolved_text_artifact_id: None,

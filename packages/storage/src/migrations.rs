@@ -36,4 +36,12 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
         "0010_migration_journal",
         include_str!("../migrations/0010_migration_journal.sql"),
     ),
+    (
+        "0011_launch_attempts",
+        include_str!("../migrations/0011_launch_attempts.sql"),
+    ),
+    (
+        "0012_prompt_invocation_worker_lineage",
+        include_str!("../migrations/0012_prompt_invocation_worker_lineage.sql"),
+    ),
 ];

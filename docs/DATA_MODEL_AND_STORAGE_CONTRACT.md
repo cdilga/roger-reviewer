@@ -338,30 +338,42 @@ Reuse signals are derived from these rows:
 - `started_at`
 - `completed_at` nullable
 - `outcome_state`
+- `prompt_invocation_id` nullable
 - `raw_output_artifact_id` nullable
 - `result_artifact_id` nullable
 
 ### `WorkerToolCallEvent`
 
 - `id`
+- `review_task_id`
 - `worker_invocation_id`
-- `operation_name`
+- `operation`
 - `request_digest`
 - `response_digest` nullable
 - `outcome_state`
-- `created_at`
+- `occurred_at`
 
 ### `WorkerStageResult`
 
-- `id`
+- `schema_id`
 - `review_session_id`
 - `review_run_id`
 - `review_task_id`
-- `worker_invocation_id`
+- `worker_invocation_id` nullable
 - `task_nonce`
+- `stage`
+- `task_kind`
 - `outcome_kind`
+- `summary`
 - `submitted_result_artifact_id` nullable
-- `findings_pack_artifact_id` nullable
+- `structured_findings_pack_artifact_id` nullable
+- `clarification_requests_json` nullable
+- `memory_review_requests_json` nullable
+- `follow_up_proposals_json` nullable
+- `memory_citations_json` nullable
+- `artifact_refs_json` nullable
+- `provider_metadata_json` nullable
+- `warnings_json` nullable
 - `created_at`
 
 ### `SessionBaselineSnapshot`

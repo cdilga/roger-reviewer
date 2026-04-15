@@ -24,6 +24,10 @@ Use `br ready` as the source of truth for what is truly unblocked. Use `bv --rob
 
 If `br` reports `database is busy`, that is lock contention, not "no work".
 Back off briefly and retry before deciding the queue is empty.
+For scripted or bulk mutation paths (`create`/`update`/`close`/`sync`), prefer
+`./scripts/swarm/br_pinned.sh ...` over raw `br ...`; the wrapper serializes
+mutating calls behind a repo-local advisory lock and injects a longer
+`--lock-timeout` unless one is already set.
 If standard `br` reads or claims still fail after a few retries, switch to the
 direct fallback path for queue truth and claiming:
 

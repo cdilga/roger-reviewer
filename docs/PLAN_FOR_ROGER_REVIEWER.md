@@ -681,6 +681,9 @@ Operational caveat for FrankenSQLite:
   rather than mature commodity plumbing
 - pin the Rust toolchain deliberately, rebuild and test frequently, and keep the
   storage adapter thin so upstream breakage is isolated
+- Roger's repo-local default should be the `nightly` Rust toolchain via
+  `rust-toolchain.toml`; the workspace edition remains `2024` until Rust ships
+  a newer edition
 - contribute measured bug reports with minimal repros rather than baking local
   assumptions deep into Roger
 
@@ -1154,7 +1157,8 @@ Minimum expectations:
 - the worker reads memory, findings, status, and artifact excerpts through
   Roger-owned operations governed by Roger's scope and trust rules
 - the worker returns a canonical stage-result envelope that may include a
-  structured findings pack, clarification requests, or follow-up hints
+  structured findings pack, clarification requests, memory-review requests,
+  and follow-up proposals
 - the worker must not mutate canonical finding state directly, promote durable
   memory directly, approve/post GitHub output directly, or bypass Roger's
   review-mode safety posture

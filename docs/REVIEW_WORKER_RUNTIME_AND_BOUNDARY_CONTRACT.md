@@ -292,6 +292,8 @@ Required fields:
 - `review_session_id`
 - `review_run_id`
 - `review_task_id`
+- `worker_invocation_id` nullable for legacy transports, but binding must match
+  the active invocation when supplied
 - `task_nonce`
 - `stage`
 - `task_kind`
@@ -302,7 +304,9 @@ Optional payload sections:
 
 - `structured_findings_pack`
 - `clarification_requests`
-- `follow_up_hints`
+- `memory_review_requests`
+- `follow_up_proposals` (`follow_up_hints` remains an accepted legacy alias on
+  ingest)
 - `memory_citations`
 - `artifact_refs`
 - `provider_metadata`
@@ -322,6 +326,9 @@ Rules:
 - the worker never returns canonical `Finding` rows directly
 - the worker returns proposals and structured payloads that Roger validates and
   materializes
+- clarification requests, memory-review requests, and follow-up proposals are
+  advisory only; they must not mutate canonical finding, memory, approval, or
+  posting state directly
 - Roger must reject a result whose session/run/task/stage/nonce does not match
   the active task binding
 

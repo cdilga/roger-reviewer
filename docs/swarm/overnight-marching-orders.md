@@ -40,6 +40,10 @@ Implementation is active. Work from live queue truth (`br ready`), not launcher 
 10. Close bead and run `br sync --flush-only` after bead state/note changes.
 
 If `br` reports `database is busy`, back off and retry.
+For scripted or bulk mutation paths (`create`/`update`/`close`/`sync`), prefer
+`./scripts/swarm/br_pinned.sh ...` over raw `br ...`; the wrapper serializes
+mutating calls behind a repo-local advisory lock and injects a longer
+`--lock-timeout` unless one is already set.
 If normal `br` queue commands still fail after a few retries, use the direct fallback path for queue truth and claiming:
 
 - `br ready --no-daemon`

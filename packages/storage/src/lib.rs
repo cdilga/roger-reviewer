@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 
 pub use semantic_embedder::{SemanticEmbedderStatus, semantic_embedder_status};
 
-const CURRENT_SCHEMA_VERSION: i64 = 11;
+const CURRENT_SCHEMA_VERSION: i64 = 12;
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_session_ledger.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_launch_binding_context.sql");
@@ -28,6 +28,8 @@ const MIGRATION_0008: &str = include_str!("../migrations/0008_worktree_preflight
 const MIGRATION_0009: &str = include_str!("../migrations/0009_outcome_event_usefulness.sql");
 const MIGRATION_0010: &str = include_str!("../migrations/0010_migration_journal.sql");
 const MIGRATION_0011: &str = include_str!("../migrations/0011_launch_attempts.sql");
+const MIGRATION_0012: &str =
+    include_str!("../migrations/0012_prompt_invocation_worker_lineage.sql");
 
 const MIGRATION_TERMINAL_STARTED: &str = "started";
 const MIGRATION_TERMINAL_COMMITTED: &str = "committed";
@@ -268,8 +270,11 @@ pub struct CreatePromptInvocation<'a> {
     pub id: &'a str,
     pub review_session_id: &'a str,
     pub review_run_id: &'a str,
+    pub review_task_id: Option<&'a str>,
+    pub worker_invocation_id: Option<&'a str>,
     pub stage: &'a str,
     pub prompt_preset_id: &'a str,
+    pub turn_index: i64,
     pub source_surface: &'a str,
     pub resolved_text_digest: &'a str,
     pub resolved_text_artifact_id: Option<&'a str>,
@@ -288,8 +293,11 @@ pub struct PromptInvocationRecord {
     pub id: String,
     pub review_session_id: String,
     pub review_run_id: String,
+    pub review_task_id: Option<String>,
+    pub worker_invocation_id: Option<String>,
     pub stage: String,
     pub prompt_preset_id: String,
+    pub turn_index: i64,
     pub source_surface: String,
     pub resolved_text_digest: String,
     pub resolved_text_artifact_id: Option<String>,
@@ -1585,24 +1593,27 @@ impl RogerStore {
         let now = time::now_ts();
         self.conn.execute(
             "INSERT INTO prompt_invocations (
-                id, review_session_id, review_run_id, stage, prompt_preset_id,
-                source_surface, resolved_text_digest, resolved_text_artifact_id,
-                resolved_text_inline_preview, explicit_objective, provider, model,
-                scope_context_json, config_layer_digest, launch_intake_id, used_at,
-                row_version, created_at, updated_at
+                id, review_session_id, review_run_id, review_task_id, worker_invocation_id,
+                stage, prompt_preset_id, turn_index, source_surface, resolved_text_digest,
+                resolved_text_artifact_id, resolved_text_inline_preview, explicit_objective,
+                provider, model, scope_context_json, config_layer_digest, launch_intake_id,
+                used_at, row_version, created_at, updated_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5,
-                ?6, ?7, ?8,
-                ?9, ?10, ?11, ?12,
-                ?13, ?14, ?15, ?16,
-                0, ?17, ?17
+                ?6, ?7, ?8, ?9, ?10,
+                ?11, ?12, ?13, ?14,
+                ?15, ?16, ?17, ?18,
+                ?19, 0, ?20, ?20
             )",
             params![
                 input.id,
                 input.review_session_id,
                 input.review_run_id,
+                input.review_task_id,
+                input.worker_invocation_id,
                 input.stage,
                 input.prompt_preset_id,
+                input.turn_index,
                 input.source_surface,
                 input.resolved_text_digest,
                 input.resolved_text_artifact_id,
@@ -1622,8 +1633,11 @@ impl RogerStore {
             id: input.id.to_owned(),
             review_session_id: input.review_session_id.to_owned(),
             review_run_id: input.review_run_id.to_owned(),
+            review_task_id: input.review_task_id.map(ToOwned::to_owned),
+            worker_invocation_id: input.worker_invocation_id.map(ToOwned::to_owned),
             stage: input.stage.to_owned(),
             prompt_preset_id: input.prompt_preset_id.to_owned(),
+            turn_index: input.turn_index,
             source_surface: input.source_surface.to_owned(),
             resolved_text_digest: input.resolved_text_digest.to_owned(),
             resolved_text_artifact_id: input.resolved_text_artifact_id.map(ToOwned::to_owned),
@@ -1644,7 +1658,8 @@ impl RogerStore {
     pub fn prompt_invocation(&self, invocation_id: &str) -> Result<Option<PromptInvocationRecord>> {
         self.conn
             .query_row(
-                "SELECT id, review_session_id, review_run_id, stage, prompt_preset_id,
+                "SELECT id, review_session_id, review_run_id, review_task_id,
+                    worker_invocation_id, stage, prompt_preset_id, turn_index,
                     source_surface, resolved_text_digest, resolved_text_artifact_id,
                     resolved_text_inline_preview, explicit_objective, provider, model,
                     scope_context_json, config_layer_digest, launch_intake_id, used_at,
@@ -1657,22 +1672,25 @@ impl RogerStore {
                         id: row.get(0)?,
                         review_session_id: row.get(1)?,
                         review_run_id: row.get(2)?,
-                        stage: row.get(3)?,
-                        prompt_preset_id: row.get(4)?,
-                        source_surface: row.get(5)?,
-                        resolved_text_digest: row.get(6)?,
-                        resolved_text_artifact_id: row.get(7)?,
-                        resolved_text_inline_preview: row.get(8)?,
-                        explicit_objective: row.get(9)?,
-                        provider: row.get(10)?,
-                        model: row.get(11)?,
-                        scope_context_json: row.get(12)?,
-                        config_layer_digest: row.get(13)?,
-                        launch_intake_id: row.get(14)?,
-                        used_at: row.get(15)?,
-                        row_version: row.get(16)?,
-                        created_at: row.get(17)?,
-                        updated_at: row.get(18)?,
+                        review_task_id: row.get(3)?,
+                        worker_invocation_id: row.get(4)?,
+                        stage: row.get(5)?,
+                        prompt_preset_id: row.get(6)?,
+                        turn_index: row.get(7)?,
+                        source_surface: row.get(8)?,
+                        resolved_text_digest: row.get(9)?,
+                        resolved_text_artifact_id: row.get(10)?,
+                        resolved_text_inline_preview: row.get(11)?,
+                        explicit_objective: row.get(12)?,
+                        provider: row.get(13)?,
+                        model: row.get(14)?,
+                        scope_context_json: row.get(15)?,
+                        config_layer_digest: row.get(16)?,
+                        launch_intake_id: row.get(17)?,
+                        used_at: row.get(18)?,
+                        row_version: row.get(19)?,
+                        created_at: row.get(20)?,
+                        updated_at: row.get(21)?,
                     })
                 },
             )
@@ -4570,6 +4588,16 @@ impl RogerStore {
                     params![time::now_ts()],
                 )?;
                 self.conn.pragma_update(None, "user_version", 11)?;
+            }
+
+            if version < 12 {
+                self.conn.execute_batch(MIGRATION_0012)?;
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at)
+                    VALUES (12, 'prompt_invocation_worker_lineage', ?1)",
+                    params![time::now_ts()],
+                )?;
+                self.conn.pragma_update(None, "user_version", 12)?;
             }
 
             if migration_class.requires_sidecar_invalidation() {

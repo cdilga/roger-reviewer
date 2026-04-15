@@ -1,3 +1,6 @@
+use std::fs;
+use std::path::PathBuf;
+
 use tempfile::tempdir;
 
 use roger_app_core::{
@@ -47,6 +50,17 @@ fn sample_resume_bundle() -> ResumeBundle {
     }
 }
 
+fn expected_schema_version() -> Result<i64> {
+    let migrations_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let count = fs::read_dir(migrations_dir)?
+        .map(|entry| entry.map(|item| item.path()))
+        .collect::<std::io::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sql"))
+        .count();
+    Ok(count as i64)
+}
+
 #[test]
 fn storage_smoke_persists_resume_and_approval_state_across_restart() -> Result<()> {
     let temp = tempdir()?;
@@ -54,7 +68,7 @@ fn storage_smoke_persists_resume_and_approval_state_across_restart() -> Result<(
 
     {
         let store = RogerStore::open(&root)?;
-        assert_eq!(store.schema_version()?, 11);
+        assert_eq!(store.schema_version()?, expected_schema_version()?);
 
         store.put_launch_profile(CreateLaunchProfile {
             id: "profile-open-pr",

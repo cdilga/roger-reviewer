@@ -423,6 +423,15 @@ fn stage_passes_run_independently_and_capture_raw_output_even_when_degraded() {
         .expect("invocation exists");
     assert_eq!(exploration_invocation.stage, "exploration");
     assert_eq!(
+        exploration_invocation.review_task_id.as_deref(),
+        Some("task-exploration")
+    );
+    assert_eq!(
+        exploration_invocation.worker_invocation_id.as_deref(),
+        Some(exploration.worker_invocation.id.as_str())
+    );
+    assert_eq!(exploration_invocation.turn_index, 0);
+    assert_eq!(
         exploration_invocation.prompt_preset_id,
         "preset-exploration"
     );
@@ -595,6 +604,15 @@ fn stage_outcome_metadata_retains_repair_state_for_audit_and_refresh() {
         .expect("lookup invocation")
         .expect("invocation exists");
     assert_eq!(invocation.stage, "deep_review");
+    assert_eq!(
+        invocation.review_task_id.as_deref(),
+        Some(deep_review_task.id.as_str())
+    );
+    assert_eq!(
+        invocation.worker_invocation_id.as_deref(),
+        Some(result.worker_invocation.id.as_str())
+    );
+    assert_eq!(invocation.turn_index, 0);
     assert_eq!(invocation.prompt_preset_id, "preset-deep-review");
     assert_eq!(invocation.source_surface, "cli");
 

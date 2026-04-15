@@ -238,6 +238,35 @@ Read critique rounds only when:
 Do not treat "latest critique doc read" as "current truth". The canonical plan
 is the current truth unless the user says otherwise.
 
+### Planning And Bead-Round Posture
+
+In a planning round, critique round, reconciliation round, or bead-shaping
+round, never treat the current state of the codebase, the current bead graph,
+or the current planning-doc set as a limiting factor on what Roger should
+become.
+
+Rules:
+
+- current code is implementation evidence, not a ceiling on the plan
+- current beads are queue state, not a ceiling on required product scope
+- current planning docs are critique inputs and authority inputs, not a reason
+  to preserve missing scope or inherited underspecification
+- if a concept is required for the project to be built truthfully, represent it
+  in the planning outcome even if the repo has not landed it yet and the graph
+  does not currently contain it
+
+However, when converting accepted planning truth into beads, do use the
+planning packet as the authority boundary.
+
+Rules:
+
+- bead creation and bead polish should consume the canonical plan and relevant
+  support contracts as the authoritative source packet
+- bead creation should not be narrowed just because the current code or graph
+  is behind the plan
+- bead creation should still be disciplined by the accepted planning docs rather
+  than inventing scope from vibes
+
 ### Agentic-First Documentation Cleanup Rules
 
 Roger follows an agentic-first planning posture:
