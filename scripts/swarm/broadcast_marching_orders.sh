@@ -12,6 +12,97 @@ PROMPT_DIR="${TMPDIR:-/tmp}/roger-reviewer-swarm-prompts"
 SEND_DELAY_SECONDS=2
 WORK_LANE=""
 
+detect_agent_type() {
+  local pane_title="${1:-}"
+  local pane_command="${2:-}"
+  local normalized_command
+
+  normalized_command="$(printf '%s' "$pane_command" | tr '[:upper:]' '[:lower:]')"
+
+  case "$normalized_command" in
+    codex*)
+      echo "codex"
+      return 0
+      ;;
+    claude*)
+      echo "claude"
+      return 0
+      ;;
+    gemini*)
+      echo "gemini"
+      return 0
+      ;;
+    opencode*)
+      echo "opencode"
+      return 0
+      ;;
+  esac
+
+  case "$pane_title" in
+    *__cod_*)
+      echo "codex"
+      return 0
+      ;;
+    *__cc_*)
+      echo "claude"
+      return 0
+      ;;
+    *__gmi_*)
+      echo "gemini"
+      return 0
+      ;;
+    *__oco_*|*__ope_*)
+      echo "opencode"
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
+list_target_panes_via_ntm() {
+  ntm status "$SESSION_NAME" --json 2>/dev/null | python3 -c '
+import json
+import sys
+
+supported = {"codex", "claude", "gemini", "opencode"}
+
+try:
+    payload = json.load(sys.stdin)
+except json.JSONDecodeError:
+    sys.exit(1)
+
+rows = []
+for pane in payload.get("panes", []):
+    pane_type = str(pane.get("type", "")).strip().lower()
+    if pane_type not in supported:
+        continue
+    index = pane.get("index")
+    if index is None:
+        continue
+    rows.append(
+        (
+            int(index),
+            str(pane.get("title", "")),
+            str(pane.get("command", "")),
+            pane_type,
+        )
+    )
+
+for index, title, command, pane_type in sorted(rows, key=lambda row: row[0]):
+    print(f"{index}|{title}|{command}|{pane_type}")
+'
+}
+
+list_target_panes_via_tmux() {
+  while IFS='|' read -r pane_index pane_title pane_command; do
+    [[ -n "$pane_index" ]] || continue
+    if pane_type=$(detect_agent_type "$pane_title" "$pane_command"); then
+      printf '%s|%s|%s|%s\n' "$pane_index" "$pane_title" "$pane_command" "$pane_type"
+    fi
+  done < <(tmux list-panes -t "$SESSION_NAME" -F '#{pane_index}|#{pane_title}|#{pane_current_command}')
+}
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [options]
@@ -83,15 +174,18 @@ fi
 
 mkdir -p "${PROMPT_DIR}/${SESSION_NAME}"
 
-while IFS='|' read -r pane_index pane_title; do
-  [[ -n "$pane_index" ]] || continue
-  case "$pane_title" in
-    *__cod_*|*__cc_*|*__gmi_*)
-      ;;
-    *)
-      continue
-      ;;
-  esac
+pane_rows=""
+if ! pane_rows="$(list_target_panes_via_ntm)"; then
+  pane_rows=""
+fi
+if [[ -z "$pane_rows" ]]; then
+  pane_rows="$(list_target_panes_via_tmux | sort -n -t'|' -k1,1)"
+fi
+
+matched_panes=0
+while IFS='|' read -r pane_index pane_title pane_command pane_type; do
+  [[ -n "${pane_index:-}" ]] || continue
+  matched_panes=$((matched_panes + 1))
 
   prompt_out="${PROMPT_DIR}/${SESSION_NAME}/pane-${pane_index}.txt"
   if [[ -n "$WORK_LANE" ]]; then
@@ -101,6 +195,12 @@ while IFS='|' read -r pane_index pane_title; do
   fi
 
   ntm send "$SESSION_NAME" --pane="$pane_index" --file "$prompt_out" --no-cass-check >/dev/null
-  echo "Broadcast built marching orders to ${SESSION_NAME} pane ${pane_index} (${pane_title})"
+  pane_label="${pane_title:-$pane_command}"
+  echo "Broadcast built marching orders to ${SESSION_NAME} pane ${pane_index} (${pane_type}: ${pane_label})"
   sleep "$SEND_DELAY_SECONDS"
-done < <(tmux list-panes -t "$SESSION_NAME" -F '#{pane_index}|#{pane_title}' | sort -n -t'|' -k1,1)
+done <<<"$pane_rows"
+
+if [[ "$matched_panes" -eq 0 ]]; then
+  echo "No supported agent panes detected in session '$SESSION_NAME'." >&2
+  exit 1
+fi
