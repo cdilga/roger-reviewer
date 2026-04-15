@@ -220,6 +220,23 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn read_workspace_file(path: &str) -> String {
+    fs::read_to_string(workspace_root().join(path)).expect("read workspace file")
+}
+
+fn normalize_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn assert_normalized_contains(haystack: &str, needle: &str, label: &str) {
+    let haystack = normalize_whitespace(haystack);
+    let needle = normalize_whitespace(needle);
+    assert!(
+        haystack.contains(&needle),
+        "{label} is missing expected provider-truth snippet: {needle}"
+    );
+}
+
 fn extension_pack_test_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -1784,6 +1801,199 @@ fn robot_docs_surfaces_schema_inventory_and_blocks_unknown_topics() {
     assert_eq!(
         blocked_payload["data"]["reason_code"],
         "unknown_robot_docs_topic"
+    );
+}
+
+#[test]
+fn provider_support_claim_guard_keeps_help_robot_and_docs_in_lockstep() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let help = run_rr(&["--help"], &runtime);
+    assert_eq!(help.exit_code, 0, "{}", help.stderr);
+
+    let blocked_review = run_rr(
+        &["review", "--pr", "42", "--provider", "pi-agent", "--robot"],
+        &runtime,
+    );
+    assert_eq!(blocked_review.exit_code, 3, "{}", blocked_review.stderr);
+    let blocked_payload = parse_robot_payload(&blocked_review.stdout);
+
+    assert_eq!(
+        blocked_payload["data"]["supported_providers"],
+        serde_json::json!(["opencode", "codex", "gemini", "claude"])
+    );
+    assert_eq!(
+        blocked_payload["data"]["planned_not_live_providers"],
+        serde_json::json!(["copilot"])
+    );
+    assert_eq!(
+        blocked_payload["data"]["not_supported_providers"],
+        serde_json::json!(["pi-agent"])
+    );
+
+    let live_provider_support = blocked_payload["data"]["live_review_provider_support"]
+        .as_array()
+        .expect("live provider support");
+    let opencode = live_provider_support
+        .iter()
+        .find(|item| item["provider"] == "opencode")
+        .expect("opencode support entry");
+    assert_eq!(opencode["display_name"], "OpenCode");
+    assert_eq!(opencode["tier"], "tier_b");
+    assert_eq!(opencode["status"], "first_class_live");
+    assert_eq!(opencode["supports"]["resume_reopen"], true);
+    assert_eq!(
+        opencode["notes"],
+        "first-class tier-b continuity path with locator reopen and rr return"
+    );
+
+    let codex = live_provider_support
+        .iter()
+        .find(|item| item["provider"] == "codex")
+        .expect("codex support entry");
+    assert_eq!(codex["tier"], "tier_a");
+    assert_eq!(codex["status"], "bounded_live");
+    assert_eq!(codex["supports"]["resume_reopen"], false);
+    assert_eq!(codex["supports"]["return"], false);
+    assert_eq!(
+        codex["notes"],
+        "bounded tier-a start/reseed/raw-capture path only; no locator reopen or rr return"
+    );
+
+    let commands = run_rr(&["robot-docs", "commands", "--robot"], &runtime);
+    assert_eq!(commands.exit_code, 0, "{}", commands.stderr);
+    let commands_payload = parse_robot_payload(&commands.stdout);
+    let command_items = commands_payload["data"]["items"]
+        .as_array()
+        .expect("command items");
+    let review_dry_run = command_items
+        .iter()
+        .find(|item| item["command"] == "rr review --dry-run")
+        .expect("review dry-run command item");
+    assert_eq!(
+        review_dry_run["supported_providers"],
+        blocked_payload["data"]["supported_providers"]
+    );
+    assert_eq!(
+        review_dry_run["planned_not_live_providers"],
+        blocked_payload["data"]["planned_not_live_providers"]
+    );
+    assert_eq!(
+        review_dry_run["not_supported_providers"],
+        blocked_payload["data"]["not_supported_providers"]
+    );
+
+    let guide = run_rr(&["robot-docs", "guide", "--robot"], &runtime);
+    assert_eq!(guide.exit_code, 0, "{}", guide.stderr);
+    let guide_payload = parse_robot_payload(&guide.stdout);
+    let guide_items = guide_payload["data"]["items"]
+        .as_array()
+        .expect("guide items");
+    let provider_support = guide_items
+        .iter()
+        .find(|item| item["kind"] == "provider_support")
+        .expect("provider support guide item");
+    assert_eq!(
+        provider_support["live_review_providers"],
+        blocked_payload["data"]["live_review_provider_support"]
+    );
+    assert_eq!(
+        provider_support["planned_not_live_providers"],
+        blocked_payload["data"]["planned_not_live_providers"]
+    );
+    assert_eq!(
+        provider_support["not_supported_providers"],
+        blocked_payload["data"]["not_supported_providers"]
+    );
+
+    assert_normalized_contains(
+        &help.stdout,
+        "opencode is the first-class tier-b continuity path; rr resume can reopen and rr return is supported",
+        "rr --help",
+    );
+    assert_normalized_contains(
+        &help.stdout,
+        "codex, gemini, and claude are bounded tier-a providers; start/reseed/raw-capture only, no locator reopen or rr return",
+        "rr --help",
+    );
+    assert_normalized_contains(
+        &help.stdout,
+        "copilot is planned but not yet a live --provider value",
+        "rr --help",
+    );
+    assert_normalized_contains(
+        &help.stdout,
+        "pi-agent is not part of the 0.1.0 live CLI surface",
+        "rr --help",
+    );
+
+    let readme = read_workspace_file("README.md");
+    assert_normalized_contains(
+        &readme,
+        "`rr review --provider` currently supports `opencode`, `codex`, `gemini`, and `claude`.",
+        "README.md",
+    );
+    assert_normalized_contains(
+        &readme,
+        "Codex, Gemini, and Claude Code are live only as bounded Tier A paths: Roger can start a review, reseed from a `ResumeBundle`, and preserve raw capture, but it does not claim locator reopen or `rr return` for those providers.",
+        "README.md",
+    );
+    assert_normalized_contains(
+        &readme,
+        "GitHub Copilot CLI is still planned rather than live",
+        "README.md",
+    );
+
+    let release_matrix = read_workspace_file("docs/RELEASE_AND_TEST_MATRIX.md");
+    assert_normalized_contains(
+        &release_matrix,
+        "| GitHub Copilot CLI | Golden-path first-class provider target, not yet live | Do not claim live support until verified launch, policy, worker boundary, and continuity coverage are real |",
+        "docs/RELEASE_AND_TEST_MATRIX.md",
+    );
+    assert_normalized_contains(
+        &release_matrix,
+        "| Codex | Secondary, bounded | Exposed via `rr review --provider codex`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |",
+        "docs/RELEASE_AND_TEST_MATRIX.md",
+    );
+    assert_normalized_contains(
+        &release_matrix,
+        "| Gemini | Secondary, bounded | Exposed via `rr review --provider gemini`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |",
+        "docs/RELEASE_AND_TEST_MATRIX.md",
+    );
+    assert_normalized_contains(
+        &release_matrix,
+        "| Claude Code | Secondary, bounded | Exposed via `rr review --provider claude`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |",
+        "docs/RELEASE_AND_TEST_MATRIX.md",
+    );
+    assert_normalized_contains(
+        &release_matrix,
+        "| Pi-Agent | Not in `0.1.0` | Planning-only future harness candidate; no live support claim, no `rr review --provider pi-agent`, and no Tier A/Tier B language until a later admission spike proves direct-CLI launch, Roger-safe policy control, audit capture, and truthful continuity behavior |",
+        "docs/RELEASE_AND_TEST_MATRIX.md",
+    );
+
+    let canonical_plan = read_workspace_file("docs/PLAN_FOR_ROGER_REVIEWER.md");
+    assert_normalized_contains(
+        &canonical_plan,
+        "the authoritative provider support order is GitHub Copilot CLI, OpenCode, Codex, Gemini, then Claude Code",
+        "docs/PLAN_FOR_ROGER_REVIEWER.md",
+    );
+    assert_normalized_contains(
+        &canonical_plan,
+        "Codex, Gemini, and Claude Code currently expose bounded Tier A paths in the live CLI",
+        "docs/PLAN_FOR_ROGER_REVIEWER.md",
+    );
+    assert_normalized_contains(
+        &canonical_plan,
+        "CLI help, status output, and docs must describe only the provider surfaces and command paths that actually exist in the product",
+        "docs/PLAN_FOR_ROGER_REVIEWER.md",
     );
 }
 
