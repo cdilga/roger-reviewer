@@ -1,6 +1,14 @@
+Status: historical readiness-review marching orders.
+
+Use this only when re-running or auditing the 2026-03-30 implementation gate.
+Roger Reviewer is now in implementation; this file is no longer the default
+operating posture for normal work.
+
 First read ALL of `AGENTS.md`, `README.md`, and `docs/PLAN_FOR_ROGER_REVIEWER.md` carefully. Then focus on the implementation-gate readiness work rather than product implementation.
 
-This repo is still in planning and bead-polishing. Do not implement Roger. Your immediate job is to help decide whether Roger Reviewer is actually ready to move from planning into implementation.
+At the time these marching orders were written, the repo was still in planning
+and bead-polishing. Treat the instructions below as a historical readiness
+review prompt, not as current repo stage truth.
 
 Register with MCP Agent Mail immediately, introduce yourself to the other agents, and say which readiness-review bead you are taking. Keep checking your inbox and acknowledge messages that require it. Reserve files before editing docs.
 

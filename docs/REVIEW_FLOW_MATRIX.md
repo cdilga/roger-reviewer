@@ -2,21 +2,21 @@
 
 This document turns the major Roger user flows into a reusable scenario matrix.
 It is not the canonical architecture spec; the canonical architecture remains
-[PLAN_FOR_ROGER_REVIEWER.md](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md).
+[PLAN_FOR_ROGER_REVIEWER.md](docs/PLAN_FOR_ROGER_REVIEWER.md).
 For the canonical command-surface expectations and the current user-flow
 hardening priorities behind those flows, see
-[`PLAN_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md).
+[`PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md).
 
 Purpose:
 
 - keep TUI, CLI, extension, and harness behavior aligned
 - make happy paths, common variants, and failure/recovery paths explicit
 - provide a stable source for integration-test selection and consistency checks
-- use [`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md)
+- use [`RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md)
   as the explicit provider/browser/OS coverage matrix for which flows must run
   where
 - use
-  [`PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md)
+  [`PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md`](docs/PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md)
   as the user-language companion artifact when a flow needs a human-readable
   narrative script or chaos story
 
@@ -29,7 +29,7 @@ Purpose:
 - when a test needs a concrete operator story rather than a surface matrix,
   pair the chosen flow family with one persona scenario id such as `PJ-03A`
   from
-  [`PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md)
+  [`PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md`](docs/PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md)
 - if a new surface or feature cannot be mapped cleanly onto an existing flow,
   either add a flow or explain why it is intentionally out of scope
 

@@ -381,9 +381,10 @@ questions instead of pretending the answers were obvious.
 
 ### CLI rules
 
-- `rr review`, `rr resume`, `rr return`, `rr status`, and `rr refresh` should
-  operate on resolved config and session baseline, not on repeated low-level
-  routing flags
+- `rr review`, `rr resume`, `rr return`, `rr status`, and `rr findings`
+  should operate on resolved config and session baseline, not on repeated
+  low-level routing flags; review-state reconciliation should happen
+  automatically when those surfaces re-enter stale state
 - ordinary `rr review` should only carry bounded launch-shaping overrides when
   the operator is intentionally deviating from the baseline
 - `rr status` and `rr doctor` should show:

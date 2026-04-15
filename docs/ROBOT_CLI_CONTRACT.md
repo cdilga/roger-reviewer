@@ -31,6 +31,11 @@ This contract does not define:
 - future harness-native command surfaces beyond ordinary `rr` semantics
 - the in-session `rr agent ...` worker transport
 
+There is no standalone refresh command in the robot-facing contract. Review-state
+reconciliation is automatic and bounded, and it happens through the existing
+`rr review`, `rr resume`, `rr return`, `rr status`, and `rr findings` surfaces
+when those commands re-enter or inspect stale state.
+
 ## CLI-Wide Rules
 
 - `--robot` enables machine-facing mode. It does not create a separate workflow.

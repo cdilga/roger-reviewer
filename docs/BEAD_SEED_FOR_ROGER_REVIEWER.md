@@ -1,7 +1,7 @@
 # Bead Seed for Roger Reviewer
 
 This document is the markdown seed structure derived from
-[`PLAN_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md).
+[`PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md).
 The live beads workspace already exists under `.beads/`; this file must stay
 aligned with that execution layer rather than acting like a stale pre-import
 draft.
@@ -277,11 +277,14 @@ draft.
   strategies, and truthful fallback behavior are explicit and reusable across
   CLI and extension-initiated launches.
 
-### 5.2 Implement `rr findings`, `rr status`, and `rr refresh`
+### 5.2 Implement `rr findings`, `rr status`, and automatic reconciliation
 
-- Objective: expose core review state and refresh behavior through the CLI.
+- Objective: expose core review state through the CLI while reconciling stale
+  review state automatically during ordinary Roger flows.
 - Depends on: 5.1, 4.3.
-- Acceptance: core review operations can be driven entirely from CLI.
+- Acceptance: core review operations can be driven entirely from CLI without a
+  standalone refresh command; bounded fractional staleness is allowed while
+  automatic reconciliation catches up.
 
 ### 5.2.1 Add session resolution rules and global session finder
 
@@ -306,9 +309,11 @@ draft.
 - Objective: route supported in-harness Roger commands through the same core
   operations as `rr` rather than bespoke provider glue.
 - Depends on: 3.2.3, 5.2.
-- Acceptance: supported harness commands for help, status, findings, refresh,
+- Acceptance: supported harness commands for help, status, findings,
   clarification, draft opening, and return share Roger-owned semantics and
-  degrade cleanly to CLI guidance when a provider lacks the needed capability.
+  degrade cleanly to CLI guidance when a provider lacks the needed capability,
+  while stale-state reconciliation remains Roger-owned and automatic rather
+  than a separate harness command.
 
 ## Epic 6: TUI
 
@@ -388,11 +393,13 @@ draft.
 - Objective: inject PR-local Roger actions and any bridge-supported bounded
   status affordances into GitHub pages.
 - Depends on: 7.2.
-- Acceptance: users can start, resume, or refresh reviews from GitHub, pass a
-  small objective or preset, and access only those in-page affordances supported
-  by the chosen daemonless bridge without turning the extension into a state
-  owner; the extension remains dependency-light and avoids framework-heavy
-  frontend stacks unless a capability proves they are necessary.
+- Acceptance: users can start or resume reviews from GitHub, pass a small
+  objective or preset, and access only those in-page affordances supported by
+  the chosen daemonless bridge without turning the extension into a state
+  owner; stale review state reconciles automatically rather than through a
+  standalone refresh action; the extension remains dependency-light and avoids
+  framework-heavy frontend stacks unless a capability proves they are
+  necessary.
 
 ## Epic 8: Approval and Posting Flow
 

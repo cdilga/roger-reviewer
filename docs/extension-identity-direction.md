@@ -66,7 +66,7 @@ Asset set:
 - Branding must not introduce posting/approval controls.
 - Branding must not imply extension authority beyond bounded launch/status role.
 - Popup action set remains exactly:
-  `start_review`, `resume_review`, `show_findings`, `refresh_review`.
+  `start_review`, `resume_review`, `show_findings`.
 
 ## Validation Hooks
 

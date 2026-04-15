@@ -39,7 +39,6 @@ Current `0.1.0` logical command IDs:
 
 Possible later additions behind separate beads and validation:
 
-- `roger-refresh`
 - `roger-clarify`
 - `roger-open-drafts`
 
@@ -95,7 +94,6 @@ Preferred first subset when implemented:
 
 Still optional even on capable harnesses, pending later beads:
 
-- `roger-refresh`
 - `roger-clarify`
 - `roger-open-drafts`
 

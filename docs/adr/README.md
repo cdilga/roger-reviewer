@@ -2,7 +2,7 @@
 
 This directory holds architecture decision records that turn the planning-stage
 questions in
-[`PLAN_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md)
+[`PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md)
 into explicit implementation contracts.
 
 ## Current ADR set

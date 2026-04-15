@@ -10,7 +10,7 @@ Bounded live rehearsal for `rr-eus.5` on the active swarm session `roger-reviewe
 
 ## Commands Run
 
-1. `./scripts/swarm/control_plane_status.sh --session roger-reviewer --lines 80`
+1. `ntm coordinator status roger-reviewer`
 2. `ntm activity roger-reviewer --json`
 3. `br ready`
 4. `tmux capture-pane -p -t roger-reviewer-control-plane:0 -S -400 | rg -n 'Assign|assigned|No ready|idle|Completion|Warning|exhaust'`

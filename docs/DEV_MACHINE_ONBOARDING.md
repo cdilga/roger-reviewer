@@ -33,7 +33,7 @@ On a correctly onboarded machine:
 - `codex` works and is logged in
 - this repo is cloned locally
 - the Agent Mail repo is available as a separate sibling checkout, for example
-  `/Users/cdilga/Documents/dev/mcp_agent_mail`
+  `/path/to/mcp_agent_mail`
 - Codex can see Agent Mail in this repo from a normal session
 - the `planning-workflow` skill is available to Codex
 - the Roger Reviewer planning docs and critique artifacts are present in-repo
@@ -195,12 +195,12 @@ Expected result should mention Agent Mail tools such as:
 
 ## Notes About `mcp_agent_mail`
 
-Recommended local shape on the current machine:
+Example local shape on one maintainer machine:
 
 - Roger Reviewer checkout:
-  `/Users/cdilga/Documents/dev/roger-reviewer`
+  `/path/to/roger-reviewer`
 - Agent Mail checkout:
-  `/Users/cdilga/Documents/dev/mcp_agent_mail`
+  `/path/to/mcp_agent_mail`
 
 Keep Agent Mail outside this repo. It is a separate project used to support the
 development environment, not part of Roger Reviewer's source tree.
@@ -221,10 +221,28 @@ bash -n /path/to/mcp_agent_mail/scripts/integrate_codex_cli.sh
 
 If this fails, do not trust the Codex integration script as-is.
 
+## Optional `rch` Helper
+
+`rch` is not part of Roger Reviewer's canonical toolchain. The repo does not
+require it for normal build, test, planning, or bead work.
+
+Use it only if you already have an `rch` worker fleet installed and want to
+offload CPU-heavy Cargo tasks during swarm execution. The swarm runbooks treat
+it as optional and should degrade cleanly to direct local execution when it is
+absent.
+
+Minimal verification:
+
+```bash
+command -v rch || echo "rch not installed"
+```
+
+If `rch` is absent, continue with direct local `cargo ...` commands.
+
 ## Recommended Onboarding Sequence for `ssh devbox`
 
 1. Install Codex and log in until `~/.codex/auth.json` exists.
-2. Clone `mcp_agent_mail` as a sibling checkout, for example to `/Users/cdilga/Documents/dev/mcp_agent_mail`.
+2. Clone `mcp_agent_mail` as a sibling checkout, for example to `/path/to/mcp_agent_mail`.
 3. Verify whether upstream `scripts/integrate_codex_cli.sh` passes `bash -n`.
 4. Start the local Agent Mail server.
 5. Register Agent Mail with Codex using `codex mcp add mcp-agent-mail --url http://127.0.0.1:8765/api/`.
@@ -243,9 +261,9 @@ Swarm automation resolves and repairs the default path through:
 
 - `/path/to/roger-reviewer/scripts/swarm/resolve_br.sh`
 
-Canonical expected path shape on this machine as of 2026-04-02:
+Canonical expected path shape on this machine as of 2026-04-15:
 
-- `~/.local/bin/br -> ~/.local/bin/br-0.1.34.pinned`
+- `~/.local/bin/br -> ~/.local/bin/br-0.1.40.pinned`
 
 Minimal verification:
 
@@ -257,7 +275,24 @@ readlink ~/.local/bin/br
 
 Do not run backup binary filenames directly in automation or runbooks.
 
+Current validated pin update (2026-04-15):
+
+- latest upstream `beads_rust` release is still `v0.1.39`
+- Roger now pins a locally built `0.1.40` from upstream `main` commit
+  `32f4a1616deea380c4f47ea40c542fb26e7e6e59`
+- local Linux `x86_64` repro for
+  `init -> create -> create -> sqlite3 integrity_check -> br doctor`
+  passed on `0.1.39` and the source-built `0.1.40`, failed on `0.1.36` and
+  `0.1.38`
+- the live Roger workspace trust repair on 2026-04-15 used `0.1.40` to rebuild
+  `.beads/beads.db` from canonical `issues.jsonl`, so use the
+  `0.1.40.pinned` expectation above for live setup work
+
 ## Rehearsal Transcript Summary (2026-04-02)
+
+This is a historical single-machine transcript. Keep the procedural lessons, but
+do not literalize the paths, pin versions, or machine-specific outputs below as
+the current cross-machine contract.
 
 Manual smoke commands run from this repo:
 
@@ -265,11 +300,11 @@ Manual smoke commands run from this repo:
 - `test -f ~/.codex/auth.json` -> pass
 - `test -f ~/.codex/skills/planning-workflow/SKILL.md` -> pass
 - `codex mcp list` and `codex mcp get mcp-agent-mail` -> pass (`enabled`)
-- `codex -C /Users/cdilga/Documents/dev/roger-reviewer mcp list` -> pass
+- `codex -C /path/to/roger-reviewer mcp list` -> pass
 - `codex exec --ephemeral ...` Agent Mail tool probe -> pass
-- `bash -n /Users/cdilga/Documents/dev/mcp_agent_mail/scripts/integrate_codex_cli.sh` -> pass
-- `scripts/swarm/resolve_br.sh --print-path` -> `/Users/cdilga/.local/bin/br`
-- `readlink ~/.local/bin/br` -> `/Users/cdilga/.local/bin/br-0.1.34.pinned`
+- `bash -n /path/to/mcp_agent_mail/scripts/integrate_codex_cli.sh` -> pass
+- `scripts/swarm/resolve_br.sh --print-path` -> `~/.local/bin/br`
+- `readlink ~/.local/bin/br` -> `~/.local/bin/br-0.1.34.pinned`
 - `br --version` -> `br 0.1.34`
 
 Fixes applied from this rehearsal:

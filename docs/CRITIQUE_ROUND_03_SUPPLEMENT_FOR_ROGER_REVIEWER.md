@@ -1,7 +1,7 @@
 # Critique Round 03 Supplement for Roger Reviewer
 
 This artifact records the formal integration of
-[`SUPPLEMENTARY_CHATGPT54PRO_FEEDBACK_ROUND_03.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/SUPPLEMENTARY_CHATGPT54PRO_FEEDBACK_ROUND_03.md)
+[`SUPPLEMENTARY_CHATGPT54PRO_FEEDBACK_ROUND_03.md`](docs/SUPPLEMENTARY_CHATGPT54PRO_FEEDBACK_ROUND_03.md)
 into the canonical planning set before the next adversarial review round.
 
 ## Highest-Value Revisions
@@ -75,8 +75,8 @@ Integrated decision:
 
 These revisions have been merged into:
 
-- [`PLAN_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md)
-- [`BEAD_SEED_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/BEAD_SEED_FOR_ROGER_REVIEWER.md)
+- [`PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md)
+- [`BEAD_SEED_FOR_ROGER_REVIEWER.md`](docs/BEAD_SEED_FOR_ROGER_REVIEWER.md)
 
 The imported beads workspace has not been repolished in this pass. The updated
 markdown plan and seed are now the correct baseline for that later work.

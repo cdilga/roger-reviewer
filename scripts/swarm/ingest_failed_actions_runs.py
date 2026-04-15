@@ -39,10 +39,8 @@ DEFAULT_INSTRUCTIONS = (
 )
 DEFAULT_AGENT_MAIL_API = "http://127.0.0.1:8765/api/"
 DEFAULT_AGENT_MAIL_TOKEN_PATHS = (
-    pathlib.Path("/Users/cdilga/Documents/dev/mcp_agent_mail/codex.mcp.json"),
-    pathlib.Path(
-        "/Users/cdilga/Documents/dev/roger-reviewer/mcp_agent_mail/codex.mcp.json"
-    ),
+    pathlib.Path.home() / "mcp_agent_mail" / "codex.mcp.json",
+    pathlib.Path(__file__).resolve().parents[2] / "mcp_agent_mail" / "codex.mcp.json",
 )
 DEFAULT_AGENT_MAIL_SENDER = "BlueHarbor"
 DEFAULT_AGENT_MAIL_PROGRAM = "ci-failure-watch"

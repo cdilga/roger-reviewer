@@ -133,6 +133,7 @@ Until those conditions hold, the provider is bounded, experimental, or contract-
 | Codex | Secondary, bounded | Tier A | Authoritative `#3` provider; keep truthful or remove live claim until verified |
 | Gemini | Secondary, bounded | Tier A | Authoritative `#4` provider; keep adapter lane honest until live launch is exposed |
 | Claude Code | Secondary, bounded | Tier A | Authoritative `#5` provider; keep live claim literal and bounded |
+| Pi-Agent | Deferred future candidate | Tier A first, only if admitted later | Planning-only after the current matrix stabilizes; use `_exploration/pi_agent_rust` as a reference target and require the same admission rubric rather than special-casing it |
 | `gh` | GitHub adapter only | N/A | Never a review harness |
 
 ### Immediate truthfulness rule
@@ -142,6 +143,8 @@ If OpenCode is not yet truly Tier B in the live path, Roger should **not** descr
 - admit Copilot into the first-class **plan**
 - ship Tier A or Tier B only when the implementation actually satisfies the claim
 - keep provider help, README, and release notes completely literal
+- keep Pi-Agent and any other future harnesses out of live claims until a later
+  admission spike defines whether they deserve even Tier A
 
 ---
 

@@ -125,7 +125,7 @@ Recommended fields:
 
 Recommended initial logical names:
 
-- requests: `resume_session`, `refresh_review`, `show_findings`,
+- requests: `resume_session`, `reconcile_review_state`, `show_findings`,
   `ask_clarification`, `open_drafts`, `return_to_roger`
 - events: `session_updated`, `findings_updated`, `drafts_updated`,
   `attention_state_changed`, `background_job_changed`

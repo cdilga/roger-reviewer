@@ -499,7 +499,6 @@ fn rr_binary_native_host_path_handles_all_primary_launch_actions_without_hanging
         "start_review",
         "resume_review",
         "show_findings",
-        "refresh_review",
     ] {
         let intent = BridgeLaunchIntent {
             action: action.to_owned(),
@@ -634,9 +633,6 @@ fn shell_commands_work_without_extension_on_blessed_opencode_path() {
     assert_eq!(findings.exit_code, 0, "{}", findings.stderr);
     let findings_payload = parse_robot_payload(&findings.stdout);
     assert!(findings_payload["outcome"] == "empty" || findings_payload["outcome"] == "complete");
-
-    let refresh = run_rr(&["refresh", "--pr", "42", "--robot"], &runtime);
-    assert_eq!(refresh.exit_code, 0, "{}", refresh.stderr);
 
     let resume = run_rr(&["resume", "--pr", "42", "--robot"], &runtime);
     assert_eq!(resume.exit_code, 0, "{}", resume.stderr);
@@ -1035,7 +1031,7 @@ fn resume_robot_mode_suppresses_stale_locator_reopen_attempts() {
 }
 
 #[test]
-fn robot_resume_and_refresh_do_not_launch_interactive_provider_paths() {
+fn robot_resume_does_not_launch_interactive_provider_paths() {
     let temp = tempdir().expect("tempdir");
     let repo = init_repo(&temp);
     let (_probe_dir, probe_bin, marker_path) = write_probe_binary();
@@ -1062,29 +1058,9 @@ fn robot_resume_and_refresh_do_not_launch_interactive_provider_paths() {
     );
     assert_eq!(resume_payload["data"]["command"], "resume");
 
-    let refresh = run_rr(
-        &[
-            "refresh",
-            "--session",
-            "session-opencode-robot-1",
-            "--robot",
-        ],
-        &runtime,
-    );
-    assert_eq!(refresh.exit_code, 0, "{}", refresh.stderr);
-    let refresh_payload = parse_robot_payload(&refresh.stdout);
-    assert_eq!(refresh_payload["outcome"], "complete");
-    assert_eq!(refresh_payload["data"]["mode"], "robot_non_interactive");
-    assert_eq!(refresh_payload["data"]["launch_suppressed"], true);
-    assert_eq!(
-        refresh_payload["data"]["reason_code"],
-        "interactive_launch_suppressed_for_robot_mode"
-    );
-    assert_eq!(refresh_payload["data"]["command"], "refresh");
-
     assert!(
         !marker_path.exists(),
-        "provider binary should not be invoked for robot resume/refresh"
+        "provider binary should not be invoked for robot resume"
     );
 }
 
@@ -1188,7 +1164,7 @@ fn codex_review_and_resume_are_truthful_tier_a_degraded_paths() {
 }
 
 #[test]
-fn bounded_provider_outputs_are_truthful_for_status_resume_refresh_and_return() {
+fn bounded_provider_outputs_are_truthful_for_status_resume_and_return() {
     let temp = tempdir().expect("tempdir");
     let repo = init_repo(&temp);
     let (_stub_dir, opencode_bin) = write_stub_binary(false);
@@ -1235,27 +1211,6 @@ fn bounded_provider_outputs_are_truthful_for_status_resume_refresh_and_return() 
         resume_payload["warnings"]
             .as_array()
             .expect("resume warnings")
-            .iter()
-            .any(|warning| warning
-                .as_str()
-                .expect("warning string")
-                .contains("bounded support"))
-    );
-
-    let refresh = run_rr(&["refresh", "--pr", "42", "--robot"], &runtime);
-    assert_eq!(refresh.exit_code, 5, "{}", refresh.stderr);
-    let refresh_payload = parse_robot_payload(&refresh.stdout);
-    assert_eq!(refresh_payload["outcome"], "degraded");
-    assert_eq!(refresh_payload["data"]["provider"], "gemini");
-    assert_eq!(
-        refresh_payload["data"]["resume_path"],
-        "reseeded_from_bundle"
-    );
-    assert_eq!(refresh_payload["data"]["continuity_quality"], "degraded");
-    assert!(
-        refresh_payload["warnings"]
-            .as_array()
-            .expect("refresh warnings")
             .iter()
             .any(|warning| warning
                 .as_str()

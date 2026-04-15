@@ -21,7 +21,9 @@ Authority:
 Special rule for this cleanup:
 
 - keep `docs/PLAN_FOR_TRUTHFUL_PROVIDER_PARITY_AND_GITHUB_COPILOT_CLI.md` as a
-  bounded side-plan because it is still helping improve Roger's posture
+  bounded side-plan only until `rr-92l0.1` merges accepted truth back into the
+  canonical plan and support contracts; do not let it become a permanent
+  parallel authority source
 
 ## Action vocabulary
 
@@ -37,7 +39,7 @@ Special rule for this cleanup:
 | Path | Class | Action | Notes |
 |------|-------|--------|-------|
 | `docs/PLAN_FOR_ROGER_REVIEWER.md` | canonical plan | `keep` | Main product truth |
-| `docs/PLAN_FOR_TRUTHFUL_PROVIDER_PARITY_AND_GITHUB_COPILOT_CLI.md` | bounded side-plan | `keep` | Preserve as an active posture-sharpening side-plan; merge accepted truth back into canonical/support docs |
+| `docs/PLAN_FOR_TRUTHFUL_PROVIDER_PARITY_AND_GITHUB_COPILOT_CLI.md` | bounded side-plan | `merge-back` | Preserve only until accepted truth is merged back through `rr-92l0.1`; then downgrade or archive |
 | `docs/PLAN_FOR_EXTENSION_SETUP_AND_HAPPY_PATH_VALIDATION.md` | bounded side-plan | `merge-back` | Keep while extension happy-path recovery remains active |
 | `docs/PLAN_FOR_SCHEMA_MIGRATIONS_AND_UPDATE_COMPATIBILITY.md` | bounded side-plan | `merge-back` | Keep until migration contract and implementation fully supersede it |
 | `docs/ROUND_05_SURFACE_RECONCILIATION_BRIEF.md` | bounded side-plan | `merge-back` | Useful reconciliation brief; accepted TUI workspace truth should migrate into support contracts and the canonical plan rather than staying here long-term |
@@ -125,7 +127,6 @@ Special rule for this cleanup:
 
 | Path | Class | Action | Notes |
 |------|-------|--------|-------|
-| `docs/OVERNIGHT_SWARM_RUNBOOK.md` | operator/runbook doc | `keep+status` | Repo-operations guide, not product truth |
 | `docs/extension-entry-ux-smoke.md` | operator/runbook doc | `keep+status` | Smoke path for extension placement and fallback |
 | `docs/extension-identity-direction.md` | design note | `keep+status` | Narrow design rationale; not product spec |
 | `docs/extension-panel-theme-smoke.md` | operator/runbook doc | `keep+status` | Theme/readability smoke checklist |
@@ -133,7 +134,6 @@ Special rule for this cleanup:
 | `docs/extension-visual-identity.md` | design note | `keep+status` | Bounded visual-identity decision record |
 | `docs/release-publish-operator-smoke.md` | operator/runbook doc | `keep+status` | Release publish smoke checklist |
 | `docs/swarm/CI_FAILURE_INTAKE_RUNBOOK.md` | operator/runbook doc | `keep+status` | CI failure watcher operations |
-| `docs/swarm/DEVBOX_REMOTE_RUNBOOK.md` | operator/runbook doc | `keep+status` | Devbox remote swarm setup |
 | `docs/swarm/HUMAN_OPERATOR_FLYWHEEL_GUIDE.md` | operator/runbook doc | `keep+status` | Human operator doctrine |
 | `docs/swarm/NTM_OPERATOR_GUIDE.md` | operator/runbook doc | `keep+status` | Direct `ntm` usage guide |
 | `docs/swarm/command_palette.md` | operator/runbook doc | `keep+status` | Command palette content, not product spec |

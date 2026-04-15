@@ -8,11 +8,11 @@ not fan out on vague testing promises.
 
 Primary references:
 
-- [`REVIEW_FLOW_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/REVIEW_FLOW_MATRIX.md)
-- [`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md)
-- [`TEST_HARNESS_GUIDELINES.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TEST_HARNESS_GUIDELINES.md)
-- [`VALIDATION_INVARIANT_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_INVARIANT_MATRIX.md)
-- [`AUTOMATED_E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/AUTOMATED_E2E_BUDGET.json)
+- [`REVIEW_FLOW_MATRIX.md`](docs/REVIEW_FLOW_MATRIX.md)
+- [`RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md)
+- [`TEST_HARNESS_GUIDELINES.md`](docs/TEST_HARNESS_GUIDELINES.md)
+- [`VALIDATION_INVARIANT_MATRIX.md`](docs/VALIDATION_INVARIANT_MATRIX.md)
+- [`AUTOMATED_E2E_BUDGET.json`](docs/AUTOMATED_E2E_BUDGET.json)
 
 ## Governing Rules
 
@@ -40,7 +40,7 @@ Primary references:
 
 This document maps flows, fixtures, and suite families. It does not by itself
 prove that Roger's most critical product truths are owned. For that, use
-[`VALIDATION_INVARIANT_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_INVARIANT_MATRIX.md).
+[`VALIDATION_INVARIANT_MATRIX.md`](docs/VALIDATION_INVARIANT_MATRIX.md).
 
 Practical rule:
 

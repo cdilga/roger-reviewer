@@ -2,7 +2,6 @@ const ACTIONS = [
   { id: 'start_review', label: 'Start' },
   { id: 'resume_review', label: 'Resume' },
   { id: 'show_findings', label: 'Findings' },
-  { id: 'refresh_review', label: 'Refresh' },
 ];
 const NON_PR_SUBTITLE =
   'Manual backup only: open a GitHub pull request tab and use this popup only when in-page Roger controls are unavailable.';

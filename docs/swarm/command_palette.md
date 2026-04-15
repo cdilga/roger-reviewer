@@ -13,13 +13,13 @@
 ## Roger Swarm
 
 ### default_new_agent | Default New Agent
-Read `AGENTS.md` first, then `README.md`, then re-anchor on `docs/PLAN_FOR_ROGER_REVIEWER.md` enough to understand the authority order, current implementation phase, local-core-first architecture direction, and support-claim truthfulness model. If you are shaping beads, writing prompts, or recovering from prior partial closeouts, also read `docs/beads/BEAD_AND_PROMPT_FAILURE_PATTERNS.md`. Register with Agent Mail, check and acknowledge your inbox, then inspect `br ready`, verify the best candidate with `br show <id>`, claim it, reserve files, and start useful work immediately. Finish beads truthfully, not mechanically. Do not drift into communication purgatory.
+Read `AGENTS.md` first, then `README.md`, then re-anchor on `docs/PLAN_FOR_ROGER_REVIEWER.md` enough to understand the authority order, current implementation phase, local-core-first architecture direction, and support-claim truthfulness model. If you are shaping beads, writing prompts, or recovering from prior partial closeouts, also read `docs/beads/BEAD_AND_PROMPT_FAILURE_PATTERNS.md`. Register with Agent Mail, check and acknowledge your inbox, then inspect `br ready`, verify the best candidate with `br show <id>`, claim it, reserve files, and start useful work immediately. For CPU-heavy cargo work, prefer `rch exec -- <command>` when it is installed; if no worker fleet exists, keep going in local fail-open mode instead of waiting. Finish beads truthfully, not mechanically. Do not drift into communication purgatory.
 
 ### reread_agents_md | Reread AGENTS
 Reread `AGENTS.md` so the repo rules are fresh again. Reopen the canonical plan sections relevant to your active bead, then check Agent Mail, rerun `br ready`, and continue from the current durable repo state rather than from memory alone.
 
 ### next_bead | Next Useful Bead
-Check Agent Mail first. Then use `br ready` as queue truth, inspect the best candidate with `br show <id>`, claim it, reserve files, and start coding immediately. Finish the bead truthfully: satisfy the acceptance criteria, but do not stop mechanically if honest closeout also requires a missing child bead, a dependency correction, or a support-claim correction. If the queue looks thin or suspicious, use `bv` only for ranking context and verify with `br`.
+Check Agent Mail first. Then use `br ready` as queue truth, inspect the best candidate with `br show <id>`, claim it, reserve files, and start coding immediately. For CPU-heavy cargo validation on the chosen slice, use `rch exec -- <command>` when available, but do not stall if it falls back to local execution. Finish the bead truthfully: satisfy the acceptance criteria, but do not stop mechanically if honest closeout also requires a missing child bead, a dependency correction, or a support-claim correction. If the queue looks thin or suspicious, use `bv` only for ranking context and verify with `br`.
 
 ### frontier_widening | Widen The Frontier
 Check Agent Mail, then inspect `br list --status open`, `br blocked`, and `bv --robot-triage`. Read `docs/beads/BEAD_AND_PROMPT_FAILURE_PATTERNS.md` if the frontier looks suspicious, overlapped, or under-split. If a safe next slice is obvious, split or create the missing bead with one proof boundary, one main validation story, and a truthful closeout contract, then announce it. Do not do speculative work without either claiming or minting the right bead.
@@ -38,7 +38,7 @@ Review the code you most recently touched with fresh eyes. Look carefully for be
 ## Execution
 
 ### implement_current_bead | Implement Current Bead
-If you already own a bead, reopen `br show <id>` and the relevant plan/support sections, then move immediately from understanding to code changes. If you do not already own one, use `br ready`, verify the best candidate with `br show <id>`, claim it, reserve files, and start editing now. Finish the slice truthfully through code, validation, and closeout notes; do not stop at summaries, TODOs, or partial scaffolding.
+If you already own a bead, reopen `br show <id>` and the relevant plan/support sections, then move immediately from understanding to code changes. If you do not already own one, use `br ready`, verify the best candidate with `br show <id>`, claim it, reserve files, and start editing now. Use `rch exec -- <command>` for CPU-heavy cargo loops when it is available, but treat fail-open local execution as normal if no workers are configured. Finish the slice truthfully through code, validation, and closeout notes; do not stop at summaries, TODOs, or partial scaffolding.
 
 ### analysis_to_action | Analysis To Action
 If you have been reading, tracing, or summarizing for too long, convert that understanding into one concrete implementation move now. Name the bead, the operator-visible promise, and the exact files you will change, reserve those files, then edit code and end this cycle with a real diff plus the validation command you expect to run. Do not reply with analysis only unless you hit a real blocker.
@@ -46,7 +46,7 @@ If you have been reading, tracing, or summarizing for too long, convert that und
 ## Verification
 
 ### prove_current_slice | Prove Current Slice
-Take the current bead or active change and drive one real user-visible or operator-visible journey to truthful working state. Identify the defended promise, choose the cheapest truthful validation lane (`unit`, `integration`, `e2e`, or explicit smoke only when truly correct), run it, fix anything that fails, and record exact evidence. Do not widen support claims beyond the proof you actually exercised.
+Take the current bead or active change and drive one real user-visible or operator-visible journey to truthful working state. Identify the defended promise, choose the cheapest truthful validation lane (`unit`, `integration`, `e2e`, or explicit smoke only when truly correct), run it, fix anything that fails, and record exact evidence. Use `rch exec -- <command>` for CPU-heavy cargo validation when available, without treating remote workers as a prerequisite. Do not widen support claims beyond the proof you actually exercised.
 
 ### closeout_audit | Closeout Audit
 Before closing or handing off a bead, audit the slice with fresh eyes. Check each acceptance criterion explicitly, compare support wording to exercised proof, verify the exact validation evidence is recorded, and ask whether another agent would have to rediscover an obvious remaining gap. If yes, do not close mechanically; fix it if still one truthful slice or split/create the missing child bead and leave explicit notes.

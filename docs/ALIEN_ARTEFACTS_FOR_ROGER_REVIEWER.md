@@ -2,7 +2,7 @@
 
 This file is a compact planning packet for external model critique rounds. It
 is deliberately smaller and sharper than the full
-[`PLAN_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md),
+[`PLAN_FOR_ROGER_REVIEWER.md`](./PLAN_FOR_ROGER_REVIEWER.md),
 while still carrying the high-signal constraints that should not be lost when
 another model reviews the project.
 
@@ -61,7 +61,7 @@ Use a shared application core with ports-and-adapters boundaries:
 - browser extension surface
 
 The domain layer owns findings, review runs, prompt stages, approval state, and
-refresh logic. UI layers should be thin.
+reconciliation logic. UI layers should be thin.
 
 ## Artefact 5: Critical Risks to Challenge
 
@@ -72,7 +72,8 @@ These are the areas an external model should attack hardest:
 - whether the proposed data model is rich enough for finding lifecycle tracking
 - whether semantic search is being overvalued relative to FTS-backed v1 search
 - whether worktree and named-instance sync is prematurely complex
-- whether refresh and fresh-eyes passes can remain coherent as findings evolve
+- whether automatic reconciliation and fresh-eyes passes can remain coherent as
+  findings evolve
 
 ## Artefact 6: Open Questions That Should Stay Explicit
 

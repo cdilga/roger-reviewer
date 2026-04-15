@@ -1,7 +1,8 @@
 # AGENTS.md — Roger Reviewer
 
-This file is the single source of truth for any agent (Claude Code, Codex, or
-other) working in this repository. Read it before doing anything else.
+This file is the primary operating contract and entry point for any agent
+(Claude Code, Codex, or other) working in this repository. Read it before
+doing anything else.
 
 ---
 
@@ -91,7 +92,8 @@ main expected exception because it is web-native.
 
 ## Planning Documents
 
-Read these to understand the full plan before touching code.
+Use this index to find the relevant planning documents before touching code.
+Do not assume every document below needs to be re-read on every pass.
 
 | Document | Purpose |
 |----------|---------|
@@ -183,6 +185,34 @@ Default reading path for agents:
 2. `docs/PLAN_FOR_ROGER_REVIEWER.md`
 3. Relevant bead or support doc for the task at hand
 
+### Session Read Budget
+
+Not every section of this file needs to be loaded into memory on every pass.
+
+Re-read every pass:
+
+- Critical Constraints
+- Project Stage Status, Scope posture, and Current Repo Truth
+- Working with Beads
+- Expected Agent Posture
+- Testing Philosophy
+- Support Claim Discipline
+- Harness support policy
+- Beads Workflow Integration
+
+Read on demand:
+
+- README Rules when editing public docs
+- Repo Boundary when deciding whether tooling/docs belong in-repo
+- Domain Model Summary and Architecture Principles when the bead touches core
+  model/architecture shape
+- Reference Background sections below when doing planning, architecture, or
+  historical reconciliation work
+
+Default rule: re-anchor on the relevant parts of the canonical plan and support
+docs, not the entire handbook corpus, unless the task is broad enough to need
+that wider context.
+
 Testing exception:
 
 - if you are shaping or implementing tests for a bead whose UX behavior,
@@ -250,8 +280,10 @@ Rules:
 - public README visuals and social-preview assets must be original and
   non-infringing; do not reference copyrighted characters, logos, or lookalike
   brand art
-- contribution guidance in public docs must state that Roger accepts Issues and
-  does not accept unsolicited Pull Requests
+- public contribution guidance should distinguish the external contribution
+  path from maintainer/operator/agent local git workflow; do not phrase repo
+  policy as a blanket prohibition on local commits, branches, or PR-based
+  maintenance when those are the appropriate delivery tools
 - when a release changes the shipped public surface materially, schedule a
   README truth pass in that same release lane before widening the public claim
 
@@ -370,43 +402,60 @@ br close <id>        # mark a bead complete
 br doctor            # workspace health check
 ```
 
-`br` currently resolves to a local patched build at
-`/Users/cdilga/.local/bin/br -> /Users/cdilga/.local/bin/br-0.1.34.pinned`.
-This is not the stock upstream `0.1.34` release. Local investigation on
-2026-03-31 showed the upstream regression still reproduced on both the
-published `0.1.34` build and upstream `main`, but a narrow local source patch
-to the fresh-schema migration path restored clean `init`, `create`, `doctor`,
-and `info` behavior for Roger's workload.
+`br` currently resolves to a locally pinned source build under
+`~/.local/bin/br -> ~/.local/bin/br-0.1.40.pinned`.
 
-Important 2026-04-02 follow-up:
+Important 2026-04-15 follow-up:
 
-- onboarding rehearsal `rr-1f4.2` reproduced claim-mutation FK failures on
-  `br-0.1.34.localfix` while `br-0.1.34.pinned` succeeded for the same
-  mutation path.
-- `scripts/swarm/resolve_br.sh` now defaults to `br-0.1.34.pinned` so swarm
-  and onboarding flows converge on the mutation-safe binary without manual
-  per-command overrides.
-- the prior rollback experiment to `br-0.1.28.pinned` remains rejected for this
-  workspace due queue-truth divergence and SQLite integrity risk.
-- therefore, keep `br-0.1.34.pinned` as the canonical default for this repo
-  unless a newly validated replacement is explicitly announced.
+- GitHub `beads_rust` latest official release is still `v0.1.39`
+  (published `2026-04-14T21:11:16Z`), but this repo now pins a locally built
+  `0.1.40` from upstream `main` commit
+  `32f4a1616deea380c4f47ea40c542fb26e7e6e59`
+  (`2026-04-14T22:48:28-04:00`,
+  `fix(import): reject --dry-run with --file, fix 3 broken tests`).
+- local Linux `x86_64` repro history now shows:
+  - `br-0.1.36.pinned` still failed fresh temp-workspace
+    `sqlite3 integrity_check` with `Page 17: never used` corruption
+  - upstream `v0.1.38` still failed the same matrix with
+    `Tree 50 page 50: free space corruption`
+  - upstream `v0.1.39` passed the fresh-init matrix
+  - source-built `0.1.40` still did not salvage the malformed Roger DB in
+    place, but it did successfully rebuild a clean DB from
+    `.beads/issues.jsonl`, restoring exact issue lookup and DB/JSONL trust on
+    the live workspace
+- `scripts/swarm/resolve_br.sh` and `scripts/swarm/br_pinned.sh` now default to
+  `br-0.1.40.pinned` so swarm and onboarding flows converge on the latest
+  locally revalidated binary.
+- future reevaluation of newer upstream versions must still use the same
+  fresh-init matrix plus a Roger workspace rebuild test; do not assume a newer
+  upstream release is safe by default.
 
 Upstream fresh-init regression report remains:
 `Dicklesworthstone/beads_rust#213`.
 
-If `br doctor` reports malformed-page warnings again, repair with:
+If `br doctor` or `check_beads_trust.sh` reports malformed-page warnings again,
+repair with:
 
 ```sh
-sqlite3 .beads/beads.db "PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA integrity_check;"
+cp -a .beads ".beads/.manual_repair_$(date -u +%Y%m%d_%H%M%S)"
+repo_root="$(pwd)"
+tmpdir="$(mktemp -d)"
+(cd "$tmpdir" && br init)
+cp "$repo_root/.beads/issues.jsonl" "$tmpdir/.beads/issues.jsonl"
+cp "$repo_root/.beads/config.yaml" "$tmpdir/.beads/config.yaml"
+(cd "$tmpdir" && br sync --import-only --rebuild)
+sqlite3 "$tmpdir/.beads/beads.db" "PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA integrity_check;"
+cp "$tmpdir/.beads/beads.db" .beads/beads.db
 br doctor
 ```
 
-`wal_checkpoint(TRUNCATE)` alone was not sufficient in local repros; `VACUUM`
-was the step that cleared the integrity-check failures. Preserved recovery
+`VACUUM` alone is no longer the preferred repair path for this repo. The
+2026-04-15 failure recurred after an earlier vacuum-only repair, while a fresh
+DB rebuild from canonical JSONL restored trust cleanly. Preserved recovery
 artefacts under `.beads/.br_recovery` are still only a cleanup warning.
 
-Do not assume upstream `br 0.1.34` is equivalent to this local build. If you
-need to reevaluate a future upstream version, test it explicitly against:
+Do not assume a newer upstream `br` release is safe by default. If you need to
+reevaluate a future upstream version, test it explicitly against:
 
 ```sh
 git init tmp && cd tmp
@@ -559,14 +608,21 @@ Rules:
 - if a bead is missing a validation contract, add or clarify it before closing
   the bead rather than silently guessing
 
-### Critical dependency spine (v1)
+## Reference Background
+
+The sections below are reference material, not mandatory every-pass reading.
+Use them when the task is architectural, historical, or broad enough that the
+extra context changes implementation decisions.
+
+### Reference Dependency Spine (v1)
 
 Repo foundation → domain schema → storage → harness linkage → prompt pipeline →
 structured findings → session-aware CLI → TUI findings workflow → outbound
 draft model → explicit posting flow → GitHub adapter → extension bridge and UI
 
-The extension is intentionally last. Do not start extension work before the
-local review core is real.
+Default sequencing rule: extension expansion should trail local-core truth.
+Do not let extension work outrun the local review core, approval surfaces, and
+posting safety model.
 
 ---
 
@@ -780,7 +836,7 @@ Required honesty checks:
 
 ---
 
-## Rollout Phase Summary
+## Historical Rollout Phase Summary
 
 | Phase | Focus |
 |-------|-------|
@@ -795,9 +851,11 @@ Required honesty checks:
 
 ---
 
-## Validation Gates
+## Historical Validation Gates
 
-Do not advance phases without meeting the gate.
+These are reference gates from the planning/readiness era. The implementation
+gate has already passed; use live beads, current code, and current validation
+docs for day-to-day execution decisions.
 
 - **Gate A (Domain viability):** schema exists, session/finding lifecycle is
   explicit, supported-harness linkage works truthfully, finding identity
@@ -833,10 +891,15 @@ The adversarial review loop:
 
 ## If You Are Running an Implementation Bead
 
-1. Read `docs/PLAN_FOR_ROGER_REVIEWER.md` to understand the architectural
-   context.
+1. Re-anchor on the relevant sections of
+   `docs/PLAN_FOR_ROGER_REVIEWER.md` and the bead's governing support docs to
+   understand the architectural context. Do not reread the entire plan by
+   default unless the bead is broad enough to need it.
 2. Read the bead in full with `br show <id>`.
-3. Implement exactly what the acceptance criteria require. No more.
+3. Implement the full truthful scope the acceptance criteria imply. Start from
+   the named acceptance boundary, but include adjacent work that is clearly
+   required for an honest closeout; if the remaining work is separable, bead it
+   instead of pretending it is out of scope.
 4. Most implementation beads should add or update tests. Start with the
    cheapest truthful validation layer and escalate only when a lighter layer
    would miss the real risk.
@@ -891,7 +954,7 @@ config or wrapper here.
 
 ---
 
-## Open Questions (non-blocking as of 2026-03-30)
+## Historical Open Questions (reference only; non-blocking as of 2026-03-30)
 
 These are bounded follow-on questions. They do not block the first
 implementation slice, but agents should still resolve them in the named beads
@@ -995,7 +1058,7 @@ should be treated as later clients over Roger-owned contracts or future
 ACP/MCP edge adapters, not as reasons to make Roger protocol-first in
 `0.1.0`.
 
-### Resolved
+### Historical Resolved Notes
 - ~~Rust TUI runtime direction~~ → Rust-native confirmed. Roger must have a Rust TUI layer.
 - ~~TUI/app-core process split~~ → Roger stays in-process in `0.1.x`; the
   remaining question is worker/wake behavior rather than whether Roger starts
@@ -1025,12 +1088,20 @@ ACP/MCP edge adapters, not as reasons to make Roger protocol-first in
 
 ## Beads Workflow Integration
 
-This project uses the Beads workflow for issue tracking. Issues are stored in
-`.beads/` and tracked in git.
+This project uses the Beads workflow for issue tracking. The live workspace is
+the `.beads/` directory: the DB, JSONL export, config, and related repair
+artefacts all live there.
 
-**Note:** `br` is non-invasive and never executes git commands. After
-`br sync --flush-only`, manually run `git add .beads/` and `git commit` when
-you want to record beads changes.
+`br` never executes git commands. Bead workflow and git workflow are related
+but not the same thing:
+
+- use `br` to read and mutate queue truth
+- use `br sync --status` to check DB/JSONL consistency
+- use `br sync --flush-only` or `br sync --import-only --rebuild` only when
+  you are intentionally exporting/importing or repairing workspace trust
+- do not treat git commits, pushes, or PRs as mandatory session-end cleanup
+- local commits and branches are allowed when useful or when the user/repo
+  workflow calls for them; they are not required just because bead data changed
 
 `mcp_agent_mail` installs an interactive-shell compatibility alias
 `bd='br'`. Some external docs and `bv --robot-*` outputs may still emit `bd`
@@ -1039,20 +1110,13 @@ examples; translate them to `br` for automation and repo docs.
 ### Essential Commands
 
 ```bash
-# View issues (launches TUI - avoid in automated sessions)
-bv
-
-# CLI commands for agents (use these instead)
-br ready              # Show issues ready to work (no blockers)
-br list --status open # All open issues
-br show <id>          # Full issue details with dependencies
+br ready                # Show issues ready to work (no blockers)
+br list --status open   # All open issues
+br show <id>            # Full issue details with dependencies
 br create --title="..." --type task --priority 2
 br update <id> --status in_progress
 br close <id> --reason "Completed"
-br close <id1> <id2>  # Close multiple issues at once
-br sync --flush-only  # Export DB state to .beads/issues.jsonl
-git add .beads/
-git commit -m "sync beads"
+br sync --status        # Read-only DB/JSONL trust check
 ```
 
 ### Workflow Pattern
@@ -1060,8 +1124,9 @@ git commit -m "sync beads"
 1. **Start**: Run `br ready` to find actionable work
 2. **Claim**: Use `br update <id> --status in_progress`
 3. **Work**: Implement the task
-4. **Complete**: Use `br close <id>`
-5. **Sync**: Always run `br sync --flush-only` at session end, then commit `.beads/`
+4. **Complete truthfully**: Close only after acceptance and proof are real
+5. **Keep queue state clean**: If you changed bead data, confirm `br sync --status`
+   is clean or record why it is intentionally not
 
 ### Key Concepts
 
@@ -1070,21 +1135,14 @@ git commit -m "sync beads"
 - **Types**: task, bug, feature, epic, question, docs
 - **Blocking**: `br dep add <issue> <depends-on>` to add dependencies
 
-### Session Protocol
+### Git Policy
 
-**Before ending any session, run this checklist:**
-
-```bash
-git status              # Check what changed
-git add <files>         # Stage code changes
-br sync --flush-only    # Export beads changes
-git add .beads/         # Stage beads export
-git commit -m "..."     # Commit code
-br sync --flush-only    # Export any new beads changes
-git add .beads/
-git commit -m "sync beads"
-git push                # Push to remote
-```
+- git commits are allowed when they are useful and truthful
+- git pushes, branch management, and PR workflow are user-directed or
+  repo-workflow-directed choices, not automatic bead obligations
+- do not invent a mandatory end-of-session commit/push ritual
+- if a bead change matters, make sure the working tree truth is preserved; the
+  decision to commit that truth is separate
 
 ### Best Practices
 
@@ -1092,6 +1150,7 @@ git push                # Push to remote
 - Update status as you work (in_progress → closed)
 - Create new issues with `br create` when you discover tasks
 - Use descriptive titles and set appropriate priority/type
-- Always `br sync --flush-only` before ending session, then commit `.beads/`
+- Prefer `br sync --status` as the normal safety check
+- Use export/import sync commands deliberately, not mechanically
 
 <!-- end-bv-agent-instructions -->

@@ -224,7 +224,7 @@ test('GitHub header action host uses native GitHub/Primer button classes', () =>
   assert.match(GITHUB_ACTION_BUTTON_CLASS, /\bButton--small\b/);
 });
 
-test('deriveActionModel hides Refresh by default and promotes Start as primary', () => {
+test('deriveActionModel keeps the default action set limited to launch, resume, and findings', () => {
   const model = deriveActionModel(null);
   assert.equal(model.primaryActionId, 'start_review');
   assert.equal(model.visibleActions.has('start_review'), true);
@@ -233,10 +233,11 @@ test('deriveActionModel hides Refresh by default and promotes Start as primary',
   assert.equal(model.visibleActions.has('refresh_review'), false);
 });
 
-test('deriveActionModel exposes Refresh and promotes it when refresh is recommended', () => {
+test('deriveActionModel promotes Resume when refresh is recommended', () => {
   const model = deriveActionModel('refresh_recommended');
-  assert.equal(model.primaryActionId, 'refresh_review');
-  assert.equal(model.visibleActions.has('refresh_review'), true);
+  assert.equal(model.primaryActionId, 'resume_review');
+  assert.equal(model.visibleActions.has('refresh_review'), false);
+  assert.equal(model.visibleActions.has('resume_review'), true);
 });
 
 test('deriveActionModel maps canonical attention states to expected primary actions', () => {
@@ -245,7 +246,7 @@ test('deriveActionModel maps canonical attention states to expected primary acti
     ['review_failed', 'resume_review', false],
     ['findings_ready', 'show_findings', false],
     ['awaiting_outbound_approval', 'show_findings', false],
-    ['refresh_recommended', 'refresh_review', true],
+    ['refresh_recommended', 'resume_review', false],
   ];
 
   for (const [attentionState, expectedPrimary, refreshVisible] of scenarios) {
@@ -288,7 +289,6 @@ test('applyActionModel toggles visibility and primary emphasis on action buttons
     makeButton('start_review'),
     makeButton('resume_review'),
     makeButton('show_findings'),
-    makeButton('refresh_review'),
   ];
   const panel = {
     querySelectorAll(selector) {
@@ -299,12 +299,13 @@ test('applyActionModel toggles visibility and primary emphasis on action buttons
   applyActionModel(panel, null);
   assert.equal(buttons[0].hidden, false);
   assert.equal(buttons[0].hasClass('roger-panel-button--primary'), true);
-  assert.equal(buttons[3].hidden, true);
+  assert.equal(buttons[1].hidden, false);
+  assert.equal(buttons[2].hidden, false);
 
   applyActionModel(panel, 'refresh_recommended');
-  assert.equal(buttons[3].hidden, false);
-  assert.equal(buttons[3].hasClass('roger-panel-button--primary'), true);
-  assert.equal(buttonStates.get('refresh_review:aria-hidden'), 'false');
+  assert.equal(buttons[1].hidden, false);
+  assert.equal(buttons[1].hasClass('roger-panel-button--primary'), true);
+  assert.equal(buttonStates.get('resume_review:aria-hidden'), 'false');
 });
 
 test('createBrandChip renders shared rr-brand-chip primitive', () => {
@@ -355,9 +356,9 @@ test('createPanel keeps GitHub button semantics while rendering Roger identity c
     panel,
     (node) => node.dataset && typeof node.dataset.action === 'string'
   );
-  assert.equal(actionButtons.length, 4);
+  assert.equal(actionButtons.length, 3);
   const actionIds = actionButtons.map((button) => button.dataset.action).sort();
-  assert.deepEqual(actionIds, ['refresh_review', 'resume_review', 'show_findings', 'start_review']);
+  assert.deepEqual(actionIds, ['resume_review', 'show_findings', 'start_review']);
   assert.equal(actionIds.includes('approve_outbound'), false);
   assert.equal(actionIds.includes('post_review'), false);
   for (const button of actionButtons) {

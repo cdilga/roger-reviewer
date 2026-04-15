@@ -4,10 +4,10 @@ This document narrows the canonical plan for Roger Reviewer `0.1.0`.
 
 Authority:
 
-- [`AGENTS.md`](/Users/cdilga/Documents/dev/roger-reviewer/AGENTS.md)
-- [`PLAN_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md)
-- [`adr/004-scope-and-memory-promotion-policy.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/adr/004-scope-and-memory-promotion-policy.md)
-- [`DATA_MODEL_AND_STORAGE_CONTRACT.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/DATA_MODEL_AND_STORAGE_CONTRACT.md)
+- [`AGENTS.md`](AGENTS.md)
+- [`PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md)
+- [`adr/004-scope-and-memory-promotion-policy.md`](docs/adr/004-scope-and-memory-promotion-policy.md)
+- [`DATA_MODEL_AND_STORAGE_CONTRACT.md`](docs/DATA_MODEL_AND_STORAGE_CONTRACT.md)
 
 It exists to make the search and memory policy executable before `rr-024`
 implements prior-review lookup and memory hooks.

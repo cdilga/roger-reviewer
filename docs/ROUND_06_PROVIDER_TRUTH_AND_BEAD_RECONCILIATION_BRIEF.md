@@ -1,6 +1,8 @@
 # Round 06 Provider Truth And Bead Reconciliation Brief
 
-Status: Proposed
+Status: historical gap-inventory brief from 2026-04-14. The live graph has
+since widened substantially; use this as rationale and reconciliation context,
+not as a current snapshot of `br ready`.
 Audience: Roger maintainers and implementers preparing the next cohesive bead-shaping pass
 Scope: provider truthfulness, review-worker boundary hardening, lifecycle hardening, Copilot admission, and graph widening needed before the next implementation wave
 

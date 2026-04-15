@@ -2,10 +2,10 @@
 
 This document turns Roger Reviewer's testing posture into an implementation-
 facing contract. It is the canonical harness-design companion to
-[`PLAN_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md)
+[`PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md)
 and
-[`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md).
-[`TESTING.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TESTING.md) is the
+[`RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md).
+[`TESTING.md`](docs/TESTING.md) is the
 operator-facing entrypoint; this document remains the implementation-facing
 support contract.
 
@@ -19,9 +19,9 @@ Use this document when:
 - translating a user-facing persona journey or chaos branch into executable
   validation coverage;
   use
-  [`PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md)
+  [`PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md`](docs/PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md)
   together with
-  [`REVIEW_FLOW_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/REVIEW_FLOW_MATRIX.md)
+  [`REVIEW_FLOW_MATRIX.md`](docs/REVIEW_FLOW_MATRIX.md)
   for that step, and prefer stable scenario ids such as `PJ-03A` or `PJ-05C`
   over vague journey names
 
@@ -59,7 +59,7 @@ Current repo truth:
 - make degraded modes explicit in tests instead of silently omitting them
 - every release-critical support claim should map to one or more invariant ids
   from
-  [`VALIDATION_INVARIANT_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_INVARIANT_MATRIX.md)
+  [`VALIDATION_INVARIANT_MATRIX.md`](docs/VALIDATION_INVARIANT_MATRIX.md)
 - allow Roger-owned doubles only when they model real contract edges and real
   failure modes; success-only fantasy doubles are not acceptable
 - preserve failure artifacts when they materially reduce diagnosis time
@@ -75,7 +75,7 @@ Rules:
 
 - new implementation work that changes a user-visible or operator-visible
   promise should cite one or more invariant ids from
-  [`VALIDATION_INVARIANT_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_INVARIANT_MATRIX.md)
+  [`VALIDATION_INVARIANT_MATRIX.md`](docs/VALIDATION_INVARIANT_MATRIX.md)
   or add a new row there
 - a bead should not claim a support boundary without also naming the suite
   families, fixture families, and proof outputs that defend the relevant
@@ -226,9 +226,9 @@ is unavailable.
 
 The prescriptive E2E catalog, including any future unblessed candidate
 journeys, lives in
-[`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md).
+[`RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md).
 Only entries carried in
-[`AUTOMATED_E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/AUTOMATED_E2E_BUDGET.json)
+[`AUTOMATED_E2E_BUDGET.json`](docs/AUTOMATED_E2E_BUDGET.json)
 count as blessed heavyweight E2Es.
 
 ## Execution Policies And Release Evidence
@@ -361,7 +361,7 @@ Recommended prefixes:
 
 Every non-unit suite should declare:
 - covered flow IDs from
-  [`REVIEW_FLOW_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/REVIEW_FLOW_MATRIX.md)
+  [`REVIEW_FLOW_MATRIX.md`](docs/REVIEW_FLOW_MATRIX.md)
 - required fixture families
 - whether the path is blessed, bounded, degraded, launch-only, or manual-only
 
@@ -396,7 +396,7 @@ Rules:
 Roger's E2E budget is intentionally strict.
 
 The canonical machine-readable budget file is:
-- [`AUTOMATED_E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/AUTOMATED_E2E_BUDGET.json)
+- [`AUTOMATED_E2E_BUDGET.json`](docs/AUTOMATED_E2E_BUDGET.json)
 
 Guard rules:
 - `0.1.x` allows exactly six blessed major heavyweight E2E journeys by default

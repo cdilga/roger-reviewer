@@ -1,98 +1,98 @@
 # Beads Workspace Status
 
-As of 2026-04-12, the Roger Reviewer beads workspace is back on the vetted
-`0.1.34.pinned` runtime and the live DB has been repaired with the documented
-SQLite checkpoint plus `VACUUM` flow. The current trust issue is no longer
-"which `br` binary is selected?" but DB-backed `br` reads failing with
-`SQLITE_BUSY_SNAPSHOT` while a long-lived `bv` reader still holds an older
-snapshot.
+As of 2026-04-15, the Roger Reviewer Linux workspace uses a source-built
+`0.1.40.pinned` as the default `br`, and the live workspace trust story is
+clean again after rebuilding `.beads/beads.db` from canonical
+`.beads/issues.jsonl`.
 
 ## Current state
 
 - default automation path now resolves through
-  `/Users/cdilga/.local/bin/br -> /Users/cdilga/.local/bin/br-0.1.34.pinned`
-- `scripts/swarm/resolve_br.sh` is the reason terminals keep snapping back to
-  `0.1.34`: its current hard pin is `PINNED_VERSION=0.1.34`
-- the latest official upstream release is `v0.1.38` (published 2026-04-10) and
-  its Apple Silicon asset matches the local
-  `/Users/cdilga/.local/bin/br-0.1.38.release` byte-for-byte
-- upstream `main` is newer than `v0.1.38` by 5 commits (`v0.1.38-5-g6d121a1`),
-  but a local head build still reproduces the same fresh-init integrity failure
-- `v0.1.38` was not promoted because a fresh temp workspace repro still failed
-  native `sqlite3 integrity_check`
-  (`Tree 50 page 50: free space corruption`)
-- stock/pinned `0.1.34` still reproduces the older fresh-init corruption
-  signature (`Page ...: never used`) in a fresh temp workspace, so `0.1.34`
-  remains "known workaround pin for mutation behavior", not "clean upstream fix"
-- [`.beads/beads.db`](/Users/cdilga/Documents/dev/roger-reviewer/.beads/beads.db)
-  now passes native `sqlite3` integrity checks again after the documented repair:
-  `PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA integrity_check;`
-- the live workspace currently has 270 issues in
-  [`.beads/issues.jsonl`](/Users/cdilga/Documents/dev/roger-reviewer/.beads/issues.jsonl)
-  (`open=1`, `closed=269`, `in_progress=0`)
-- DB-backed `br doctor` and `br ready` can still fail immediately after the
-  repair with `database is busy (snapshot conflict ...)` while a long-lived
-  `bv` process keeps the pre-repair snapshot open
-- at the time of the 2026-04-12 check, `lsof` showed `bv` as the only live
-  holder on `.beads/beads.db`
-- JSONL-only queue inspection still works during that state:
-  `br ready --no-db` returned `rr-1pz7`
-- stock upstream `br 0.1.29` through `0.1.34` were repro-bad locally: a fresh temp workspace
-  failed native `sqlite3` integrity checks after ordinary sequential
-  `br create` operations
-- upstream `main` at commit `1130411b1dfa646c769b1f56735d9dd9942b8db0` was
-  still repro-bad on 2026-03-31
-- upstream regression report filed:
+  `~/.local/bin/br -> ~/.local/bin/br-0.1.40.pinned`
+- `scripts/swarm/resolve_br.sh` and `scripts/swarm/br_pinned.sh` now default to
+  `0.1.40`
+- the latest official upstream release is still `v0.1.39`
+  (published `2026-04-14T21:11:16Z`)
+- Roger now pins a locally built `0.1.40` from upstream `main` commit
+  `32f4a1616deea380c4f47ea40c542fb26e7e6e59`
+  (`2026-04-14T22:48:28-04:00`,
+  `fix(import): reject --dry-run with --file, fix 3 broken tests`)
+- local Linux `x86_64` repro history now shows:
+  - `br-0.1.36.pinned` failed the fresh temp-workspace matrix with
+    `Page 17: never used` corruption
+  - upstream `v0.1.38` failed the same matrix with
+    `Tree 50 page 50: free space corruption`
+  - upstream `v0.1.39` passed the fresh-init matrix
+  - source-built `0.1.40` passed the fresh-init matrix and successfully rebuilt
+    the Roger workspace from canonical JSONL
+- the live workspace currently reports `456` issues in
+  [`.beads/beads.db`](.beads/beads.db)
+  (`open=87`, `closed=364`, `deferred=5`)
+- the 2026-04-15 live repair preserved a full backup snapshot under
+  [`.beads/.manual_repair_20260415_033050`](.beads/.manual_repair_20260415_033050)
+- the repaired live workspace now passes the canonical trust check:
+  `./scripts/swarm/check_beads_trust.sh` reports
+  `TRUST_STATUS=pass` and `TRUST_REASON=db and jsonl agree on current issue truth`
+- `br doctor` now passes both internal and native SQLite integrity checks
+- `br sync --status --json` reports `dirty_count=0`,
+  `jsonl_newer=false`, and `db_newer=false`
+- exact issue lookup is restored on the live workspace; for example,
+  `br show rr-x51h.1.2 --json` now succeeds again
+- both DB-backed and JSONL-backed ready queues currently report 13 ready
+  issues
+- the open graph remains concentrated in Round 06 provider-truth,
+  outbound-flow, search-planner, release/update, and proof-mapping lanes
+- `bv --robot-insights` still reports `0` dependency cycles
+- upstream regression report for the earlier fresh-init failures remains:
   `Dicklesworthstone/beads_rust#213`
-- local source investigation found the fresh-schema bootstrap was still running
-  legacy v3/v4 migrations before `PRAGMA user_version` was set, which caused
-  fresh DBs to drop and recreate `idx_issues_ready`; with current
-  `frankensqlite`, that leaked the old root page and triggered the
-  `Page 17: never used` integrity failure
-- the practical local fix was:
-  1. repair the current workspace DB with SQLite checkpoint plus `VACUUM`
-  2. install a patched local `br` build that skips legacy migrations on a
-     truly fresh DB
 
 ## Validation performed
 
-- `readlink /Users/cdilga/.local/bin/br` ->
-  `/Users/cdilga/.local/bin/br-0.1.34.pinned`
-- `br --version` -> `br 0.1.34`
-- `curl -fsSL https://api.github.com/repos/Dicklesworthstone/beads_rust/releases/latest`
-  -> latest upstream release is `v0.1.38` with asset
-     `br-v0.1.38-darwin_arm64.tar.gz`
-- `curl -fsSL -o /tmp/br-v0.1.38-darwin_arm64.tar.gz <release-url>` plus
-  `curl -fsSL <release-url>.sha256`
-  -> downloaded release asset checksum matched published checksum
-- `shasum -a 256 /tmp/br-v0.1.38-darwin_arm64/br /Users/cdilga/.local/bin/br-0.1.38.release`
-  -> identical hashes; local `br-0.1.38.release` matches the official release
-- `git clone https://github.com/Dicklesworthstone/beads_rust.git /tmp/beads_rust-main-test`
-  plus `cargo build --release`
-  -> built upstream head `6d121a1` (`v0.1.38-5-g6d121a1`)
-- `br info`
-- `br doctor` before repair
-  -> `WARN sqlite.integrity_check ... Page 17: never used ...`
-- `sqlite3 .beads/beads.db "PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA integrity_check;"`
-  -> `0|0|0` then `ok`
-- `br doctor` after repair
-  -> native `sqlite3.integrity_check` passes, but DB-backed doctor path hits
-     `database is busy (snapshot conflict ...)`
-- `br ready`
-  -> `database is busy (snapshot conflict on pages: page 7864320 > snapshot db_size 374 (latest: 374))`
-- `br ready --no-db`
-  -> ready queue still visible; returned `rr-1pz7`
-- `lsof .beads/beads.db .beads/beads.db-wal .beads/beads.db-shm`
-  -> `bv` was the only remaining live holder
-- temp repro with `/Users/cdilga/.local/bin/br-0.1.34.pinned` on
-  `init -> create -> create -> sqlite3 integrity_check`
-  -> `Page 17: never used; Page 57: never used; Page 58: never used; Page 60: never used`
-- temp repro with `/Users/cdilga/.local/bin/br-0.1.38.release` on the same
-  steps
-  -> `Tree 50 page 50: free space corruption`
-- temp repro with `/tmp/beads_rust-main-test/target/release/br` on the same
-  steps
-  -> `Tree 50 page 50: free space corruption`
+- `git ls-remote https://github.com/Dicklesworthstone/beads_rust.git HEAD refs/heads/main`
+  -> `32f4a1616deea380c4f47ea40c542fb26e7e6e59`
+- local source build:
+  - clone upstream `beads_rust` main
+  - fast-forward sibling `frankensqlite` checkout to upstream main
+  - `cargo build --release --bin br`
+  - resulting binary version -> `br 0.1.40`
+- fresh-init matrix:
+  - `0.1.36` failed
+  - `0.1.38` failed
+  - `0.1.39` passed
+  - source-built `0.1.40` passed
+- throwaway Roger workspace tests against the malformed live-state copy:
+  - DB-backed exact issue lookup still failed on the copied malformed DB
+  - `--no-db` update paths succeeded
+  - `br sync --import-only --rebuild` on the malformed copy did not fix it in place
+- clean-room rebuild validation:
+  - create a fresh temp workspace
+  - copy in canonical `.beads/issues.jsonl`
+  - `br init`
+  - copy live `config.yaml`
+  - `br sync --import-only --rebuild --json`
+  - `sqlite3 .beads/beads.db "PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA integrity_check; PRAGMA foreign_key_check;"`
+  - result: native SQLite `ok`, clean sync state, exact lookup restored, and
+    DB-backed update succeeded
+- live repair and promotion:
+  - backup snapshot before swap:
+    [`.beads/.manual_repair_20260415_033050`](.beads/.manual_repair_20260415_033050)
+  - replace live `.beads/beads.db` with the clean rebuilt DB
+  - install the source-built binary to
+    `~/.local/bin/br-0.1.40.pinned`
+  - repoint `~/.local/bin/br`
+- post-repair validation:
+  - `br --version` -> `br 0.1.40`
+  - `readlink -f ~/.local/bin/br`
+    -> `/home/ubuntu/.local/bin/br-0.1.40.pinned`
+  - `./scripts/swarm/check_beads_trust.sh`
+    -> `TRUST_STATUS=pass`, `TRUST_REASON=db and jsonl agree on current issue truth`
+  - `br doctor`
+    -> `OK sqlite.integrity_check` and `OK sqlite3.integrity_check`
+  - `br sync --status --json`
+    -> `dirty_count=0`, `jsonl_newer=false`, `db_newer=false`
+  - `sqlite3 .beads/beads.db "select status, count(*) from issues group by status order by status;"`
+    -> `closed|364`, `deferred|5`, `open|87`
+  - DB-backed and JSONL-backed ready counts both remain `13`
 
 ## Canonical workspace-trust check
 
@@ -115,9 +115,16 @@ so only the direct parity and integrity checks are evaluated.
 
 ## Notes
 
+- As of 2026-04-15, the bead graph is execution-ready and the live workspace
+  trust has been restored. The current blocker is no longer workspace health;
+  it is only the normal question of which ready beads to execute next.
 - `br doctor` still reports preserved recovery artefacts in
-  [`.beads/.br_recovery`](/Users/cdilga/Documents/dev/roger-reviewer/.beads/.br_recovery).
+  [`.beads/.br_recovery`](.beads/.br_recovery).
   That is currently a cleanup warning, not a functional error.
+- If the workspace regresses again, prefer a fresh DB rebuild from canonical
+  JSONL over repeated in-place vacuum-style repair. This repo has now seen
+  vacuum clear corruption once and then later regress, while the clean rebuild
+  path restored both integrity and exact-ID lookup.
 - If DB-backed `br ready`/`show`/`list` start returning `snapshot conflict`
   immediately after repair or checkpoint work, restart long-lived `bv` or other
   DB readers first. Until they release the stale snapshot, use `br ... --no-db`
@@ -125,17 +132,23 @@ so only the direct parity and integrity checks are evaluated.
   mutation path.
 - The active local `br` path is intentional, but it is not a permanent
   version-policy claim. Reevaluate future upstream versions explicitly rather
-  than assuming the local patch will be needed forever.
-- Do not replace the default `br` symlink with stock upstream `0.1.34` or
-  current upstream `main` unless they have been repro-verified locally against
-  the same fresh-init and doctor matrix.
+  than assuming `0.1.40` will stay safe forever.
+- Do not replace the default `br` symlink with a newer upstream build unless it
+  has been repro-verified locally against the same fresh-init matrix and a
+  Roger workspace rebuild test.
 - The pre-repair database files were preserved in
-  [`.beads/.manual_repair_20260328_2056`](/Users/cdilga/Documents/dev/roger-reviewer/.beads/.manual_repair_20260328_2056)
+  [`.beads/.manual_repair_20260328_2056`](.beads/.manual_repair_20260328_2056)
   for audit and rollback purposes.
 - A second repair snapshot from the 2026-03-29 sync pass was preserved in
-  [`.beads/.manual_repair_20260329_201553`](/Users/cdilga/Documents/dev/roger-reviewer/.beads/.manual_repair_20260329_201553).
+  [`.beads/.manual_repair_20260329_201553`](.beads/.manual_repair_20260329_201553).
 - A third post-diagnosis snapshot was preserved in
-  [`.beads/.manual_repair_20260329_2146`](/Users/cdilga/Documents/dev/roger-reviewer/.beads/.manual_repair_20260329_2146).
+  [`.beads/.manual_repair_20260329_2146`](.beads/.manual_repair_20260329_2146).
+- A fourth backup snapshot was preserved immediately before the successful
+  2026-04-14 live repair in
+  [`.beads/.manual_repair_20260414_223207`](.beads/.manual_repair_20260414_223207).
+- A fifth backup snapshot was preserved immediately before the successful
+  2026-04-15 rebuild-and-swap repair in
+  [`.beads/.manual_repair_20260415_033050`](.beads/.manual_repair_20260415_033050).
 - A narrower `br` derived-cache bug still exists on some maintenance paths that
   bypass normal `br update` auto-flush behavior. In a temp repro, a dirty issue
   exported the JSONL successfully and then failed while repopulating

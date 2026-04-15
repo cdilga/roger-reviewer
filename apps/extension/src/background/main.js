@@ -4,7 +4,6 @@ const SUPPORTED_ACTIONS = new Set([
   'start_review',
   'resume_review',
   'show_findings',
-  'refresh_review',
 ]);
 const CANONICAL_ATTENTION_STATES = new Set([
   'awaiting_user_input',
@@ -204,7 +203,7 @@ async function handleLaunchMessage(payload) {
       ok: false,
       mode: 'invalid_request',
       message: `Unsupported action: ${String(intent.action)}`,
-      guidance: 'Supported actions: start_review, resume_review, show_findings, refresh_review.',
+      guidance: 'Supported actions: start_review, resume_review, show_findings.',
     };
   }
 

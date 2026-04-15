@@ -16,3 +16,4 @@
 # Temporary
 last-touched
 *.tmp
+ci-failure-intake-state.json

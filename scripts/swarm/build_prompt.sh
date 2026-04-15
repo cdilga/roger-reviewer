@@ -88,6 +88,7 @@ Persistent swarm identity rules:
 - Record exact validation commands when closing beads and run \`br sync --flush-only\` after bead state/note changes.
 - If \`br\` reports \`database is busy\`, back off and retry before concluding queue state.
 - Full operating doctrine lives at \`docs/swarm/worker-operating-doctrine.md\`.
+- If \`rch\` is installed, prefer \`rch exec -- <command>\` for CPU-heavy cargo builds/tests. If no worker fleet exists, local fail-open execution is still acceptable; do not wait for remote capacity that is not actually configured.
 - Do not use a PR-based dev workflow for swarm work: no \`gh pr\`, no opening/managing PRs, no PR review/comment loops for your own changes, and no assumption that each agent should branch off independently unless the user explicitly says so.
 - Lane assignment: this worker is in the \`${WORK_LANE}\` lane.
 - Control-plane mode is \`${CONTROL_PLANE_MODE}\`: panes are expected to be reclaimed by persistent assign-watch/controller loops, so if no safe bead is claimable post an explicit exhausted-queue status in Agent Mail instead of idling silently.

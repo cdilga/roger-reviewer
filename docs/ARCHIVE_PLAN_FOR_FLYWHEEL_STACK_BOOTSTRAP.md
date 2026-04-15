@@ -5,10 +5,10 @@ localization. It is no longer the canonical target for this repository.
 
 Current canonical planning artifacts:
 
-- [`PLAN_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md)
-- [`BEAD_SEED_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/BEAD_SEED_FOR_ROGER_REVIEWER.md)
-- [`ALIEN_ARTEFACTS_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/ALIEN_ARTEFACTS_FOR_ROGER_REVIEWER.md)
-- [`PLANNING_WORKFLOW_PROMPTS.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLANNING_WORKFLOW_PROMPTS.md)
+- [`PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md)
+- [`BEAD_SEED_FOR_ROGER_REVIEWER.md`](docs/BEAD_SEED_FOR_ROGER_REVIEWER.md)
+- [`ALIEN_ARTEFACTS_FOR_ROGER_REVIEWER.md`](docs/ALIEN_ARTEFACTS_FOR_ROGER_REVIEWER.md)
+- [`PLANNING_WORKFLOW_PROMPTS.md`](docs/PLANNING_WORKFLOW_PROMPTS.md)
 
 The remainder of this document is preserved as historical methodology context.
 

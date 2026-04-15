@@ -5,6 +5,7 @@
 .bv/
 
 # Project-local Codex state
+.codex
 .codex/
 .claude/*
 !.claude/skills/
@@ -25,6 +26,9 @@ target/
 .beads_backup/
 
 # Local swarm/runtime state
+.ntm/
+.swarm-kit/
+mcp_agent_mail/
 .ntm/logs/
 .ntm/pids/
 .ntm/summaries/

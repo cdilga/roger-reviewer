@@ -4,9 +4,9 @@ This document turns the canonical plan's validation posture into an
 implementation-facing support contract for Roger `0.1.0`.
 
 It narrows, but does not override, the canonical plan in
-[`docs/PLAN_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md)
+[`docs/PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md)
 and the release-facing validation matrix in
-[`docs/RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md).
+[`docs/RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md).
 
 ## Purpose
 
@@ -108,7 +108,7 @@ Required posture:
 Required contents for `0.1.0`:
 
 - the six budget-approved major journeys in
-  [`docs/AUTOMATED_E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/AUTOMATED_E2E_BUDGET.json)
+  [`docs/AUTOMATED_E2E_BUDGET.json`](docs/AUTOMATED_E2E_BUDGET.json)
 - only executable suites that have landed and actually run in the relevant
   lane count as functional coverage for those journeys
 - any seventh heavyweight E2E only after explicit justification and budget
@@ -281,7 +281,7 @@ Shared-source coverage without a fresh Edge run is sufficient only when:
 ## Budget File
 
 The machine-readable budget for automated heavyweight E2Es lives in
-[`docs/AUTOMATED_E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/AUTOMATED_E2E_BUDGET.json).
+[`docs/AUTOMATED_E2E_BUDGET.json`](docs/AUTOMATED_E2E_BUDGET.json).
 
 Contract:
 

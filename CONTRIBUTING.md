@@ -1,6 +1,6 @@
 # Contributing
 
-Roger Reviewer currently accepts Issues, not Pull Requests.
+Roger Reviewer uses an issue-first contribution path.
 
 If you want to help, start with an issue:
 
@@ -18,6 +18,7 @@ The best issues include:
 - the command, surface, or browser involved
 - screenshots or terminal output when they clarify the problem
 
-Please do not open unsolicited pull requests. The public workflow for this
-project is issue-first. If a change should exist, it should be discussed and
-shaped there before any implementation work starts.
+If a change should exist, discuss and shape it in an issue first so scope,
+support claims, and validation expectations are clear before implementation
+work starts. Code contributions and PRs should follow that coordinated path
+rather than bypassing it.

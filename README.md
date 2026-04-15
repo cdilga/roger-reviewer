@@ -42,13 +42,7 @@ Roger takes a different position:
 
 Roger ships through GitHub Releases. That is the public install surface.
 
-### macOS
-
-```bash
-curl -fsSL https://github.com/cdilga/roger-reviewer/releases/latest/download/rr-install.sh | bash
-```
-
-### Linux
+### macOS / Linux
 
 ```bash
 curl -fsSL https://github.com/cdilga/roger-reviewer/releases/latest/download/rr-install.sh | bash
@@ -84,13 +78,15 @@ rr findings
 
 ```bash
 rr resume --pr 123
-rr refresh --pr 123
 ```
 
 Replace `123` with your pull request number. For `0.1.0`, the intended provider
 order is GitHub Copilot CLI, OpenCode, Codex, Gemini, then Claude Code.
 OpenCode remains the continuity reference path, and the browser companion is
 optional.
+
+Roger reconciles stale review state automatically when you re-enter with
+`rr review`, `rr resume`, `rr return`, `rr status`, or `rr findings`.
 
 ## Commands
 
@@ -101,8 +97,7 @@ optional.
 | `rr status` | Show the current session, attention state, and next step |
 | `rr findings` | Inspect the structured findings Roger has materialized |
 | `rr sessions` | List local review sessions |
-| `rr refresh --pr 123` | Reconcile the review after new commits land |
-| `rr return --pr 123` | Return from the underlying coding session to Roger |
+| `rr return --pr 123` | Rebind a dropped-out bare OpenCode session back to Roger |
 | `rr extension setup --browser edge` | Set up the optional browser companion |
 | `rr extension doctor --browser edge` | Verify the browser companion path |
 
@@ -112,6 +107,14 @@ optional.
 
 Install `rr`, start from the repo, and do the real review work locally. This is
 the primary Roger path.
+
+`rr return` is narrower than `rr resume`. Use it only after you intentionally
+drop out of Roger into a bare harness session and want Roger to rebind that
+work back to the original review session. If you are already in a normal
+Roger-managed session, you usually want `rr resume` or just to keep working in
+that session. In `0.1.0`, `rr return` is only blessed on OpenCode tier-B
+continuity paths; Codex, Copilot, Gemini, and Claude should fail closed rather
+than pretend to support it.
 
 ### 2. Browser-assisted launch
 
@@ -158,7 +161,7 @@ flowchart TD
     WORKER["Review worker gets<br/>bounded task + context"]:::core
     PACK["Structured findings pack<br/>plus raw output"]:::core
     NORMALIZE["Roger normalizes findings,<br/>attention, and lineage"]:::core
-    INSPECT["TUI / CLI inspect, triage,<br/>clarify, and refresh"]:::core
+    INSPECT["TUI / CLI inspect, triage,<br/>clarify, and reconcile"]:::core
     DRAFT["Draft comments locally"]:::core
     APPROVE{"Explicit human approval?"}:::gate
     POST["GitHub adapter posts"]:::external
@@ -174,7 +177,7 @@ flowchart TD
     VERIFY -- no --> BLOCK
     VERIFY -- yes --> WORKER --> PACK --> NORMALIZE --> INSPECT
     NORMALIZE --> STORE
-    INSPECT -- follow-up / refresh --> WORKER
+    INSPECT -- follow-up / reconcile --> WORKER
     INSPECT --> DRAFT --> APPROVE
     APPROVE -- not yet --> INSPECT
     APPROVE -- approved --> POST --> AUDIT --> STORE
@@ -204,7 +207,7 @@ Roger's browser companion is optional and launch-oriented.
 
 ## Contributing
 
-Roger Reviewer accepts Issues, not Pull Requests.
+Roger Reviewer uses an issue-first contribution path.
 
 If you found a bug, want a feature, or want to challenge a workflow or product
 assumption, open an issue first:

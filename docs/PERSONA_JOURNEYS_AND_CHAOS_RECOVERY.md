@@ -3,11 +3,11 @@ Audience: maintainers shaping user-facing flows, acceptance criteria, integratio
 coverage, and E2E candidates
 Primary references:
 
-- [`PLAN_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md)
-- [`REVIEW_FLOW_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/REVIEW_FLOW_MATRIX.md)
-- [`TEST_HARNESS_GUIDELINES.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TEST_HARNESS_GUIDELINES.md)
-- [`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md)
-- [`VALIDATION_INVARIANT_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_INVARIANT_MATRIX.md)
+- [`PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md)
+- [`REVIEW_FLOW_MATRIX.md`](docs/REVIEW_FLOW_MATRIX.md)
+- [`TEST_HARNESS_GUIDELINES.md`](docs/TEST_HARNESS_GUIDELINES.md)
+- [`RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md)
+- [`VALIDATION_INVARIANT_MATRIX.md`](docs/VALIDATION_INVARIANT_MATRIX.md)
 
 # Persona Journeys And Chaos Recovery
 
@@ -33,7 +33,7 @@ the user back on track.
 - beads, acceptance criteria, suite metadata, and manual smoke notes may cite
   either a persona family or a specific scenario cut
 - when a scenario cut changes materially, update this document together with
-  [`REVIEW_FLOW_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/REVIEW_FLOW_MATRIX.md)
+  [`REVIEW_FLOW_MATRIX.md`](docs/REVIEW_FLOW_MATRIX.md)
 
 ## How to use this artifact
 
@@ -487,9 +487,9 @@ When designing a new high-value integration test, release smoke, or future E2E:
 
 1. start from one `PJ-xxY` scenario id in this document
 2. map it to one or more flow ids in
-   [`REVIEW_FLOW_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/REVIEW_FLOW_MATRIX.md)
+   [`REVIEW_FLOW_MATRIX.md`](docs/REVIEW_FLOW_MATRIX.md)
 3. name the relevant invariant ids from
-   [`VALIDATION_INVARIANT_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_INVARIANT_MATRIX.md)
+   [`VALIDATION_INVARIANT_MATRIX.md`](docs/VALIDATION_INVARIANT_MATRIX.md)
 4. choose the cheapest truthful proof lane before escalating to E2E
 5. if a scenario is proposed as a heavyweight E2E, explain why lower-level
    integration cuts do not defend the same promise cheaply enough

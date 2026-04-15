@@ -370,7 +370,7 @@ pub fn handle_bridge_intent(
     }
 
     match intent.action.as_str() {
-        "start_review" | "resume_review" | "show_findings" | "refresh_review" => {
+        "start_review" | "resume_review" | "show_findings" => {
             BridgeResponse::success(
                 &intent.action,
                 &format!(
@@ -383,7 +383,7 @@ pub fn handle_bridge_intent(
         other => BridgeResponse::failure(
             other,
             &format!("Unknown bridge action: {other}"),
-            "Supported actions: start_review, resume_review, show_findings, refresh_review",
+            "Supported actions: start_review, resume_review, show_findings",
         ),
     }
 }

@@ -3,9 +3,9 @@
 This document closes `rr-006.2`.
 
 It turns the accepted in-process runtime direction from
-[`ADR 008`](/Users/cdilga/Documents/dev/roger-reviewer/docs/adr/008-tui-runtime-and-concurrency-boundary.md)
+[`ADR 008`](docs/adr/008-tui-runtime-and-concurrency-boundary.md)
 and the harness constraints from
-[`HARNESS_SESSION_LINKAGE_CONTRACT.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/HARNESS_SESSION_LINKAGE_CONTRACT.md)
+[`HARNESS_SESSION_LINKAGE_CONTRACT.md`](docs/HARNESS_SESSION_LINKAGE_CONTRACT.md)
 into a concrete `0.1.0` supervision policy.
 
 ## Scope
@@ -126,7 +126,7 @@ Explicit cancellation required once started:
 
 - start review
 - resume review
-- refresh review
+- review follow-on work that mutates Roger-owned state
 - follow-up pass
 - clarification pass
 - post approved drafts

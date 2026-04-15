@@ -8,10 +8,10 @@ helper boundaries, and failure-artifact preservation rules.
 
 Authority:
 
-- [`AGENTS.md`](/Users/cdilga/Documents/dev/roger-reviewer/AGENTS.md)
-- [`docs/TEST_HARNESS_GUIDELINES.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TEST_HARNESS_GUIDELINES.md)
-- [`docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md)
-- [`docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md)
+- [`AGENTS.md`](AGENTS.md)
+- [`docs/TEST_HARNESS_GUIDELINES.md`](docs/TEST_HARNESS_GUIDELINES.md)
+- [`docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md`](docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md)
+- [`docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md)
 
 This document narrows those contracts into the concrete layout that
 `rr-025.2` (fixture corpus and manifest) and `rr-025.3` (CI wiring) can
@@ -23,7 +23,7 @@ implement without inventing their own schemas.
 
 - All validation lives under one canonical layout. No per-suite ad hoc paths.
 - Suite naming derives from the family prefix table in
-  [`VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md).
+  [`VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md).
 - Roger's conceptual validation lanes are `unit`, `integration`, and `e2e`.
   The current scaffold keeps runner-compatible subkinds such as `property`,
   `acceptance`, and `smoke`; treat them as refinements or release evidence, not
@@ -78,7 +78,7 @@ Compatibility note:
 ## Suite Naming Conventions
 
 Suite file and module names must use the prefix families defined in
-[`VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md):
+[`VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md):
 
 | Prefix | Purpose |
 |--------|---------|
@@ -144,12 +144,12 @@ preserve_failure_artifacts = true     # must be true for acceptance, e2e, bridge
 
 - `id` must be unique across all suites in the Roger workspace.
 - `flow_ids` must map to IDs defined in
-  [`REVIEW_FLOW_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/REVIEW_FLOW_MATRIX.md).
+  [`REVIEW_FLOW_MATRIX.md`](docs/REVIEW_FLOW_MATRIX.md).
 - `invariant_ids` should map to ids defined in
-  [`VALIDATION_INVARIANT_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_INVARIANT_MATRIX.md)
+  [`VALIDATION_INVARIANT_MATRIX.md`](docs/VALIDATION_INVARIANT_MATRIX.md)
   whenever the suite defends a release-critical product truth.
 - `fixture_families` must map to families defined in
-  [`VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md).
+  [`VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md).
 - `degraded = true` and `bounded = true` must be explicit for any suite
   testing non-parity or launch-only behavior; the suite must not silently
   pass for full-feature behavior.
@@ -263,7 +263,7 @@ failures/
 ```
 
 Artifacts must use the names from
-[`TEST_HARNESS_GUIDELINES.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TEST_HARNESS_GUIDELINES.md)
+[`TEST_HARNESS_GUIDELINES.md`](docs/TEST_HARNESS_GUIDELINES.md)
 § Required artifact classes.
 
 ## Proof Manifests

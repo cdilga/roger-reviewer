@@ -9,7 +9,7 @@ It exists to answer one practical question:
   resume, and later analytics all work without bloating the hot path
 
 The canonical product plan remains
-[`PLAN_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md).
+[`PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md).
 
 ## Posture
 

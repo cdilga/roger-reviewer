@@ -71,7 +71,15 @@ Use prompt families instead of one generic marching-orders prompt:
 - `recovery_continue`
 - `recovery_exhausted_queue`
 
-These are seeded in [command_palette.md](/Users/cdilga/Documents/dev/roger-reviewer/docs/swarm/command_palette.md).
+For CPU-heavy cargo validation or build work, make `rch` part of the operating
+habit when it is installed:
+
+- ask workers to prefer `rch exec -- <command>` for heavy `cargo` runs
+- do not stall if no worker fleet exists; local-only fail-open is still useful
+- do not widen Roger support claims just because the operator machine happens to
+  have `rch`
+
+These are seeded in [command_palette.md](command_palette.md).
 
 ## Built Rebroadcast
 

@@ -40,7 +40,6 @@ const ACTIONS = [
   { id: 'start_review', label: 'Start' },
   { id: 'resume_review', label: 'Resume' },
   { id: 'show_findings', label: 'Findings' },
-  { id: 'refresh_review', label: 'Refresh' },
 ];
 
 const ATTENTION_STYLES = {
@@ -60,7 +59,7 @@ const ATTENTION_STYLES = {
     color: 'var(--fgColor-success, #1a7f37)',
   },
   refresh_recommended: {
-    label: 'Refresh recommended',
+    label: 'Resume review recommended',
     background: 'var(--bgColor-accent-muted, #ddf4ff)',
     color: 'var(--fgColor-accent, #0969da)',
   },
@@ -76,8 +75,7 @@ function deriveActionModel(attentionState) {
   let primaryActionId = 'start_review';
 
   if (attentionState === 'refresh_recommended') {
-    visibleActions.add('refresh_review');
-    primaryActionId = 'refresh_review';
+    primaryActionId = 'resume_review';
   } else if (attentionState === 'findings_ready' || attentionState === 'awaiting_outbound_approval') {
     primaryActionId = 'show_findings';
   } else if (attentionState === 'awaiting_user_input' || attentionState === 'review_failed') {

@@ -2,8 +2,8 @@
 
 Status: completed Round 04 closeout artifact. This document records the
 reconciliation outcome; the canonical spec remains
-[`AGENTS.md`](/Users/cdilga/Documents/dev/roger-reviewer/AGENTS.md) plus
-[`PLAN_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md).
+[`AGENTS.md`](AGENTS.md) plus
+[`PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md).
 
 Date: 2026-03-29
 
@@ -22,13 +22,13 @@ job was to:
 
 ## Source Set Reconciled
 
-- [`AGENTS.md`](/Users/cdilga/Documents/dev/roger-reviewer/AGENTS.md)
-- [`PLAN_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md)
-- [`ROUND_04_ARCHITECTURE_RECONCILIATION_BRIEF.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/ROUND_04_ARCHITECTURE_RECONCILIATION_BRIEF.md)
-- [`DATA_MODEL_AND_STORAGE_CONTRACT.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/DATA_MODEL_AND_STORAGE_CONTRACT.md)
-- [`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md)
-- [`REVIEW_FLOW_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/REVIEW_FLOW_MATRIX.md)
-- [`docs/adr/README.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/adr/README.md)
+- [`AGENTS.md`](AGENTS.md)
+- [`PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md)
+- [`ROUND_04_ARCHITECTURE_RECONCILIATION_BRIEF.md`](docs/ROUND_04_ARCHITECTURE_RECONCILIATION_BRIEF.md)
+- [`DATA_MODEL_AND_STORAGE_CONTRACT.md`](docs/DATA_MODEL_AND_STORAGE_CONTRACT.md)
+- [`RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md)
+- [`REVIEW_FLOW_MATRIX.md`](docs/REVIEW_FLOW_MATRIX.md)
+- [`docs/adr/README.md`](docs/adr/README.md)
 - accepted ADRs `001` through `008`
 
 ## What Round 04 Closed
@@ -130,7 +130,7 @@ The next planning step is not another broad critique round.
 The next sequence is:
 
 1. sync the live bead graph to the current
-   [`BEAD_SEED_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/BEAD_SEED_FOR_ROGER_REVIEWER.md)
+   [`BEAD_SEED_FOR_ROGER_REVIEWER.md`](docs/BEAD_SEED_FOR_ROGER_REVIEWER.md)
 2. run bead polishing on the live graph
 3. run and record a readiness review
 4. begin implementation only after that gate passes

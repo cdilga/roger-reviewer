@@ -80,7 +80,7 @@ flowchart TD
     WORKER["Review worker gets<br/>bounded task + context"]:::core
     PACK["Structured findings pack<br/>plus raw output"]:::core
     NORMALIZE["Roger normalizes findings,<br/>attention, and lineage"]:::core
-    INSPECT["TUI / CLI inspect, triage,<br/>clarify, and refresh"]:::core
+    INSPECT["TUI / CLI inspect, triage,<br/>clarify, and reconcile"]:::core
     DRAFT["Draft comments locally"]:::core
     APPROVE{"Explicit human approval?"}:::gate
     POST["GitHub adapter posts"]:::external
@@ -96,7 +96,7 @@ flowchart TD
     VERIFY -- no --> BLOCK
     VERIFY -- yes --> WORKER --> PACK --> NORMALIZE --> INSPECT
     NORMALIZE --> STORE
-    INSPECT -- follow-up / refresh --> WORKER
+    INSPECT -- follow-up / automatic reconciliation --> WORKER
     INSPECT --> DRAFT --> APPROVE
     APPROVE -- not yet --> INSPECT
     APPROVE -- approved --> POST --> AUDIT --> STORE

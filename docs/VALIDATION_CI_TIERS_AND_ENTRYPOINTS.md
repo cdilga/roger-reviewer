@@ -8,10 +8,10 @@ contract, and wires artifact retention and the automated E2E budget guard.
 
 Authority:
 
-- [`docs/VALIDATION_HARNESS_SCAFFOLD_CONTRACT.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_HARNESS_SCAFFOLD_CONTRACT.md)
-- [`docs/VALIDATION_FIXTURE_CORPUS_AND_MANIFEST.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_FIXTURE_CORPUS_AND_MANIFEST.md)
-- [`docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md)
-- [`docs/AUTOMATED_E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/AUTOMATED_E2E_BUDGET.json)
+- [`docs/VALIDATION_HARNESS_SCAFFOLD_CONTRACT.md`](docs/VALIDATION_HARNESS_SCAFFOLD_CONTRACT.md)
+- [`docs/VALIDATION_FIXTURE_CORPUS_AND_MANIFEST.md`](docs/VALIDATION_FIXTURE_CORPUS_AND_MANIFEST.md)
+- [`docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md`](docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md)
+- [`docs/AUTOMATED_E2E_BUDGET.json`](docs/AUTOMATED_E2E_BUDGET.json)
 
 This document does not override the lane and execution-policy definitions in
 `TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md`. It narrows them into concrete

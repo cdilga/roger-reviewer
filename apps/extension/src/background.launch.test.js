@@ -59,7 +59,7 @@ test('handleLaunchMessage fails closed when Native Messaging is unavailable', as
   });
 });
 
-for (const action of ['start_review', 'resume_review', 'show_findings', 'refresh_review']) {
+for (const action of ['start_review', 'resume_review', 'show_findings']) {
   test(`handleLaunchMessage preserves native messaging success envelope for ${action}`, async () => {
     const chromeStub = {
       runtime: {
@@ -94,3 +94,30 @@ for (const action of ['start_review', 'resume_review', 'show_findings', 'refresh
     });
   });
 }
+
+test('handleLaunchMessage rejects refresh_review as a browser action', async () => {
+  const chromeStub = {
+    runtime: {
+      lastError: null,
+      onMessage: { addListener: () => {} },
+      sendNativeMessage() {
+        throw new Error('native dispatch should not be reached');
+      },
+    },
+  };
+
+  await withChromeStub(chromeStub, async () => {
+    const response = await handleLaunchMessage({
+      intent: {
+        action: 'refresh_review',
+        owner: 'acme',
+        repo: 'widgets',
+        pr_number: 42,
+      },
+    });
+
+    assert.equal(response.ok, false);
+    assert.equal(response.mode, 'invalid_request');
+    assert.match(response.guidance, /Supported actions:/);
+  });
+});

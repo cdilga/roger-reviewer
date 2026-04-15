@@ -1,7 +1,7 @@
 # Roger Reviewer Tools
 
 This file is the practical agent-side environment guide for working on Roger
-Reviewer from another workstation such as a devbox.
+Reviewer from another workstation.
 
 Read this if you want a fresh machine to be able to:
 
@@ -47,6 +47,7 @@ Strongly recommended:
 Optional but useful:
 
 - `bv`
+- `rch`
 - `cargo fuzz`
 - `criterion`
 - `loom`
@@ -63,52 +64,12 @@ For the current Roger workflow, the important assumptions are:
 - `ntm` is optional orchestration, not a hard dependency
 - Agent Mail is the preferred coordination layer when using multiple agents
 
-## Fastest Setup Paths
-
-There are two sensible ways to bring up the agent-side environment.
-
-### 1. Manual local workstation setup
+## Setup Posture
 
 Use the install and verification sections in this file when you want a normal
-laptop or local workstation ready for repo work.
-
-This path is best when:
-
-- you are setting up one machine by hand
-- you want to understand each tool instead of inheriting a swarm bundle
-- you do not need the remote `devbox` swarm shape
-
-### 2. Remote `devbox` bootstrap
-
-If you are bringing up the known remote swarm environment, the fastest path is
-the repo bootstrap:
-
-```bash
-./scripts/swarm/setup_devbox_remote.sh --host devbox
-```
-
-Alternate configured hosts:
-
-```bash
-./scripts/swarm/setup_devbox_remote.sh --host devbox-cf
-./scripts/swarm/setup_devbox_remote.sh --host devbox-triton
-```
-
-That path is valuable because it already knows the Roger devbox shape and
-installs or syncs the agent-side pieces that are otherwise easy to miss:
-
-- `ntm`
-- Agent Mail
-- `br`
-- `bv`
-- Codex skills
-- the remote Roger checkout
-- the remote Agent Mail checkout
-
-If you want the remote path, read this file first and then use:
-
-- [`docs/swarm/DEVBOX_REMOTE_RUNBOOK.md`](docs/swarm/DEVBOX_REMOTE_RUNBOOK.md)
-- [`docs/DEV_MACHINE_ONBOARDING.md`](docs/DEV_MACHINE_ONBOARDING.md)
+laptop, workstation, or server ready for repo work. This repo no longer treats
+checked-in devbox/bootstrap wrappers as part of its contract; use direct `ntm`,
+Agent Mail, and the repo palette/prompt files instead.
 
 ## Core CLIs
 
@@ -163,6 +124,8 @@ sudo apt-get update
 sudo apt-get install -y ripgrep fd-find tmux
 ```
 
+On Debian/Ubuntu, the executable is usually `fdfind` rather than `fd`.
+
 ## Agent CLIs
 
 ### Codex
@@ -213,10 +176,6 @@ Important Roger-specific note:
   regressions
 - before automating `br`, read `AGENTS.md` and
   `docs/DEV_MACHINE_ONBOARDING.md`
-- if you are standing up the remote `devbox` workflow, let
-  `./scripts/swarm/setup_devbox_remote.sh` install and wire the expected `br`
-  path for you
-
 Local verification for the pinned-repo expectation:
 
 ```bash
@@ -276,8 +235,7 @@ bv --robot-plan
 
 Do not run bare `bv` from agent flows unless you intentionally want the TUI.
 
-If you are using the remote `devbox` bootstrap, it installs `bv` for you.
-Otherwise, verify availability explicitly:
+Verify availability explicitly:
 
 ```bash
 bv --version
@@ -322,6 +280,77 @@ For the Roger-specific operator surface after install, read:
 - [`docs/swarm/NTM_OPERATOR_GUIDE.md`](docs/swarm/NTM_OPERATOR_GUIDE.md)
 - [`docs/swarm/HUMAN_OPERATOR_FLYWHEEL_GUIDE.md`](docs/swarm/HUMAN_OPERATOR_FLYWHEEL_GUIDE.md)
 
+Install the repo palette into NTM:
+
+```bash
+./scripts/swarm/install_ntm_palette.sh
+```
+
+### `rch` — Remote Compilation Helper
+
+`rch` is optional. Roger does not require it as part of the canonical
+toolchain, but it is useful for swarm runs when builds or tests are CPU-heavy.
+
+Use it when:
+
+- you are running a multi-agent swarm and want one standard wrapper for heavy
+  `cargo` commands
+- a worker prompt or runbook explicitly suggests `rch exec -- <command>`
+- you already have a worker fleet configured, or you are happy with fail-open
+  local execution
+
+Do not treat it as a Roger requirement:
+
+- the repo must still work with direct local `cargo ...` commands
+- `rch` may be installed locally with zero workers and still be acceptable for
+  swarm use if it fails open to local execution
+
+Install from upstream:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/remote_compilation_helper/main/install.sh?$(date +%s)" | bash -s -- --easy-mode
+```
+
+Low-intrusion install when you do not want service setup:
+
+```bash
+tmpdir="$(mktemp -d)"
+git clone https://github.com/Dicklesworthstone/remote_compilation_helper.git "$tmpdir"
+RCH_NO_HOOK=1 RCH_SKIP_FLEET_SYNC=1 bash "$tmpdir/install.sh" --easy-mode --no-service --yes
+```
+
+Verify:
+
+```bash
+rch --version
+rch daemon start
+rch status --workers --jobs
+rch exec -- cargo check -p roger-cli --all-targets
+rch doctor
+```
+
+Expected truthful states:
+
+- if workers are configured, `rch` may offload compile work remotely
+- if no workers are configured, `rch` should still be usable in local-only
+  fail-open mode rather than blocking the swarm
+
+Typical usage:
+
+```bash
+rch exec -- cargo check -p roger-cli --all-targets
+rch exec -- cargo test --workspace --all-targets
+```
+
+Observed operator caveat:
+
+- the upstream installer may add a Claude `PreToolUse` hook in
+  `~/.claude/settings.json`; verify that side effect is acceptable on the
+  machine you are bootstrapping instead of assuming the install is hook-free
+- the active local build on this machine now detaches daemon start correctly in
+  shell-wrapped runs, so `rch daemon start`, `rch status --workers --jobs`, and
+  `rch exec ...` are all valid verification steps for the local-only posture
+
 ## Agent Mail
 
 Agent Mail is not part of Roger's shipped product, but it is part of the
@@ -336,10 +365,6 @@ Recommended shape:
 The best manual deep-dive is:
 
 - [`docs/DEV_MACHINE_ONBOARDING.md`](docs/DEV_MACHINE_ONBOARDING.md)
-
-The best remote-operator path is:
-
-- [`docs/swarm/DEVBOX_REMOTE_RUNBOOK.md`](docs/swarm/DEVBOX_REMOTE_RUNBOOK.md)
 
 Codex MCP registration:
 
@@ -406,9 +431,6 @@ test -f ~/.codex/skills/planning-workflow/SKILL.md && echo "planning-workflow ok
 If you maintain skills through marketplace installs or local clones, keep the
 result visible from that root or from your Codex user-level configuration.
 
-If you are using the remote `devbox` bootstrap, the setup script is already
-designed to sync the shared Codex skills from the primary machine.
-
 ## Suggested verification on a fresh machine
 
 Run this in order:
@@ -422,6 +444,7 @@ tmux -V
 rg --version
 br --version
 cass --version
+rch --version || echo "rch optional"
 test -f ~/.codex/auth.json && echo "codex auth ok"
 test -f ~/.codex/skills/planning-workflow/SKILL.md && echo "planning-workflow ok"
 ```
@@ -447,17 +470,17 @@ codex mcp list
 Observed on the current machine during this session:
 
 - `br` available
-- `cass` available
 - `ntm` available
+- `rch` available in local-only/fail-open posture
 - `codex` available
 - `claude` available
 - `bun` available
 - `cargo` and `rustc` available
 - `git`, `rg`, and `tmux` available
-- `fd` missing
+- `fdfind` available (`fd` alias not installed)
 
-That is enough for a strong Roger dev environment, but a fresh devbox should
-install `fd` as well.
+That is enough for a strong Roger dev environment, but a fresh machine should
+still install or alias `fd` for consistency.
 
 ## Related docs
 

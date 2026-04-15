@@ -322,8 +322,7 @@ Resolution sequence:
 
 Problem:
 
-- some docs imply `roger-clarify`, `roger-open-drafts`, and `roger-refresh` are
-  effectively there
+- some docs imply `roger-clarify` and `roger-open-drafts` are effectively there
 - accepted contract and live code only safely support help/status/findings/return
 
 Best resolution:
@@ -344,8 +343,7 @@ Ownership:
 Resolution sequence:
 
 1. align flow docs and support docs to the tiny safe subset
-2. add future beads for `roger-clarify`, `roger-open-drafts`, and
-   `roger-refresh`
+2. add future beads for `roger-clarify` and `roger-open-drafts`
 3. only widen support claims after those commands are real and validated
 
 ### R5. No canonical recall envelope

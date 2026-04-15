@@ -33,10 +33,10 @@ do
   fi
 done
 
-echo "[validate] assert popup action set remains Start/Resume/Findings/Refresh"
+echo "[validate] assert popup action set remains Start/Resume/Findings"
 node <<'NODE'
 const { ACTIONS } = require('./apps/extension/src/popup/main.js');
-const expected = ['start_review', 'resume_review', 'show_findings', 'refresh_review'];
+const expected = ['start_review', 'resume_review', 'show_findings'];
 const actual = Array.isArray(ACTIONS) ? ACTIONS.map((action) => action.id) : [];
 if (JSON.stringify(actual) !== JSON.stringify(expected)) {
   console.error(`unexpected popup action set: ${JSON.stringify(actual)}`);

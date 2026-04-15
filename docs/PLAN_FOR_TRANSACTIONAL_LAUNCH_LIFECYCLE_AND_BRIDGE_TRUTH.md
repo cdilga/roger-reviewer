@@ -5,9 +5,10 @@ into `docs/PLAN_FOR_ROGER_REVIEWER.md` and the relevant support contracts rather
 than left here as a long-lived parallel source of product truth.
 Audience: Roger maintainers and implementers working on lifecycle truth, bridge
 realism, and cross-provider session binding in `0.1.x`
-Scope: `rr review`, `rr resume`, `rr refresh`, `rr return`, and browser bridge
-handoff semantics where a real provider session must be verified before Roger
-claims success
+Scope: `rr review`, `rr resume`, `rr return`, and browser bridge handoff
+semantics where a real provider session must be verified before Roger claims
+success. Refresh-like reconciliation is automatic and bounded, not a separate
+operator command.
 
 ---
 
@@ -19,7 +20,9 @@ hardest under-investigated lane left in the current planning stack.
 The canonical plan already says the right high-level things:
 
 - Roger must not report success before a real provider session is verified
-- launch/resume/refresh/return should be transactional per user-visible action
+- launch/resume/return should be transactional per user-visible action
+- stale review-state reconciliation should happen automatically when Roger
+  re-enters or observes drift, not as a standalone operator verb
 - the bridge must not return pretend success
 - the launch-attempt lifecycle must be distinct from the durable
   `ReviewSession` lifecycle
@@ -51,9 +54,8 @@ provider launch and the final Roger commit.
 ### The bridge still returns pretend success
 
 In `packages/bridge/src/lib.rs`, `handle_bridge_intent` currently returns
-success for `start_review`, `resume_review`, `show_findings`, and
-`refresh_review` without actually invoking `rr`. The response body even leaves
-the session id empty.
+success for `start_review`, `resume_review`, and `show_findings` without
+actually invoking `rr`. The response body even leaves the session id empty.
 
 That violates the canonical rule that the serious bridge path must invoke the
 real CLI and return Roger-owned ids only after the command really succeeded.
@@ -147,7 +149,6 @@ Roger needs a durable aggregate that represents one specific attempt to:
 
 - start a review
 - resume a review
-- refresh a review
 - return from bare harness context
 
 `LaunchAttempt` is not the same thing as:
@@ -191,7 +192,7 @@ Examples:
 - start review
 - resume by locator
 - resume by reseed
-- refresh into a new run
+- automatic reconciliation into a new run when needed
 - return-to-Roger rebind
 
 ### D5. Bridge actions dispatch through real `rr --robot`
@@ -222,8 +223,15 @@ Examples:
 - `rr review --provider opencode` creates one attempt with action
   `start_review`
 - `rr resume --session X` creates one attempt with action `resume_review`
-- `rr refresh --session X` creates one attempt with action `refresh_review`
 - `rr return --session X` creates one attempt with action `return_to_roger`
+
+## Automatic reconciliation
+
+Roger may perform bounded automatic reconciliation of stale review state when
+it re-enters an existing session or observes drift through status and readback
+surfaces. That reconciliation should not create a separate user-visible action
+kind or a dedicated bridge request. It should update the same durable session
+truth that `review`, `resume`, and `return` already maintain.
 
 Retries create new attempt ids. Roger should not reuse one failed attempt row as
 if it were a fresh try.
@@ -311,7 +319,6 @@ Suggested minimal relational fields:
 - `action_kind`
   - `start_review`
   - `resume_review`
-  - `refresh_review`
   - `return_to_roger`
 - `provider`
 - `surface`
@@ -343,8 +350,8 @@ Suggested minimal relational fields:
 
 - `attempt_nonce` is the anti-stale-binding anchor. External hook or provider
   verification evidence must match it before Roger trusts the evidence.
-- `requested_session_id` links resume/refresh/return attempts to an intended
-  existing Roger session without implying success.
+- `requested_session_id` links resume/return attempts to an intended existing
+  Roger session without implying success.
 - `committed_review_session_id` and `committed_review_run_id` let doctor and
   recovery flows prove what, if anything, was finalized.
 - `verification_artifact_id` keeps the proof object durable and inspectable.
@@ -465,21 +472,8 @@ Recommended algorithm:
 6. finalize atomically:
    - create a new `ReviewRun` when appropriate
    - update continuity/attention state
-   - refresh stored locator or bundle refs
+   - reconcile stored locator or bundle refs
    - mark attempt `verified_reopened` or `verified_reseeded`
-
-## `rr refresh`
-
-`refresh` should follow the same execution discipline as `resume`, but the new
-run kind and invalidation effects differ.
-
-Required finalization behavior:
-
-- create a new run
-- preserve target tuple
-- record invalidation triggers that will later revoke stale approvals
-- never silently mutate outbound approvals during the speculative phase before
-  verification succeeds
 
 ## `rr return`
 
@@ -514,7 +508,7 @@ Atomic unit should include:
 - `launch_attempts` success transition
 - append-only event rows
 
-### Resume/refresh/return finalization
+### Resume/return finalization
 
 Atomic unit should include:
 
@@ -607,13 +601,6 @@ Requires:
 - successful `rr resume --robot ...`
 - canonical `session_id`
 
-### `refresh_review`
-
-Requires:
-
-- successful `rr refresh --robot ...`
-- canonical `session_id`
-
 ### `show_findings`
 
 This action should not claim session success unless it has enough information to
@@ -654,10 +641,14 @@ This lane should be defended mostly by integration tests, not heavyweight E2E.
 ### CLI lifecycle truth
 
 - `rr review` does not create durable session rows before verification succeeds
+- `rr resume` and `rr return` are transactional and do not expose stale
+  continuity as committed success
 - crash/fault injection between provider verification and final commit does not
   leave a fake successful session
 - retry after partial failure creates a new attempt id and does not reuse stale
   evidence
+- automatic reconciliation after re-entry or state drift updates review truth
+  without requiring a separate manual refresh step
 
 ### Provider verification safety
 
@@ -703,8 +694,8 @@ This lane should be defended mostly by integration tests, not heavyweight E2E.
 
 - rework `rr review`
 - rework `rr resume`
-- rework `rr refresh`
 - rework `rr return`
+- add automatic reconciliation into status/readback paths
 - add fault-injection tests around verification and final commit
 
 ### Slice 4. Bridge retrofit

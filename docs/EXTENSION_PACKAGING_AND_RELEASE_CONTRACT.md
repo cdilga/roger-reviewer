@@ -4,10 +4,10 @@ This document freezes the `0.1.0` packaging, contract-export, install, and
 release shape for Roger's browser extension and Native Messaging bridge.
 
 It narrows the accepted direction from
-[`PLAN_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md),
-[`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md),
+[`PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md),
+[`RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md),
 and
-[`ADR 003`](/Users/cdilga/Documents/dev/roger-reviewer/docs/adr/003-browser-bridge-and-extension-dependency-policy.md)
+[`ADR 003`](docs/adr/003-browser-bridge-and-extension-dependency-policy.md)
 into an implementation-facing contract for `rr-007.1`.
 
 ## Scope

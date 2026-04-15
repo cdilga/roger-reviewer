@@ -18,7 +18,7 @@ human notices them on GitHub.
 
 For the broader command-surface expectations and user-flow hardening priorities
 across `rr review`, repo-local re-entry, TUI/workspace entry, full local
-review, refresh, and browser launch, see
+review, automatic reconciliation, and browser launch, see
 [`PLAN_FOR_ROGER_REVIEWER.md`](PLAN_FOR_ROGER_REVIEWER.md).
 
 ---
@@ -367,7 +367,7 @@ The current `rr-jj1e` / release-proof direction is correct and should remain.
 
 | Product flow | Canonical surface | Defending suite(s) | Tier |
 |---|---|---|---|
-| Local core review | `rr review/resume/findings/status/refresh` | `e2e_core_review_happy_path` + existing int/accept suites | nightly/release |
+| Local core review | `rr review/resume/findings/status` | `e2e_core_review_happy_path` + existing int/accept suites | nightly/release |
 | Guided browser setup | `rr extension setup` | `accept_extension_setup_guided`, `int_cli_extension_command_surface` | gated/nightly |
 | Setup truth and repair | `rr extension doctor` | `int_cli_extension_command_surface`, `accept_extension_setup_guided` | gated/nightly |
 | Browser panel render | GitHub PR content script | `int_extension_panel_render_contract` | pr/gated |
@@ -389,7 +389,6 @@ rr resume
 rr return
 rr findings
 rr status
-rr refresh
 rr search
 rr update
 rr extension setup

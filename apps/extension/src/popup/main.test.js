@@ -8,6 +8,7 @@ const {
   buildLaunchMessage,
   buildPopupViewModel,
   parsePullRequestContextFromUrl,
+  SUPPORTED_ACTIONS,
   routePopupAction,
 } = require('./main.js');
 
@@ -93,6 +94,19 @@ test('routePopupAction routes every documented action through dispatcher payload
   }
 
   assert.deepEqual(seenActions, ACTIONS.map((action) => action.id));
+});
+
+test('routePopupAction no longer exposes refresh_review as a supported action', () => {
+  assert.equal(SUPPORTED_ACTIONS.has('refresh_review'), false);
+  assert.throws(
+    () =>
+      buildLaunchMessage('refresh_review', {
+        owner: 'octo',
+        repo: 'roger-reviewer',
+        pr_number: 42,
+      }),
+    /Unsupported action/
+  );
 });
 
 test('buildLaunchMessage rejects unsupported actions', () => {

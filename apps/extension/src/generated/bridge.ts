@@ -4,8 +4,7 @@
 export type BridgeAction =
   | 'start_review'
   | 'resume_review'
-  | 'show_findings'
-  | 'refresh_review';
+  | 'show_findings';
 
 export interface BridgeLaunchIntent {
   action: BridgeAction;

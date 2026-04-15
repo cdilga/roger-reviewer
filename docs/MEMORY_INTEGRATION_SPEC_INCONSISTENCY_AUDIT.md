@@ -188,7 +188,6 @@ Current safe truth:
 
 Still only optional follow-on:
 
-- `roger-refresh`
 - `roger-clarify`
 - `roger-open-drafts`
 

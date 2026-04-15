@@ -36,9 +36,9 @@ CARGO_TARGET_DIR=/tmp/br-target-v0134 cargo build --release --bin br
 
 ### Docker helper scripts
 
-- [docker_repro_v0134_fresh_init_corruption.sh](/Users/cdilga/Documents/dev/roger-reviewer/scripts/br-repros/docker_repro_v0134_fresh_init_corruption.sh)
-- [docker_repro_v0134_ready_mutates_state.sh](/Users/cdilga/Documents/dev/roger-reviewer/scripts/br-repros/docker_repro_v0134_ready_mutates_state.sh)
-- [docker_repro_v0134_foreign_key_parent_child_metadata.sh](/Users/cdilga/Documents/dev/roger-reviewer/scripts/br-repros/docker_repro_v0134_foreign_key_parent_child_metadata.sh)
+- [docker_repro_v0134_fresh_init_corruption.sh](scripts/br-repros/docker_repro_v0134_fresh_init_corruption.sh)
+- [docker_repro_v0134_ready_mutates_state.sh](scripts/br-repros/docker_repro_v0134_ready_mutates_state.sh)
+- [docker_repro_v0134_foreign_key_parent_child_metadata.sh](scripts/br-repros/docker_repro_v0134_foreign_key_parent_child_metadata.sh)
 
 ## Verified bug 1: fresh `br init` creates an integrity-check-failing DB on stock `v0.1.34`
 
@@ -89,8 +89,8 @@ Page 60: never used
 
 Helper script:
 
-- [repro_v0134_fresh_init_corruption.sh](/Users/cdilga/Documents/dev/roger-reviewer/scripts/br-repros/repro_v0134_fresh_init_corruption.sh)
-- [docker_repro_v0134_fresh_init_corruption.sh](/Users/cdilga/Documents/dev/roger-reviewer/scripts/br-repros/docker_repro_v0134_fresh_init_corruption.sh)
+- [repro_v0134_fresh_init_corruption.sh](scripts/br-repros/repro_v0134_fresh_init_corruption.sh)
+- [docker_repro_v0134_fresh_init_corruption.sh](scripts/br-repros/docker_repro_v0134_fresh_init_corruption.sh)
 
 Docker-validated output on 2026-04-01:
 
@@ -138,8 +138,8 @@ what users and agents naturally treat as a read-only queue inspection command.
 
 Helper script:
 
-- [repro_v0134_ready_mutates_state.sh](/Users/cdilga/Documents/dev/roger-reviewer/scripts/br-repros/repro_v0134_ready_mutates_state.sh)
-- [docker_repro_v0134_ready_mutates_state.sh](/Users/cdilga/Documents/dev/roger-reviewer/scripts/br-repros/docker_repro_v0134_ready_mutates_state.sh)
+- [repro_v0134_ready_mutates_state.sh](scripts/br-repros/repro_v0134_ready_mutates_state.sh)
+- [docker_repro_v0134_ready_mutates_state.sh](scripts/br-repros/docker_repro_v0134_ready_mutates_state.sh)
 
 Docker-validated output on 2026-04-01:
 
@@ -180,8 +180,8 @@ Observed behavior:
 
 Helper script:
 
-- [repro_foreign_key_parent_child_metadata.sh](/Users/cdilga/Documents/dev/roger-reviewer/scripts/br-repros/repro_foreign_key_parent_child_metadata.sh)
-- [docker_repro_v0134_foreign_key_parent_child_metadata.sh](/Users/cdilga/Documents/dev/roger-reviewer/scripts/br-repros/docker_repro_v0134_foreign_key_parent_child_metadata.sh)
+- [repro_foreign_key_parent_child_metadata.sh](scripts/br-repros/repro_foreign_key_parent_child_metadata.sh)
+- [docker_repro_v0134_foreign_key_parent_child_metadata.sh](scripts/br-repros/docker_repro_v0134_foreign_key_parent_child_metadata.sh)
 
 Docker-validated output on 2026-04-02:
 

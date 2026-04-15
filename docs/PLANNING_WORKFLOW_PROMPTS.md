@@ -1,11 +1,11 @@
 # Planning Workflow Prompts
 
 These prompts adapt the local planning workflow to `Roger Reviewer`, using
-[`docs/roger-reviewer-brain-dump.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/roger-reviewer-brain-dump.md)
+[`docs/roger-reviewer-brain-dump.md`](./roger-reviewer-brain-dump.md)
 as the raw source document and
-[`PLAN_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md)
+[`PLAN_FOR_ROGER_REVIEWER.md`](./PLAN_FOR_ROGER_REVIEWER.md)
 as the canonical plan. Use
-[`ALIEN_ARTEFACTS_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/ALIEN_ARTEFACTS_FOR_ROGER_REVIEWER.md)
+[`ALIEN_ARTEFACTS_FOR_ROGER_REVIEWER.md`](./ALIEN_ARTEFACTS_FOR_ROGER_REVIEWER.md)
 when you want a smaller artifact pack for external critique rounds.
 
 ## Method Summary

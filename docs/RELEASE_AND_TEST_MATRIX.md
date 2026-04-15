@@ -8,14 +8,14 @@ high-value release targets and tests rather than pretending every combination is
 equally important.
 
 The canonical plan remains
-[`PLAN_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md).
+[`PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md).
 
 The implementation-facing harness contract lives in
-[`TEST_HARNESS_GUIDELINES.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TEST_HARNESS_GUIDELINES.md).
+[`TEST_HARNESS_GUIDELINES.md`](docs/TEST_HARNESS_GUIDELINES.md).
 The automated E2E budget file lives in
-[`AUTOMATED_E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/AUTOMATED_E2E_BUDGET.json).
+[`AUTOMATED_E2E_BUDGET.json`](docs/AUTOMATED_E2E_BUDGET.json).
 The user-language scenario source for those journeys lives in
-[`PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md).
+[`PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md`](docs/PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md).
 
 Roger now recognizes only three validation lanes:
 
@@ -53,7 +53,7 @@ Rules:
 | Codex | Secondary, bounded | Exposed via `rr review --provider codex`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |
 | Gemini | Secondary, bounded | Exposed via `rr review --provider gemini`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |
 | Claude Code | Secondary, bounded | Exposed via `rr review --provider claude`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |
-| Pi-Agent | Not in `0.1.0` | Contract-shaping only |
+| Pi-Agent | Not in `0.1.0` | Planning-only future harness candidate; no live support claim, no `rr review --provider pi-agent`, and no Tier A/Tier B language until a later admission spike proves direct-CLI launch, Roger-safe policy control, audit capture, and truthful continuity behavior |
 
 Bounded-provider coverage in `0.1.0` should stay common-sense:
 

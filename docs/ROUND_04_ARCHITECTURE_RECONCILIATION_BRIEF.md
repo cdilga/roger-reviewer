@@ -5,7 +5,7 @@ conflicts with `AGENTS.md` or `PLAN_FOR_ROGER_REVIEWER.md`, those canonical
 documents still win until a later integration pass updates them.
 
 Outcome: Round 04 was closed via
-[`ROUND_04_ARCHITECTURE_RECONCILIATION_OUTCOME.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/ROUND_04_ARCHITECTURE_RECONCILIATION_OUTCOME.md).
+[`ROUND_04_ARCHITECTURE_RECONCILIATION_OUTCOME.md`](docs/ROUND_04_ARCHITECTURE_RECONCILIATION_OUTCOME.md).
 
 Date: 2026-03-29
 
@@ -183,7 +183,7 @@ Recommended envelope:
 
 Recommended initial logical names:
 
-- requests: `resume_session`, `refresh_review`, `show_findings`,
+- requests: `resume_session`, `reconcile_review_state`, `show_findings`,
   `ask_clarification`, `open_drafts`, `return_to_roger`
 - events: `session_updated`, `findings_updated`, `drafts_updated`,
   `attention_state_changed`, `background_job_changed`

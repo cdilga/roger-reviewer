@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT="${ROOT_DIR}/scripts/swarm/ingest_failed_actions_runs.py"
-BR_BIN="/Users/cdilga/.local/bin/br-0.1.34.pinned"
+BR_BIN="$("${ROOT_DIR}/scripts/swarm/resolve_br.sh" --print-path)"
 
 if [[ ! -x "${BR_BIN}" ]]; then
   echo "missing pinned br binary: ${BR_BIN}" >&2

@@ -161,7 +161,7 @@ fn unknown_action_rejected() {
 }
 
 #[test]
-fn refresh_review_action_is_accepted() {
+fn refresh_review_action_is_rejected() {
     let intent = BridgeLaunchIntent {
         action: "refresh_review".to_owned(),
         owner: "acme".to_owned(),
@@ -178,8 +178,9 @@ fn refresh_review_action_is_accepted() {
         gh_available: true,
     };
     let resp = handle_bridge_intent(&intent, &preflight, Path::new("/usr/local/bin/rr"));
-    assert!(resp.ok);
+    assert!(!resp.ok);
     assert_eq!(resp.action, "refresh_review");
+    assert!(resp.guidance.unwrap().contains("Supported actions"));
 }
 
 #[test]

@@ -3,7 +3,7 @@
 Status: reusable workflow prompt pack. This document is for studying an
 existing repo before planning, implementation, or adversarial review begins.
 It is intentionally more generic than
-[`PLANNING_WORKFLOW_PROMPTS.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLANNING_WORKFLOW_PROMPTS.md)
+[`PLANNING_WORKFLOW_PROMPTS.md`](./PLANNING_WORKFLOW_PROMPTS.md)
 so it can be adapted for other repositories.
 
 Use this when the problem is not "write the final plan from scratch" but

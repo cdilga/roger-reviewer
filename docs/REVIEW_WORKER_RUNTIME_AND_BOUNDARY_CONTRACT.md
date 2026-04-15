@@ -20,12 +20,12 @@ This contract makes that line explicit.
 
 ## Authority
 
-- [`AGENTS.md`](/Users/cdilga/Documents/dev/roger-reviewer/AGENTS.md)
-- [`docs/PLAN_FOR_ROGER_REVIEWER.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_ROGER_REVIEWER.md)
-- [`docs/HARNESS_SESSION_LINKAGE_CONTRACT.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/HARNESS_SESSION_LINKAGE_CONTRACT.md)
-- [`docs/PROMPT_PRESET_AND_OUTCOME_CONTRACT.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PROMPT_PRESET_AND_OUTCOME_CONTRACT.md)
-- [`docs/SEARCH_MEMORY_LIFECYCLE_AND_SEMANTIC_ASSET_POLICY.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/SEARCH_MEMORY_LIFECYCLE_AND_SEMANTIC_ASSET_POLICY.md)
-- [`docs/PLAN_FOR_TRANSACTIONAL_LAUNCH_LIFECYCLE_AND_BRIDGE_TRUTH.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/PLAN_FOR_TRANSACTIONAL_LAUNCH_LIFECYCLE_AND_BRIDGE_TRUTH.md)
+- [`AGENTS.md`](AGENTS.md)
+- [`docs/PLAN_FOR_ROGER_REVIEWER.md`](docs/PLAN_FOR_ROGER_REVIEWER.md)
+- [`docs/HARNESS_SESSION_LINKAGE_CONTRACT.md`](docs/HARNESS_SESSION_LINKAGE_CONTRACT.md)
+- [`docs/PROMPT_PRESET_AND_OUTCOME_CONTRACT.md`](docs/PROMPT_PRESET_AND_OUTCOME_CONTRACT.md)
+- [`docs/SEARCH_MEMORY_LIFECYCLE_AND_SEMANTIC_ASSET_POLICY.md`](docs/SEARCH_MEMORY_LIFECYCLE_AND_SEMANTIC_ASSET_POLICY.md)
+- [`docs/PLAN_FOR_TRANSACTIONAL_LAUNCH_LIFECYCLE_AND_BRIDGE_TRUTH.md`](docs/PLAN_FOR_TRANSACTIONAL_LAUNCH_LIFECYCLE_AND_BRIDGE_TRUTH.md)
 
 If this document conflicts with the canonical plan, the canonical plan wins
 until the plan is deliberately updated.

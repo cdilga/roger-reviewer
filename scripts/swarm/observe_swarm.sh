@@ -4,7 +4,6 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd "${SCRIPT_DIR}/../.." && pwd)
 BR_RESOLVER="${SCRIPT_DIR}/resolve_br.sh"
-CONTROL_PLANE_ENSURE="${SCRIPT_DIR}/control_plane_ensure.sh"
 DEFAULT_SESSION_NAME="$(basename "$PROJECT_ROOT" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//')"
 
 SESSION_NAME="${DEFAULT_SESSION_NAME}-swarm"
@@ -103,27 +102,9 @@ ready_count() {
 }
 
 control_plane_snapshot() {
-  if [[ ! -x "$CONTROL_PLANE_ENSURE" ]]; then
-    jq -n \
-      --arg mode "$CONTROL_MODE" \
-      '{status: "helper-missing", mode: $mode, missing_sessions: [], controller_signal: "unknown"}'
-    return 0
-  fi
-
-  local output
-  if output="$("$CONTROL_PLANE_ENSURE" --session "$SESSION_NAME" --mode "$CONTROL_MODE" --check --json 2>/dev/null)"; then
-    printf '%s\n' "$output"
-    return 0
-  fi
-
-  if [[ -n "$output" ]]; then
-    printf '%s\n' "$output"
-    return 0
-  fi
-
   jq -n \
     --arg mode "$CONTROL_MODE" \
-    '{status: "unavailable", mode: $mode, missing_sessions: [], controller_signal: "unknown"}'
+    '{status: "ntm-native", mode: $mode, missing_sessions: [], controller_signal: "not-applicable"}'
 }
 
 worker_panes() {

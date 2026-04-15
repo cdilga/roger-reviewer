@@ -112,6 +112,12 @@ These are the current stable local reference clones under `_exploration/`.
 - Role: daemonless bridge/runtime reference ideas
 - Why it matters: reference for bridge and runtime edges, not a blueprint
 
+### `pi_agent_rust`
+
+- Role: deferred future harness-admission reference
+- Why it matters: gives Roger a concrete local prior-art target for evaluating a
+  post-`0.1.0` Pi-Agent adapter without widening current support claims
+
 ## Candidate `/tmp` Spike Queue
 
 Use `/tmp/roger-reference-projects/` for these when a focused spike is approved.

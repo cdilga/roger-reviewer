@@ -11,7 +11,7 @@ Identity rationale and narrowed alternatives are tracked in:
 
 - popup shell renders the new Roger mark and wordmark assets
 - shared identity token sheet is imported by popup HTML
-- popup still preserves manual-backup messaging and the bounded 4-action set
+- popup still preserves manual-backup messaging and the bounded 3-action set
 - identity assets are present as static artifacts for future in-page reuse
 
 ## Automated Command
@@ -37,7 +37,7 @@ In one supported browser (Chrome, Brave, or Edge):
 1. Load the unpacked extension.
 2. Open the popup on a GitHub PR tab.
 3. Verify mark + wordmark render in the popup header.
-4. Verify Start/Resume/Findings/Refresh remain available.
+4. Verify Start/Resume/Findings remain available.
 5. Open popup on a non-PR tab and confirm manual-backup guidance still appears.
 
 ## Pass Criteria
@@ -51,7 +51,7 @@ In one supported browser (Chrome, Brave, or Edge):
 - `node --test apps/extension/src/popup/index.test.js apps/extension/src/popup/main.test.js`
   - PASS
   - confirmed: brand-shell markup, mark/wordmark asset references, identity token
-    import, popup manual-backup messaging, and bounded 4-action routing
+    import, popup manual-backup messaging, and bounded 3-action routing
 - `scripts/swarm/validate_extension_entry_placements.sh`
   - PASS
   - confirmed: header/rail/modal placement coverage and Native Messaging

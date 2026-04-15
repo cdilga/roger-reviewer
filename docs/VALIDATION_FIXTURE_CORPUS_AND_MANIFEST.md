@@ -8,9 +8,9 @@ provenance rules, and update policy.
 
 Authority:
 
-- [`docs/VALIDATION_HARNESS_SCAFFOLD_CONTRACT.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_HARNESS_SCAFFOLD_CONTRACT.md) — scaffold layout and `MANIFEST.toml` format
-- [`docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md) — suite ownership and support claims
-- [`docs/TEST_HARNESS_GUIDELINES.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TEST_HARNESS_GUIDELINES.md) — tier rules and double policy
+- [`docs/VALIDATION_HARNESS_SCAFFOLD_CONTRACT.md`](docs/VALIDATION_HARNESS_SCAFFOLD_CONTRACT.md) — scaffold layout and `MANIFEST.toml` format
+- [`docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md) — suite ownership and support claims
+- [`docs/TEST_HARNESS_GUIDELINES.md`](docs/TEST_HARNESS_GUIDELINES.md) — tier rules and double policy
 
 Each family in this document maps to a directory under `tests/fixtures/`
 and must have a `MANIFEST.toml` whose `family` key matches the name here.

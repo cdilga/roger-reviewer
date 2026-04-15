@@ -1,6 +1,8 @@
 # Alien Workflows for Roger Reviewer
 
-Status: planning-stage workflow pack.
+Status: reusable critique workflow pack. Roger is now in implementation; treat
+planning-stage language below as guidance for future critique or doc/bead audit
+rounds, not as the current repo stage.
 
 This document adapts the strongest parts of the Agent Flywheel methodology into
 Roger-specific, self-contained workflows for external critique, research, and
@@ -282,8 +284,8 @@ These are the highest-value alien-workflow moves to do next:
    Good first targets are local companion/bridge patterns, session durability
    systems, or scoped memory/search systems.
 3. Run a plan-to-beads transfer audit.
-   Roger is still in planning/bead-polishing stage; this is the right moment to
-   test whether the live bead graph actually carries the planning intent.
+   Roger is already in implementation, so use this when the docs, support
+   contracts, or live bead graph may have drifted rather than as a stage gate.
 4. Add feedback-to-infrastructure closure after each critique round.
    Do not let good critique stay trapped in round docs only.
 

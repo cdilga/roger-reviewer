@@ -228,7 +228,6 @@ Current safe subset:
 
 Possible later additions, only behind separate beads and validation:
 
-- `roger-refresh`
 - `roger-clarify`
 - `roger-open-drafts`
 

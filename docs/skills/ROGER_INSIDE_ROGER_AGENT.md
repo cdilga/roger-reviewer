@@ -68,5 +68,6 @@ Do not:
 
 - use raw `gh` from inside the harness
 - treat provider-local memory or chat state as Roger truth
-- assume `roger-refresh`, `roger-clarify`, or `roger-open-drafts` exist
+- assume `roger-clarify` or `roger-open-drafts` exist, or invent a manual
+  refresh command instead of relying on Roger's automatic reconciliation model
 - present an unsupported in-harness affordance as if it were shipped

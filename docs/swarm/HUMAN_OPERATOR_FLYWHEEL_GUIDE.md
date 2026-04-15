@@ -138,7 +138,15 @@ At minimum:
 - `recovery_continue`
 - `recovery_exhausted_queue`
 
-These are now seeded in [command_palette.md](/Users/cdilga/Documents/dev/roger-reviewer/docs/swarm/command_palette.md).
+If the run is going to do heavy `cargo` work, bake `rch` into the launch plan
+when it is available:
+
+- treat `rch exec -- <command>` as the preferred wrapper for CPU-heavy cargo
+  tasks
+- assume local-only fail-open is acceptable if no worker fleet is configured
+- do not hold launch waiting for remote workers that do not exist
+
+These are now seeded in [command_palette.md](command_palette.md).
 
 The operator should think:
 

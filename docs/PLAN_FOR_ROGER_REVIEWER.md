@@ -7,8 +7,8 @@ Implementation of the local-core-first `0.1.0` slice is now active.
 
 Authoritative readiness artifacts:
 
-- [`READINESS_REVIEW_FIRST_IMPLEMENTATION_SLICE_WITHOUT_EXTENSION.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/READINESS_REVIEW_FIRST_IMPLEMENTATION_SLICE_WITHOUT_EXTENSION.md)
-- [`READINESS_IMPLEMENTATION_GATE_DECISION.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/READINESS_IMPLEMENTATION_GATE_DECISION.md)
+- [`READINESS_REVIEW_FIRST_IMPLEMENTATION_SLICE_WITHOUT_EXTENSION.md`](docs/READINESS_REVIEW_FIRST_IMPLEMENTATION_SLICE_WITHOUT_EXTENSION.md)
+- [`READINESS_IMPLEMENTATION_GATE_DECISION.md`](docs/READINESS_IMPLEMENTATION_GATE_DECISION.md)
 
 Current plan-maintenance rule:
 
@@ -128,7 +128,7 @@ Canonical product name: `Roger Reviewer`
 Working CLI shorthand for the plan: `rr`
 
 This matches the existing
-[`docs/roger-reviewer-brain-dump.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/roger-reviewer-brain-dump.md)
+[`docs/roger-reviewer-brain-dump.md`](docs/roger-reviewer-brain-dump.md)
 and is the name the repo should optimize around unless a later branding pass
 changes it deliberately.
 
@@ -226,8 +226,8 @@ model.
 1. User opens a GitHub PR in Chrome, Brave, or Edge.
 2. Extension injects a Roger entry point appropriate to the chosen bridge and
    v1 scope.
-3. User chooses a review action such as start review, resume review, or refresh
-   findings.
+3. User chooses a review action such as start review or resume review, and
+   Roger automatically reconciles stale review state as needed.
 4. Extension passes PR context to a local Roger launcher using a daemonless
    bridge.
 5. Roger creates or reuses a local review session, records the repo snapshot,
@@ -278,7 +278,7 @@ without the browser extension installed.
    triage or outbound state.
 5. Clarifying questions can be attached to findings in a structured way.
 6. Review artifacts, prompts, and intermediate outputs are retained locally for
-   later resume, refresh, or audit.
+   later resume, reconcile, or audit.
 
 ### Workflow 4.1: Clarify a finding without mutating it
 
@@ -294,10 +294,11 @@ without the browser extension installed.
 5. The user can then triage the finding, ask another question, or leave the
    finding untouched.
 
-### Workflow 5: Refresh after new commits
+### Workflow 5: Automatic reconciliation after new commits
 
-1. User refreshes a review after a PR changes.
-2. Roger pulls new metadata and diffs, then runs a fresh-eyes pass.
+1. User re-enters a review after a PR changes.
+2. Roger pulls new metadata and diffs automatically, then runs a fresh-eyes
+   pass when the state is stale enough to justify one.
 3. Prior high-signal findings are selectively reintroduced so the system does
    not start from zero.
 4. Findings that remain relevant are carried forward; resolved or obsolete ones
@@ -309,8 +310,8 @@ without the browser extension installed.
    analysis.
 2. Canonical attention states should include: review launched, review awaiting
    user input, outbound approval required, review completed with findings ready,
-   refresh recommended after new commits, and review failed or needs manual
-   recovery.
+   review needs reconciliation after new commits, and review failed or needs
+   manual recovery.
 3. The TUI and CLI should expose these states directly.
 4. Other surfaces such as a browser extension, a desktop notification, or a
    future collaboration hook may mirror them, but should not redefine them.
@@ -362,12 +363,12 @@ not as optional polish.
 - this flow must be defended without manual store seeding in the proving
   acceptance path
 
-### U5. Refresh must reconcile findings and approval state
+### U5. Automatic reconciliation must keep findings and approval state current
 
-- `rr refresh` must evolve from continuity relink plus run recording into a
-  real refresh/reconciliation workflow
-- draft invalidation and reconfirmation after refresh are part of the same flow
-  rather than separate optional cleanup
+- stale review state must reconcile automatically instead of requiring a
+  manual refresh step
+- draft invalidation and reconfirmation after drift are part of the same
+  automatic reconciliation flow rather than separate optional cleanup
 
 ### U6. Browser launch must dispatch real Roger commands
 
@@ -394,7 +395,7 @@ not as optional polish.
 
 ### U9. Product correctness must include interrupted and degraded real-world use
 
-- current-scope correctness includes long-lived sessions, refresh churn,
+- current-scope correctness includes long-lived sessions, reconciliation churn,
   approval invalidation, stale evidence anchors, bridge/setup drift, posting
   failures, partial findings repair, and dropout/return continuity
 - Roger should not treat "works in the clean happy path" as sufficient proof for
@@ -407,8 +408,8 @@ not as optional polish.
   nominal path and the failure/degraded path that materially affects the same
   promise
 - a single generic end-to-end succeeds-only test is not an acceptable
-  substitute for narrower proof of fail-closed launch, refresh invalidation,
-  recovery UX, and operator-visible repair states
+  substitute for narrower proof of fail-closed launch, reconciliation
+  invalidation, recovery UX, and operator-visible repair states
 
 ## Agent Workflows
 
@@ -592,7 +593,7 @@ Escalation rule:
 
 The concrete `0.1.0` defaults for queue classes, queue limits, cancellation,
 same-process wake, and cross-process refresh now live in
-[`TUI_RUNTIME_SUPERVISOR_POLICY.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TUI_RUNTIME_SUPERVISOR_POLICY.md).
+[`TUI_RUNTIME_SUPERVISOR_POLICY.md`](docs/TUI_RUNTIME_SUPERVISOR_POLICY.md).
 
 ### Minimum external envelope family
 
@@ -619,8 +620,8 @@ Recommended fields:
 
 Recommended initial logical names:
 
-- requests: `resume_session`, `refresh_review`, `show_findings`,
-  `ask_clarification`, `open_drafts`, `return_to_roger`
+- requests: `resume_session`, `show_findings`, `ask_clarification`,
+  `open_drafts`, `return_to_roger`
 - events: `session_updated`, `findings_updated`, `drafts_updated`,
   `attention_state_changed`, `background_job_changed`
 
@@ -739,7 +740,7 @@ to a local editor.
 
 ### Finding identity and lifecycle
 
-Refresh behavior will fail unless findings have stable enough identity to match
+Reconciliation behavior will fail unless findings have stable enough identity to match
 or supersede prior findings across reruns.
 
 Required invariants:
@@ -867,7 +868,7 @@ Not every provider needs equal status in `0.1.0`.
 | Codex | Secondary bounded review harness | Yes | Bounded | Authoritative `#3` provider; exposed via `rr review --provider codex`; Tier A only today (no locator reopen or `rr return`) |
 | Gemini | Secondary bounded review harness | Yes | Bounded | Authoritative `#4` provider; exposed via `rr review --provider gemini`; keep Tier A live-CLI claims truthful and do not imply locator reopen or `rr return` |
 | Claude Code | Secondary bounded review harness | Yes | Bounded | Authoritative `#5` provider; exposed via `rr review --provider claude`; Tier A only today (no locator reopen or `rr return`) |
-| Pi-Agent | Future review harness | No | No | Same as Codex |
+| Pi-Agent | Deferred future review harness candidate | No | No | Post-`0.1.0` admission candidate only; evaluate `_exploration/pi_agent_rust` against the same direct-CLI launch, policy-control, auditability, and continuity-tier rubric Roger uses for every provider before creating implementation beads |
 | GitHub CLI (`gh`) | GitHub adapter, not review harness | N/A | N/A | Read/write adapter for GitHub operations only |
 
 Rules:
@@ -883,6 +884,8 @@ Rules:
 - GitHub Copilot CLI is active implementation scope, but it should remain out
   of live support claims until the verified launch, policy, and continuity path
   are real
+- Pi-Agent is outside the `0.1.0` support order and remains planning-only until
+  a later admission spike proves it belongs in the matrix at all
 - other providers should influence the adapter shape, not the `0.1.0`
   implementation commitment
 - GitHub CLI belongs in the GitHub adapter boundary, not the review-harness
@@ -938,6 +941,9 @@ Scope rule for this plan:
 - OpenCode should reach Tier B and remains the required fallback/reference path
 - Codex, Gemini, and Claude Code currently expose bounded Tier A paths in the
   live CLI surface and should be documented literally as such
+- Pi-Agent is the most concrete deferred post-`0.1.0` harness candidate because
+  `_exploration/pi_agent_rust` already exists locally, but it still must enter
+  through the same admission rubric rather than by brand exception
 - future providers should be admitted by capability tier, not by one-off
   exceptions
 
@@ -1069,8 +1075,8 @@ Recommended capability table:
 
 ### Launch truth and transaction rule
 
-Roger must not treat provider start, resume, refresh, or return as a sequence
-of loosely related local writes.
+Roger must not treat provider start, resume, or return as a sequence of
+loosely related local writes.
 
 Required rules:
 
@@ -1168,7 +1174,7 @@ Transport rule:
   adapter over Roger-owned contracts rather than the foundational architecture
 
 See
-[`REVIEW_WORKER_RUNTIME_AND_BOUNDARY_CONTRACT.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/REVIEW_WORKER_RUNTIME_AND_BOUNDARY_CONTRACT.md)
+[`REVIEW_WORKER_RUNTIME_AND_BOUNDARY_CONTRACT.md`](docs/REVIEW_WORKER_RUNTIME_AND_BOUNDARY_CONTRACT.md)
 for the full worker object model, tool surface, result envelope, and transport
 decision.
 
@@ -1186,10 +1192,12 @@ Recommended canonical operations:
 - `return_to_roger`
 - `show_status`
 - `show_findings`
-- `refresh_review`
 - `ask_clarification`
 - `open_drafts`
 - `show_help`
+
+Stale-state reconciliation is automatic and should be reflected through status
+and findings reads rather than a separate command object.
 
 Recommended command objects:
 
@@ -1241,7 +1249,6 @@ subset is:
 The following remain optional even for capable harnesses, and only behind
 separate beads and validation:
 
-- `roger-refresh`
 - `roger-clarify`
 - `roger-open-drafts`
 
@@ -1256,7 +1263,7 @@ Minimum payload:
 
 - repo identifier
 - PR identifier or URL
-- requested action such as `start`, `resume`, or `refresh`
+- requested action such as `start`, `resume`, or `follow_up`
 - optional prompt override or launch mode
 
 Minimum behavior:
@@ -1344,7 +1351,7 @@ Practical consequence:
   approvals automatically before the posting path is available again
 
 These invariants are expanded in
-[`DATA_MODEL_AND_STORAGE_CONTRACT.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/DATA_MODEL_AND_STORAGE_CONTRACT.md).
+[`DATA_MODEL_AND_STORAGE_CONTRACT.md`](docs/DATA_MODEL_AND_STORAGE_CONTRACT.md).
 
 ## Execution Truth Rules
 
@@ -1487,7 +1494,7 @@ should include both lexical and semantic retrieval.
   summaries only when they become durable evidence.
 
 See
-[`DATA_MODEL_AND_STORAGE_CONTRACT.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/DATA_MODEL_AND_STORAGE_CONTRACT.md)
+[`DATA_MODEL_AND_STORAGE_CONTRACT.md`](docs/DATA_MODEL_AND_STORAGE_CONTRACT.md)
 for the hot/cold/derived storage split, aggregate ownership, and concurrency
 rules.
 
@@ -2190,7 +2197,7 @@ Packaging and platform requirements:
 - build, packaging, and publication ownership should live in explicit CI/release
   jobs rather than in ad hoc local maintainer steps; the detailed ownership
   split is part of the `0.1.0` release contract and belongs in
-  [`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md)
+  [`RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md)
 
 ### Installation and update model
 
@@ -2318,10 +2325,9 @@ hardening after `rr-r3dt`):
 
 - the primary PR-page happy path should feel GitHub-native rather than like a
   floating foreign card
-- the happy path should minimize clicks: the core 4-action set (`Start`,
-  `Resume`, `Findings`, `Refresh`) should be available directly on the PR page
-  without forcing a toolbar popup or intermediate launcher when page seams are
-  healthy
+- the happy path should minimize clicks: the core 3-action set (`Start`,
+  `Resume`, `Findings`) should be available directly on the PR page without
+  forcing a toolbar popup or intermediate launcher when page seams are healthy
 - preferred placement order:
   1. attach Roger entry controls into stable PR-page action seams using GitHub-
      native button styling and spacing comparable to first-party actions
@@ -2354,14 +2360,14 @@ hardening after `rr-r3dt`):
   extension and CLI should prefer that over avoidable extra clicks or rerun
   prompts
 - practical `0.1.x` examples:
-  - demote `Refresh` from an always-visible primary action into a contextual
-    action shown when Roger state makes refresh relevant
+  - treat stale review state as something Roger reconciles automatically, and
+    surface the updated review context instead of a dedicated refresh action
   - infer one primary CTA from session and attention state instead of treating
     every action as equally likely
   - continue guided extension setup automatically when browser-side identity
     registration is observed rather than forcing an extra setup or doctor
     command when Roger can finish truthfully
-  - narrow resume or refresh disambiguation prompts to cases of real ambiguity
+  - narrow resume or re-entry disambiguation prompts to cases of real ambiguity
     rather than blocking when a single strongest target is already known
 - these inferences must remain read-safe and launch-safe only; posting,
   approval, code mutation, and other elevated actions remain explicitly
@@ -2454,7 +2460,7 @@ Candidate features that may remain v2:
 The extension should mirror the TUI selectively rather than imitate it fully:
 
 - **Review Home** becomes a PR-local launcher card with `start`, `resume`,
-  `refresh review`, and `open in Roger`, styled to feel native to GitHub and
+  `findings`, and `open in Roger`, styled to feel native to GitHub and
   attached inline to the page when a stable host seam exists
 - **Session Overview** becomes a compact status badge or popover showing bounded
   counts such as `new`, `needs follow-up`, `drafted`, and `awaiting approval`
@@ -2477,11 +2483,12 @@ The extension must not expose transport plumbing as ordinary product actions.
 Rules:
 
 - ordinary PR-page actions should represent review intent such as `start`,
-  `resume`, `refresh review`, `open findings locally`, or `open draft queue`
-- `refresh` in product UI must mean refreshing the review against changed PR or
-  repo state, never refreshing Native Messaging transport or bridge readback
-- if the extension can attempt bridge readback or status refresh automatically,
-  it should do so automatically rather than exposing a maintenance button
+  `resume`, `open findings locally`, `open draft queue`, or `open in Roger`
+- review-state reconciliation against changed PR or repo state is automatic and
+  should not appear as a standalone browser or CLI command
+- if the extension can attempt bridge readback, status readback, or stale-state
+  reconciliation automatically, it should do so automatically rather than
+  exposing a maintenance button
 - manual transport controls such as `refresh bridge`, `ping host`, `reload
   status`, or similar mechanics belong only in setup, doctor, or explicit
   recovery surfaces
@@ -2495,7 +2502,7 @@ Plan extension features in two explicit capability tiers:
 
 **Launch tier** (Native Messaging launch-only handoff):
 
-- start, resume, or refresh a review from a PR page
+- start, resume, or re-enter a review from a PR page
 - choose a bounded launch mode or preset
 - pass a short objective and preferred local UI target
 - expose a manual browser-action fallback entry when PR-page inline injection is
@@ -2635,7 +2642,6 @@ Current live `0.1.0` command surface:
 - `rr sessions`
 - `rr findings`
 - `rr search`
-- `rr refresh`
 - `rr status`
 - `rr update`
 - `rr extension setup`
@@ -2736,7 +2742,6 @@ Current `0.1.0` logical command IDs:
 
 Possible later additions, only behind separate beads and validation:
 
-- `roger-refresh`
 - `roger-clarify`
 - `roger-open-drafts`
 
@@ -2772,7 +2777,7 @@ Required top-level fields:
   - `surface_invocation_id`: source-local correlation ID when available
   - `received_at`
 - `action`
-  - `start`, `resume`, `refresh`, or `follow_up`
+  - `start`, `resume`, or `follow_up`
 - `target`
   - `repo_locator`: Roger-owned repo identity or canonical local repo path
   - optional `review_target`:
@@ -2801,8 +2806,6 @@ Required invariants:
   without ambiguity
 - `resume` requires a resumable `session` target or enough repo/PR identity to
   locate exactly one eligible session
-- `refresh` requires an existing `session` target or enough repo/PR identity to
-  locate exactly one refreshable session
 - `follow_up` requires a local `session` target and may optionally include a
   `finding` target when the handoff should open a specific finding or local
   clarification lane
@@ -2820,8 +2823,8 @@ same fields.
   - may reference richer local prompt authoring inputs, but those must still
     normalize into the bounded `prompt_ingress` object before launch
 - `tui`
-  - may emit `resume`, `refresh`, and `follow_up` requests with strong local
-    session or finding identity
+  - may emit `resume` and `follow_up` requests with strong local session or
+    finding identity
   - may request focused handoff into local queues or inspectors
 - `extension`
   - must emit only the bounded browser-safe subset defined below
@@ -3068,12 +3071,12 @@ Principles:
   `docs/REVIEW_FLOW_MATRIX.md` as the scenario inventory for cross-surface
   consistency checks and integration-test selection
 - keep the explicit provider/browser/OS/fixture support matrix in
-  [`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md)
+  [`RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md)
   so coverage obligations do not live only as prose
 - keep the implementation-facing harness contract in
-  [`TEST_HARNESS_GUIDELINES.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TEST_HARNESS_GUIDELINES.md)
+  [`TEST_HARNESS_GUIDELINES.md`](docs/TEST_HARNESS_GUIDELINES.md)
   and the automated E2E budget in
-  [`AUTOMATED_E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/AUTOMATED_E2E_BUDGET.json)
+  [`AUTOMATED_E2E_BUDGET.json`](docs/AUTOMATED_E2E_BUDGET.json)
   so tiers, fixtures, and E2E growth rules stay machine-checkable
 
 ## Worktree and Named Instance Model
@@ -3543,9 +3546,9 @@ Rules:
   correct scope bucket, preserved provenance, and explicit degraded lexical-only
   behavior when semantic retrieval is unavailable
 - the prescriptive E2E catalog lives in
-  [`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md);
+  [`RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md);
   the six approved entries live in
-  [`AUTOMATED_E2E_BUDGET.json`](/Users/cdilga/Documents/dev/roger-reviewer/docs/AUTOMATED_E2E_BUDGET.json)
+  [`AUTOMATED_E2E_BUDGET.json`](docs/AUTOMATED_E2E_BUDGET.json)
   and any seventh journey must be promoted there before it consumes a blessed
   budget slot
 
@@ -3698,14 +3701,14 @@ Execution policies decide when and how those lanes run. Recommended policies:
   or brittle environment
 - `release-candidate`: an explicit operator gate backed by validation evidence,
   artifact verification, and the release smoke matrix in
-  [`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md)
+  [`RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md)
 
 The exact suite-family rules, fixture contract, artifact layout, and E2E budget
 guard should live in
-[`TEST_HARNESS_GUIDELINES.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TEST_HARNESS_GUIDELINES.md)
+[`TEST_HARNESS_GUIDELINES.md`](docs/TEST_HARNESS_GUIDELINES.md)
 rather than being rediscovered piecemeal during implementation. The concrete
 flow-to-suite mapping and fixture ownership should live in
-[`VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md).
+[`VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md).
 
 ### Release gate and operator evidence
 
@@ -3874,7 +3877,7 @@ Mitigation:
 - require unsupported deeper capabilities to fail clearly instead of emulating
   OpenCode semantics poorly
 - gate bounded-provider release claims behind the provider acceptance suites in
-  [`RELEASE_AND_TEST_MATRIX.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/RELEASE_AND_TEST_MATRIX.md)
+  [`RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md)
 
 ### Risk: findings degrade into unstructured text dumps
 
@@ -3929,16 +3932,19 @@ Mitigation:
 These remaining questions are bounded implementation follow-ons. They no longer
 block the implementation gate for the first local-core slice. Resolved runtime
 and validation-ownership details now live in
-[`TUI_RUNTIME_SUPERVISOR_POLICY.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/TUI_RUNTIME_SUPERVISOR_POLICY.md)
+[`TUI_RUNTIME_SUPERVISOR_POLICY.md`](docs/TUI_RUNTIME_SUPERVISOR_POLICY.md)
 and
-[`VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md).
+[`VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md).
 
 - **Future harness expansion**: The `0.1.0` capability tiers and provider
   minima are now fixed. The remaining question is which later providers
   eventually earn Tier A, Tier B, or Tier C support beyond OpenCode and the
-  current bounded live-CLI providers. GitHub Copilot CLI is active current scope; the open
-  question is how much of its intended tier lands in the current slice, not
-  whether it belongs to some undefined later phase.
+  current bounded live-CLI providers. GitHub Copilot CLI is active current
+  scope; the open question is how much of its intended tier lands in the
+  current slice, not whether it belongs to some undefined later phase.
+  Pi-Agent is the first named deferred candidate for the next admission round,
+  but only as a planning-spike target until the current provider matrix
+  stabilizes and the same proof packet is defined for it.
 
 - **Protocol adapters**: When Roger expands beyond the initial OpenCode and
   bounded-provider paths, which later integrations justify ACP as a
@@ -4069,4 +4075,4 @@ Planning for Roger Reviewer is complete when:
   environment mutations
 
 These conditions were satisfied and recorded on 2026-03-30 in
-[`READINESS_IMPLEMENTATION_GATE_DECISION.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/READINESS_IMPLEMENTATION_GATE_DECISION.md).
+[`READINESS_IMPLEMENTATION_GATE_DECISION.md`](docs/READINESS_IMPLEMENTATION_GATE_DECISION.md).

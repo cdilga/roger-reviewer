@@ -107,7 +107,6 @@ The live help surface currently exposes:
 - `rr sessions`
 - `rr findings`
 - `rr search`
-- `rr refresh`
 - `rr status`
 - `rr update`
 - `rr extension setup`
@@ -777,8 +776,8 @@ implied by the canonical plan, and should be mapped explicitly into UI work:
 - review-home attention queue
 - queue badges and counts for `awaiting_outbound_approval`, `refresh_recommended`,
   and `review_failed`
-- diff-aware refresh comparison view
-- approval invalidation banner after refresh or retarget
+- diff-aware reconciliation comparison view
+- approval invalidation banner after reconciliation or retarget
 - posting failure recovery view with retry and audit detail
 - evidence open-in-editor affordances
 - search result jump-to-session and jump-to-finding actions
@@ -943,7 +942,7 @@ Current safe action family:
 - `Start`
 - `Resume`
 - `Findings`
-- `Refresh`
+- `Open in Roger`
 
 Recommended companion-tier additions:
 
@@ -956,7 +955,7 @@ Recommended mapping:
 - no matching local session: `Start`
 - `review_started` or `awaiting_user_input`: `Resume`
 - `findings_ready`: `Findings`
-- `refresh_recommended`: `Refresh`
+- `refresh_recommended`: `Open in Roger`
 - `awaiting_outbound_approval`: `Open Draft Queue`
 - `review_failed`: `Open in Roger` with failure guidance
 
@@ -967,12 +966,13 @@ The extension should surface operator-intent actions, not transport mechanics.
 Rules:
 
 - ordinary PR-page controls should represent review intent such as `Start`,
-  `Resume`, `Findings`, `Refresh`, `Open Draft Queue`, or `Open in Roger`
-- `Refresh` in product UI must always mean "refresh the review against changed
-  PR or repo state", never "re-read Native Messaging state" or "retry bridge
-  transport"
-- if Roger can attempt bridge readback, state refresh, or staleness checks
-  automatically on mount, focus, or bounded retry, it should do so automatically
+  `Resume`, `Findings`, `Open Draft Queue`, or `Open in Roger`
+- any review-state update in product UI must mean reconciling the review
+  against changed PR or repo state, never refreshing Native Messaging state or
+  retrying bridge transport
+- if Roger can attempt bridge readback, state reconciliation, or staleness
+  checks automatically on mount, focus, or bounded retry, it should do so
+  automatically
 - manual controls such as `refresh bridge`, `ping host`, `reload status`, or
   similar plumbing should stay out of the normal PR surface
 - bridge-maintenance actions belong only in setup, doctor, or explicit recovery
@@ -1185,7 +1185,7 @@ Use this test for `0.1.x`:
 | `Start` | launch intent | keep | contextual PR-page action | Needed when no local session exists. |
 | `Resume` | `ReviewSession`, `AttentionState` | keep | contextual PR-page action | Needed when a local session already exists. |
 | `Findings` | `Finding`, `AttentionState` | keep | contextual PR-page action | Needed when findings are the next truthful local focus. |
-| `Refresh review` | refresh recommendation + target revision | keep | contextual PR-page action only | Needed, but only when Roger recommends refresh. |
+| `refresh_recommended` state | refresh recommendation + target revision | keep | contextual PR-page feedback only | Needed, but the PR page should surface reconciliation guidance instead of a standalone refresh button. |
 | `Open Draft Queue` | `OutboundDraftBatch`, `AttentionState` | keep | contextual PR-page action | Needed for approval-required state. |
 | `Open in Roger` | `ReviewSession` | keep | contextual PR-page action | Needed as the broad recovery/open-local affordance. |
 | `Open Session Overview` | `ReviewSession` | bundle | `Open in Roger` with focus | Not worth a separate named action. |
@@ -1257,7 +1257,7 @@ The following user stories should still be supported truthfully by the narrowed
 | As a browser-first reviewer, I can resume an existing local session from the PR page instead of starting over. | extension Resume | `ReviewSession`, `AttentionState` |
 | As a browser-first reviewer, I can open the local findings view when findings are already ready. | extension Findings | `Finding`, `AttentionState` |
 | As a browser-first reviewer, I can open the local draft queue when approval is the next real task. | extension Open Draft Queue | `OutboundDraftBatch`, `AttentionState` |
-| As a browser-first reviewer, I can trigger a real review refresh only when Roger says refresh is the right operator move. | extension Refresh review | `refresh_recommended`, target revision |
+| As a browser-first reviewer, Roger automatically reconciles review state after PR changes, and I can re-enter Roger from the PR page when I want to inspect the updated state. | extension Open in Roger or Resume | `refresh_recommended`, target revision |
 | As a browser-first reviewer, I do not have to understand Native Messaging plumbing to use Roger successfully. | extension inline/rail host + `rr doctor` when needed | user-intent action model |
 
 ### Setup, install, update, and recovery

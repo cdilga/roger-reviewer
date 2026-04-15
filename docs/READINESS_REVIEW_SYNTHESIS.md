@@ -18,8 +18,8 @@ moments in the timeline.
 Read this document as a detailed breakdown of the intermediate gate analysis
 state from 2026-03-29. It is historical support material now. The current
 authoritative readiness posture is the later narrow-go decision in
-[`READINESS_IMPLEMENTATION_GATE_DECISION.md`](/Users/cdilga/Documents/dev/roger-reviewer/docs/READINESS_IMPLEMENTATION_GATE_DECISION.md),
-plus the follow-on contract closures for `rr-006.2` and `rr-025`.
+[`READINESS_IMPLEMENTATION_GATE_DECISION.md`](./READINESS_IMPLEMENTATION_GATE_DECISION.md),
+plus the later contract closures for `rr-015`, `rr-006.2`, and `rr-025`.
 
 ---
 

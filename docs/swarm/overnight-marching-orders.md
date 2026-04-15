@@ -62,10 +62,10 @@ from memory alone.
 - Do not mutate external/dev/test environments without explicit user authorization.
 - Keep Agent Mail + file reservations in sync with real work.
 - Use Frankenterm (`ft`) as the observer default when available; if absent, install via `scripts/swarm/install_frankenterm.sh` or declare explicit degraded `--no-ft` mode.
-- Use `rch exec -- <command>` for CPU-heavy cargo tasks when available.
+- Use `rch exec -- <command>` for CPU-heavy cargo tasks when available. If no worker fleet is configured, local fail-open execution is still acceptable; do not wait for remote capacity that does not exist.
 
 ## Authority Links
 
 - Worker doctrine (long form): `docs/swarm/worker-operating-doctrine.md`
-- Operator runbook: `docs/OVERNIGHT_SWARM_RUNBOOK.md`
+- Operator cockpit guidance: `docs/swarm/NTM_OPERATOR_GUIDE.md`
 - Canonical authority order and safety rules: `AGENTS.md`

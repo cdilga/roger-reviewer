@@ -95,7 +95,6 @@ enum CommandKind {
     RobotDocs,
     Findings,
     Status,
-    Refresh,
 }
 
 impl CommandKind {
@@ -114,7 +113,6 @@ impl CommandKind {
             (Self::RobotDocs, _) => "rr robot-docs",
             (Self::Findings, _) => "rr findings",
             (Self::Status, _) => "rr status",
-            (Self::Refresh, _) => "rr refresh",
         }
     }
 
@@ -131,7 +129,6 @@ impl CommandKind {
             Self::RobotDocs => "rr.robot.robot_docs.v1",
             Self::Findings => "rr.robot.findings.v1",
             Self::Status => "rr.robot.status.v1",
-            Self::Refresh => "rr.robot.refresh.v1",
         }
     }
 }
@@ -519,7 +516,6 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         "robot-docs" => CommandKind::RobotDocs,
         "findings" => CommandKind::Findings,
         "status" => CommandKind::Status,
-        "refresh" => CommandKind::Refresh,
         "-h" | "--help" | "help" => {
             return Err("help requested".to_owned());
         }
@@ -871,9 +867,7 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
 fn execute_command(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     match parsed.command {
         CommandKind::Review => handle_review(parsed, runtime),
-        CommandKind::Resume => {
-            handle_resume_or_refresh(parsed, runtime, LaunchAction::ResumeReview)
-        }
+        CommandKind::Resume => handle_resume(parsed, runtime),
         CommandKind::Return => handle_return(parsed, runtime),
         CommandKind::Sessions => handle_sessions(parsed, runtime),
         CommandKind::Search => handle_search(parsed, runtime),
@@ -883,9 +877,6 @@ fn execute_command(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
         CommandKind::RobotDocs => handle_robot_docs(parsed),
         CommandKind::Findings => handle_findings(parsed, runtime),
         CommandKind::Status => handle_status(parsed, runtime),
-        CommandKind::Refresh => {
-            handle_resume_or_refresh(parsed, runtime, LaunchAction::RefreshFindings)
-        }
     }
 }
 
@@ -2662,11 +2653,7 @@ fn infer_strongest_reentry_selection(
     Ok(Some((session_id, binding, score)))
 }
 
-fn handle_resume_or_refresh(
-    parsed: &ParsedArgs,
-    runtime: &CliRuntime,
-    action: LaunchAction,
-) -> CommandResponse {
+fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let store = match RogerStore::open(&runtime.store_root) {
         Ok(store) => store,
         Err(err) => return error_response(format!("failed to open Roger store: {err}")),
@@ -2736,7 +2723,7 @@ fn handle_resume_or_refresh(
                 session.id, session.provider
             ),
             vec![
-                "resume/refresh is currently available for opencode, codex, gemini, and claude sessions".to_owned(),
+                "resume is currently available for opencode, codex, gemini, and claude sessions".to_owned(),
             ],
             json!({
                 "session_id": session.id,
@@ -2746,11 +2733,7 @@ fn handle_resume_or_refresh(
         );
     }
 
-    let command_name = if matches!(action, LaunchAction::RefreshFindings) {
-        "rr refresh"
-    } else {
-        "rr resume"
-    };
+    let command_name = "rr resume";
 
     if parsed.robot {
         let continuity_state = session.continuity_state.to_ascii_lowercase();
@@ -2788,7 +2771,7 @@ fn handle_resume_or_refresh(
                 "repository": session.review_target.repository,
                 "pull_request": session.review_target.pull_request_number,
                 "provider": session.provider,
-                "command": if matches!(action, LaunchAction::RefreshFindings) { "refresh" } else { "resume" },
+                "command": "resume",
                 "resume_path": inferred_resume_path,
                 "continuity_quality": continuity_quality,
                 "continuity_state_snapshot": session.continuity_state,
@@ -2812,7 +2795,7 @@ fn handle_resume_or_refresh(
                 "session_id": session.id,
                 "repository": session.review_target.repository,
                 "pull_request": session.review_target.pull_request_number,
-                "command": if matches!(action, LaunchAction::RefreshFindings) { "refresh" } else { "resume" },
+                "command": "resume",
             }),
             warnings: {
                 let mut warnings: Vec<String> =
@@ -2821,11 +2804,11 @@ fn handle_resume_or_refresh(
                 warnings
             },
             repair_actions: Vec::new(),
-            message: "resume/refresh plan generated (dry-run)".to_owned(),
+            message: "resume plan generated (dry-run)".to_owned(),
         };
     }
 
-    let intent = launch_intent(action.clone(), runtime);
+    let intent = launch_intent(LaunchAction::ResumeReview, runtime);
 
     let resume_bundle = match session.resume_bundle_artifact_id.as_deref() {
         Some(id) => match store.load_resume_bundle(id) {
@@ -2997,11 +2980,7 @@ fn handle_resume_or_refresh(
         warnings.insert(0, warning);
     }
 
-    let run_kind = if matches!(action, LaunchAction::RefreshFindings) {
-        "refresh"
-    } else {
-        "resume"
-    };
+    let run_kind = "resume";
     let run_id = next_id("run");
 
     if let Err(err) = store.create_review_run(CreateReviewRun {
@@ -3037,8 +3016,8 @@ fn handle_resume_or_refresh(
     if let Err(err) = store.update_review_session_attention(
         &updated_session.id,
         updated_session.row_version,
-        if run_kind == "refresh" {
-            "refresh_requested"
+        if session.attention_state == "refresh_recommended" {
+            "refresh_recommended"
         } else {
             "review_resumed"
         },
@@ -3216,7 +3195,7 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         cwd: Some(runtime.cwd.to_string_lossy().as_ref()),
         worktree_root: None,
     }) {
-        return error_response(format!("failed to refresh launch binding: {err}"));
+        return error_response(format!("failed to update launch binding: {err}"));
     }
 
     let degraded = !matches!(outcome.continuity_quality, ContinuityQuality::Usable)
@@ -3288,11 +3267,12 @@ fn handle_sessions(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
                 "follow_on": {
                     "requires_explicit_session": true,
                     "resume_command": format!("rr resume --session {}", entry.session_id),
-                    "refresh_command": format!("rr refresh --session {}", entry.session_id),
+                    "reconciliation_mode": "automatic_background",
+                    "fractional_staleness_allowed": true,
                 }
             })
         })
-        .collect::<Vec<_>>();
+            .collect::<Vec<_>>();
 
     let outcome = if count == 0 {
         OutcomeKind::Empty
@@ -4848,6 +4828,7 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                 json!({"command": "rr bridge install [--extension-id <id>] --robot", "purpose": "repair/dev host registration override when guided setup cannot discover identity"}),
                 json!({"command": "rr bridge uninstall --robot", "purpose": "remove bridge registration assets"}),
                 json!({"command": "rr robot-docs schemas --robot", "purpose": "schema inventory"}),
+                json!({"kind": "reconciliation_contract", "mode": "automatic_background", "summary": "Roger reconciles stale review state automatically during ordinary review, resume, return, status, findings, TUI, and extension flows; bounded fractional staleness is allowed while background reconciliation catches up."}),
                 json!({
                     "kind": "inside_roger_skill",
                     "context": "inside_roger",
@@ -4971,14 +4952,13 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                 json!({"command": "rr extension", "schema_id": "rr.robot.extension.v1"}),
                 json!({"command": "rr findings", "schema_id": "rr.robot.findings.v1"}),
                 json!({"command": "rr status", "schema_id": "rr.robot.status.v1"}),
-                json!({"command": "rr refresh", "schema_id": "rr.robot.refresh.v1"}),
                 json!({"command": "rr robot-docs", "schema_id": "rr.robot.robot_docs.v1"}),
             ],
             "0.1.0",
         ),
         "workflows" => (
             vec![
-                json!({"name": "resume_loop", "steps": ["rr sessions --robot", "rr resume --session <id> --robot", "rr findings --session <id> --robot"]}),
+                json!({"name": "resume_loop", "steps": ["rr sessions --robot", "rr resume --session <id> --robot", "rr findings --session <id> --robot"], "notes": "stale review-state reconciliation is automatic and may complete asynchronously while these surfaces are in use"}),
                 json!({"name": "search_followup", "steps": ["rr search --query <text> --robot", "rr status --session <id> --robot"]}),
                 json!({
                     "name": "inside_roger_safe_subset",
@@ -5099,7 +5079,12 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
 
     let branch = infer_git_branch(&runtime.cwd);
     let provider_tier = provider_tier(&session.provider);
-    let provider_warning = provider_support_warning(&session.provider, "rr status");
+    let mut warnings: Vec<String> = provider_support_warning(&session.provider, "rr status")
+        .into_iter()
+        .collect();
+    if let Some(warning) = automatic_reconciliation_warning(&session.attention_state) {
+        warnings.push(warning);
+    }
 
     CommandResponse {
         outcome: OutcomeKind::Complete,
@@ -5121,6 +5106,11 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             "attention": {
                 "state": session.attention_state,
                 "updated_at": session.updated_at,
+            },
+            "reconciliation": {
+                "mode": "automatic_background",
+                "fractional_staleness_allowed": true,
+                "stale_target_detected": session.attention_state == "refresh_recommended",
             },
             "findings": {
                 "total": findings_count,
@@ -5144,7 +5134,7 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 },
             }
         }),
-        warnings: provider_warning.into_iter().collect(),
+        warnings,
         repair_actions: Vec::new(),
         message: "status loaded".to_owned(),
     }
@@ -5204,7 +5194,12 @@ fn handle_findings(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
         }
     };
     let provider_tier = provider_tier(&session.provider);
-    let provider_warning = provider_support_warning(&session.provider, "rr findings");
+    let mut warnings: Vec<String> = provider_support_warning(&session.provider, "rr findings")
+        .into_iter()
+        .collect();
+    if let Some(warning) = automatic_reconciliation_warning(&session.attention_state) {
+        warnings.push(warning);
+    }
 
     let mut items = Vec::with_capacity(findings.len());
     for finding in &findings {
@@ -5243,6 +5238,11 @@ fn handle_findings(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
                 "repository": session.review_target.repository,
                 "pull_request": session.review_target.pull_request_number,
             },
+            "reconciliation": {
+                "mode": "automatic_background",
+                "fractional_staleness_allowed": true,
+                "stale_target_detected": session.attention_state == "refresh_recommended",
+            },
             "provider_capability": {
                 "provider": session.provider,
                 "tier": provider_tier,
@@ -5253,7 +5253,7 @@ fn handle_findings(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
                 },
             },
         }),
-        warnings: provider_warning.into_iter().collect(),
+        warnings,
         repair_actions: Vec::new(),
         message: if count == 0 {
             "no findings available for this session".to_owned()
@@ -5574,6 +5574,17 @@ fn provider_support_warning(provider: &str, command: &str) -> Option<String> {
     }
 }
 
+fn automatic_reconciliation_warning(attention_state: &str) -> Option<String> {
+    if attention_state == "refresh_recommended" {
+        Some(
+            "Roger reconciles stale review state automatically; current results may be fractionally stale until background reconciliation completes."
+                .to_owned(),
+        )
+    } else {
+        None
+    }
+}
+
 fn session_path_label(path: &OpenCodeSessionPath) -> &'static str {
     match path {
         OpenCodeSessionPath::StartedFresh => "started_fresh",
@@ -5745,8 +5756,7 @@ fn bridge_contract_snapshot() -> &'static str {
 export type BridgeAction =
   | 'start_review'
   | 'resume_review'
-  | 'show_findings'
-  | 'refresh_review';
+  | 'show_findings';
 
 export interface BridgeLaunchIntent {
   action: BridgeAction;
@@ -5886,7 +5896,7 @@ fn next_id(prefix: &str) -> String {
 }
 
 fn usage_text() -> &'static str {
-    "Usage:\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--repo owner/repo] [--limit <n>] [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--yes|-y] [--dry-run] [--robot]\n  rr bridge export-contracts [--robot]\n  rr bridge verify-contracts [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge install [--extension-id <id>] [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr extension setup [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr extension doctor [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr refresh [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n\nUpdate notes:\n  - default rr update apply prompts for confirmation on interactive TTY\n  - pass --yes|-y for non-interactive apply confirmation; --robot apply requires --yes|-y\n  - --dry-run and --robot without --yes are non-mutating metadata checks\n  - local/unpublished builds fail closed; migration-capable updates are deferred in 0.1.x"
+    "Usage:\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--repo owner/repo] [--limit <n>] [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--yes|-y] [--dry-run] [--robot]\n  rr bridge export-contracts [--robot]\n  rr bridge verify-contracts [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge install [--extension-id <id>] [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr extension setup [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr extension doctor [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n\nUpdate notes:\n  - default rr update apply prompts for confirmation on interactive TTY\n  - pass --yes|-y for non-interactive apply confirmation; --robot apply requires --yes|-y\n  - --dry-run and --robot without --yes are non-mutating metadata checks\n  - local/unpublished builds fail closed; migration-capable updates are deferred in 0.1.x"
 }
 
 #[cfg(test)]

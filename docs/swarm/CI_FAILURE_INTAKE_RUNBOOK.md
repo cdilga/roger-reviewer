@@ -7,7 +7,7 @@ ownership. This runbook makes that policy operational.
 
 `scripts/swarm/watch_ci_failures.sh` polls failed GitHub Actions runs for this
 repo and feeds them through
-[`scripts/swarm/ingest_failed_actions_runs.py`](/Users/cdilga/Documents/dev/roger-reviewer/scripts/swarm/ingest_failed_actions_runs.py).
+[`scripts/swarm/ingest_failed_actions_runs.py`](../../scripts/swarm/ingest_failed_actions_runs.py).
 
 The watcher:
 
@@ -18,7 +18,7 @@ The watcher:
 - sanitizes untrusted GitHub run text before it becomes bead description, notes,
   or Agent Mail body content, and quarantines suspicious prompt-like fields
 - appends configurable follow-up instructions from
-  [`.github/ci-failure-intake.json`](/Users/cdilga/Documents/dev/roger-reviewer/.github/ci-failure-intake.json)
+  [`.github/ci-failure-intake.json`](../../.github/ci-failure-intake.json)
 - sends Agent Mail notifications on topic `ci-failure` for create/update events
   so active agents see failures without waiting for a manual `br ready`
 
@@ -53,7 +53,7 @@ Dry-run mode:
 
 The default config file is:
 
-- [`.github/ci-failure-intake.json`](/Users/cdilga/Documents/dev/roger-reviewer/.github/ci-failure-intake.json)
+- [`.github/ci-failure-intake.json`](../../.github/ci-failure-intake.json)
 
 Supported knobs:
 
@@ -93,14 +93,14 @@ follow-ups are collapsed.
 
 ### Swarm integration
 
-The repo swarm wrapper now auto-starts the CI failure watcher after a successful
-[`launch_swarm.sh`](/Users/cdilga/Documents/dev/roger-reviewer/scripts/swarm/launch_swarm.sh)
-run. The shared status wrapper also reports whether `ci-failure-watch` is up.
+This watcher is independent of the `ntm` operator cockpit. If you are running a
+swarm, start it explicitly in parallel with your `ntm spawn ...` session rather
+than depending on repo-local launch wrappers.
 
 Manual checks:
 
 ```bash
 ./scripts/swarm/ensure_ci_failure_watch.sh --status
-./scripts/swarm/status.sh
+ntm status roger-reviewer
 tmux attach -t ci-failure-watch
 ```
