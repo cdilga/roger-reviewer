@@ -277,8 +277,8 @@ ntm dashboard roger
 
 For the Roger-specific operator surface after install, read:
 
-- [`docs/swarm/NTM_OPERATOR_GUIDE.md`](docs/swarm/NTM_OPERATOR_GUIDE.md)
 - [`docs/swarm/HUMAN_OPERATOR_FLYWHEEL_GUIDE.md`](docs/swarm/HUMAN_OPERATOR_FLYWHEEL_GUIDE.md)
+- [`docs/swarm/command_palette.md`](docs/swarm/command_palette.md)
 
 Install the repo palette into NTM:
 

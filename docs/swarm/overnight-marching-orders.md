@@ -58,6 +58,16 @@ After compaction or any long interruption, re-read `AGENTS.md`, reopen the
 relevant plan sections, and re-check `br ready` before acting. Do not resume
 from memory alone.
 
+If this pane is part of a persistent interactive tmux swarm session, do not
+stop after a single checkpoint. After each useful checkpoint, immediately
+re-check Agent Mail, rerun `br ready`, verify the next candidate with
+`br show <id>`, claim it, and keep going. Only stop when the queue is
+genuinely exhausted for you, a real blocker prevents more progress, or the
+user explicitly redirects you.
+
+If this prompt is being used in a headless one-shot launcher instead, stop
+cleanly after a durable checkpoint and let the outer launcher re-invoke you.
+
 ## Non-negotiables
 
 - Preserve Roger approval safety: no automatic GitHub posting and no direct GitHub write bypasses.
@@ -71,5 +81,5 @@ from memory alone.
 ## Authority Links
 
 - Worker doctrine (long form): `docs/swarm/worker-operating-doctrine.md`
-- Operator cockpit guidance: `docs/swarm/NTM_OPERATOR_GUIDE.md`
+- Operator cockpit guidance: `docs/swarm/HUMAN_OPERATOR_FLYWHEEL_GUIDE.md`
 - Canonical authority order and safety rules: `AGENTS.md`

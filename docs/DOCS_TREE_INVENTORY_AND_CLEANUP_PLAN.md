@@ -134,8 +134,8 @@ Special rule for this cleanup:
 | `docs/extension-visual-identity.md` | design note | `keep+status` | Bounded visual-identity decision record |
 | `docs/release-publish-operator-smoke.md` | operator/runbook doc | `keep+status` | Release publish smoke checklist |
 | `docs/swarm/CI_FAILURE_INTAKE_RUNBOOK.md` | operator/runbook doc | `keep+status` | CI failure watcher operations |
-| `docs/swarm/HUMAN_OPERATOR_FLYWHEEL_GUIDE.md` | operator/runbook doc | `keep+status` | Human operator doctrine |
-| `docs/swarm/NTM_OPERATOR_GUIDE.md` | operator/runbook doc | `keep+status` | Direct `ntm` usage guide |
+| `docs/swarm/HUMAN_OPERATOR_FLYWHEEL_GUIDE.md` | operator/runbook doc | `keep+status` | Canonical human operator doctrine plus direct `ntm` usage guide |
+| `docs/swarm/NTM_OPERATOR_GUIDE.md` | operator/runbook doc | `keep+status` | Compatibility pointer to the canonical human operator guide |
 | `docs/swarm/command_palette.md` | operator/runbook doc | `keep+status` | Command palette content, not product spec |
 | `docs/swarm/maintenance-lane-policy.md` | operator/runbook doc | `keep+status` | Swarm maintenance-lane policy |
 | `docs/swarm/maintenance-marching-orders.md` | operator/runbook doc | `keep+status` | Swarm maintenance prompt/runbook |

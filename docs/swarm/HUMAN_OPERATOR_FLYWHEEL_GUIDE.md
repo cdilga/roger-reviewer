@@ -8,6 +8,11 @@ the machine.
 The goal is to move from "I launched some agents" to "I am deliberately running
 an agent flywheel."
 
+This is the canonical swarm operator doc for Roger. The older
+`docs/swarm/NTM_OPERATOR_GUIDE.md` content has been folded into this guide.
+The shared prompt library lives at
+[`docs/swarm/command_palette.md`](command_palette.md).
+
 ---
 
 ## What The Operator Actually Does
@@ -105,6 +110,77 @@ The real power comes from:
 
 ---
 
+## Direct NTM Workflow
+
+Drive `ntm` directly before leaning on repo wrappers.
+
+A good default operator loop is:
+
+```bash
+ntm spawn roger-reviewer --cod=4 --no-user --auto-restart
+./scripts/swarm/run_assign_watch.sh --session roger-reviewer
+ntm palette roger-reviewer
+ntm activity roger-reviewer --watch
+ntm status roger-reviewer
+```
+
+Important spawn behavior:
+
+- by default, `ntm spawn` reserves the first pane for the user
+- that means 4 agents becomes 5 panes total unless you pass `--no-user`
+- use `--no-user` when you want the pane count to match the agent count exactly
+
+High-value direct commands:
+
+```bash
+ntm spawn roger-reviewer --cod=4 --no-user --auto-restart
+ntm assign roger-reviewer --watch --auto --strategy=dependency
+ntm add roger-reviewer --persona=reviewer --prompt "Review the active changes deeply"
+ntm palette roger-reviewer
+ntm send roger-reviewer --cod --file some-prompt.md
+ntm controller roger-reviewer
+ntm coordinator status roger-reviewer
+ntm handoff create roger-reviewer --auto
+ntm interrupt roger-reviewer
+ntm kill --project roger-reviewer --force
+```
+
+---
+
+## `ntm send` Is Not The Control Plane
+
+`ntm send` delivers prompts. It does not keep reclaiming idle panes after they
+finish a checkpoint.
+
+If you only:
+
+1. spawn agents
+2. send an initial prompt
+3. watch the panes
+
+then agents will eventually go idle, drift, or sit waiting for the next nudge.
+That is expected.
+
+For continuous churn, pair launch-time prompts with a persistent control plane:
+
+```bash
+ntm spawn roger-reviewer --cod=4 --no-user --auto-restart
+ntm assign roger-reviewer --watch --auto --strategy=dependency
+ntm controller roger-reviewer
+```
+
+Repo-local shortcut:
+
+```bash
+./scripts/swarm/run_assign_watch.sh --session roger-reviewer
+```
+
+Use `ntm send` for orientation, recovery, or targeted redirection. Use
+`assign --watch` plus controller/coordinator features to keep the swarm moving
+after panes become idle.
+
+---
+
 ## Your Job At Launch
 
 Before launching a swarm, decide five things:
@@ -146,7 +222,8 @@ when it is available:
 - assume local-only fail-open is acceptable if no worker fleet is configured
 - do not hold launch waiting for remote workers that do not exist
 
-These are now seeded in [command_palette.md](command_palette.md).
+These are now seeded in
+[`docs/swarm/command_palette.md`](command_palette.md).
 
 The operator should think:
 
@@ -170,16 +247,33 @@ It reads prompt entries from:
 ~/.config/ntm/command_palette.md
 ```
 
+NTM also recognizes a project-local:
+
+```bash
+./command_palette.md
+```
+
 This repo keeps a shared palette at:
 
 ```bash
 docs/swarm/command_palette.md
 ```
 
-Install it with:
+Use the shared prompt library directly here:
+
+- [`docs/swarm/command_palette.md`](command_palette.md)
+
+Install it with the repo helper:
 
 ```bash
 ./scripts/swarm/install_ntm_palette.sh
+```
+
+If you want the direct shim-free path instead:
+
+```bash
+mkdir -p ~/.config/ntm
+ln -sf "$PWD/docs/swarm/command_palette.md" ~/.config/ntm/command_palette.md
 ```
 
 Once installed, use:
@@ -389,12 +483,13 @@ For a normal coding swarm:
 
 1. decide mission and mode
 2. spawn the initial session with the right agent mix
-3. seed strong new-agent orientation
-4. monitor with `ntm activity` and `ntm status`
-5. use `ntm palette` to inject mode-specific prompts
-6. add specialist agents when needed
-7. use handoff/recovery tools when interrupted
-8. stop or shrink the swarm once the leverage drops
+3. start the persistent control plane (`ntm assign --watch` or repo helper)
+4. seed strong new-agent orientation
+5. monitor with `ntm activity` and `ntm status`
+6. use `ntm palette` to inject mode-specific prompts
+7. add specialist agents when needed
+8. use handoff/recovery tools when interrupted
+9. stop or shrink the swarm once the leverage drops
 
 You are not trying to maximize the number of prompt injections.
 You are trying to maximize compounded useful work.
@@ -407,6 +502,18 @@ Launch:
 
 ```bash
 ntm spawn roger-reviewer --cod=4 --no-user --auto-restart
+```
+
+Keep work flowing:
+
+```bash
+./scripts/swarm/run_assign_watch.sh --session roger-reviewer
+```
+
+or direct NTM:
+
+```bash
+ntm assign roger-reviewer --watch --auto --strategy=dependency
 ```
 
 Use the palette:
@@ -431,12 +538,14 @@ ntm add roger-reviewer --persona=reviewer --prompt "Review the current changes d
 Inject a recovery prompt:
 
 ```bash
-ntm send roger-reviewer --cod --file docs/swarm/command_palette.md
+ntm send roger-reviewer --cod --file /path/to/recovery-prompt.md
 ```
 
-That exact last command is usually not how you will use recovery in practice.
-The point is that recovery should be something you can trigger deliberately, not
-something you vaguely hope happens.
+Prefer selecting the recovery prompt from
+[`docs/swarm/command_palette.md`](command_palette.md) through `ntm palette`
+rather than pasting the whole palette file into a pane. The point is that
+recovery should be something you can trigger deliberately, not something you
+vaguely hope happens.
 
 Stop the swarm:
 
