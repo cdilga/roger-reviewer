@@ -6151,7 +6151,8 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                 json!({"command": "rr status --robot", "purpose": "session attention snapshot"}),
                 json!({"command": "rr sessions --robot", "purpose": "global session finder"}),
                 json!({"command": "rr findings --robot", "purpose": "structured findings list"}),
-                json!({"command": "rr search --query <text> --robot", "purpose": "prior-review lookup"}),
+                json!({"command": "rr search --query <text> --query-mode recall --robot", "purpose": "prior-review lookup"}),
+                json!({"command": "rr draft --session <id> --finding <finding-id> --robot", "purpose": "materialize local outbound drafts bound to the current review target without posting to GitHub"}),
                 json!({
                     "kind": "provider_support",
                     "command": "rr review --provider <name>",
@@ -6264,6 +6265,7 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                 json!({"command": "rr sessions", "required_formats": ["json"], "optional_formats": ["compact"]}),
                 json!({"command": "rr findings", "required_formats": ["json"], "optional_formats": ["compact"]}),
                 json!({"command": "rr search", "required_formats": ["json"], "optional_formats": ["compact"]}),
+                json!({"command": "rr draft", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr update", "required_formats": ["json"], "optional_formats": []}),
                 json!({
                     "command": "rr review --dry-run",
@@ -6295,19 +6297,22 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                 json!({"command": "rr return", "schema_id": "rr.robot.return.v1"}),
                 json!({"command": "rr sessions", "schema_id": "rr.robot.sessions.v1"}),
                 json!({"command": "rr search", "schema_id": "rr.robot.search.v1"}),
+                json!({"command": "rr draft", "schema_id": "rr.robot.draft.v1"}),
                 json!({"command": "rr update", "schema_id": "rr.robot.update.v1"}),
                 json!({"command": "rr bridge", "schema_id": "rr.robot.bridge.v1"}),
                 json!({"command": "rr extension", "schema_id": "rr.robot.extension.v1"}),
                 json!({"command": "rr findings", "schema_id": "rr.robot.findings.v1"}),
                 json!({"command": "rr status", "schema_id": "rr.robot.status.v1"}),
                 json!({"command": "rr robot-docs", "schema_id": "rr.robot.robot_docs.v1"}),
+                json!({"command": "rr agent", "schema_id": AGENT_TRANSPORT_RESPONSE_SCHEMA_V1, "surface": "dedicated_worker_transport"}),
             ],
             "0.1.0",
         ),
         "workflows" => (
             vec![
-                json!({"name": "resume_loop", "steps": ["rr sessions --robot", "rr resume --session <id> --robot", "rr findings --session <id> --robot"], "notes": "stale review-state reconciliation is automatic and may complete asynchronously while these surfaces are in use"}),
-                json!({"name": "search_followup", "steps": ["rr search --query <text> --robot", "rr status --session <id> --robot"]}),
+                json!({"name": "resume_loop", "steps": ["rr sessions --robot", "rr resume --session <id> --robot", "rr findings --session <id> --robot"], "notes": "There is no standalone refresh action. Readback surfaces expose persisted attention state and repair guidance; re-entry surfaces remain the place where Roger can safely reconcile stale review context."}),
+                json!({"name": "search_followup", "steps": ["rr search --query <text> --query-mode recall --robot", "rr status --session <id> --robot"]}),
+                json!({"name": "local_outbound_draft", "steps": ["rr findings --session <id> --robot", "rr draft --session <id> --finding <finding-id> [--finding <finding-id>] --robot", "rr status --session <id> --robot"], "notes": "rr draft materializes local Roger-owned draft batches only. It does not approve or post anything to GitHub, and it fails closed if the session target or persisted review state is stale."}),
                 json!({
                     "name": "inside_roger_safe_subset",
                     "context": "inside_roger",
