@@ -11,9 +11,10 @@ use roger_app_core::{
 use roger_storage::{
     ArtifactBudgetClass, ArtifactStorageKind, CreateFinding, CreateLaunchAttempt,
     CreateLaunchProfile, CreateOutboundDraft, CreateReviewRun, CreateReviewSession,
-    CreateSessionLaunchBinding, FinalizeReviewLaunchAttempt, LaunchAttemptAction,
-    LaunchAttemptState, LaunchSurface, ResolveSessionLaunchBinding, Result, RogerStore,
-    SessionBindingResolution, UpdateIndexState, UpdateLaunchAttempt,
+    CreateSessionLaunchBinding, ExistingSessionLaunchFinalizationError,
+    FinalizeExistingSessionLaunchAttempt, FinalizeReviewLaunchAttempt, LaunchAttemptAction,
+    LaunchAttemptState, LaunchSurface, ResolveSessionLaunchBinding, ResolveSessionLocalRoot,
+    Result, RogerStore, SessionBindingResolution, UpdateIndexState, UpdateLaunchAttempt,
 };
 
 fn sample_target() -> ReviewTarget {
@@ -345,6 +346,7 @@ fn storage_smoke_persists_resume_and_approval_state_across_restart() -> Result<(
         assert!(by_target_none.is_empty());
     }
 
+
     Ok(())
 }
 
@@ -558,6 +560,11 @@ fn launch_binding_resolution_fails_closed_for_ambiguous_and_mismatched_state() -
         ("session-1", "binding-1", &target, "reuse_if_possible"),
         ("session-2", "binding-2", &other_target, "always_new"),
     ] {
+        let (cwd, worktree_root) = match binding_id {
+            "binding-1" => (Some("/tmp/worktree-a"), Some("/tmp/worktree-a")),
+            "binding-2" => (Some("/tmp/worktree-a/subdir"), Some("/tmp/worktree-a")),
+            _ => unreachable!("unexpected binding id"),
+        };
         store.create_review_session(CreateReviewSession {
             id: session_id,
             review_target,
@@ -577,8 +584,8 @@ fn launch_binding_resolution_fails_closed_for_ambiguous_and_mismatched_state() -
             launch_profile_id: None,
             ui_target: Some("cli"),
             instance_preference: Some(instance_preference),
-            cwd: Some("/tmp/repo"),
-            worktree_root: None,
+            cwd,
+            worktree_root,
         })?;
     }
 
@@ -621,6 +628,29 @@ fn launch_binding_resolution_fails_closed_for_ambiguous_and_mismatched_state() -
                 if binding_id == "binding-1" && reason.contains("binding target mismatch")
         ),
         "expected stale resolution, got {stale:?}"
+    );
+
+    let stale_local_root = store.resolve_session_launch_binding_with_context(
+        ResolveSessionLaunchBinding {
+            explicit_session_id: None,
+            surface: LaunchSurface::Cli,
+            repo_locator: "owner/repo",
+            review_target: Some(&other_target),
+            ui_target: Some("cli"),
+            instance_preference: Some("always_new"),
+        },
+        ResolveSessionLocalRoot {
+            cwd: Some("/tmp/worktree-b"),
+            worktree_root: Some("/tmp/worktree-b"),
+        },
+    )?;
+    assert!(
+        matches!(
+            &stale_local_root,
+            SessionBindingResolution::Stale { binding_id, reason }
+                if binding_id == "binding-2" && reason.contains("worktree root mismatch")
+        ),
+        "expected stale local-root resolution, got {stale_local_root:?}"
     );
 
     Ok(())

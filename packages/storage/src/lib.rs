@@ -1088,6 +1088,12 @@ pub struct ResolveSessionReentry {
     pub instance_preference: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ResolveSessionLocalRoot<'a> {
+    pub cwd: Option<&'a str>,
+    pub worktree_root: Option<&'a str>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionReentryResolution {
     Resolved {
@@ -4018,6 +4024,14 @@ impl RogerStore {
         &self,
         query: ResolveSessionLaunchBinding<'_>,
     ) -> Result<SessionBindingResolution> {
+        self.resolve_session_launch_binding_with_context(query, ResolveSessionLocalRoot::default())
+    }
+
+    pub fn resolve_session_launch_binding_with_context(
+        &self,
+        query: ResolveSessionLaunchBinding<'_>,
+        local_root: ResolveSessionLocalRoot<'_>,
+    ) -> Result<SessionBindingResolution> {
         let mut stmt = self.conn.prepare(
             "SELECT id, session_id, repo_locator, review_target, surface, launch_profile_id,
                 ui_target, instance_preference, cwd, worktree_root, row_version
@@ -4110,6 +4124,13 @@ impl RogerStore {
                     });
                 }
             }
+        }
+
+        if let Some(reason) = binding_local_root_stale_reason(&binding, local_root) {
+            return Ok(SessionBindingResolution::Stale {
+                binding_id: binding.id.clone(),
+                reason,
+            });
         }
 
         Ok(SessionBindingResolution::Resolved(binding))
@@ -4234,6 +4255,14 @@ impl RogerStore {
         &self,
         query: ResolveSessionReentry,
     ) -> Result<SessionReentryResolution> {
+        self.resolve_session_reentry_with_context(query, ResolveSessionLocalRoot::default())
+    }
+
+    pub fn resolve_session_reentry_with_context(
+        &self,
+        query: ResolveSessionReentry,
+        local_root: ResolveSessionLocalRoot<'_>,
+    ) -> Result<SessionReentryResolution> {
         if let Some(explicit_session_id) = query.explicit_session_id.clone() {
             if let Some(session) = self.review_session(&explicit_session_id)? {
                 return Ok(SessionReentryResolution::Resolved {
@@ -4260,15 +4289,17 @@ impl RogerStore {
             let sessions = self.find_sessions_by_target(repository, pull_request_number)?;
             if sessions.len() == 1 {
                 let session = sessions[0].clone();
-                let binding_resolution =
-                    self.resolve_session_launch_binding(ResolveSessionLaunchBinding {
+                let binding_resolution = self.resolve_session_launch_binding_with_context(
+                    ResolveSessionLaunchBinding {
                         explicit_session_id: Some(&session.id),
                         surface: query.source_surface,
                         repo_locator: repository,
                         review_target: Some(&session.review_target),
                         ui_target: query.ui_target.as_deref(),
                         instance_preference: query.instance_preference.as_deref(),
-                    })?;
+                    },
+                    local_root,
+                )?;
                 return match binding_resolution {
                     SessionBindingResolution::Resolved(binding) => {
                         Ok(SessionReentryResolution::Resolved {
@@ -5535,6 +5566,55 @@ fn session_entry_from_record(record: &ReviewSessionRecord) -> SessionFinderEntry
         provider: record.provider.clone(),
         updated_at: record.updated_at,
     }
+}
+
+fn binding_local_root_stale_reason(
+    binding: &SessionLaunchBindingRecord,
+    local_root: ResolveSessionLocalRoot<'_>,
+) -> Option<String> {
+    if let Some(worktree_root) = local_root.worktree_root {
+        return match binding.worktree_root.as_deref() {
+            Some(bound_worktree_root)
+                if Path::new(bound_worktree_root) == Path::new(worktree_root) =>
+            {
+                None
+            }
+            Some(bound_worktree_root) => Some(format!(
+                "binding worktree root mismatch: expected current worktree {worktree_root}, found {bound_worktree_root}"
+            )),
+            None => match binding.cwd.as_deref() {
+                Some(bound_cwd) if Path::new(bound_cwd).starts_with(Path::new(worktree_root)) => {
+                    None
+                }
+                Some(bound_cwd) => Some(format!(
+                    "binding cwd is outside current worktree root: expected current worktree {worktree_root}, found {bound_cwd}"
+                )),
+                None => Some("binding is missing durable local-root state".to_owned()),
+            },
+        };
+    }
+
+    if let Some(cwd) = local_root.cwd {
+        return match binding.worktree_root.as_deref() {
+            Some(bound_worktree_root)
+                if Path::new(cwd).starts_with(Path::new(bound_worktree_root)) =>
+            {
+                None
+            }
+            Some(bound_worktree_root) => Some(format!(
+                "current cwd {cwd} is outside binding worktree root {bound_worktree_root}"
+            )),
+            None => match binding.cwd.as_deref() {
+                Some(bound_cwd) if Path::new(bound_cwd) == Path::new(cwd) => None,
+                Some(bound_cwd) => Some(format!(
+                    "binding cwd mismatch: expected current cwd {cwd}, found {bound_cwd}"
+                )),
+                None => Some("binding is missing durable local-root state".to_owned()),
+            },
+        };
+    }
+
+    None
 }
 
 fn count_for_session(conn: &Connection, table: &str, session_id: &str) -> Result<i64> {
