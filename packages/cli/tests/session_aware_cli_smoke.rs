@@ -2332,6 +2332,7 @@ fn return_reports_truthful_rebind_path_after_dropout_style_state() {
     let locator = adapter
         .start_session(&target, &sample_launch_intent(LaunchAction::StartReview))
         .expect("start locator");
+    let binding_cwd = runtime.cwd.to_string_lossy().to_string();
 
     let store = RogerStore::open(&runtime.store_root).expect("open store");
     store
@@ -2359,7 +2360,7 @@ fn return_reports_truthful_rebind_path_after_dropout_style_state() {
             launch_profile_id: Some("profile-open-pr"),
             ui_target: Some("cli"),
             instance_preference: Some("reuse_if_possible"),
-            cwd: Some("/tmp/repo"),
+            cwd: Some(&binding_cwd),
             worktree_root: None,
         })
         .expect("create binding");
