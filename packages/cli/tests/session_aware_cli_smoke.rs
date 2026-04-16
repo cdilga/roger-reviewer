@@ -1650,6 +1650,12 @@ fn status_and_findings_surface_outbound_approval_states_truthfully() {
             "drafted",
         ),
         (
+            "finding-superseded",
+            "fp-superseded",
+            "Superseded draft finding",
+            "drafted",
+        ),
+        (
             "finding-posted",
             "fp-posted",
             "Posted draft finding",
@@ -1767,6 +1773,39 @@ fn status_and_findings_surface_outbound_approval_states_truthfully() {
             row_version: 2,
         })
         .expect("store invalidated draft item");
+    let superseded_batch = OutboundDraftBatch {
+        id: "batch-superseded".to_owned(),
+        review_session_id: session_id.clone(),
+        review_run_id: review_run_id.clone(),
+        repo_id: "owner/repo".to_owned(),
+        remote_review_target_id: "pr-42".to_owned(),
+        payload_digest: "sha256:payload-superseded".to_owned(),
+        approval_state: ApprovalState::Invalidated,
+        approved_at: Some(1_710_020_021),
+        invalidated_at: Some(1_710_020_022),
+        invalidation_reason_code: Some("superseded_invalidate".to_owned()),
+        row_version: 2,
+    };
+    store
+        .store_outbound_draft_batch(&superseded_batch)
+        .expect("store superseded batch");
+    store
+        .store_outbound_draft_item(&OutboundDraft {
+            id: "draft-superseded".to_owned(),
+            review_session_id: session_id.clone(),
+            review_run_id: review_run_id.clone(),
+            finding_id: Some("finding-superseded".to_owned()),
+            draft_batch_id: superseded_batch.id.clone(),
+            repo_id: superseded_batch.repo_id.clone(),
+            remote_review_target_id: superseded_batch.remote_review_target_id.clone(),
+            payload_digest: superseded_batch.payload_digest.clone(),
+            approval_state: ApprovalState::Invalidated,
+            anchor_digest: "anchor:superseded".to_owned(),
+            target_locator: "github:owner/repo#42/files#thread-superseded".to_owned(),
+            body: "Superseded canonical outbound body".to_owned(),
+            row_version: 2,
+        })
+        .expect("store superseded draft item");
 
     store
         .create_outbound_draft(roger_storage::CreateOutboundDraft {
@@ -1855,7 +1894,7 @@ fn status_and_findings_surface_outbound_approval_states_truthfully() {
     );
     assert_eq!(
         status_payload["data"]["outbound"]["state_counts"]["invalidated"],
-        1
+        2
     );
     assert_eq!(
         status_payload["data"]["outbound"]["state_counts"]["posted"],
@@ -1863,6 +1902,22 @@ fn status_and_findings_surface_outbound_approval_states_truthfully() {
     );
     assert_eq!(
         status_payload["data"]["outbound"]["state_counts"]["failed"],
+        1
+    );
+    assert_eq!(
+        status_payload["data"]["outbound"]["recovery"]["retry_needed_count"],
+        0
+    );
+    assert_eq!(
+        status_payload["data"]["outbound"]["recovery"]["invalidation_reason_counts"]["target_rebased"],
+        1
+    );
+    assert_eq!(
+        status_payload["data"]["outbound"]["recovery"]["superseded_count"],
+        1
+    );
+    assert_eq!(
+        status_payload["data"]["outbound"]["recovery"]["invalidation_reason_counts"]["superseded_invalidate"],
         1
     );
     assert_eq!(
@@ -1910,6 +1965,26 @@ fn status_and_findings_surface_outbound_approval_states_truthfully() {
     assert_eq!(
         indexed["finding-invalidated"]["outbound_detail"]["invalidation_reason_code"],
         "target_rebased"
+    );
+    assert_eq!(
+        indexed["finding-invalidated"]["outbound_detail"]["retry_needed"],
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        indexed["finding-invalidated"]["outbound_detail"]["recovery_state"],
+        "invalidated"
+    );
+    assert_eq!(
+        indexed["finding-superseded"]["outbound_state"],
+        "invalidated"
+    );
+    assert_eq!(
+        indexed["finding-superseded"]["outbound_detail"]["invalidation_reason_code"],
+        "superseded_invalidate"
+    );
+    assert_eq!(
+        indexed["finding-superseded"]["outbound_detail"]["recovery_state"],
+        "superseded"
     );
     assert_eq!(indexed["finding-posted"]["outbound_state"], "posted");
     assert_eq!(
@@ -2120,6 +2195,14 @@ fn status_and_findings_preserve_partial_post_membership_after_restart() {
         serde_json::json!(0)
     );
     assert_eq!(
+        status_payload["data"]["outbound"]["recovery"]["retry_needed_count"],
+        serde_json::json!(1)
+    );
+    assert_eq!(
+        status_payload["data"]["outbound"]["recovery"]["invalidation_reason_counts"],
+        serde_json::json!({})
+    );
+    assert_eq!(
         status_payload["data"]["outbound"]["posting_gate"]["ready_count"],
         serde_json::json!(0)
     );
@@ -2149,12 +2232,52 @@ fn status_and_findings_preserve_partial_post_membership_after_restart() {
         "Partial"
     );
     assert_eq!(
+        indexed["finding-partial-posted"]["outbound_detail"]["posted_action_item_status"],
+        "Posted"
+    );
+    assert_eq!(
+        indexed["finding-partial-posted"]["outbound_detail"]["remote_identifier"],
+        "73"
+    );
+    assert_eq!(
+        indexed["finding-partial-posted"]["outbound_detail"]["failure_code"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        indexed["finding-partial-posted"]["outbound_detail"]["retry_needed"],
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        indexed["finding-partial-posted"]["outbound_detail"]["recovery_state"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
         indexed["finding-partial-failed"]["outbound_state"],
         "failed"
     );
     assert_eq!(
         indexed["finding-partial-failed"]["outbound_detail"]["posted_action_status"],
         "Partial"
+    );
+    assert_eq!(
+        indexed["finding-partial-failed"]["outbound_detail"]["posted_action_item_status"],
+        "Failed"
+    );
+    assert_eq!(
+        indexed["finding-partial-failed"]["outbound_detail"]["remote_identifier"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        indexed["finding-partial-failed"]["outbound_detail"]["failure_code"],
+        "retryable:service_unavailable"
+    );
+    assert_eq!(
+        indexed["finding-partial-failed"]["outbound_detail"]["retry_needed"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        indexed["finding-partial-failed"]["outbound_detail"]["recovery_state"],
+        "retry_needed"
     );
 }
 

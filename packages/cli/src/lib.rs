@@ -35,16 +35,17 @@ use roger_session_opencode::{
 use roger_storage::{
     CreateLaunchAttempt, CreateReviewRun, CreateReviewSession, CreateSessionLaunchBinding,
     FinalizeReviewLaunchAttempt, LaunchAttemptAction, LaunchAttemptState, LaunchSurface,
-    PriorReviewLookupQuery, PriorReviewRetrievalMode, ResolveSessionLaunchBinding,
-    ResolveSessionLocalRoot, ResolveSessionReentry, ReviewLaunchFinalizationError, RogerStore,
-    SessionBindingResolution, SessionFinderEntry, SessionFinderQuery, SessionLaunchBindingRecord,
-    SessionReentryResolution, StorageLayout, UpdateLaunchAttempt,
+    OutboundSurfaceProjection, PriorReviewLookupQuery, PriorReviewRetrievalMode,
+    ResolveSessionLaunchBinding, ResolveSessionLocalRoot, ResolveSessionReentry,
+    ReviewLaunchFinalizationError, RogerStore, SessionBindingResolution, SessionFinderEntry,
+    SessionFinderQuery, SessionLaunchBindingRecord, SessionReentryResolution, StorageLayout,
+    UpdateLaunchAttempt,
 };
 use rusqlite::Connection as SqliteConnection;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -4917,6 +4918,106 @@ fn fetch_url_with_curl(url: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ChecksumsManifestFetch {
+    text: String,
+    url: String,
+    legacy_fallback_used: bool,
+    attempted_urls: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ChecksumsManifestFetchError {
+    attempted_urls: Vec<String>,
+    message: String,
+}
+
+fn fetch_checksums_manifest_with_fallback(
+    download_root: &str,
+    target_tag: &str,
+    declared_checksums_name: &str,
+) -> Result<ChecksumsManifestFetch, ChecksumsManifestFetchError> {
+    let declared_url = format!("{download_root}/{target_tag}/{declared_checksums_name}");
+    let mut attempted_urls = vec![declared_url.clone()];
+    match fetch_url_with_curl(&declared_url) {
+        Ok(text) => {
+            return Ok(ChecksumsManifestFetch {
+                text,
+                url: declared_url,
+                legacy_fallback_used: false,
+                attempted_urls,
+            });
+        }
+        Err(primary_err) => {
+            if declared_checksums_name == "SHA256SUMS" {
+                return Err(ChecksumsManifestFetchError {
+                    attempted_urls,
+                    message: format!("failed to fetch checksums: {primary_err}"),
+                });
+            }
+
+            let fallback_url = format!("{download_root}/{target_tag}/SHA256SUMS");
+            attempted_urls.push(fallback_url.clone());
+            match fetch_url_with_curl(&fallback_url) {
+                Ok(text) => Ok(ChecksumsManifestFetch {
+                    text,
+                    url: fallback_url,
+                    legacy_fallback_used: true,
+                    attempted_urls,
+                }),
+                Err(fallback_err) => Err(ChecksumsManifestFetchError {
+                    attempted_urls,
+                    message: format!(
+                        "failed to fetch checksums: {primary_err}; fallback SHA256SUMS also failed: {fallback_err}"
+                    ),
+                }),
+            }
+        }
+    }
+}
+
+fn release_hosted_reinstall_command(
+    repo: &str,
+    target_version: Option<&str>,
+    target_tag: Option<&str>,
+    channel: Option<&str>,
+) -> String {
+    if cfg!(target_os = "windows") {
+        let base = if let Some(tag) = target_tag {
+            format!("https://github.com/{repo}/releases/download/{tag}/rr-install.ps1")
+        } else {
+            format!("https://github.com/{repo}/releases/latest/download/rr-install.ps1")
+        };
+        let mut args = Vec::new();
+        if let Some(channel) = channel.filter(|value| !value.is_empty() && *value != "stable") {
+            args.push(format!("-Channel {channel}"));
+        }
+        if let Some(version) = target_version {
+            args.push(format!("-Version {version}"));
+        }
+        args.push(format!("-Repo {repo}"));
+        let arg_string = args.join(" ");
+        return format!(
+            "powershell -ExecutionPolicy Bypass -Command \"& {{ $tmp = Join-Path $env:TEMP 'rr-install.ps1'; Invoke-WebRequest '{base}' -OutFile $tmp; & $tmp {arg_string} }}\""
+        );
+    }
+
+    let base = if let Some(tag) = target_tag {
+        format!("https://github.com/{repo}/releases/download/{tag}/rr-install.sh")
+    } else {
+        format!("https://github.com/{repo}/releases/latest/download/rr-install.sh")
+    };
+    let mut args = Vec::new();
+    if let Some(channel) = channel.filter(|value| !value.is_empty() && *value != "stable") {
+        args.push(format!("--channel {channel}"));
+    }
+    if let Some(version) = target_version {
+        args.push(format!("--version {version}"));
+    }
+    args.push(format!("--repo {repo}"));
+    format!("curl -fsSL {base} | bash -s -- {}", args.join(" "))
+}
+
 fn resolve_latest_release_tag(api_root: &str, channel: &str) -> Result<String, String> {
     if channel == "stable" {
         let payload = fetch_url_with_curl(&format!("{api_root}/releases/latest"))?;
@@ -5604,18 +5705,25 @@ fn migration_policy_payload() -> Value {
 }
 
 fn handle_update(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
+    let repo = parsed
+        .repo
+        .clone()
+        .unwrap_or_else(|| "cdilga/roger-reviewer".to_owned());
+
     let Some(current_version) = option_env!("ROGER_RELEASE_VERSION").map(str::to_owned) else {
+        let recommended_reinstall_command =
+            release_hosted_reinstall_command(&repo, None, None, Some("stable"));
         return blocked_response(
             "rr update is disabled for local/unpublished builds without embedded release metadata"
                 .to_owned(),
             vec![
                 "install a published Roger release artifact before running rr update".to_owned(),
-                "or run scripts/release/rr-install.sh directly with an explicit --version"
-                    .to_owned(),
+                format!("or run {recommended_reinstall_command}"),
             ],
             json!({
                 "reason_code": "local_or_unpublished_build",
                 "migration": migration_policy_payload(),
+                "recommended_reinstall_command": recommended_reinstall_command,
             }),
         );
     };
@@ -5625,11 +5733,6 @@ fn handle_update(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let current_tag = option_env!("ROGER_RELEASE_TAG")
         .map(str::to_owned)
         .unwrap_or_else(|| format!("v{current_version}"));
-
-    let repo = parsed
-        .repo
-        .clone()
-        .unwrap_or_else(|| "cdilga/roger-reviewer".to_owned());
     let channel = parsed.update_channel.clone();
     let api_root = parsed
         .update_api_root
@@ -5897,17 +6000,28 @@ fn handle_update(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         }
     }
 
-    let checksums_url = format!("{download_root}/{target_tag}/{checksums_name}");
-    let checksums_text = match fetch_url_with_curl(&checksums_url) {
-        Ok(text) => text,
+    let checksums_fetch = match fetch_checksums_manifest_with_fallback(
+        &download_root,
+        &target_tag,
+        &checksums_name,
+    ) {
+        Ok(fetch) => fetch,
         Err(err) => {
             return blocked_response(
-                format!("failed to fetch checksums: {err}"),
+                err.message,
                 vec!["rebuild/upload checksums for this tag".to_owned()],
-                json!({"reason_code": "checksums_missing", "url": checksums_url}),
+                json!({
+                    "reason_code": "checksums_missing",
+                    "url": format!("{download_root}/{target_tag}/{checksums_name}"),
+                    "attempted_urls": err.attempted_urls,
+                    "legacy_fallback_attempted": checksums_name != "SHA256SUMS",
+                }),
             );
         }
     };
+    let checksums_url = checksums_fetch.url.clone();
+    let checksums_legacy_fallback = checksums_fetch.legacy_fallback_used;
+    let checksums_text = checksums_fetch.text;
     let checksums_sha = match checksums_entry_for_archive(&checksums_text, &archive_name) {
         Ok(value) => value,
         Err(err) => {
@@ -5965,10 +6079,26 @@ fn handle_update(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 "current_version": current_version,
                 "current_channel": current_channel,
                 "current_tag": current_tag,
-                "target_version": target_version,
-                "target_tag": target_tag,
+                "current_release": {
+                    "version": current_version,
+                    "channel": current_channel,
+                    "tag": current_tag,
+                },
+                "target_version": Value::Null,
+                "target_tag": Value::Null,
+                "target_release": {
+                    "version": Value::Null,
+                    "channel": channel,
+                    "tag": Value::Null,
+                },
                 "target": target,
                 "up_to_date": true,
+                "checksums_legacy_fallback": checksums_legacy_fallback,
+                "metadata_urls": {
+                    "install_metadata": install_metadata_url,
+                    "core_manifest": core_manifest_url,
+                    "checksums": checksums_url,
+                },
                 "migration": migration_policy.clone(),
                 "confirmation": {
                     "required": false,
@@ -5983,13 +6113,12 @@ fn handle_update(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     }
 
     let archive_url = format!("{download_root}/{target_tag}/{archive_name}");
-    let recommended_command = if cfg!(target_os = "windows") {
-        format!(
-            "powershell -ExecutionPolicy Bypass -File scripts/release/rr-install.ps1 -Version {target_version} -Repo {repo}"
-        )
-    } else {
-        format!("bash scripts/release/rr-install.sh --version {target_version} --repo {repo}")
-    };
+    let recommended_command = release_hosted_reinstall_command(
+        &repo,
+        Some(&target_version),
+        Some(&target_tag),
+        Some(&channel),
+    );
 
     if parsed.dry_run {
         return CommandResponse {
@@ -6011,6 +6140,7 @@ fn handle_update(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                     "core_manifest": core_manifest_url,
                     "checksums": checksums_url,
                 },
+                "checksums_legacy_fallback": checksums_legacy_fallback,
                 "archive": {
                     "name": archive_name,
                     "sha256": archive_sha256,
@@ -6145,23 +6275,41 @@ fn handle_update(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let current_exe = match std::env::current_exe() {
         Ok(path) => path,
         Err(err) => {
+            let recommended_reinstall_command = release_hosted_reinstall_command(
+                &repo,
+                Some(&target_version),
+                Some(&target_tag),
+                Some(&channel),
+            );
             return blocked_response(
                 format!("failed to resolve current executable path: {err}"),
-                vec!["run scripts/release/rr-install.sh with an explicit --version".to_owned()],
-                json!({"reason_code": "current_exe_resolution_failed"}),
+                vec![format!("run {recommended_reinstall_command}")],
+                json!({
+                    "reason_code": "current_exe_resolution_failed",
+                    "recommended_reinstall_command": recommended_reinstall_command,
+                }),
             );
         }
     };
     let install_path = match resolve_update_install_path(&current_exe, &binary_name) {
         Ok(path) => path,
         Err(err) => {
+            let recommended_reinstall_command = release_hosted_reinstall_command(
+                &repo,
+                Some(&target_version),
+                Some(&target_tag),
+                Some(&channel),
+            );
             return blocked_response(
                 err,
                 vec![
                     "install Roger to a direct rr binary path before running rr update".to_owned(),
-                    "or run scripts/release/rr-install.sh with an explicit --version".to_owned(),
+                    format!("or run {recommended_reinstall_command}"),
                 ],
-                json!({"reason_code": "unsupported_install_layout"}),
+                json!({
+                    "reason_code": "unsupported_install_layout",
+                    "recommended_reinstall_command": recommended_reinstall_command,
+                }),
             );
         }
     };
@@ -6177,15 +6325,22 @@ fn handle_update(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     ) {
         Ok(outcome) => outcome,
         Err(err) => {
+            let recommended_reinstall_command = release_hosted_reinstall_command(
+                &repo,
+                Some(&target_version),
+                Some(&target_tag),
+                Some(&channel),
+            );
             return blocked_response(
                 format!("failed to apply in-place update: {err}"),
                 vec![
                     "re-run rr update after resolving install path and permissions".to_owned(),
-                    format!("or run {recommended_command}"),
+                    format!("or run {recommended_reinstall_command}"),
                 ],
                 json!({
                     "reason_code": "in_place_apply_failed",
                     "install_path": install_path.to_string_lossy(),
+                    "recommended_reinstall_command": recommended_reinstall_command,
                 }),
             );
         }
@@ -6210,6 +6365,7 @@ fn handle_update(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 "core_manifest": core_manifest_url,
                 "checksums": checksums_url,
             },
+            "checksums_legacy_fallback": checksums_legacy_fallback,
             "archive": {
                 "name": archive_name,
                 "sha256": archive_sha256,
@@ -8136,6 +8292,59 @@ fn handle_post(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     }
 }
 
+fn outbound_retry_needed(projection: &OutboundSurfaceProjection) -> bool {
+    projection
+        .failure_code
+        .as_deref()
+        .is_some_and(|code| code.starts_with("retryable:"))
+}
+
+fn outbound_recovery_state(projection: &OutboundSurfaceProjection) -> Option<&'static str> {
+    if projection
+        .invalidation_reason_code
+        .as_deref()
+        .is_some_and(|reason| reason.starts_with("superseded"))
+    {
+        Some("superseded")
+    } else if outbound_retry_needed(projection) {
+        Some("retry_needed")
+    } else if projection.state == "invalidated" {
+        Some("invalidated")
+    } else {
+        None
+    }
+}
+
+fn outbound_recovery_summary(
+    projections: impl IntoIterator<Item = OutboundSurfaceProjection>,
+) -> serde_json::Value {
+    let mut retry_needed_count = 0_i64;
+    let mut superseded_count = 0_i64;
+    let mut invalidation_reason_counts = BTreeMap::<String, i64>::new();
+
+    for projection in projections {
+        if outbound_retry_needed(&projection) {
+            retry_needed_count += 1;
+        }
+
+        if matches!(outbound_recovery_state(&projection), Some("superseded")) {
+            superseded_count += 1;
+        }
+
+        if let Some(reason) = projection.invalidation_reason_code.as_ref() {
+            *invalidation_reason_counts
+                .entry(reason.clone())
+                .or_insert(0) += 1;
+        }
+    }
+
+    json!({
+        "retry_needed_count": retry_needed_count,
+        "superseded_count": superseded_count,
+        "invalidation_reason_counts": invalidation_reason_counts,
+    })
+}
+
 fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let store = match RogerStore::open(&runtime.store_root) {
         Ok(store) => store,
@@ -8217,6 +8426,36 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     } else {
         roger_storage::OutboundStateCounts::default()
     };
+    let outbound_recovery = if let Some(run) = latest_run.as_ref() {
+        match store.materialized_findings_for_run(&session.id, &run.id) {
+            Ok(findings) => {
+                let mut projections = Vec::with_capacity(findings.len());
+                for finding in findings {
+                    let projection = match store.outbound_surface_projection_for_finding(
+                        &finding.id,
+                        &finding.outbound_state,
+                    ) {
+                        Ok(projection) => projection,
+                        Err(err) => {
+                            return error_response(format!(
+                                "failed to project outbound recovery state for status finding {}: {err}",
+                                finding.id
+                            ));
+                        }
+                    };
+                    projections.push(projection);
+                }
+                outbound_recovery_summary(projections)
+            }
+            Err(err) => {
+                return error_response(format!(
+                    "failed to load findings for outbound recovery summary: {err}"
+                ));
+            }
+        }
+    } else {
+        outbound_recovery_summary(Vec::new())
+    };
 
     let branch = infer_git_branch(&runtime.cwd);
     let provider_tier = provider_tier(&session.provider);
@@ -8277,6 +8516,7 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                     "ready_count": outbound_counts.approved,
                     "visibly_elevated": outbound_counts.approved > 0,
                 },
+                "recovery": outbound_recovery,
             },
             "continuity": {
                 "tier": provider_tier,
@@ -8392,7 +8632,13 @@ fn handle_findings(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
                 "approval_id": outbound_projection.approval_id,
                 "posted_action_id": outbound_projection.posted_action_id,
                 "posted_action_status": outbound_projection.posted_action_status,
+                "posted_action_item_id": outbound_projection.posted_action_item_id,
+                "posted_action_item_status": outbound_projection.posted_action_item_status,
+                "remote_identifier": outbound_projection.remote_identifier,
+                "failure_code": outbound_projection.failure_code,
                 "invalidation_reason_code": outbound_projection.invalidation_reason_code,
+                "retry_needed": outbound_retry_needed(&outbound_projection),
+                "recovery_state": outbound_recovery_state(&outbound_projection),
                 "mutation_elevated": outbound_projection.mutation_elevated,
             },
             "evidence_count": evidence_count,
