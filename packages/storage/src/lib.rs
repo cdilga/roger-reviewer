@@ -1218,6 +1218,7 @@ pub struct PriorReviewLookupQuery<'a> {
 pub enum PriorReviewRetrievalMode {
     Hybrid,
     LexicalOnly,
+    RecoveryScan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3467,6 +3468,7 @@ impl RogerStore {
         let lexical_ready = self
             .index_state(&format!("lexical:{}", query.scope_key))?
             .is_some_and(|state| state.status == "ready");
+        let lexical_recovery_scan = !lexical_ready;
         if !lexical_ready {
             degraded_reasons.push(
                 "lexical sidecar unavailable or stale; using canonical DB lexical scan".to_owned(),
@@ -3633,7 +3635,9 @@ impl RogerStore {
 
         Ok(PriorReviewLookupResult {
             scope_bucket,
-            mode: if semantic_operational {
+            mode: if lexical_recovery_scan {
+                PriorReviewRetrievalMode::RecoveryScan
+            } else if semantic_operational {
                 PriorReviewRetrievalMode::Hybrid
             } else {
                 PriorReviewRetrievalMode::LexicalOnly

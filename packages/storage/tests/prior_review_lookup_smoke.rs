@@ -171,6 +171,58 @@ fn prior_review_lookup_is_repo_first_and_truthfully_degrades_without_semantic_as
 }
 
 #[test]
+fn prior_review_lookup_uses_recovery_scan_when_lexical_sidecar_is_unavailable() -> Result<()> {
+    let temp = tempdir()?;
+    let store = RogerStore::open(temp.path().join("profile"))?;
+
+    seed_session(&store, "session-owner", "run-owner", "owner/repo", 42)?;
+
+    store.upsert_materialized_finding(CreateMaterializedFinding {
+        id: "finding-owner",
+        session_id: "session-owner",
+        review_run_id: "run-owner",
+        stage: "deep_review",
+        fingerprint: "fp:refresh-lifecycle",
+        title: "Refresh lifecycle can invalidate prior approvals",
+        normalized_summary: "refresh lifecycle reconfirmation should gate posting",
+        severity: "high",
+        confidence: "high",
+        triage_state: "accepted",
+        outbound_state: "drafted",
+    })?;
+
+    let result = store.prior_review_lookup(PriorReviewLookupQuery {
+        scope_key: "repo:owner/repo",
+        repository: "owner/repo",
+        query_text: "refresh",
+        limit: 10,
+        include_tentative_candidates: false,
+        allow_project_scope: false,
+        allow_org_scope: false,
+        semantic_assets_verified: false,
+        semantic_candidates: Vec::new(),
+    })?;
+
+    assert_eq!(result.mode, PriorReviewRetrievalMode::RecoveryScan);
+    assert!(
+        result
+            .degraded_reasons
+            .iter()
+            .any(|reason| reason.contains("lexical sidecar unavailable or stale"))
+    );
+    assert!(
+        result
+            .degraded_reasons
+            .iter()
+            .any(|reason| reason.contains("semantic assets"))
+    );
+    assert_eq!(result.evidence_hits.len(), 1);
+    assert_eq!(result.evidence_hits[0].finding_id, "finding-owner");
+
+    Ok(())
+}
+
+#[test]
 fn prior_review_lookup_fuses_semantic_candidates_when_assets_and_sidecars_are_ready() -> Result<()>
 {
     let temp = tempdir()?;
