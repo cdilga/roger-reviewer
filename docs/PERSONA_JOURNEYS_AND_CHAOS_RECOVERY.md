@@ -438,6 +438,47 @@ the user back on track.
 - `PJ-06C` and `PJ-06D` are strong corruption, fail-closed, and restart-truth
   scenarios
 
+## Ownership reconciliation for PJ-01 through PJ-03
+
+This reconciliation makes the entry, resume, and local-first persona families
+point at concrete product owners instead of leaving them spread only across
+flow and testing docs.
+
+Closed baseline beads remain authoritative current owners until a newer Round
+06 hardening bead replaces them. This pass does not create additional follow-on
+beads because the remaining executable and hardening gaps already have explicit
+owners in `rr-6iah.1`, `rr-6iah.2`, `rr-6iah.4`, `rr-8isd.5.1`,
+`rr-8isd.5.2`, `rr-8isd.5.3`, `rr-b58q.4.4`, and `rr-x51h.3.2.1`.
+
+Machine-checkable follow-on:
+
+- `rr-6iah.10` now owns the missing Roger-side guard so `PJ-01` through
+  `PJ-03` ownership does not remain prose-only. Do not imply that
+  `guard-persona-recovery` covers these non-recovery persona families until
+  that follow-on lands.
+
+Shared browser-entry rule:
+
+- browser entry stays a thin Roger surface over bridge, session-resolution, and
+  setup truth; `rr-021`, `rr-022`, `rr-8isd.5.1`, and `rr-8isd.5.2` own the
+  requirement to fail closed into install, doctor, or local re-entry guidance
+  rather than fabricating browser-side status or launch success
+
+| Scenario id | Key owner beads | Current validating suites | Open hardening / executable owners | Recovery truth carried here |
+|-------------|-----------------|---------------------------|------------------------------------|-----------------------------|
+| `PJ-01A` | `rr-021`, `rr-022`, `rr-8isd.5.1`, `rr-8isd.5.2` | `int_bridge_launch_only_no_status`, `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, `smoke_browser_launch_edge` | `rr-6iah.4`, `rr-8isd.5.3`, `rr-b58q.4.4` | first-use browser launch is only supported once Roger-owned setup, host registration, and doctor truth line up |
+| `PJ-01B` | `rr-021`, `rr-8isd.5.1`, `rr-8isd.5.2` | `int_bridge_launch_only_no_status`, `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, `smoke_browser_launch_edge` | `rr-6iah.4`, `rr-8isd.5.3`, `rr-b58q.4.4` | interrupted setup retries through the same product-facing setup path instead of leaking manual bridge or extension-id recovery steps |
+| `PJ-01C` | `rr-021`, `rr-022`, `rr-8isd.5.2` | `int_bridge_launch_only_no_status`, `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, `smoke_browser_launch_edge` | `rr-6iah.4`, `rr-b58q.4.4` | apparent setup success without a reachable local Roger host must block into doctor or repair guidance rather than pretending launch succeeded |
+| `PJ-01D` | `rr-021`, `rr-8isd.5.2` | `int_bridge_launch_only_no_status` | `rr-8isd.5.3`, `rr-b58q.4.4` | unsupported browser or install modes are rejected plainly and routed back to the supported setup path |
+| `PJ-02A` | `rr-005.2`, `rr-018`, `rr-022` | `int_cli_session_aware`, `int_session_reentry_same_pr_routing`, `accept_opencode_resume` | `rr-6iah.1` | browser resume reconnects to the same review when one strong target exists and otherwise falls back to the normal chooser path |
+| `PJ-02B` | `rr-005.2`, `rr-005.2.1`, `rr-009.1` | `int_cli_sessions_global_finder`, `int_session_reentry_same_pr_routing` | `rr-6iah.1` | ambiguity stays explicit across browser and local re-entry, and Roger never guesses between same-PR candidates |
+| `PJ-02C` | `rr-021`, `rr-018`, `rr-022` | `int_bridge_launch_only_no_status`, `int_cli_session_aware`, `accept_opencode_resume` | `rr-6iah.1` | when browser handoff is unavailable, the same review remains recoverable through local Roger commands instead of dead-ending in the extension |
+| `PJ-02D` | `rr-005.2`, `rr-x51h.3.2.1` | `prop_refresh_identity_lifecycle`, `int_cli_session_aware`, `int_github_posting_safety_recovery` | `rr-6iah.1`, `rr-6iah.3` | resume across PR drift or stale state preserves continuity but keeps freshness and invalidation truth explicit before reuse |
+| `PJ-03A` | `rr-018`, `rr-019` | `e2e_core_review_happy_path` | `rr-6iah.2` | the shell-first Roger loop stays real without browser setup and lands in the same local triage and draft surfaces |
+| `PJ-03B` | `rr-005.2`, `rr-018` | `int_cli_session_aware`, `int_session_reentry_same_pr_routing` | none | missing or ambiguous launch context blocks clearly or routes through the chooser instead of ambient inference |
+| `PJ-03C` | `rr-003.3`, `rr-018` | `accept_opencode_resume`, `int_harness_opencode_resume`, `int_cli_session_aware` | `rr-6iah.2`, `rr-6iah.5` | losing the shell does not lose the review; Roger resumes or reseeds with the same durable session identity and bounded continuity truth |
+| `PJ-03D` | `rr-005.2`, `rr-005.2.1`, `rr-018` | `int_cli_sessions_global_finder`, `int_session_reentry_same_pr_routing`, `int_cli_session_aware` | `rr-6iah.1` | returning from another terminal or directory uses the same session-finder and re-entry rules instead of creating mystery sessions |
+
 ## Ownership reconciliation for PJ-04 through PJ-06
 
 This reconciliation makes the recovery-heavy persona families point at concrete
