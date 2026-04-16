@@ -1197,15 +1197,104 @@ pub struct SearchQueryPlanningInput<'a> {
     pub supports_promotion_review: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchScopeSet {
+    CurrentRepository,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchSessionBaseline {
+    AmbientSessionOptional,
+    AnchorScopedContext,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchAnchorSet {
+    None,
+    ExplicitHints,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchTrustFloor {
+    PromotedAndEvidenceOnly,
+    CandidateInspectionAllowed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchCandidateVisibility {
+    Hidden,
+    CandidateAuditOnly,
+    PromotionReviewOnly,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchSemanticPosture {
+    LexicalOnly,
+    DegradedSemanticVisible,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchRetrievalLane {
+    ExactLookup,
+    LexicalRecall,
+    RelatedContext,
+    CandidateAudit,
+    PromotionReview,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchStrategySelection {
+    pub primary_lane: SearchRetrievalLane,
+    pub lexical: bool,
+    pub prior_review: bool,
+    pub semantic: bool,
+    pub candidate_audit: bool,
+    pub query_expansion: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchQueryPlan {
     pub requested_query_mode: SearchQueryMode,
     pub resolved_query_mode: SearchQueryMode,
+    pub scope_set: SearchScopeSet,
+    pub session_baseline: SearchSessionBaseline,
+    pub anchor_set: SearchAnchorSet,
+    pub trust_floor: SearchTrustFloor,
+    pub candidate_visibility: SearchCandidateVisibility,
+    pub semantic_posture: SearchSemanticPosture,
+    pub strategy: SearchStrategySelection,
 }
 
 impl SearchQueryPlan {
     pub fn includes_tentative_candidates(self) -> bool {
-        self.resolved_query_mode == SearchQueryMode::CandidateAudit
+        self.candidate_visibility != SearchCandidateVisibility::Hidden
+    }
+
+    pub fn strategy_reason(self) -> &'static str {
+        match self.strategy.primary_lane {
+            SearchRetrievalLane::ExactLookup => {
+                "exact lookup stays lexical-only so locator-style queries do not widen into recall lanes"
+            }
+            SearchRetrievalLane::LexicalRecall => {
+                "free-text recall combines lexical and prior-review lanes while keeping candidate visibility hidden"
+            }
+            SearchRetrievalLane::RelatedContext => {
+                "related-context planning keeps anchor-scoped retrieval explicit instead of widening to ordinary recall"
+            }
+            SearchRetrievalLane::CandidateAudit => {
+                "candidate audit deliberately exposes tentative candidates without widening ordinary recall or promotion review"
+            }
+            SearchRetrievalLane::PromotionReview => {
+                "promotion review stays explicit so promotion work does not masquerade as ordinary recall"
+            }
+        }
     }
 }
 
@@ -1289,6 +1378,85 @@ pub fn plan_search_query(
     Ok(SearchQueryPlan {
         requested_query_mode,
         resolved_query_mode,
+        scope_set: SearchScopeSet::CurrentRepository,
+        session_baseline: if input.anchor_hints.is_empty() {
+            SearchSessionBaseline::AmbientSessionOptional
+        } else {
+            SearchSessionBaseline::AnchorScopedContext
+        },
+        anchor_set: if input.anchor_hints.is_empty() {
+            SearchAnchorSet::None
+        } else {
+            SearchAnchorSet::ExplicitHints
+        },
+        trust_floor: match resolved_query_mode {
+            SearchQueryMode::CandidateAudit | SearchQueryMode::PromotionReview => {
+                SearchTrustFloor::CandidateInspectionAllowed
+            }
+            SearchQueryMode::Auto
+            | SearchQueryMode::ExactLookup
+            | SearchQueryMode::Recall
+            | SearchQueryMode::RelatedContext => SearchTrustFloor::PromotedAndEvidenceOnly,
+        },
+        candidate_visibility: match resolved_query_mode {
+            SearchQueryMode::CandidateAudit => SearchCandidateVisibility::CandidateAuditOnly,
+            SearchQueryMode::PromotionReview => SearchCandidateVisibility::PromotionReviewOnly,
+            SearchQueryMode::Auto
+            | SearchQueryMode::ExactLookup
+            | SearchQueryMode::Recall
+            | SearchQueryMode::RelatedContext => SearchCandidateVisibility::Hidden,
+        },
+        semantic_posture: match resolved_query_mode {
+            SearchQueryMode::Recall
+            | SearchQueryMode::RelatedContext
+            | SearchQueryMode::PromotionReview => SearchSemanticPosture::DegradedSemanticVisible,
+            SearchQueryMode::Auto
+            | SearchQueryMode::ExactLookup
+            | SearchQueryMode::CandidateAudit => SearchSemanticPosture::LexicalOnly,
+        },
+        strategy: match resolved_query_mode {
+            SearchQueryMode::Auto => unreachable!("auto resolves before strategy selection"),
+            SearchQueryMode::ExactLookup => SearchStrategySelection {
+                primary_lane: SearchRetrievalLane::ExactLookup,
+                lexical: true,
+                prior_review: false,
+                semantic: false,
+                candidate_audit: false,
+                query_expansion: false,
+            },
+            SearchQueryMode::Recall => SearchStrategySelection {
+                primary_lane: SearchRetrievalLane::LexicalRecall,
+                lexical: true,
+                prior_review: true,
+                semantic: true,
+                candidate_audit: false,
+                query_expansion: false,
+            },
+            SearchQueryMode::RelatedContext => SearchStrategySelection {
+                primary_lane: SearchRetrievalLane::RelatedContext,
+                lexical: true,
+                prior_review: true,
+                semantic: true,
+                candidate_audit: false,
+                query_expansion: false,
+            },
+            SearchQueryMode::CandidateAudit => SearchStrategySelection {
+                primary_lane: SearchRetrievalLane::CandidateAudit,
+                lexical: true,
+                prior_review: true,
+                semantic: false,
+                candidate_audit: true,
+                query_expansion: false,
+            },
+            SearchQueryMode::PromotionReview => SearchStrategySelection {
+                primary_lane: SearchRetrievalLane::PromotionReview,
+                lexical: true,
+                prior_review: true,
+                semantic: true,
+                candidate_audit: false,
+                query_expansion: false,
+            },
+        },
     })
 }
 
@@ -3079,6 +3247,70 @@ mod tests {
         let encoded = serde_json::to_string(&bundle).expect("serialize bundle");
         let decoded: ResumeBundle = serde_json::from_str(&encoded).expect("deserialize bundle");
         assert_eq!(decoded, bundle);
+    }
+
+    #[test]
+    fn candidate_audit_plan_explicitly_allows_candidates_without_widening_promotion_review() {
+        let anchor_hints = vec!["finding-1".to_owned()];
+        let plan = plan_search_query(SearchQueryPlanningInput {
+            query_text: "stale draft invalidation",
+            query_mode: Some("candidate_audit"),
+            anchor_hints: &anchor_hints,
+            supports_candidate_audit: true,
+            supports_promotion_review: false,
+        })
+        .expect("candidate audit should plan");
+
+        assert_eq!(
+            plan.candidate_visibility,
+            SearchCandidateVisibility::CandidateAuditOnly
+        );
+        assert_eq!(
+            plan.trust_floor,
+            SearchTrustFloor::CandidateInspectionAllowed
+        );
+        assert_eq!(plan.session_baseline, SearchSessionBaseline::AnchorScopedContext);
+        assert_eq!(plan.semantic_posture, SearchSemanticPosture::LexicalOnly);
+        assert_eq!(plan.strategy.primary_lane, SearchRetrievalLane::CandidateAudit);
+        assert!(plan.strategy.candidate_audit);
+        assert!(!plan.strategy.semantic);
+        assert!(plan.includes_tentative_candidates());
+        assert!(plan.strategy_reason().contains("candidate audit"));
+    }
+
+    #[test]
+    fn recall_plan_keeps_candidates_hidden_while_planning_prior_review_and_semantic_lanes() {
+        let plan = plan_search_query(SearchQueryPlanningInput {
+            query_text: "stale draft invalidation",
+            query_mode: Some("recall"),
+            anchor_hints: &[],
+            supports_candidate_audit: true,
+            supports_promotion_review: false,
+        })
+        .expect("recall should plan");
+
+        assert_eq!(plan.scope_set, SearchScopeSet::CurrentRepository);
+        assert_eq!(
+            plan.session_baseline,
+            SearchSessionBaseline::AmbientSessionOptional
+        );
+        assert_eq!(plan.anchor_set, SearchAnchorSet::None);
+        assert_eq!(
+            plan.trust_floor,
+            SearchTrustFloor::PromotedAndEvidenceOnly
+        );
+        assert_eq!(plan.candidate_visibility, SearchCandidateVisibility::Hidden);
+        assert_eq!(
+            plan.semantic_posture,
+            SearchSemanticPosture::DegradedSemanticVisible
+        );
+        assert_eq!(plan.strategy.primary_lane, SearchRetrievalLane::LexicalRecall);
+        assert!(plan.strategy.lexical);
+        assert!(plan.strategy.prior_review);
+        assert!(plan.strategy.semantic);
+        assert!(!plan.strategy.candidate_audit);
+        assert!(!plan.includes_tentative_candidates());
+        assert!(plan.strategy_reason().contains("free-text recall"));
     }
 
     #[test]
