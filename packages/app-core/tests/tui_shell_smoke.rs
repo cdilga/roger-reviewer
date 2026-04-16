@@ -47,7 +47,10 @@ fn recall_envelope(
         }),
         snippet_or_summary: snippet_or_summary.to_owned(),
         anchor_overlap_summary: "1 anchor hint(s) supplied".to_owned(),
-        degraded_flags: degraded_flags.iter().map(|flag| (*flag).to_owned()).collect(),
+        degraded_flags: degraded_flags
+            .iter()
+            .map(|flag| (*flag).to_owned())
+            .collect(),
         explain_summary: format!(
             "{item_kind} surfaced from {memory_lane} with requested query_mode {requested_query_mode}, resolved query_mode {resolved_query_mode}, retrieval_mode hybrid, posture {citation_posture}/{surface_posture}"
         ),
@@ -517,6 +520,8 @@ fn queue_and_inspector_keep_outbound_states_and_posting_elevation_visible() {
         .lines
         .join("\n");
     assert!(detail_lines.contains("triage=new · outbound=approved"));
+    assert!(detail_lines.contains("draft_state=approved"));
+    assert!(detail_lines.contains("pending_post=true"));
 
     let draft_queue_lines = shell
         .panels
@@ -544,6 +549,8 @@ fn queue_and_inspector_keep_outbound_states_and_posting_elevation_visible() {
         .lines
         .join("\n");
     assert!(invalidated_detail.contains("outbound=invalidated"));
+    assert!(invalidated_detail.contains("draft_state=invalidated"));
+    assert!(invalidated_detail.contains("invalidation_reason=target_rebased"));
 
     let invalidated_queue = invalidated_shell
         .panels
@@ -616,6 +623,41 @@ fn local_draft_queue_transitions_keep_pending_post_visibility_local() {
 }
 
 #[test]
+fn posting_failed_state_surfaces_recovery_guidance_in_detail_and_queue() {
+    let mut snapshot = sample_snapshot();
+    snapshot.finding_rows[0].outbound_state = "failed".to_owned();
+    snapshot.local_draft_queue[0].decision = DraftReviewDecision::Approved;
+    snapshot.local_draft_queue[0].post_failure_reason = Some("github_unavailable".to_owned());
+    snapshot.local_draft_queue[0].recovery_hint = Some("retry after restoring gh auth".to_owned());
+
+    let mut shell = MinimalTuiShell::open(snapshot);
+    shell.select_finding("finding-1");
+
+    let detail_lines = shell
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Finding Detail")
+        .expect("finding detail panel")
+        .lines
+        .join("\n");
+    assert!(detail_lines.contains("outbound=failed"));
+    assert!(detail_lines.contains("draft_state=approved"));
+    assert!(detail_lines.contains("post_failed=github_unavailable"));
+    assert!(detail_lines.contains("recovery_hint=retry after restoring gh auth"));
+
+    let draft_queue_lines = shell
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Draft Queue")
+        .expect("draft queue panel")
+        .lines
+        .join("\n");
+    assert!(draft_queue_lines.contains("approved"));
+    assert!(draft_queue_lines.contains("post_failed=github_unavailable"));
+    assert!(draft_queue_lines.contains("recovery=retry after restoring gh auth"));
+}
+
+#[test]
 fn session_switching_updates_active_chrome_without_side_effects() {
     let mut shell = MinimalTuiShell::open(sample_snapshot());
     assert_eq!(shell.active_session().session_id, "session-42");
@@ -643,8 +685,10 @@ fn session_switching_updates_active_chrome_without_side_effects() {
     assert!(session_lines.contains("tier=tier_a"));
     assert!(session_lines.contains("isolation=current_checkout"));
     assert!(session_lines.contains("policy_profile=review_safe_tier_a_reseed_only"));
-    assert!(session_lines
-        .contains("status_reason=preflight selected reseed-only bounded provider policy"));
+    assert!(
+        session_lines
+            .contains("status_reason=preflight selected reseed-only bounded provider policy")
+    );
     assert!(session_lines.contains("available_sessions:"));
 }
 

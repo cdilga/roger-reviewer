@@ -518,6 +518,13 @@ impl MinimalTuiShell {
             .find(|detail| detail.finding_id == selected_id)
     }
 
+    fn selected_draft_entry(&self) -> Option<&LocalDraftReviewEntry> {
+        let selected_id = self.selected_finding_id.as_deref()?;
+        self.local_draft_queue
+            .iter()
+            .find(|entry| entry.finding_id.as_deref() == Some(selected_id))
+    }
+
     pub fn record_triage_intent(
         &mut self,
         finding_id: &str,
@@ -866,6 +873,21 @@ impl MinimalTuiShell {
                 "triage={} · outbound={}",
                 row.triage_state, row.outbound_state
             ));
+        }
+        if let Some(entry) = self.selected_draft_entry() {
+            lines.push(format!("draft_state={}", entry.decision.as_str()));
+            if entry.pending_post {
+                lines.push("pending_post=true".to_owned());
+            }
+            if let Some(reason) = entry.invalidation_reason.as_deref() {
+                lines.push(format!("invalidation_reason={reason}"));
+            }
+            if let Some(reason) = entry.post_failure_reason.as_deref() {
+                lines.push(format!("post_failed={reason}"));
+            }
+            if let Some(hint) = entry.recovery_hint.as_deref() {
+                lines.push(format!("recovery_hint={hint}"));
+            }
         }
         if let Some(lineage) = detail.refresh_lineage.as_deref() {
             lines.push(format!("refresh_lineage={lineage}"));
