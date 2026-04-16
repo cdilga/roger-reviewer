@@ -2,8 +2,8 @@ use roger_app_core::tui_shell::{
     ActiveSessionEntry, BackgroundJobClass, BackgroundJobSnapshot, BackgroundJobStatus,
     ClarificationIntentStatus, DraftReviewDecision, EvidenceSnippet, FindingDetail, FindingListRow,
     LocalDraftReviewEntry, MinimalTuiShell, ReadOnlySessionSnapshot, SearchBaselineSnapshot,
-    SearchHistoryReviewRequest, SearchHistorySnapshot, SessionChrome, SupervisorSnapshot,
-    WakeReason, WakeSignal,
+    SearchHistoryReviewRequest, SearchHistorySnapshot, SearchHistoryView, SessionChrome,
+    SupervisorSnapshot, WakeReason, WakeSignal,
 };
 use roger_app_core::{RecallEnvelope, RecallSourceRef};
 use roger_config::resolve_cli_config_from_lookup;
@@ -53,6 +53,37 @@ fn recall_envelope(
         ),
         citation_posture: citation_posture.to_owned(),
         surface_posture: surface_posture.to_owned(),
+    }
+}
+
+fn search_history_view(
+    query_text: &str,
+    requested_query_mode: &str,
+    resolved_query_mode: &str,
+    anchor_hints: &[&str],
+    degraded_flags: &[&str],
+    promoted_memory: Vec<RecallEnvelope>,
+    tentative_candidates: Vec<RecallEnvelope>,
+    evidence_hits: Vec<RecallEnvelope>,
+    review_requests: Vec<SearchHistoryReviewRequest>,
+) -> SearchHistoryView {
+    SearchHistoryView {
+        query_text: query_text.to_owned(),
+        requested_query_mode: requested_query_mode.to_owned(),
+        resolved_query_mode: resolved_query_mode.to_owned(),
+        retrieval_mode: "hybrid".to_owned(),
+        anchor_hints: anchor_hints
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect(),
+        degraded_flags: degraded_flags
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect(),
+        promoted_memory,
+        tentative_candidates,
+        evidence_hits,
+        review_requests,
     }
 }
 
@@ -146,69 +177,150 @@ fn sample_snapshot() -> ReadOnlySessionSnapshot {
             ),
         ],
         search_history: Some(SearchHistorySnapshot {
-            query_text: "approval invalidation".to_owned(),
-            requested_query_mode: "auto".to_owned(),
-            resolved_query_mode: "promotion_review".to_owned(),
-            retrieval_mode: "hybrid".to_owned(),
-            anchor_hints: vec!["finding-1".to_owned()],
-            degraded_flags: vec!["stale_index".to_owned()],
-            promoted_memory: vec![recall_envelope(
-                "promoted_memory",
-                "memory-1",
-                "auto",
-                "promotion_review",
-                "promoted_memory",
-                Some("established"),
-                "cite_allowed",
-                "ordinary",
-                "Prior approval invalidation regression",
-                &[],
-            )],
-            tentative_candidates: vec![
-                recall_envelope(
-                    "candidate_memory",
-                    "memory-2",
+            views: vec![
+                search_history_view(
+                    "approval invalidation",
                     "auto",
-                    "promotion_review",
-                    "tentative_candidates",
-                    Some("candidate"),
-                    "inspect_only",
-                    "candidate_review",
-                    "Tentative reminder to recheck approval payload drift",
-                    &["stale_index"],
+                    "recall",
+                    &[],
+                    &[],
+                    vec![recall_envelope(
+                        "promoted_memory",
+                        "memory-1",
+                        "auto",
+                        "recall",
+                        "promoted_memory",
+                        Some("established"),
+                        "cite_allowed",
+                        "ordinary",
+                        "Prior approval invalidation regression",
+                        &[],
+                    )],
+                    Vec::new(),
+                    vec![recall_envelope(
+                        "evidence_finding",
+                        "finding-77",
+                        "auto",
+                        "recall",
+                        "evidence_hits",
+                        None,
+                        "cite_allowed",
+                        "ordinary",
+                        "Current review evidence showing approval drift on refresh",
+                        &[],
+                    )],
+                    Vec::new(),
                 ),
-                recall_envelope(
-                    "candidate_memory",
-                    "memory-3",
+                search_history_view(
+                    "approval invalidation",
+                    "auto",
+                    "related_context",
+                    &["finding-1"],
+                    &[],
+                    vec![recall_envelope(
+                        "promoted_memory",
+                        "memory-1",
+                        "auto",
+                        "related_context",
+                        "promoted_memory",
+                        Some("established"),
+                        "cite_allowed",
+                        "ordinary",
+                        "Prior approval invalidation regression",
+                        &[],
+                    )],
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                search_history_view(
+                    "approval invalidation",
+                    "candidate_audit",
+                    "candidate_audit",
+                    &["finding-1"],
+                    &["stale_index"],
+                    Vec::new(),
+                    vec![
+                        recall_envelope(
+                            "candidate_memory",
+                            "memory-2",
+                            "candidate_audit",
+                            "candidate_audit",
+                            "tentative_candidates",
+                            Some("candidate"),
+                            "inspect_only",
+                            "candidate_review",
+                            "Tentative reminder to recheck approval payload drift",
+                            &["stale_index"],
+                        ),
+                        recall_envelope(
+                            "candidate_memory",
+                            "memory-3",
+                            "candidate_audit",
+                            "candidate_audit",
+                            "tentative_candidates",
+                            Some("contradicted"),
+                            "warning_only",
+                            "operator_review_only",
+                            "Older advice to keep approval token after target retargeting",
+                            &["stale_index"],
+                        ),
+                    ],
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                search_history_view(
+                    "approval invalidation",
                     "auto",
                     "promotion_review",
-                    "tentative_candidates",
-                    Some("contradicted"),
-                    "warning_only",
-                    "operator_review_only",
-                    "Older advice to keep approval token after target retargeting",
+                    &["finding-1"],
                     &["stale_index"],
+                    vec![recall_envelope(
+                        "promoted_memory",
+                        "memory-1",
+                        "auto",
+                        "promotion_review",
+                        "promoted_memory",
+                        Some("established"),
+                        "cite_allowed",
+                        "ordinary",
+                        "Prior approval invalidation regression",
+                        &[],
+                    )],
+                    vec![recall_envelope(
+                        "candidate_memory",
+                        "memory-2",
+                        "auto",
+                        "promotion_review",
+                        "tentative_candidates",
+                        Some("candidate"),
+                        "inspect_only",
+                        "candidate_review",
+                        "Tentative reminder to recheck approval payload drift",
+                        &["stale_index"],
+                    )],
+                    vec![recall_envelope(
+                        "evidence_finding",
+                        "finding-77",
+                        "auto",
+                        "promotion_review",
+                        "evidence_hits",
+                        None,
+                        "cite_allowed",
+                        "ordinary",
+                        "Current review evidence showing approval drift on refresh",
+                        &[],
+                    )],
+                    vec![SearchHistoryReviewRequest {
+                        id: "mrr-1".to_owned(),
+                        request_kind: "promote".to_owned(),
+                        subject_memory_id: "memory-2".to_owned(),
+                        status: "pending_review".to_owned(),
+                        reason_summary: "candidate has repeated supporting evidence".to_owned(),
+                    }],
                 ),
             ],
-            evidence_hits: vec![recall_envelope(
-                "evidence_finding",
-                "finding-77",
-                "auto",
-                "promotion_review",
-                "evidence_hits",
-                None,
-                "cite_allowed",
-                "ordinary",
-                "Current review evidence showing approval drift on refresh",
-                &[],
-            )],
-            review_requests: vec![SearchHistoryReviewRequest {
-                id: "mrr-1".to_owned(),
-                request_kind: "promote".to_owned(),
-                subject_memory_id: "memory-2".to_owned(),
-                status: "pending_review".to_owned(),
-                reason_summary: "candidate has repeated supporting evidence".to_owned(),
-            }],
+            active_query_mode: "promotion_review".to_owned(),
             baseline: Some(SearchBaselineSnapshot {
                 id: "baseline-1".to_owned(),
                 default_query_mode: "recall".to_owned(),
@@ -274,8 +386,8 @@ fn finding_detail_surfaces_lineage_degraded_state_and_evidence() {
 }
 
 #[test]
-fn search_history_projects_canonical_recall_truth_and_tentative_posture() {
-    let shell = MinimalTuiShell::open(sample_snapshot());
+fn search_history_pivots_across_canonical_query_modes_and_keeps_tentative_posture_visible() {
+    let mut shell = MinimalTuiShell::open(sample_snapshot());
 
     let search_lines = shell
         .panels
@@ -285,7 +397,10 @@ fn search_history_projects_canonical_recall_truth_and_tentative_posture() {
         .lines
         .join("\n");
 
-    assert!(search_lines.contains("query=\"approval invalidation\""));
+    assert!(search_lines.contains(
+        "available_query_modes=recall, related_context, candidate_audit, promotion_review"
+    ));
+    assert!(search_lines.contains("active_query_mode=promotion_review"));
     assert!(search_lines.contains("requested=auto"));
     assert!(search_lines.contains("resolved=promotion_review"));
     assert!(search_lines.contains("retrieval=hybrid"));
@@ -294,12 +409,51 @@ fn search_history_projects_canonical_recall_truth_and_tentative_posture() {
     assert!(search_lines.contains("default_query_mode=recall"));
     assert!(search_lines.contains("candidate_visibility=review_only"));
     assert!(search_lines.contains("allowed_scopes=repository, pull_request"));
-    assert!(search_lines.contains("lanes promoted=1 tentative=2 evidence=1 review_requests=1"));
+    assert!(search_lines.contains("lanes promoted=1 tentative=1 evidence=1 review_requests=1"));
     assert!(search_lines.contains("mrr-1 · kind=promote · subject=memory-2"));
-    assert!(search_lines.contains("visibility=tentative_candidate"));
-    assert!(search_lines.contains("visibility=contradicted_warning"));
-    assert!(search_lines.contains("trust=contradicted"));
-    assert!(search_lines.contains("citation=warning_only"));
+
+    assert!(shell.switch_search_history_mode("candidate_audit"));
+    let candidate_lines = shell
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Search/History")
+        .expect("search/history panel")
+        .lines
+        .join("\n");
+    assert!(candidate_lines.contains("active_query_mode=candidate_audit"));
+    assert!(candidate_lines.contains("requested=candidate_audit"));
+    assert!(candidate_lines.contains("resolved=candidate_audit"));
+    assert!(candidate_lines.contains("lanes promoted=0 tentative=2 evidence=0 review_requests=0"));
+    assert!(candidate_lines.contains("visibility=tentative_candidate"));
+    assert!(candidate_lines.contains("visibility=contradicted_warning"));
+    assert!(candidate_lines.contains("trust=contradicted"));
+    assert!(candidate_lines.contains("citation=warning_only"));
+
+    assert!(shell.switch_search_history_mode("related_context"));
+    let related_lines = shell
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Search/History")
+        .expect("search/history panel")
+        .lines
+        .join("\n");
+    assert!(related_lines.contains("active_query_mode=related_context"));
+    assert!(related_lines.contains("requested=auto"));
+    assert!(related_lines.contains("resolved=related_context"));
+    assert!(related_lines.contains("anchor_hints=finding-1"));
+
+    assert!(shell.switch_search_history_mode("recall"));
+    let recall_lines = shell
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Search/History")
+        .expect("search/history panel")
+        .lines
+        .join("\n");
+    assert!(recall_lines.contains("active_query_mode=recall"));
+    assert!(recall_lines.contains("requested=auto"));
+    assert!(recall_lines.contains("resolved=recall"));
+    assert!(recall_lines.contains("lanes promoted=1 tentative=0 evidence=1 review_requests=0"));
 }
 
 #[test]

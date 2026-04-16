@@ -271,7 +271,7 @@ pub struct SearchHistoryReviewRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SearchHistorySnapshot {
+pub struct SearchHistoryView {
     pub query_text: String,
     pub requested_query_mode: String,
     pub resolved_query_mode: String,
@@ -288,6 +288,13 @@ pub struct SearchHistorySnapshot {
     pub evidence_hits: Vec<RecallEnvelope>,
     #[serde(default)]
     pub review_requests: Vec<SearchHistoryReviewRequest>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchHistorySnapshot {
+    #[serde(default)]
+    pub views: Vec<SearchHistoryView>,
+    pub active_query_mode: String,
     #[serde(default)]
     pub baseline: Option<SearchBaselineSnapshot>,
 }
@@ -452,6 +459,24 @@ impl MinimalTuiShell {
         };
         self.active_session_index = index;
         self.apply_active_session_chrome();
+        self.rebuild_panels();
+        true
+    }
+
+    pub fn switch_search_history_mode(&mut self, resolved_query_mode: &str) -> bool {
+        let Some(search) = self.search_history.as_mut() else {
+            return false;
+        };
+
+        if !search
+            .views
+            .iter()
+            .any(|view| view.resolved_query_mode == resolved_query_mode)
+        {
+            return false;
+        }
+
+        search.active_query_mode = resolved_query_mode.to_owned();
         self.rebuild_panels();
         true
     }
@@ -906,30 +931,46 @@ impl MinimalTuiShell {
         let Some(search) = self.search_history.as_ref() else {
             return Vec::new();
         };
+        let Some(active_view) = self.active_search_history_view() else {
+            return vec!["search/history has no canonical recall views loaded".to_owned()];
+        };
 
         let mut lines = vec![format!(
-            "query=\"{}\" · requested={} · resolved={} · retrieval={}",
-            search.query_text,
-            search.requested_query_mode,
-            search.resolved_query_mode,
-            search.retrieval_mode
+            "available_query_modes={}",
+            search
+                .views
+                .iter()
+                .map(|view| view.resolved_query_mode.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         )];
+        lines.push(format!("active_query_mode={}", search.active_query_mode));
+        lines.push(format!(
+            "query=\"{}\" · requested={} · resolved={} · retrieval={}",
+            active_view.query_text,
+            active_view.requested_query_mode,
+            active_view.resolved_query_mode,
+            active_view.retrieval_mode
+        ));
 
-        if !search.anchor_hints.is_empty() {
-            lines.push(format!("anchor_hints={}", search.anchor_hints.join(", ")));
+        if !active_view.anchor_hints.is_empty() {
+            lines.push(format!(
+                "anchor_hints={}",
+                active_view.anchor_hints.join(", ")
+            ));
         }
-        if !search.degraded_flags.is_empty() {
+        if !active_view.degraded_flags.is_empty() {
             lines.push(format!(
                 "degraded_flags={}",
-                search.degraded_flags.join(", ")
+                active_view.degraded_flags.join(", ")
             ));
         }
         lines.push(format!(
             "lanes promoted={} tentative={} evidence={} review_requests={}",
-            search.promoted_memory.len(),
-            search.tentative_candidates.len(),
-            search.evidence_hits.len(),
-            search.review_requests.len()
+            active_view.promoted_memory.len(),
+            active_view.tentative_candidates.len(),
+            active_view.evidence_hits.len(),
+            active_view.review_requests.len()
         ));
 
         if let Some(baseline) = search.baseline.as_ref() {
@@ -953,9 +994,9 @@ impl MinimalTuiShell {
             }
         }
 
-        if !search.review_requests.is_empty() {
+        if !active_view.review_requests.is_empty() {
             lines.push("review_requests:".to_owned());
-            for request in &search.review_requests {
+            for request in &active_view.review_requests {
                 lines.push(format!(
                     "{} · kind={} · subject={} · status={} · reason={}",
                     request.id,
@@ -967,13 +1008,13 @@ impl MinimalTuiShell {
             }
         }
 
-        Self::push_recall_lane_lines(&mut lines, "promoted_memory", &search.promoted_memory);
+        Self::push_recall_lane_lines(&mut lines, "promoted_memory", &active_view.promoted_memory);
         Self::push_recall_lane_lines(
             &mut lines,
             "tentative_candidates",
-            &search.tentative_candidates,
+            &active_view.tentative_candidates,
         );
-        Self::push_recall_lane_lines(&mut lines, "evidence_hits", &search.evidence_hits);
+        Self::push_recall_lane_lines(&mut lines, "evidence_hits", &active_view.evidence_hits);
 
         lines
     }
@@ -1063,6 +1104,15 @@ impl MinimalTuiShell {
                     .first()
                     .map(|detail| detail.finding_id.clone())
             })
+    }
+
+    fn active_search_history_view(&self) -> Option<&SearchHistoryView> {
+        let search = self.search_history.as_ref()?;
+        search
+            .views
+            .iter()
+            .find(|view| view.resolved_query_mode == search.active_query_mode)
+            .or_else(|| search.views.first())
     }
 }
 
