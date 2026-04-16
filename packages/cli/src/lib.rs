@@ -34,12 +34,12 @@ use roger_session_opencode::{
 };
 use roger_storage::{
     CreateLaunchAttempt, CreateReviewRun, CreateReviewSession, CreateSessionLaunchBinding,
-    FinalizeReviewLaunchAttempt, LaunchAttemptAction, LaunchAttemptState, LaunchSurface,
-    OutboundSurfaceProjection, PriorReviewLookupQuery, PriorReviewRetrievalMode,
-    ResolveSessionLaunchBinding, ResolveSessionLocalRoot, ResolveSessionReentry,
-    ReviewLaunchFinalizationError, RogerStore, SessionBindingResolution, SessionFinderEntry,
-    SessionFinderQuery, SessionLaunchBindingRecord, SessionReentryResolution, StorageLayout,
-    UpdateLaunchAttempt,
+    FinalizeExistingSessionLaunchAttempt, FinalizeReviewLaunchAttempt, LaunchAttemptAction,
+    LaunchAttemptState, LaunchSurface, OutboundSurfaceProjection, PriorReviewLookupQuery,
+    PriorReviewRetrievalMode, ResolveSessionLaunchBinding, ResolveSessionLocalRoot,
+    ResolveSessionReentry, ReviewLaunchFinalizationError, RogerStore, SessionBindingResolution,
+    SessionFinderEntry, SessionFinderQuery, SessionLaunchBindingRecord, SessionReentryResolution,
+    StorageLayout, UpdateLaunchAttempt,
 };
 use rusqlite::Connection as SqliteConnection;
 use serde::{Serialize, de::DeserializeOwned};
@@ -4115,26 +4115,73 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         };
     }
 
+    let attempt_id = next_id("attempt");
+    if let Err(err) = store.create_launch_attempt(CreateLaunchAttempt {
+        id: &attempt_id,
+        action: LaunchAttemptAction::ResumeReview,
+        provider: &session.provider,
+        source_surface: LaunchSurface::Cli,
+        review_target: &session.review_target,
+        requested_session_id: Some(&session.id),
+        state: LaunchAttemptState::Pending,
+    }) {
+        return error_response(format!("failed to create launch attempt: {err}"));
+    }
+
+    if let Err(err) = persist_launch_attempt_state(
+        &store,
+        &attempt_id,
+        LaunchAttemptState::Dispatching,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ) {
+        return error_response(err);
+    }
+
     let intent = launch_intent(LaunchAction::ResumeReview, runtime);
 
     let resume_bundle = match session.resume_bundle_artifact_id.as_deref() {
         Some(id) => match store.load_resume_bundle(id) {
             Ok(bundle) => Some(bundle),
             Err(err) => {
+                let detail = format!("resume bundle could not be loaded: {err}");
+                if let Err(update_err) = persist_launch_attempt_state(
+                    &store,
+                    &attempt_id,
+                    LaunchAttemptState::FailedSessionBinding,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(&detail),
+                ) {
+                    return error_response(update_err);
+                }
                 return blocked_response(
-                    format!("resume bundle could not be loaded: {err}"),
+                    detail,
                     vec!["re-run rr review to regenerate ResumeBundle".to_owned()],
-                    json!({"reason_code": "resume_bundle_missing_or_invalid", "session_id": session.id}),
+                    json!({
+                        "reason_code": "resume_bundle_missing_or_invalid",
+                        "session_id": session.id,
+                        "launch_attempt_id": attempt_id,
+                    }),
                 );
             }
         },
         None => None,
     };
 
-    let (resume_path, continuity_quality, decision_reason, mut warnings) = match session
-        .provider
-        .as_str()
-    {
+    let (
+        session_locator,
+        resume_path,
+        terminal_state,
+        continuity_quality,
+        decision_reason,
+        mut warnings,
+    ) = match session.provider.as_str() {
         "opencode" => {
             let adapter = OpenCodeAdapter::with_binary(runtime.opencode_bin.clone());
             let linkage = match adapter.link_session(
@@ -4145,8 +4192,21 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             ) {
                 Ok(linkage) => linkage,
                 Err(err) => {
+                    let detail = format!("resume failed: {err}");
+                    if let Err(update_err) = persist_launch_attempt_state(
+                        &store,
+                        &attempt_id,
+                        LaunchAttemptState::FailedSpawn,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(&detail),
+                    ) {
+                        return error_response(update_err);
+                    }
                     return blocked_response(
-                        format!("resume failed: {err}"),
+                        detail,
                         vec![
                             "ensure a valid ResumeBundle exists or launch a new review with rr review"
                                 .to_owned(),
@@ -4154,13 +4214,20 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                         json!({
                             "reason_code": "resume_failed_closed",
                             "session_id": session.id,
+                            "launch_attempt_id": attempt_id,
                             "error": err.to_string(),
                         }),
                     );
                 }
             };
             (
+                linkage.locator,
                 session_path_label(&linkage.path).to_owned(),
+                match linkage.path {
+                    OpenCodeSessionPath::ReopenedByLocator => LaunchAttemptState::VerifiedReopened,
+                    OpenCodeSessionPath::ReseededFromBundle => LaunchAttemptState::VerifiedReseeded,
+                    OpenCodeSessionPath::StartedFresh => LaunchAttemptState::VerifiedStarted,
+                },
                 linkage.continuity_quality,
                 linkage
                     .decision
@@ -4180,8 +4247,21 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             ) {
                 Ok(linkage) => linkage,
                 Err(err) => {
+                    let detail = format!("resume failed: {err}");
+                    if let Err(update_err) = persist_launch_attempt_state(
+                        &store,
+                        &attempt_id,
+                        LaunchAttemptState::FailedSpawn,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(&detail),
+                    ) {
+                        return error_response(update_err);
+                    }
                     return blocked_response(
-                        format!("resume failed: {err}"),
+                        detail,
                         vec![
                             "ensure a valid ResumeBundle exists or launch a new review with rr review --provider codex"
                                 .to_owned(),
@@ -4189,13 +4269,19 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                         json!({
                             "reason_code": "resume_failed_closed",
                             "session_id": session.id,
+                            "launch_attempt_id": attempt_id,
                             "error": err.to_string(),
                         }),
                     );
                 }
             };
             (
+                linkage.locator,
                 codex_session_path_label(&linkage.path).to_owned(),
+                match linkage.path {
+                    CodexSessionPath::ReseededFromBundle => LaunchAttemptState::VerifiedReseeded,
+                    CodexSessionPath::StartedFresh => LaunchAttemptState::VerifiedStarted,
+                },
                 linkage.continuity_quality,
                 linkage
                     .decision
@@ -4217,8 +4303,21 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             ) {
                 Ok(linkage) => linkage,
                 Err(err) => {
+                    let detail = format!("resume failed: {err}");
+                    if let Err(update_err) = persist_launch_attempt_state(
+                        &store,
+                        &attempt_id,
+                        LaunchAttemptState::FailedSpawn,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(&detail),
+                    ) {
+                        return error_response(update_err);
+                    }
                     return blocked_response(
-                        format!("resume failed: {err}"),
+                        detail,
                         vec![
                             "ensure a valid ResumeBundle exists or launch a new review with rr review --provider claude"
                                 .to_owned(),
@@ -4226,13 +4325,19 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                         json!({
                             "reason_code": "resume_failed_closed",
                             "session_id": session.id,
+                            "launch_attempt_id": attempt_id,
                             "error": err.to_string(),
                         }),
                     );
                 }
             };
             (
+                linkage.locator,
                 claude_session_path_label(&linkage.path).to_owned(),
+                match linkage.path {
+                    ClaudeSessionPath::ReseededFromBundle => LaunchAttemptState::VerifiedReseeded,
+                    ClaudeSessionPath::StartedFresh => LaunchAttemptState::VerifiedStarted,
+                },
                 linkage.continuity_quality,
                 linkage
                     .decision
@@ -4254,8 +4359,21 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             ) {
                 Ok(linkage) => linkage,
                 Err(err) => {
+                    let detail = format!("resume failed: {err}");
+                    if let Err(update_err) = persist_launch_attempt_state(
+                        &store,
+                        &attempt_id,
+                        LaunchAttemptState::FailedSpawn,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(&detail),
+                    ) {
+                        return error_response(update_err);
+                    }
                     return blocked_response(
-                        format!("resume failed: {err}"),
+                        detail,
                         vec![
                             "ensure a valid ResumeBundle exists or launch a new review with rr review --provider gemini"
                                 .to_owned(),
@@ -4263,13 +4381,19 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                         json!({
                             "reason_code": "resume_failed_closed",
                             "session_id": session.id,
+                            "launch_attempt_id": attempt_id,
                             "error": err.to_string(),
                         }),
                     );
                 }
             };
             (
+                linkage.locator,
                 gemini_session_path_label(&linkage.path).to_owned(),
+                match linkage.path {
+                    GeminiSessionPath::ReseededFromBundle => LaunchAttemptState::VerifiedReseeded,
+                    GeminiSessionPath::StartedFresh => LaunchAttemptState::VerifiedStarted,
+                },
                 linkage.continuity_quality,
                 linkage
                     .decision
@@ -4287,67 +4411,112 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         warnings.insert(0, warning);
     }
 
+    let provider_session_id =
+        match verified_provider_session_id(&session.provider, &session_locator) {
+            Ok(session_id) => session_id.to_owned(),
+            Err(detail) => {
+                if let Err(update_err) = persist_launch_attempt_state(
+                    &store,
+                    &attempt_id,
+                    LaunchAttemptState::FailedProviderVerification,
+                    None,
+                    None,
+                    None,
+                    Some(&session_locator),
+                    Some(&detail),
+                ) {
+                    return error_response(update_err);
+                }
+                return blocked_response(
+                    format!("failed to verify provider session: {detail}"),
+                    vec!["re-run rr resume after verifying provider launch output".to_owned()],
+                    json!({
+                        "reason_code": "provider_session_unverified",
+                        "launch_attempt_id": attempt_id,
+                        "provider": session.provider,
+                        "session_id": session.id,
+                    }),
+                );
+            }
+        };
+
+    if let Err(err) = persist_launch_attempt_state(
+        &store,
+        &attempt_id,
+        LaunchAttemptState::AwaitingProviderVerification,
+        None,
+        None,
+        Some(&provider_session_id),
+        Some(&session_locator),
+        None,
+    ) {
+        return error_response(err);
+    }
+
     let run_kind = "resume";
     let run_id = next_id("run");
-
-    if let Err(err) = store.create_review_run(CreateReviewRun {
-        id: &run_id,
-        session_id: &session.id,
-        run_kind,
-        repo_snapshot: &format!(
-            "{}#{}",
-            session.review_target.repository, session.review_target.pull_request_number
-        ),
-        continuity_quality: continuity_state_label(&continuity_quality),
-        session_locator_artifact_id: None,
-    }) {
-        return error_response(format!("failed to create {run_kind} run: {err}"));
-    }
-
-    let continuity_state = format!(
-        "{}:{}",
-        run_kind,
-        continuity_state_label(&continuity_quality)
-    );
-    let updated_session = match store.update_review_session_continuity(
-        &session.id,
-        session.row_version,
-        &continuity_state,
-    ) {
-        Ok(session) => session,
-        Err(err) => {
-            return error_response(format!("failed to update session continuity: {err}"));
-        }
-    };
-
-    if let Err(err) = store.update_review_session_attention(
-        &updated_session.id,
-        updated_session.row_version,
-        if session.attention_state == "refresh_recommended" {
-            "refresh_recommended"
-        } else {
-            "review_resumed"
-        },
-    ) {
-        return error_response(format!("failed to update session attention state: {err}"));
-    }
-
     let binding_id = binding
-        .map(|record| record.id)
+        .as_ref()
+        .map(|record| record.id.clone())
         .unwrap_or_else(|| next_id("binding"));
-    if let Err(err) = store.put_session_launch_binding(CreateSessionLaunchBinding {
-        id: &binding_id,
-        session_id: &session.id,
-        repo_locator: &session.review_target.repository,
-        review_target: Some(&session.review_target),
-        surface: LaunchSurface::Cli,
-        launch_profile_id: Some(cli_config::PROFILE_ID),
-        ui_target: Some(cli_config::UI_TARGET),
-        instance_preference: Some(cli_config::INSTANCE_PREFERENCE),
-        cwd: Some(runtime.cwd.to_string_lossy().as_ref()),
-        worktree_root: None,
-    }) {
-        return error_response(format!("failed to persist launch binding: {err}"));
+    let continuity_state = format!("{run_kind}:{}", continuity_state_label(&continuity_quality));
+    if let Err(err) =
+        store.finalize_existing_session_launch_attempt(FinalizeExistingSessionLaunchAttempt {
+            attempt_id: &attempt_id,
+            terminal_state,
+            provider_session_id: &provider_session_id,
+            verified_locator: &session_locator,
+            review_session_id: &session.id,
+            expected_session_row_version: session.row_version,
+            continuity_state: &continuity_state,
+            attention_state: "review_resumed",
+            review_run: CreateReviewRun {
+                id: &run_id,
+                session_id: &session.id,
+                run_kind,
+                repo_snapshot: &format!(
+                    "{}#{}",
+                    session.review_target.repository, session.review_target.pull_request_number
+                ),
+                continuity_quality: continuity_state_label(&continuity_quality),
+                session_locator_artifact_id: None,
+            },
+            launch_binding: CreateSessionLaunchBinding {
+                id: &binding_id,
+                session_id: &session.id,
+                repo_locator: &session.review_target.repository,
+                review_target: Some(&session.review_target),
+                surface: LaunchSurface::Cli,
+                launch_profile_id: Some(cli_config::PROFILE_ID),
+                ui_target: Some(cli_config::UI_TARGET),
+                instance_preference: Some(cli_config::INSTANCE_PREFERENCE),
+                cwd: Some(binding_context.cwd.as_str()),
+                worktree_root: binding_context.worktree_root.as_deref(),
+            },
+        })
+    {
+        let detail = format!("failed to finalize resume launch: {err}");
+        let failure_state = match err {
+            roger_storage::ExistingSessionLaunchFinalizationError::SessionBinding(_) => {
+                LaunchAttemptState::FailedSessionBinding
+            }
+            roger_storage::ExistingSessionLaunchFinalizationError::Commit(_) => {
+                LaunchAttemptState::FailedCommit
+            }
+        };
+        if let Err(update_err) = persist_launch_attempt_state(
+            &store,
+            &attempt_id,
+            failure_state,
+            None,
+            None,
+            Some(&provider_session_id),
+            Some(&session_locator),
+            Some(&detail),
+        ) {
+            return error_response(update_err);
+        }
+        return error_response(detail);
     }
 
     let degraded = !matches!(continuity_quality, ContinuityQuality::Usable)
@@ -4360,6 +4529,7 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             OutcomeKind::Complete
         },
         data: json!({
+            "launch_attempt_id": attempt_id,
             "session_id": session.id,
             "review_run_id": run_id,
             "repository": session.review_target.repository,
@@ -4425,6 +4595,32 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         );
     }
 
+    let attempt_id = next_id("attempt");
+    if let Err(err) = store.create_launch_attempt(CreateLaunchAttempt {
+        id: &attempt_id,
+        action: LaunchAttemptAction::ReturnToRoger,
+        provider: &session.provider,
+        source_surface: LaunchSurface::Cli,
+        review_target: &session.review_target,
+        requested_session_id: Some(&session.id),
+        state: LaunchAttemptState::Pending,
+    }) {
+        return error_response(format!("failed to create launch attempt: {err}"));
+    }
+
+    if let Err(err) = persist_launch_attempt_state(
+        &store,
+        &attempt_id,
+        LaunchAttemptState::Dispatching,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ) {
+        return error_response(err);
+    }
+
     let adapter = OpenCodeAdapter::with_binary(runtime.opencode_bin.clone());
     let reopen_outcome = classify_reopen_outcome_for_return(
         &adapter,
@@ -4447,64 +4643,143 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     ) {
         Ok(outcome) => outcome,
         Err(err) => {
+            let detail = format!("rr return failed: {err}");
+            if let Err(update_err) = persist_launch_attempt_state(
+                &store,
+                &attempt_id,
+                LaunchAttemptState::FailedSpawn,
+                None,
+                None,
+                None,
+                None,
+                Some(&detail),
+            ) {
+                return error_response(update_err);
+            }
             return blocked_response(
-                format!("rr return failed: {err}"),
+                detail,
                 vec!["ensure a valid binding and ResumeBundle exist for this repo".to_owned()],
-                json!({"reason_code": "rr_return_failed", "session_id": session.id}),
+                json!({
+                    "reason_code": "rr_return_failed",
+                    "session_id": session.id,
+                    "launch_attempt_id": attempt_id,
+                }),
             );
         }
     };
 
-    let run_id = next_id("run");
-    if let Err(err) = store.create_review_run(CreateReviewRun {
-        id: &run_id,
-        session_id: &outcome.session_id,
-        run_kind: "return",
-        repo_snapshot: &format!(
-            "{}#{}",
-            session.review_target.repository, session.review_target.pull_request_number
-        ),
-        continuity_quality: continuity_state_label(&outcome.continuity_quality),
-        session_locator_artifact_id: None,
-    }) {
-        return error_response(format!("failed to record return run: {err}"));
+    let provider_session_id =
+        match verified_provider_session_id(&session.provider, &outcome.locator) {
+            Ok(session_id) => session_id.to_owned(),
+            Err(detail) => {
+                if let Err(update_err) = persist_launch_attempt_state(
+                    &store,
+                    &attempt_id,
+                    LaunchAttemptState::FailedProviderVerification,
+                    None,
+                    None,
+                    None,
+                    Some(&outcome.locator),
+                    Some(&detail),
+                ) {
+                    return error_response(update_err);
+                }
+                return blocked_response(
+                    format!("failed to verify provider session: {detail}"),
+                    vec!["re-run rr return after verifying provider launch output".to_owned()],
+                    json!({
+                        "reason_code": "provider_session_unverified",
+                        "launch_attempt_id": attempt_id,
+                        "provider": session.provider,
+                        "session_id": session.id,
+                    }),
+                );
+            }
+        };
+
+    if let Err(err) = persist_launch_attempt_state(
+        &store,
+        &attempt_id,
+        LaunchAttemptState::AwaitingProviderVerification,
+        None,
+        None,
+        Some(&provider_session_id),
+        Some(&outcome.locator),
+        None,
+    ) {
+        return error_response(err);
     }
 
+    let binding_id = binding
+        .as_ref()
+        .map(|record| record.id.clone())
+        .unwrap_or_else(|| next_id("binding"));
+    let run_id = next_id("run");
     let continuity_state = format!(
         "return:{}",
         continuity_state_label(&outcome.continuity_quality)
     );
-    let updated = match store.update_review_session_continuity(
-        &session.id,
-        session.row_version,
-        &continuity_state,
-    ) {
-        Ok(updated) => updated,
-        Err(err) => return error_response(format!("failed to update session continuity: {err}")),
+    let terminal_state = match outcome.path {
+        OpenCodeReturnPath::ReboundExistingSession => LaunchAttemptState::VerifiedReopened,
+        OpenCodeReturnPath::ReseededSession => LaunchAttemptState::VerifiedReseeded,
     };
-
     if let Err(err) =
-        store.update_review_session_attention(&updated.id, updated.row_version, "returned_to_roger")
+        store.finalize_existing_session_launch_attempt(FinalizeExistingSessionLaunchAttempt {
+            attempt_id: &attempt_id,
+            terminal_state,
+            provider_session_id: &provider_session_id,
+            verified_locator: &outcome.locator,
+            review_session_id: &session.id,
+            expected_session_row_version: session.row_version,
+            continuity_state: &continuity_state,
+            attention_state: "returned_to_roger",
+            review_run: CreateReviewRun {
+                id: &run_id,
+                session_id: &session.id,
+                run_kind: "return",
+                repo_snapshot: &format!(
+                    "{}#{}",
+                    session.review_target.repository, session.review_target.pull_request_number
+                ),
+                continuity_quality: continuity_state_label(&outcome.continuity_quality),
+                session_locator_artifact_id: None,
+            },
+            launch_binding: CreateSessionLaunchBinding {
+                id: &binding_id,
+                session_id: &session.id,
+                repo_locator: &session.review_target.repository,
+                review_target: Some(&session.review_target),
+                surface: LaunchSurface::Cli,
+                launch_profile_id: Some(cli_config::PROFILE_ID),
+                ui_target: Some(cli_config::UI_TARGET),
+                instance_preference: Some(cli_config::INSTANCE_PREFERENCE),
+                cwd: Some(binding_context.cwd.as_str()),
+                worktree_root: binding_context.worktree_root.as_deref(),
+            },
+        })
     {
-        return error_response(format!("failed to update session attention: {err}"));
-    }
-
-    let binding_id = binding
-        .map(|record| record.id)
-        .unwrap_or_else(|| next_id("binding"));
-    if let Err(err) = store.put_session_launch_binding(CreateSessionLaunchBinding {
-        id: &binding_id,
-        session_id: &session.id,
-        repo_locator: &session.review_target.repository,
-        review_target: Some(&session.review_target),
-        surface: LaunchSurface::Cli,
-        launch_profile_id: Some(cli_config::PROFILE_ID),
-        ui_target: Some(cli_config::UI_TARGET),
-        instance_preference: Some(cli_config::INSTANCE_PREFERENCE),
-        cwd: Some(runtime.cwd.to_string_lossy().as_ref()),
-        worktree_root: None,
-    }) {
-        return error_response(format!("failed to update launch binding: {err}"));
+        let detail = format!("failed to finalize return launch: {err}");
+        let failure_state = match err {
+            roger_storage::ExistingSessionLaunchFinalizationError::SessionBinding(_) => {
+                LaunchAttemptState::FailedSessionBinding
+            }
+            roger_storage::ExistingSessionLaunchFinalizationError::Commit(_) => {
+                LaunchAttemptState::FailedCommit
+            }
+        };
+        if let Err(update_err) = persist_launch_attempt_state(
+            &store,
+            &attempt_id,
+            failure_state,
+            None,
+            None,
+            Some(&provider_session_id),
+            Some(&outcome.locator),
+            Some(&detail),
+        ) {
+            return error_response(update_err);
+        }
+        return error_response(detail);
     }
 
     let degraded = !matches!(outcome.continuity_quality, ContinuityQuality::Usable)
@@ -4521,6 +4796,7 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             capability["supports_rr_return"] = json!(true);
             capability["required_tier_for_return"] = json!("tier_b");
             json!({
+                "launch_attempt_id": attempt_id,
                 "session_id": outcome.session_id,
                 "review_run_id": run_id,
                 "provider_capability": capability,
@@ -4578,8 +4854,13 @@ fn handle_sessions(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
                 "follow_on": {
                     "requires_explicit_session": true,
                     "resume_command": format!("rr resume --session {}", entry.session_id),
-                    "reconciliation_mode": "automatic_background",
-                    "fractional_staleness_allowed": true,
+                    "reconciliation_mode": if entry.attention_state == "refresh_recommended" {
+                        "reentry_required"
+                    } else {
+                        "automatic_background"
+                    },
+                    "manual_refresh_supported": false,
+                    "stale_target_detected": entry.attention_state == "refresh_recommended",
                 }
             })
         })
@@ -6423,7 +6704,12 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                 json!({"command": "rr bridge install [--extension-id <id>] --robot", "purpose": "repair/dev host registration override when guided setup cannot discover identity"}),
                 json!({"command": "rr bridge uninstall --robot", "purpose": "remove bridge registration assets"}),
                 json!({"command": "rr robot-docs schemas --robot", "purpose": "schema inventory"}),
-                json!({"kind": "reconciliation_contract", "mode": "automatic_background", "summary": "Roger reconciles stale review state automatically during ordinary review, resume, return, status, findings, TUI, and extension flows; bounded fractional staleness is allowed while background reconciliation catches up."}),
+                json!({
+                    "kind": "reconciliation_contract",
+                    "mode": "persisted_readback",
+                    "manual_refresh_supported": false,
+                    "summary": "There is no standalone refresh command. Roger surfaces the last persisted review state and requires explicit re-entry or a fresh pass when target drift is detected."
+                }),
                 json!({
                     "kind": "inside_roger_skill",
                     "context": "inside_roger",
@@ -8466,9 +8752,20 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let mut warnings: Vec<String> = provider_support_warning(&session.provider, "rr status")
         .into_iter()
         .collect();
-    if let Some(warning) = automatic_reconciliation_warning(&session.attention_state) {
-        warnings.push(warning);
-    }
+    let mut repair_actions = Vec::new();
+    let reconciliation = if session.attention_state == "refresh_recommended" {
+        if let Some(warning) = persisted_readback_warning(&session.attention_state) {
+            warnings.push(warning);
+        }
+        repair_actions = persisted_readback_repair_actions(&session.id, &session.review_target);
+        persisted_readback_reconciliation(&session.id, &session.review_target, session.updated_at)
+    } else {
+        json!({
+            "mode": "automatic_background",
+            "fractional_staleness_allowed": true,
+            "stale_target_detected": false,
+        })
+    };
 
     CommandResponse {
         outcome: OutcomeKind::Complete,
@@ -8491,11 +8788,7 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 "state": session.attention_state,
                 "updated_at": session.updated_at,
             },
-            "reconciliation": {
-                "mode": "automatic_background",
-                "fractional_staleness_allowed": true,
-                "stale_target_detected": session.attention_state == "refresh_recommended",
-            },
+            "reconciliation": reconciliation,
             "findings": {
                 "total": findings_count,
                 "needs_follow_up": needs_follow_up_count,
@@ -8530,7 +8823,7 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             "provider_capability": provider_capability(&session.provider)
         }),
         warnings,
-        repair_actions: Vec::new(),
+        repair_actions,
         message: "status loaded".to_owned(),
     }
 }
@@ -8595,9 +8888,20 @@ fn handle_findings(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
     let mut warnings: Vec<String> = provider_support_warning(&session.provider, "rr findings")
         .into_iter()
         .collect();
-    if let Some(warning) = automatic_reconciliation_warning(&session.attention_state) {
-        warnings.push(warning);
-    }
+    let mut repair_actions = Vec::new();
+    let reconciliation = if session.attention_state == "refresh_recommended" {
+        if let Some(warning) = persisted_readback_warning(&session.attention_state) {
+            warnings.push(warning);
+        }
+        repair_actions = persisted_readback_repair_actions(&session.id, &session.review_target);
+        persisted_readback_reconciliation(&session.id, &session.review_target, session.updated_at)
+    } else {
+        json!({
+            "mode": "automatic_background",
+            "fractional_staleness_allowed": true,
+            "stale_target_detected": false,
+        })
+    };
 
     let mut items = Vec::with_capacity(findings.len());
     for finding in &findings {
@@ -8664,15 +8968,11 @@ fn handle_findings(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
                 "repository": session.review_target.repository,
                 "pull_request": session.review_target.pull_request_number,
             },
-            "reconciliation": {
-                "mode": "automatic_background",
-                "fractional_staleness_allowed": true,
-                "stale_target_detected": session.attention_state == "refresh_recommended",
-            },
+            "reconciliation": reconciliation,
             "provider_capability": provider_capability(&session.provider),
         }),
         warnings,
-        repair_actions: Vec::new(),
+        repair_actions,
         message: if count == 0 {
             "no findings available for this session".to_owned()
         } else {
@@ -9214,15 +9514,45 @@ fn provider_support_warning(provider: &str, command: &str) -> Option<String> {
     }
 }
 
-fn automatic_reconciliation_warning(attention_state: &str) -> Option<String> {
+fn persisted_readback_reconciliation(
+    session_id: &str,
+    target: &ReviewTarget,
+    updated_at: i64,
+) -> Value {
+    json!({
+        "mode": "persisted_readback",
+        "manual_refresh_supported": false,
+        "stale_target_detected": true,
+        "repair_required": true,
+        "freshness_basis": "persisted_attention_state",
+        "attention_updated_at": updated_at,
+        "recommended_reentry_command": format!("rr resume --session {session_id}"),
+        "recommended_fresh_pass_command": format!(
+            "rr review --repo {} --pr {}",
+            target.repository, target.pull_request_number
+        ),
+    })
+}
+
+fn persisted_readback_warning(attention_state: &str) -> Option<String> {
     if attention_state == "refresh_recommended" {
         Some(
-            "Roger reconciles stale review state automatically; current results may be fractionally stale until background reconciliation completes."
+            "Roger is showing the last persisted review state; reopen the Roger session or start a fresh pass to reconcile stale target context."
                 .to_owned(),
         )
     } else {
         None
     }
+}
+
+fn persisted_readback_repair_actions(session_id: &str, target: &ReviewTarget) -> Vec<String> {
+    vec![
+        format!("run rr resume --session {session_id} to reopen the Roger session locally"),
+        format!(
+            "run rr review --repo {} --pr {} to start a fresh pass if target drift invalidated the older review",
+            target.repository, target.pull_request_number
+        ),
+    ]
 }
 
 fn session_path_label(path: &OpenCodeSessionPath) -> &'static str {
