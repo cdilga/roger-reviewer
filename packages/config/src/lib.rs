@@ -113,6 +113,7 @@ pub struct ResolvedProviderCapability {
     pub status: String,
     pub support_tier: String,
     pub surface_class: String,
+    pub capability_provenance: ValueProvenance,
     pub policy_profile: ResolvedPolicyProfile,
     pub hook_contract_version: ResolvedValue<String>,
     pub instruction_contract_version: ResolvedValue<String>,
@@ -151,9 +152,80 @@ pub struct ResolvedRogerConfig {
     pub providers: Vec<ResolvedProviderCapability>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedRoutineSurfaceBaseline {
+    pub surface: String,
+    pub launch_profile_id: ResolvedValue<String>,
+    pub provider: ResolvedProviderCapability,
+    pub ui_target: ResolvedValue<String>,
+    pub instance_preference: ResolvedValue<String>,
+    pub isolation_mode: ResolvedValue<String>,
+    pub named_instance_on_collision: ResolvedValue<bool>,
+    pub repair_overrides_active: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_repair_override_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedConfigError {
+    pub reason_code: String,
+    pub message: String,
+}
+
+impl ResolvedProviderCapability {
+    pub fn status_reason(&self) -> Option<String> {
+        self.fail_closed_reason
+            .clone()
+            .or_else(|| self.degraded_reason.clone())
+    }
+}
+
 impl ResolvedRogerConfig {
     pub fn provider(&self, provider: &str) -> Option<&ResolvedProviderCapability> {
         self.providers.iter().find(|item| item.provider == provider)
+    }
+
+    pub fn routine_surface_baseline(
+        &self,
+        provider_override: Option<&str>,
+    ) -> Result<ResolvedRoutineSurfaceBaseline, ResolvedConfigError> {
+        let provider_key = provider_override.unwrap_or(self.launch.default_provider.value.as_str());
+        let provider = self.provider(provider_key).cloned().ok_or_else(|| {
+            let reason_code = if provider_override.is_some() {
+                "provider_override_unknown"
+            } else {
+                "default_provider_unknown"
+            };
+            ResolvedConfigError {
+                reason_code: reason_code.to_owned(),
+                message: format!(
+                    "resolved config has no provider capability entry for '{provider_key}'"
+                ),
+            }
+        })?;
+
+        let active_repair_override_keys = if self.repair_overrides_active() {
+            self.active_repair_override_keys()
+        } else {
+            Vec::new()
+        };
+
+        Ok(ResolvedRoutineSurfaceBaseline {
+            surface: self.surface.clone(),
+            launch_profile_id: self.launch.launch_profile_id.clone(),
+            provider,
+            ui_target: self.launch.ui_target.clone(),
+            instance_preference: self.launch.instance_preference.clone(),
+            isolation_mode: self.launch.isolation_mode.clone(),
+            named_instance_on_collision: self.launch.named_instance_on_collision.clone(),
+            repair_overrides_active: self.repair_overrides_active(),
+            active_repair_override_keys,
+            status_reason: self
+                .provider(provider_key)
+                .and_then(ResolvedProviderCapability::status_reason),
+        })
     }
 
     pub fn repair_overrides_active(&self) -> bool {
@@ -316,6 +388,9 @@ where
         status: provider_support_status(provider).to_owned(),
         support_tier: provider_support_tier(provider).to_owned(),
         surface_class: provider_surface_class(provider).to_owned(),
+        capability_provenance: ValueProvenance::built_in(format!(
+            "providers.{provider}.support_matrix"
+        )),
         policy_profile: provider_policy_profile(provider),
         hook_contract_version: ResolvedValue::built_in(
             provider_hook_contract_version(provider).to_owned(),
@@ -457,7 +532,9 @@ fn provider_degraded_reason(provider: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ValueProvenanceLayer, cli_defaults, resolve_cli_config_from_lookup};
+    use super::{
+        ResolvedConfigError, ValueProvenanceLayer, cli_defaults, resolve_cli_config_from_lookup,
+    };
     use std::collections::HashMap;
     use std::path::Path;
 
@@ -487,6 +564,14 @@ mod tests {
         assert_eq!(opencode.status, "first_class_live");
         assert_eq!(opencode.support_tier, "tier_b");
         assert_eq!(opencode.surface_class, "review_primary");
+        assert_eq!(
+            opencode.capability_provenance.layer,
+            ValueProvenanceLayer::BuiltIn
+        );
+        assert_eq!(
+            opencode.capability_provenance.source,
+            "providers.opencode.support_matrix"
+        );
         assert_eq!(opencode.policy_profile.id, "review_safe_tier_b_continuity");
         assert_eq!(opencode.binary_path.value, "opencode");
         assert_eq!(opencode.hook_contract_version.value, "none");
@@ -611,6 +696,98 @@ mod tests {
                 cli_defaults::ENV_BRIDGE_HOST_BINARY.to_owned(),
                 cli_defaults::ENV_EXTENSION_PROFILE_ROOT.to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn builds_routine_surface_baseline_for_default_provider() {
+        let resolved = resolve_cli_config_from_lookup(Path::new("/tmp/roger"), |_| None);
+
+        let baseline = resolved
+            .routine_surface_baseline(None)
+            .expect("routine surface baseline");
+        assert_eq!(baseline.surface, "cli");
+        assert_eq!(baseline.launch_profile_id.value, "profile-open-pr");
+        assert_eq!(baseline.provider.provider, "opencode");
+        assert_eq!(baseline.provider.support_tier, "tier_b");
+        assert_eq!(baseline.provider.surface_class, "review_primary");
+        assert_eq!(
+            baseline.provider.policy_profile.id,
+            "review_safe_tier_b_continuity"
+        );
+        assert_eq!(baseline.ui_target.value, "cli");
+        assert_eq!(baseline.instance_preference.value, "reuse_if_possible");
+        assert_eq!(baseline.isolation_mode.value, "current_checkout");
+        assert_eq!(baseline.named_instance_on_collision.value, true);
+        assert!(!baseline.repair_overrides_active);
+        assert!(baseline.active_repair_override_keys.is_empty());
+        assert!(baseline.status_reason.is_none());
+    }
+
+    #[test]
+    fn routine_surface_baseline_surfaces_fail_closed_reason_for_provider_override() {
+        let resolved = resolve_cli_config_from_lookup(Path::new("/tmp/roger"), |_| None);
+
+        let baseline = resolved
+            .routine_surface_baseline(Some("copilot"))
+            .expect("copilot routine surface baseline");
+        assert_eq!(baseline.provider.provider, "copilot");
+        assert_eq!(baseline.provider.support_tier, "tier_a_planned");
+        assert_eq!(baseline.provider.surface_class, "admission_pending");
+        assert_eq!(
+            baseline.status_reason.as_deref(),
+            Some("provider_not_live")
+        );
+        assert_eq!(
+            baseline.provider.capability_provenance.source,
+            "providers.copilot.support_matrix"
+        );
+    }
+
+    #[test]
+    fn routine_surface_baseline_keeps_repair_provenance_demoted_but_visible() {
+        let env = HashMap::from([
+            (
+                cli_defaults::ENV_STORE_ROOT.to_owned(),
+                "/tmp/custom-store".to_owned(),
+            ),
+            (
+                cli_defaults::ENV_BRIDGE_HOST_BINARY.to_owned(),
+                "/tmp/rr-host".to_owned(),
+            ),
+        ]);
+        let resolved =
+            resolve_cli_config_from_lookup(Path::new("/tmp/roger"), |key| env.get(key).cloned());
+
+        let baseline = resolved
+            .routine_surface_baseline(None)
+            .expect("routine surface baseline");
+        assert!(baseline.repair_overrides_active);
+        assert_eq!(
+            baseline.active_repair_override_keys,
+            vec![
+                cli_defaults::ENV_STORE_ROOT.to_owned(),
+                cli_defaults::ENV_BRIDGE_HOST_BINARY.to_owned(),
+            ]
+        );
+        assert_eq!(baseline.provider.provider, "opencode");
+    }
+
+    #[test]
+    fn routine_surface_baseline_rejects_unknown_provider_override() {
+        let resolved = resolve_cli_config_from_lookup(Path::new("/tmp/roger"), |_| None);
+
+        let err = resolved
+            .routine_surface_baseline(Some("totally-unknown"))
+            .expect_err("unknown provider should fail closed");
+        assert_eq!(
+            err,
+            ResolvedConfigError {
+                reason_code: "provider_override_unknown".to_owned(),
+                message:
+                    "resolved config has no provider capability entry for 'totally-unknown'"
+                        .to_owned(),
+            }
         );
     }
 }
