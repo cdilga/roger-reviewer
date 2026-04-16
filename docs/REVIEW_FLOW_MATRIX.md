@@ -451,6 +451,25 @@ Purpose:
 - Test intent: prove in-harness commands are convenience adapters with semantic
   parity, not a second command model
 
+### F18: Update an Installed Roger Binary
+
+- Surfaces: CLI, published release metadata, installer-owned install layout
+- Primary artifact: `rr update` robot envelope plus retained upgrade rehearsal
+  manifest
+- Happy path: operator runs `rr update` from a published direct-binary install,
+  Roger resolves the intended target release, verifies metadata and checksums,
+  requires explicit confirmation for apply, replaces the installed binary with
+  rollback protection, and the updated binary remains usable afterward
+- Common variants: same-version no-op, `--dry-run` preflight, explicit pinned
+  version or target override, explicit RC dry-run, and release-hosted reinstall
+  guidance for bounded recovery
+- Failure/recovery: local or unpublished build provenance, unsupported install
+  layout, malformed or incomplete release assets, and blocked migration posture
+  all fail closed with truthful robot output and repair guidance instead of
+  guessing or mutating partially
+- Test intent: prove Roger's update promise as a real old->update->new journey
+  with retained artifacts, not just as disjoint installer and dry-run checks
+
 ## Minimum Cross-Surface Consistency Rules
 
 - every extension action must map to a real local Roger flow, not an

@@ -7,6 +7,8 @@ Purpose: provide the minimum truthful manual smoke checklist that must be comple
 1. The unified `release` workflow completed its build, packaging, and verify jobs successfully for the intended tag.
 2. The `release-verify-assets-report` artifact reports `publish_gate.publish_allowed=true`.
 3. The same workflow run produced the optional bridge/extension artifacts you intend to ship.
+4. The representative deterministic upgrade rehearsal passed on the candidate source tree:
+   `bash scripts/release/test_update_upgrade_rehearsal.sh --output-dir <artifact-dir>`
 
 ## Required Checks
 
@@ -64,11 +66,20 @@ gh workflow run release.yml \
   - `--fresh-install-update-dry-run-outcome <complete|blocked|...>`
   - `--fresh-install-update-dry-run-reason-code <reason-or-none>`
 
+7. Keep the deterministic pre-publish upgrade rehearsal separate from the live publish smoke:
+- `bash scripts/release/test_update_upgrade_rehearsal.sh --output-dir <artifact-dir>`
+- retain `update-upgrade-rehearsal-manifest.json`, the pre-update same-version no-op output,
+  the `rr update --yes --robot` apply output, and the post-update same-version no-op output
+- this script is the representative `INV-UPDATE-004` proof for the bounded stable direct-binary
+  update lane; it does not widen Windows-host or RC apply claims by itself
+
 ## Evidence to retain
 
 - URL for the unified `release` workflow run used for publish
 - `release-publish-plan` artifact from the publish run
 - final release URL
+- deterministic upgrade rehearsal outputs from
+  `bash scripts/release/test_update_upgrade_rehearsal.sh --output-dir <artifact-dir>`
 - live installer/update proof outputs (`releases/latest` response summary + installer dry-run output + fresh-install update dry-run output)
 - explicit CI evidence fields for the closeout guard:
   `latest_proof_utc`, `latest_proof_tag`, `installer_dry_run_outcome`,

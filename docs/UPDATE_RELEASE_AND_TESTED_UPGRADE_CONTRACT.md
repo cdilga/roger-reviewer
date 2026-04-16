@@ -46,8 +46,11 @@ As of `2026-04-14`, the repo has these real facts:
   rename-with-rollback replacement for supported in-place installs.
 - the Unix installer `scripts/release/rr-install.sh` exists and has automated
   synthetic-release tests.
-- the PowerShell installer `scripts/release/rr-install.ps1` exists, but its
-  semantics and test coverage are not yet at full parity with the Unix lane.
+- the PowerShell installer `scripts/release/rr-install.ps1` now follows the
+  same checksum-manifest contract as the Unix installer for canonical
+  `SHA256SUMS` releases and legacy published tags whose metadata still names a
+  per-release checksum file, but Windows proof remains manual in this
+  workspace.
 - release automation already verifies core assets, installer-script presence,
   optional-lane claim drift, and publish-gate inputs before publication.
 - schema/data migration-capable updates remain deferred/fail-closed in `0.1.x`.
@@ -83,10 +86,12 @@ truthfully claim the same in-place update target matrix as the installer lane.
 
 ### 4. Installer parity drift
 
-The Unix installer supports the `--version 0.1.0` stable alias and a legacy
-`SHA256SUMS` fallback path in tests. The PowerShell installer does not yet
-implement or test the same behaviors. Roger must not describe those behaviors
-as shell-family-agnostic until parity exists.
+The checksum-manifest lane now aligns across the Unix and PowerShell installers
+for both canonical `SHA256SUMS` releases and the legacy published-tag shape
+where install metadata still names `<artifact>-checksums.txt`. Other installer
+parity gaps remain: the Unix installer supports the `--version 0.1.0` stable
+alias and has retained automated synthetic-feed tests, while the PowerShell
+lane still relies on manual Windows-host proof in this workspace.
 
 ### 5. Install-layout semantics are under-specified
 
@@ -97,9 +102,9 @@ yet made first-class in public update semantics.
 
 ### 6. Repair guidance drift
 
-`rr update --dry-run` currently emits a `recommended_install_command` that uses
-repo-local `scripts/release/rr-install.*` paths. That is not a truthful repair
-command for a normal installed user outside a repository checkout.
+This gap is now closed in source: `rr update` emits release-hosted reinstall
+commands instead of repo-relative `scripts/release/rr-install.*` paths. The
+remaining work is retention and replay discipline, not command-shape truth.
 
 ### 7. Tested-upgrade-path gap
 
@@ -117,15 +122,11 @@ rehearsed upgrade path.
 
 ### 8. Release-gate checksum contradiction
 
-The current release pipeline can bless and publish a checksum contract that is
-already internally inconsistent:
-
-- install metadata declares `checksums_name = <artifact-stem>-checksums.txt`
-- the release verifier enforces that same declared name
-- the verifier output and publish plan then emit and publish `SHA256SUMS`
-
-That means Roger can currently publish a release whose installer metadata points
-at a checksum asset the release does not actually contain.
+This gap is now closed in source: install metadata, release verification, and
+published asset naming all converge on `SHA256SUMS` as the canonical checksum
+manifest. The installer and updater keep an explicit legacy fallback path so
+already-published tags that still declare `<artifact>-checksums.txt` remain
+consumable until the stable line is refreshed.
 
 ### 9. Published-artifact versus repo-doc drift
 
@@ -170,11 +171,13 @@ Observed live sequence:
 4. it resolves the target release from GitHub `releases/latest`; at the time of
    writing, that is `v2026.04.08`.
 5. it fetches `release-install-metadata-2026.04.08.json` successfully.
-6. it reads `checksums_name` from that metadata. The live bundle says
-   `roger-reviewer-2026.04.08-checksums.txt`.
-7. it attempts to fetch that checksums file from the release tag.
-8. the release does not publish that file. It publishes `SHA256SUMS` instead.
-9. `rr update` blocks immediately with:
+6. it reads `checksums_name` from that metadata. Older published bundles may
+   still say `roger-reviewer-<version>-checksums.txt`, while current source
+   now emits `SHA256SUMS`.
+7. it attempts to fetch the declared checksums file first.
+8. if the declared asset is absent and the canonical `SHA256SUMS` exists, the
+   updater falls back to `SHA256SUMS` and continues validation.
+9. if neither manifest exists, `rr update` blocks immediately with:
    - `schema_id=rr.robot.update.v1`
    - `outcome=blocked`
    - `reason_code=checksums_missing`
@@ -199,26 +202,25 @@ Observed live sequence:
 
 1. `curl -fsSL https://github.com/cdilga/roger-reviewer/releases/latest/download/rr-install.sh | bash -s -- --install-dir <tmp>`
    succeeds.
-2. the Unix installer succeeds because it falls back from the metadata-declared
-   checksums name to the published `SHA256SUMS`.
-3. the freshly installed `<tmp>/rr update --dry-run --robot` blocks with the
-   same `checksums_missing` error as above.
-
-So the current latest stable release is installable on Unix, but it is not
-self-consistent as an updater release.
+2. the installer succeeds because Roger now treats `SHA256SUMS` as the
+   canonical checksum manifest and retains a legacy fallback for older published
+   metadata.
+3. the freshly installed `<tmp>/rr update --dry-run --robot` should now
+   complete a same-version no-op or cross-version dry-run without a
+   `checksums_missing` contract break, provided the release still ships either
+   the declared checksums file or `SHA256SUMS`.
 
 ### Why the Unix installer works while `rr update` fails
 
 Current live split:
 
-- `rr update` treats `checksums_name` from the install metadata bundle as the
-  required remote asset and does not fall back.
-- the Unix installer tries `checksums_name` first, then falls back to
-  `SHA256SUMS`.
-- the PowerShell installer does not have the same fallback.
+- `rr update` now tries the metadata-declared checksums asset first, then falls
+  back to `SHA256SUMS` when that canonical manifest is present.
+- the Unix installer and PowerShell installer follow the same checksum-manifest
+  rule.
 
-This creates three different behaviors against the same live release payload,
-which is not an acceptable long-term contract.
+That removes the prior three-way split in checksum behavior. Remaining parity
+gaps are documented elsewhere in this contract.
 
 ## End-To-End Flow And Blocker Ledger
 
@@ -234,11 +236,11 @@ not theoretical.
 | 4. Verify release assets | `verify_release_assets.py` checks bundle/core-manifest agreement and emits verification outputs | Blocker: the verifier enforces the per-release checksum filename from step 3, but then writes `SHA256SUMS` as the only verified checksum artifact, so the verify lane itself preserves both sides of the contradiction. |
 | 5. Build publish plan and notes | `publish_release.py`, `build_release_notes.sh`, and `release.yml` publish from `upstream/verify-report/SHA256SUMS` | Blocker: the published release notes and asset set standardize on `SHA256SUMS`, not the metadata-declared checksums file the updater later requires. |
 | 6. Post-publish stable smoke | [`release-publish-operator-smoke.md`](release-publish-operator-smoke.md) defines the required manual smoke | Blocker: the smoke does not run a fresh installed binary through `rr update --dry-run --robot`, so self-update breakage is not part of the publish gate today. |
-| 7. Fresh Unix install from live release | `rr-install.sh` resolves latest/pinned metadata and installs successfully on Unix | Blocker note: install success can mask a broken release because the Unix installer falls back from the metadata-declared checksums asset to `SHA256SUMS`. |
-| 8. Fresh Windows install from live release | `rr-install.ps1` resolves the same metadata-driven asset set without the Unix fallback | Blocker: latest-install parity is not defended; current live latest release is likely broken on PowerShell because the metadata-declared checksums asset is absent and there is no demonstrated fallback. |
-| 9. In-place updater dry-run | installed `rr` reads install metadata and fetches the declared checksum asset exactly | Blocker: live `rr update --dry-run --robot` on `v2026.04.08` fails with `reason_code=checksums_missing` before no-op detection, layout checks, or apply logic. |
+| 7. Fresh Unix install from live release | `rr-install.sh` resolves latest/pinned metadata and installs successfully on Unix | Current source aligns canonical checksum naming on `SHA256SUMS` and retains legacy fallback for older published tags; live stable proof still has to be retained per release. |
+| 8. Fresh Windows install from live release | `rr-install.ps1` resolves the same metadata-driven asset set | Current source now shares the checksum-manifest fallback logic with Unix, but Windows-host proof remains manual until a stable `pwsh` lane is available here. |
+| 9. In-place updater dry-run | installed `rr` reads install metadata, manifests, and checksums before no-op/apply decisions | Current source now falls back from legacy metadata-declared checksum names to `SHA256SUMS`; live release proof still has to be retained per stable tag. |
 | 10. Non-interactive apply surface | current source exposes `--yes/-y` and robot docs for update discovery | Blocker: the latest published stable binary does not expose those flags or discovery entries yet, so repo/public docs must not treat current source semantics as already shipped release semantics. |
-| 11. Install/update repair guidance | blocked update envelopes should point users at a real reinstall path | Blocker: current updater responses still emit repo-relative installer commands that are not usable for normal release-installed users outside a checkout. |
+| 11. Install/update repair guidance | blocked update envelopes should point users at a real reinstall path | Current source emits release-hosted reinstall commands; the remaining obligation is retaining those blocked-envelope proofs when the support claim is widened. |
 
 ## Canonical Update Surface
 
@@ -447,13 +449,13 @@ before widening install/update claims.
 | --- | --- | --- | --- | --- | --- |
 | Unix latest stable install | release-hosted Unix installer can resolve and dry-run the latest stable release truthfully | `INV-UPDATE-001`, `INV-UPDATE-003` | `integration` + `smoke` | `bash scripts/release/test_rr_install.sh`, live `releases/latest` probe, live Unix installer dry-run output | partially defended |
 | Windows latest stable install | release-hosted PowerShell installer can resolve and dry-run the latest stable release truthfully | `INV-UPDATE-001`, `INV-UPDATE-003` | `integration` + `smoke` | PowerShell installer parity tests or retained Windows-host dry-run evidence against the live release | under-defended |
-| Published stable direct-binary update | installed stable release can preflight and apply a newer stable release without hidden target/provenance drift | `INV-UPDATE-002`, `INV-UPDATE-003`, `INV-UPDATE-004` | `integration` + `smoke` | updater dry-run envelope, apply rehearsal, pre/post version evidence, blocked-reason snapshots for fail-closed variants | currently broken on live stable checksum contract |
-| Published RC direct-binary update | installed RC release stays on the intended prerelease lane when the operator asks for RC behavior | `INV-UPDATE-002`, `INV-UPDATE-004` | `unit` + `integration` | channel-history fixtures, RC-target dry-run envelope, RC-upgrade rehearsal or explicit narrowed claim | under-defended and currently misroutable by default |
+| Published stable direct-binary update | installed stable release can preflight and apply a newer stable release without hidden target/provenance drift | `INV-UPDATE-002`, `INV-UPDATE-003`, `INV-UPDATE-004` | `integration` + `smoke` | updater dry-run envelope, `bash scripts/release/test_update_upgrade_rehearsal.sh --output-dir <artifact-dir>`, pre/post version evidence, blocked-reason snapshots for fail-closed variants | representative synthetic rehearsal defended; live per-release smoke still required |
+| Published RC direct-binary update | installed RC release stays on the intended prerelease lane when the operator asks for RC behavior | `INV-UPDATE-002`, `INV-UPDATE-004` | `unit` + `integration` | channel-history fixtures, RC-target dry-run envelope, RC-upgrade rehearsal or explicit narrowed claim | explicit RC dry-run truth is defended; representative RC apply remains narrowed |
 | Pinned install/update flows | explicit pinned versions behave deterministically and do not inherit accidental latest semantics | `INV-UPDATE-001`, `INV-UPDATE-002`, `INV-UPDATE-003` | `integration` | pinned synthetic release fixtures, installer dry-runs, updater dry-run envelopes for pinned targets | partially defended |
-| Same-version no-op check | user already on the target release gets a truthful no-op result instead of a misleading remote-asset failure | `INV-UPDATE-001`, `INV-UPDATE-002` | `integration` | same-version updater rehearsal with healthy release assets and explicit no-op envelope evidence | under-defended |
+| Same-version no-op check | user already on the target release gets a truthful no-op result instead of a misleading remote-asset failure | `INV-UPDATE-001`, `INV-UPDATE-002` | `integration` | same-version updater rehearsal with healthy release assets and explicit no-op envelope evidence | defended by `update_release_contract_smoke` and the synthetic upgrade rehearsal |
 | Linux `aarch64` published install/update | Linux `aarch64` support is truthful and surface-specific for install versus in-place update | `INV-UPDATE-002`, `INV-UPDATE-003` | `integration` + `smoke` | Linux `aarch64` installer proof, updater target-resolution proof, explicit `--target` posture or parity proof | install supported; updater parity not yet truthful |
-| Local/unpublished or source-checkout users | updater fails closed and points those users at the correct release-backed recovery path | `INV-UPDATE-002`, `INV-UPDATE-005` | `integration` | blocked updater envelope with `local_or_unpublished_build`, release-backed reinstall guidance evidence | behavior defended; guidance not yet fully truthful |
-| Symlinked, renamed, wrapper, or shim installs | unsupported layouts fail closed without partial mutation and with bounded recovery guidance | `INV-UPDATE-002`, `INV-UPDATE-005` | `unit` + `integration` | layout fixtures, blocked envelopes, reinstall guidance evidence | partially defended |
+| Local/unpublished or source-checkout users | updater fails closed and points those users at the correct release-backed recovery path | `INV-UPDATE-002`, `INV-UPDATE-005` | `integration` | blocked updater envelope with `local_or_unpublished_build`, release-backed reinstall guidance evidence | defended by current source-backed integration coverage |
+| Symlinked, renamed, wrapper, or shim installs | unsupported layouts fail closed without partial mutation and with bounded recovery guidance | `INV-UPDATE-002`, `INV-UPDATE-005` | `unit` + `integration` | layout fixtures, blocked envelopes, reinstall guidance evidence | renamed/layout block remains defended; symlink/shim variants still stay bounded |
 | Missing prerequisites, offline release drift, or malformed release assets | updater/install surfaces fail clearly and preserve a diagnosable repair path | `INV-UPDATE-001`, `INV-UPDATE-003`, `INV-UPDATE-005` | `integration` + `smoke` | malformed release-bundle fixtures, missing-tool fixtures, blocked envelopes, release verify artifacts | partially defended |
 | Malformed or incompatible local store at update time | update preflight does not mutate across unknown migration boundaries and emits bounded recovery guidance | `INV-STORE-001`, `INV-UPDATE-002`, `INV-UPDATE-005` | `integration` | migration/store-schema probe fixtures, blocked envelopes, recovery-path evidence | partially defended |
 
@@ -569,8 +571,9 @@ first issues that would have to be fixed in order:
    release-backed commands a normal installed user can actually run
 6. make runtime prerequisites explicit and diagnostic instead of letting missing
    `curl` / `tar` look like generic release/network drift
-7. add one published-to-published synthetic upgrade rehearsal so the upgrade
-   path is defended as a journey rather than only as disjoint pieces
+7. keep the published-to-published synthetic upgrade rehearsal retained and
+   wired into release evidence so the upgrade path stays defended as a journey
+   rather than only as disjoint pieces
 8. wire publish smoke so a freshly installed published binary must pass
    `rr update --dry-run --robot` against the just-published release
 9. stop repo/public docs from assuming current-source update flags and robot-doc
@@ -601,21 +604,31 @@ The update lane must retain these automated checks:
    - must keep covering local-build block, confirmation matrix, migration
      preflight states, successful replace, rollback restore, and unsupported
      install layout
+5. deterministic published-to-published upgrade rehearsal
+   - canonical entrypoint:
+     `bash scripts/release/test_update_upgrade_rehearsal.sh --output-dir <artifact-dir>`
+   - proves install `N`, same-version no-op on the installed old binary, apply
+     to `N+1`, and same-version no-op on the updated binary with preserved
+     rehearsal artifacts
 
-### Missing automated proof that must be added before widening claims
+### Representative automated upgrade proof now present
 
-Roger should add a dedicated synthetic published-to-published upgrade rehearsal:
+Roger now carries a dedicated synthetic published-to-published upgrade rehearsal:
 
-1. synthesize release `N`
+1. build release `N` and release `N+1` binaries with distinct embedded release metadata
 2. install `N` via the official installer into an isolated directory
-3. execute the installed `rr` from that directory
-4. synthesize release `N+1`
-5. run `rr update --dry-run` against `N+1`
-6. run `rr update --yes`
-7. assert the updated binary is now release `N+1` and still usable
+3. execute the installed `rr` from that directory and prove same-version no-op
+4. repoint the synthetic release feed to `N+1`
+5. run `rr update --yes --robot`
+6. assert the updated binary remains usable and now reports a same-version no-op against `N+1`
 
-Until this exists, Roger must describe the upgrade path as partially rehearsed,
-not fully end-to-end defended.
+Canonical entrypoint:
+
+- `bash scripts/release/test_update_upgrade_rehearsal.sh --output-dir <artifact-dir>`
+
+This is the representative `INV-UPDATE-004` proof for the bounded stable
+direct-binary update lane. It does not, by itself, widen Windows-host or RC
+apply claims; those remain separate cohorts with narrower current posture.
 
 ### Required manual stable-release proof
 
@@ -650,8 +663,8 @@ These are the concrete follow-ons implied by this contract.
 4. Replace repo-relative reinstall guidance emitted by `rr update` with
    release-backed commands.
 
-5. Add the synthetic published-to-published upgrade rehearsal to the release
-   validation story.
+5. Keep the synthetic published-to-published upgrade rehearsal retained in the
+   release validation story and its output manifest wired into release evidence.
 
 6. Decide whether checksum fallback is a real cross-surface contract or a Unix
    installer implementation detail, then align installers/updater/docs.

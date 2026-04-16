@@ -155,6 +155,13 @@ Current pinned posture:
   plumbing today
 - release-critical claims should depend on named suites, artifacts, and proof
   manifests rather than on raw line-coverage percentages alone
+- install/update truth now includes a representative deterministic upgrade
+  rehearsal:
+  - `bash scripts/release/test_update_upgrade_rehearsal.sh --output-dir <artifact-dir>`
+  - this is the canonical automated `INV-UPDATE-004` proof for the bounded
+    stable direct-binary update lane
+  - it does not widen Windows-host or RC apply claims, which remain separate
+    follow-on proof lanes
 - the repo-pinned Rust compiler channel is `nightly` via
   [`rust-toolchain.toml`](../rust-toolchain.toml); the workspace language
   edition remains `2024`

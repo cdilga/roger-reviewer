@@ -343,6 +343,15 @@ Smoke validation for this contract:
   - verifies fresh install success from a synthetic release payload
   - verifies fail-closed behavior when release metadata is missing
   - verifies fail-closed behavior when release metadata is ambiguous for target
+- `bash scripts/release/test_update_upgrade_rehearsal.sh --output-dir <artifact-dir>`
+  - builds representative stable releases `N` and `N+1` with distinct embedded
+    release metadata
+  - installs `N` through the official installer, proves same-version no-op on
+    the installed old binary, applies `rr update --yes --robot`, and then
+    proves same-version no-op on the updated binary
+  - serves as the representative `INV-UPDATE-004` proof for the bounded stable
+    direct-binary update lane; RC apply and Windows-host update proof remain
+    separately narrowed
 - post-publish live stable smoke (manual release lane):
   - `curl -fsSL https://api.github.com/repos/cdilga/roger-reviewer/releases/latest`
   - `bash scripts/release/rr-install.sh --repo cdilga/roger-reviewer --dry-run`
@@ -375,6 +384,10 @@ Behavior rules:
   manifest + checksum verification rules as install and fails closed on missing
   metadata, metadata/manifest drift, checksum mismatch, or ambiguous target
   resolution
+- the representative stable direct-binary upgrade proof is the deterministic
+  rehearsal `bash scripts/release/test_update_upgrade_rehearsal.sh --output-dir <artifact-dir>`;
+  Windows-host and representative RC apply rehearsals remain separate follow-on
+  proof lanes rather than implied parity
 - apply path uses an atomic rename/backup strategy with rollback restore when
   replacement fails after backup
 - installs created from local/unpublished artifacts should not be upgraded as
