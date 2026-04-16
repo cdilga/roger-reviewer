@@ -7,9 +7,11 @@ mod semantic_embedder;
 
 use roger_app_core::{
     ApprovalState, OutboundApprovalToken, OutboundDraft, OutboundDraftBatch, PostedAction,
-    PostedActionStatus, ProviderContinuityCapability, ResumeAttemptOutcome, ResumeBundle,
-    ResumeDecision, ResumeSessionState, ReviewTarget, SessionLocator, Surface,
-    decide_resume_strategy, outbound_target_tuple_json, time,
+    PostedActionItem, PostedActionStatus, PostingAdapterItemStatus, ProviderContinuityCapability,
+    ResumeAttemptOutcome, ResumeBundle, ResumeDecision, ResumeSessionState, ReviewTarget,
+    ReviewTaskKind, SessionLocator, Surface, WorkerInvocation, WorkerInvocationOutcomeState,
+    WorkerStageOutcome, WorkerStageResult, WorkerToolCallEvent, WorkerToolCallOutcomeState,
+    WorkerTransportKind, decide_resume_strategy, outbound_target_tuple_json, time,
     validate_outbound_draft_batch_linkage,
 };
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value};
@@ -18,7 +20,7 @@ use sha2::{Digest, Sha256};
 
 pub use semantic_embedder::{SemanticEmbedderStatus, semantic_embedder_status};
 
-const CURRENT_SCHEMA_VERSION: i64 = 14;
+const CURRENT_SCHEMA_VERSION: i64 = 16;
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_session_ledger.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_launch_binding_context.sql");
@@ -35,6 +37,8 @@ const MIGRATION_0012: &str =
     include_str!("../migrations/0012_prompt_invocation_worker_lineage.sql");
 const MIGRATION_0013: &str = include_str!("../migrations/0013_outbound_batch_storage.sql");
 const MIGRATION_0014: &str = include_str!("../migrations/0014_outbound_postable_payload.sql");
+const MIGRATION_0015: &str = include_str!("../migrations/0015_worker_audit_trail.sql");
+const MIGRATION_0016: &str = include_str!("../migrations/0016_posted_action_items.sql");
 
 const MIGRATION_TERMINAL_STARTED: &str = "started";
 const MIGRATION_TERMINAL_COMMITTED: &str = "committed";
@@ -103,6 +107,13 @@ fn projected_outbound_state_from_posted_status(raw: &str) -> &'static str {
     }
 }
 
+fn projected_outbound_state_from_posted_item_status(raw: &str) -> &'static str {
+    match raw {
+        "Posted" => "posted",
+        _ => "failed",
+    }
+}
+
 fn projected_outbound_state_from_finding_state(raw: &str) -> &'static str {
     match raw {
         "NotDrafted" | "not_drafted" => "not_drafted",
@@ -161,6 +172,156 @@ fn parse_posted_action_status(raw: &str) -> Result<PostedActionStatus> {
             entity: "posted_action_status",
             id: raw.to_owned(),
         }),
+    }
+}
+
+fn posting_adapter_item_status_str(status: &PostingAdapterItemStatus) -> &'static str {
+    match status {
+        PostingAdapterItemStatus::Posted => "Posted",
+        PostingAdapterItemStatus::Failed => "Failed",
+    }
+}
+
+fn parse_posting_adapter_item_status(raw: &str) -> Result<PostingAdapterItemStatus> {
+    match raw {
+        "Posted" => Ok(PostingAdapterItemStatus::Posted),
+        "Failed" => Ok(PostingAdapterItemStatus::Failed),
+        _ => Err(StorageError::Conflict {
+            entity: "posted_action_item_status",
+            id: raw.to_owned(),
+        }),
+    }
+}
+
+fn review_task_kind_str(kind: ReviewTaskKind) -> &'static str {
+    match kind {
+        ReviewTaskKind::ExplorationPass => "exploration_pass",
+        ReviewTaskKind::DeepReviewPass => "deep_review_pass",
+        ReviewTaskKind::FollowUpPass => "follow_up_pass",
+        ReviewTaskKind::RefreshCompare => "refresh_compare",
+        ReviewTaskKind::ClarificationPass => "clarification_pass",
+        ReviewTaskKind::RecheckFinding => "recheck_finding",
+    }
+}
+
+fn parse_review_task_kind(raw: &str) -> Result<ReviewTaskKind> {
+    match raw {
+        "exploration_pass" => Ok(ReviewTaskKind::ExplorationPass),
+        "deep_review_pass" => Ok(ReviewTaskKind::DeepReviewPass),
+        "follow_up_pass" => Ok(ReviewTaskKind::FollowUpPass),
+        "refresh_compare" => Ok(ReviewTaskKind::RefreshCompare),
+        "clarification_pass" => Ok(ReviewTaskKind::ClarificationPass),
+        "recheck_finding" => Ok(ReviewTaskKind::RecheckFinding),
+        _ => Err(StorageError::Conflict {
+            entity: "review_task_kind",
+            id: raw.to_owned(),
+        }),
+    }
+}
+
+fn worker_transport_kind_str(kind: WorkerTransportKind) -> &'static str {
+    kind.as_str()
+}
+
+fn parse_worker_transport_kind(raw: &str) -> Result<WorkerTransportKind> {
+    match raw {
+        "legacy_stage_harness" => Ok(WorkerTransportKind::LegacyStageHarness),
+        "agent_cli" => Ok(WorkerTransportKind::AgentCli),
+        "mcp" => Ok(WorkerTransportKind::Mcp),
+        _ => Err(StorageError::Conflict {
+            entity: "worker_transport_kind",
+            id: raw.to_owned(),
+        }),
+    }
+}
+
+fn worker_invocation_outcome_state_str(state: WorkerInvocationOutcomeState) -> &'static str {
+    match state {
+        WorkerInvocationOutcomeState::Running => "running",
+        WorkerInvocationOutcomeState::Completed => "completed",
+        WorkerInvocationOutcomeState::CompletedPartial => "completed_partial",
+        WorkerInvocationOutcomeState::NeedsClarification => "needs_clarification",
+        WorkerInvocationOutcomeState::NeedsContext => "needs_context",
+        WorkerInvocationOutcomeState::Abstained => "abstained",
+        WorkerInvocationOutcomeState::Failed => "failed",
+    }
+}
+
+fn parse_worker_invocation_outcome_state(raw: &str) -> Result<WorkerInvocationOutcomeState> {
+    match raw {
+        "running" => Ok(WorkerInvocationOutcomeState::Running),
+        "completed" => Ok(WorkerInvocationOutcomeState::Completed),
+        "completed_partial" => Ok(WorkerInvocationOutcomeState::CompletedPartial),
+        "needs_clarification" => Ok(WorkerInvocationOutcomeState::NeedsClarification),
+        "needs_context" => Ok(WorkerInvocationOutcomeState::NeedsContext),
+        "abstained" => Ok(WorkerInvocationOutcomeState::Abstained),
+        "failed" => Ok(WorkerInvocationOutcomeState::Failed),
+        _ => Err(StorageError::Conflict {
+            entity: "worker_invocation_outcome_state",
+            id: raw.to_owned(),
+        }),
+    }
+}
+
+fn worker_tool_call_outcome_state_str(state: WorkerToolCallOutcomeState) -> &'static str {
+    match state {
+        WorkerToolCallOutcomeState::Succeeded => "succeeded",
+        WorkerToolCallOutcomeState::Denied => "denied",
+        WorkerToolCallOutcomeState::Failed => "failed",
+    }
+}
+
+fn parse_worker_tool_call_outcome_state(raw: &str) -> Result<WorkerToolCallOutcomeState> {
+    match raw {
+        "succeeded" => Ok(WorkerToolCallOutcomeState::Succeeded),
+        "denied" => Ok(WorkerToolCallOutcomeState::Denied),
+        "failed" => Ok(WorkerToolCallOutcomeState::Failed),
+        _ => Err(StorageError::Conflict {
+            entity: "worker_tool_call_outcome_state",
+            id: raw.to_owned(),
+        }),
+    }
+}
+
+fn worker_stage_outcome_str(outcome: WorkerStageOutcome) -> &'static str {
+    match outcome {
+        WorkerStageOutcome::Completed => "completed",
+        WorkerStageOutcome::CompletedPartial => "completed_partial",
+        WorkerStageOutcome::NeedsClarification => "needs_clarification",
+        WorkerStageOutcome::NeedsContext => "needs_context",
+        WorkerStageOutcome::Abstained => "abstained",
+        WorkerStageOutcome::Failed => "failed",
+    }
+}
+
+fn parse_worker_stage_outcome(raw: &str) -> Result<WorkerStageOutcome> {
+    match raw {
+        "completed" => Ok(WorkerStageOutcome::Completed),
+        "completed_partial" => Ok(WorkerStageOutcome::CompletedPartial),
+        "needs_clarification" => Ok(WorkerStageOutcome::NeedsClarification),
+        "needs_context" => Ok(WorkerStageOutcome::NeedsContext),
+        "abstained" => Ok(WorkerStageOutcome::Abstained),
+        "failed" => Ok(WorkerStageOutcome::Failed),
+        _ => Err(StorageError::Conflict {
+            entity: "worker_stage_outcome",
+            id: raw.to_owned(),
+        }),
+    }
+}
+
+fn serialize_json_string<T: Serialize + ?Sized>(value: &T) -> Result<String> {
+    serde_json::to_string(value).map_err(StorageError::from)
+}
+
+fn serialize_optional_json_string<T: Serialize>(value: Option<&T>) -> Result<Option<String>> {
+    value.map(serialize_json_string).transpose()
+}
+
+fn serialize_slice_json_string<T: Serialize>(values: &[T]) -> Result<Option<String>> {
+    if values.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(serialize_json_string(values)?))
     }
 }
 
@@ -463,6 +624,37 @@ pub struct PromptInvocationRecord {
     pub row_version: i64,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateWorkerStageResult<'a> {
+    pub result: &'a WorkerStageResult,
+    pub submitted_result_artifact_id: Option<&'a str>,
+    pub structured_findings_pack_artifact_id: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkerStageResultRecord {
+    pub review_session_id: String,
+    pub review_run_id: String,
+    pub review_task_id: String,
+    pub worker_invocation_id: Option<String>,
+    pub schema_id: String,
+    pub task_nonce: String,
+    pub stage: String,
+    pub task_kind: ReviewTaskKind,
+    pub outcome: WorkerStageOutcome,
+    pub summary: String,
+    pub submitted_result_artifact_id: Option<String>,
+    pub structured_findings_pack_artifact_id: Option<String>,
+    pub clarification_requests_json: Option<String>,
+    pub memory_review_requests_json: Option<String>,
+    pub follow_up_proposals_json: Option<String>,
+    pub memory_citations_json: Option<String>,
+    pub artifact_refs_json: Option<String>,
+    pub provider_metadata_json: Option<String>,
+    pub warnings_json: Option<String>,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -1348,6 +1540,10 @@ pub struct OutboundSurfaceProjection {
     pub approval_id: Option<String>,
     pub posted_action_id: Option<String>,
     pub posted_action_status: Option<String>,
+    pub posted_action_item_id: Option<String>,
+    pub posted_action_item_status: Option<String>,
+    pub remote_identifier: Option<String>,
+    pub failure_code: Option<String>,
     pub invalidation_reason_code: Option<String>,
     pub mutation_elevated: bool,
 }
@@ -2124,6 +2320,297 @@ impl RogerStore {
                 },
             )
             .optional()
+            .map_err(StorageError::from)
+    }
+
+    pub fn record_worker_invocation(
+        &self,
+        invocation: &WorkerInvocation,
+    ) -> Result<WorkerInvocation> {
+        let created_at = time::now_ts();
+        self.conn.execute(
+            "INSERT INTO worker_invocations (
+                id, review_session_id, review_run_id, review_task_id, provider,
+                provider_session_id, transport_kind, started_at, completed_at,
+                outcome_state, prompt_invocation_id, raw_output_artifact_id,
+                result_artifact_id, created_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5,
+                ?6, ?7, ?8, ?9,
+                ?10, ?11, ?12,
+                ?13, ?14
+            )",
+            params![
+                invocation.id,
+                invocation.review_session_id,
+                invocation.review_run_id,
+                invocation.review_task_id,
+                invocation.provider,
+                invocation.provider_session_id,
+                worker_transport_kind_str(invocation.transport_kind),
+                invocation.started_at,
+                invocation.completed_at,
+                worker_invocation_outcome_state_str(invocation.outcome_state),
+                invocation.prompt_invocation_id,
+                invocation.raw_output_artifact_id,
+                invocation.result_artifact_id,
+                created_at
+            ],
+        )?;
+
+        Ok(invocation.clone())
+    }
+
+    pub fn worker_invocations_for_run(
+        &self,
+        review_session_id: &str,
+        review_run_id: &str,
+    ) -> Result<Vec<WorkerInvocation>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, review_session_id, review_run_id, review_task_id,
+                    provider, provider_session_id, transport_kind, started_at,
+                    completed_at, outcome_state, prompt_invocation_id,
+                    raw_output_artifact_id, result_artifact_id
+             FROM worker_invocations
+             WHERE review_session_id = ?1 AND review_run_id = ?2
+             ORDER BY started_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![review_session_id, review_run_id], |row| {
+            let transport_kind: String = row.get(6)?;
+            let outcome_state: String = row.get(9)?;
+            Ok(WorkerInvocation {
+                id: row.get(0)?,
+                review_session_id: row.get(1)?,
+                review_run_id: row.get(2)?,
+                review_task_id: row.get(3)?,
+                provider: row.get(4)?,
+                provider_session_id: row.get(5)?,
+                transport_kind: parse_worker_transport_kind(&transport_kind).map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        6,
+                        rusqlite::types::Type::Text,
+                        Box::new(err),
+                    )
+                })?,
+                started_at: row.get(7)?,
+                completed_at: row.get(8)?,
+                outcome_state: parse_worker_invocation_outcome_state(&outcome_state).map_err(
+                    |err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            9,
+                            rusqlite::types::Type::Text,
+                            Box::new(err),
+                        )
+                    },
+                )?,
+                prompt_invocation_id: row.get(10)?,
+                raw_output_artifact_id: row.get(11)?,
+                result_artifact_id: row.get(12)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
+    }
+
+    pub fn record_worker_tool_call_event(
+        &self,
+        event: &WorkerToolCallEvent,
+    ) -> Result<WorkerToolCallEvent> {
+        let created_at = time::now_ts();
+        self.conn.execute(
+            "INSERT INTO worker_tool_call_events (
+                id, review_task_id, worker_invocation_id, operation,
+                request_digest, response_digest, outcome_state, occurred_at, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                event.id,
+                event.review_task_id,
+                event.worker_invocation_id,
+                event.operation,
+                event.request_digest,
+                event.response_digest,
+                worker_tool_call_outcome_state_str(event.outcome_state),
+                event.occurred_at,
+                created_at
+            ],
+        )?;
+        Ok(event.clone())
+    }
+
+    pub fn worker_tool_call_events_for_invocation(
+        &self,
+        worker_invocation_id: &str,
+    ) -> Result<Vec<WorkerToolCallEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, review_task_id, worker_invocation_id, operation,
+                    request_digest, response_digest, outcome_state, occurred_at
+             FROM worker_tool_call_events
+             WHERE worker_invocation_id = ?1
+             ORDER BY occurred_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![worker_invocation_id], |row| {
+            let outcome_state: String = row.get(6)?;
+            Ok(WorkerToolCallEvent {
+                id: row.get(0)?,
+                review_task_id: row.get(1)?,
+                worker_invocation_id: row.get(2)?,
+                operation: row.get(3)?,
+                request_digest: row.get(4)?,
+                response_digest: row.get(5)?,
+                outcome_state: parse_worker_tool_call_outcome_state(&outcome_state).map_err(
+                    |err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            6,
+                            rusqlite::types::Type::Text,
+                            Box::new(err),
+                        )
+                    },
+                )?,
+                occurred_at: row.get(7)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
+    }
+
+    pub fn record_worker_stage_result(
+        &self,
+        input: CreateWorkerStageResult<'_>,
+    ) -> Result<WorkerStageResultRecord> {
+        let created_at = time::now_ts();
+        let clarification_requests_json =
+            serialize_slice_json_string(&input.result.clarification_requests)?;
+        let memory_review_requests_json =
+            serialize_slice_json_string(&input.result.memory_review_requests)?;
+        let follow_up_proposals_json =
+            serialize_slice_json_string(&input.result.follow_up_proposals)?;
+        let memory_citations_json = serialize_slice_json_string(&input.result.memory_citations)?;
+        let artifact_refs_json = serialize_slice_json_string(&input.result.artifact_refs)?;
+        let provider_metadata_json =
+            serialize_optional_json_string(input.result.provider_metadata.as_ref())?;
+        let warnings_json = serialize_slice_json_string(&input.result.warnings)?;
+
+        self.conn.execute(
+            "INSERT INTO worker_stage_results (
+                review_session_id, review_run_id, review_task_id, worker_invocation_id,
+                schema_id, task_nonce, stage, task_kind, outcome_kind, summary,
+                submitted_result_artifact_id, structured_findings_pack_artifact_id,
+                clarification_requests_json, memory_review_requests_json,
+                follow_up_proposals_json, memory_citations_json, artifact_refs_json,
+                provider_metadata_json, warnings_json, created_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4,
+                ?5, ?6, ?7, ?8, ?9, ?10,
+                ?11, ?12,
+                ?13, ?14,
+                ?15, ?16, ?17,
+                ?18, ?19, ?20
+            )",
+            params![
+                input.result.review_session_id,
+                input.result.review_run_id,
+                input.result.review_task_id,
+                input.result.worker_invocation_id,
+                input.result.schema_id,
+                input.result.task_nonce,
+                input.result.stage,
+                review_task_kind_str(input.result.task_kind),
+                worker_stage_outcome_str(input.result.outcome),
+                input.result.summary,
+                input.submitted_result_artifact_id,
+                input.structured_findings_pack_artifact_id,
+                clarification_requests_json.as_deref(),
+                memory_review_requests_json.as_deref(),
+                follow_up_proposals_json.as_deref(),
+                memory_citations_json.as_deref(),
+                artifact_refs_json.as_deref(),
+                provider_metadata_json.as_deref(),
+                warnings_json.as_deref(),
+                created_at
+            ],
+        )?;
+
+        Ok(WorkerStageResultRecord {
+            review_session_id: input.result.review_session_id.clone(),
+            review_run_id: input.result.review_run_id.clone(),
+            review_task_id: input.result.review_task_id.clone(),
+            worker_invocation_id: input.result.worker_invocation_id.clone(),
+            schema_id: input.result.schema_id.clone(),
+            task_nonce: input.result.task_nonce.clone(),
+            stage: input.result.stage.clone(),
+            task_kind: input.result.task_kind,
+            outcome: input.result.outcome,
+            summary: input.result.summary.clone(),
+            submitted_result_artifact_id: input.submitted_result_artifact_id.map(ToOwned::to_owned),
+            structured_findings_pack_artifact_id: input
+                .structured_findings_pack_artifact_id
+                .map(ToOwned::to_owned),
+            clarification_requests_json,
+            memory_review_requests_json,
+            follow_up_proposals_json,
+            memory_citations_json,
+            artifact_refs_json,
+            provider_metadata_json,
+            warnings_json,
+            created_at,
+        })
+    }
+
+    pub fn worker_stage_results_for_run(
+        &self,
+        review_session_id: &str,
+        review_run_id: &str,
+    ) -> Result<Vec<WorkerStageResultRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT review_session_id, review_run_id, review_task_id, worker_invocation_id,
+                    schema_id, task_nonce, stage, task_kind, outcome_kind, summary,
+                    submitted_result_artifact_id, structured_findings_pack_artifact_id,
+                    clarification_requests_json, memory_review_requests_json,
+                    follow_up_proposals_json, memory_citations_json, artifact_refs_json,
+                    provider_metadata_json, warnings_json, created_at
+             FROM worker_stage_results
+             WHERE review_session_id = ?1 AND review_run_id = ?2
+             ORDER BY created_at ASC, review_task_id ASC",
+        )?;
+        let rows = stmt.query_map(params![review_session_id, review_run_id], |row| {
+            let task_kind: String = row.get(7)?;
+            let outcome_kind: String = row.get(8)?;
+            Ok(WorkerStageResultRecord {
+                review_session_id: row.get(0)?,
+                review_run_id: row.get(1)?,
+                review_task_id: row.get(2)?,
+                worker_invocation_id: row.get(3)?,
+                schema_id: row.get(4)?,
+                task_nonce: row.get(5)?,
+                stage: row.get(6)?,
+                task_kind: parse_review_task_kind(&task_kind).map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        7,
+                        rusqlite::types::Type::Text,
+                        Box::new(err),
+                    )
+                })?,
+                outcome: parse_worker_stage_outcome(&outcome_kind).map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(err),
+                    )
+                })?,
+                summary: row.get(9)?,
+                submitted_result_artifact_id: row.get(10)?,
+                structured_findings_pack_artifact_id: row.get(11)?,
+                clarification_requests_json: row.get(12)?,
+                memory_review_requests_json: row.get(13)?,
+                follow_up_proposals_json: row.get(14)?,
+                memory_citations_json: row.get(15)?,
+                artifact_refs_json: row.get(16)?,
+                provider_metadata_json: row.get(17)?,
+                warnings_json: row.get(18)?,
+                created_at: row.get(19)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(StorageError::from)
     }
 
@@ -3238,6 +3725,105 @@ impl RogerStore {
             actions.push(row?);
         }
         Ok(actions)
+    }
+
+    pub fn store_posted_action_item(&self, item: &PostedActionItem) -> Result<()> {
+        let parent_batch_id = self
+            .conn
+            .query_row(
+                "SELECT draft_batch_id
+                 FROM posted_batch_actions
+                 WHERE id = ?1",
+                params![item.posted_action_id.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "posted_batch_action",
+                id: item.posted_action_id.clone(),
+            })?;
+        let draft_batch_id = self
+            .conn
+            .query_row(
+                "SELECT draft_batch_id
+                 FROM outbound_draft_items
+                 WHERE id = ?1",
+                params![item.draft_id.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "outbound_draft_item",
+                id: item.draft_id.clone(),
+            })?;
+        if parent_batch_id != draft_batch_id {
+            return Err(StorageError::Conflict {
+                entity: "posted_action_item_binding",
+                id: format!("{}:draft_batch_mismatch", item.id),
+            });
+        }
+        if item.status == PostingAdapterItemStatus::Posted
+            && item
+                .remote_identifier
+                .as_deref()
+                .is_none_or(|remote_identifier| remote_identifier.trim().is_empty())
+        {
+            return Err(StorageError::Conflict {
+                entity: "posted_action_item_binding",
+                id: format!("{}:missing_remote_identifier", item.id),
+            });
+        }
+
+        self.conn.execute(
+            "INSERT INTO posted_action_items (
+                id, posted_action_id, draft_id, status, remote_identifier, failure_code
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                item.id.as_str(),
+                item.posted_action_id.as_str(),
+                item.draft_id.as_str(),
+                posting_adapter_item_status_str(&item.status),
+                item.remote_identifier.as_deref(),
+                item.failure_code.as_deref(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn store_posted_action_items(&self, items: &[PostedActionItem]) -> Result<()> {
+        for item in items {
+            self.store_posted_action_item(item)?;
+        }
+        Ok(())
+    }
+
+    pub fn posted_action_items_for_batch(&self, batch_id: &str) -> Result<Vec<PostedActionItem>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT pai.id, pai.posted_action_id, pai.draft_id, pai.status,
+                pai.remote_identifier, pai.failure_code
+             FROM posted_action_items pai
+             JOIN posted_batch_actions pba ON pba.id = pai.posted_action_id
+             WHERE pba.draft_batch_id = ?1
+             ORDER BY pba.posted_at ASC, pba.rowid ASC, pai.rowid ASC",
+        )?;
+        let rows = stmt.query_map(params![batch_id], |row| {
+            let status: String = row.get(3)?;
+            Ok(PostedActionItem {
+                id: row.get(0)?,
+                posted_action_id: row.get(1)?,
+                draft_id: row.get(2)?,
+                status: parse_posting_adapter_item_status(&status)
+                    .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?,
+                remote_identifier: row.get(4)?,
+                failure_code: row.get(5)?,
+            })
+        })?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
     }
 
     pub fn put_launch_profile(&self, profile: CreateLaunchProfile<'_>) -> Result<()> {
@@ -4668,12 +5254,32 @@ impl RogerStore {
                     odb.approval_state,
                     odb.invalidation_reason_code,
                     oat.id,
-                    pba.id,
-                    pba.status
+                    COALESCE(pba_item.id, pba_batch.id),
+                    pba_batch.status,
+                    pai.id,
+                    pai.status,
+                    CASE
+                        WHEN pai.id IS NOT NULL THEN pai.remote_identifier
+                        ELSE pba_batch.remote_identifier
+                    END,
+                    CASE
+                        WHEN pai.id IS NOT NULL THEN pai.failure_code
+                        ELSE pba_batch.failure_code
+                    END
                  FROM outbound_draft_items odi
                  JOIN outbound_draft_batches odb ON odb.id = odi.draft_batch_id
                  LEFT JOIN outbound_batch_approval_tokens oat ON oat.draft_batch_id = odb.id
-                 LEFT JOIN posted_batch_actions pba ON pba.id = (
+                 LEFT JOIN posted_action_items pai ON pai.id = (
+                    SELECT pai_inner.id
+                    FROM posted_action_items pai_inner
+                    JOIN posted_batch_actions pba_inner
+                      ON pba_inner.id = pai_inner.posted_action_id
+                    WHERE pai_inner.draft_id = odi.id
+                    ORDER BY pba_inner.posted_at DESC, pba_inner.rowid DESC, pai_inner.rowid DESC
+                    LIMIT 1
+                 )
+                 LEFT JOIN posted_batch_actions pba_item ON pba_item.id = pai.posted_action_id
+                 LEFT JOIN posted_batch_actions pba_batch ON pba_batch.id = (
                     SELECT id
                     FROM posted_batch_actions
                     WHERE draft_batch_id = odb.id
@@ -4688,9 +5294,15 @@ impl RogerStore {
                 |row| {
                     let approval_state: String = row.get(2)?;
                     let posted_action_status: Option<String> = row.get(6)?;
-                    let state = posted_action_status
+                    let posted_action_item_status: Option<String> = row.get(8)?;
+                    let state = posted_action_item_status
                         .as_deref()
-                        .map(projected_outbound_state_from_posted_status)
+                        .map(projected_outbound_state_from_posted_item_status)
+                        .or_else(|| {
+                            posted_action_status
+                                .as_deref()
+                                .map(projected_outbound_state_from_posted_status)
+                        })
                         .unwrap_or_else(|| {
                             projected_outbound_state_from_approval_state(&approval_state)
                         })
@@ -4703,6 +5315,10 @@ impl RogerStore {
                         approval_id: row.get(4)?,
                         posted_action_id: row.get(5)?,
                         posted_action_status,
+                        posted_action_item_id: row.get(7)?,
+                        posted_action_item_status,
+                        remote_identifier: row.get(9)?,
+                        failure_code: row.get(10)?,
                         invalidation_reason_code: row.get(3)?,
                         mutation_elevated: is_mutation_elevated_surface_state(&state),
                     })
@@ -4723,7 +5339,8 @@ impl RogerStore {
                     oat.id,
                     oat.revoked_at,
                     pa.id,
-                    pa.status
+                    pa.status,
+                    pa.remote_locator
                  FROM outbound_drafts od
                  LEFT JOIN outbound_approval_tokens oat ON oat.id = (
                     SELECT id
@@ -4767,6 +5384,10 @@ impl RogerStore {
                         approval_id,
                         posted_action_id: row.get(3)?,
                         posted_action_status,
+                        posted_action_item_id: None,
+                        posted_action_item_status: None,
+                        remote_identifier: row.get(5)?,
+                        failure_code: None,
                         invalidation_reason_code: revoked_at.map(|_| "legacy_revoked".to_owned()),
                         mutation_elevated: is_mutation_elevated_surface_state(&state),
                     })
@@ -4799,6 +5420,10 @@ impl RogerStore {
             approval_id: None,
             posted_action_id: None,
             posted_action_status: None,
+            posted_action_item_id: None,
+            posted_action_item_status: None,
+            remote_identifier: None,
+            failure_code: None,
             invalidation_reason_code: None,
             mutation_elevated: is_mutation_elevated_surface_state(&state),
         })
@@ -5608,6 +6233,26 @@ impl RogerStore {
                     params![time::now_ts()],
                 )?;
                 self.conn.pragma_update(None, "user_version", 14)?;
+            }
+
+            if version < 15 {
+                self.conn.execute_batch(MIGRATION_0015)?;
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at)
+                    VALUES (15, 'worker_audit_trail', ?1)",
+                    params![time::now_ts()],
+                )?;
+                self.conn.pragma_update(None, "user_version", 15)?;
+            }
+
+            if version < 16 {
+                self.conn.execute_batch(MIGRATION_0016)?;
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at)
+                    VALUES (16, 'posted_action_items', ?1)",
+                    params![time::now_ts()],
+                )?;
+                self.conn.pragma_update(None, "user_version", 16)?;
             }
 
             if migration_class.requires_sidecar_invalidation() {

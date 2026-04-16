@@ -5,7 +5,7 @@ use roger_app_core::{
     LaunchAction, LaunchIntent, ReviewTarget, ReviewTask, ReviewTaskKind, SessionLocator, Surface,
     WORKER_STAGE_RESULT_SCHEMA_V1, WorkerCapabilityProfile, WorkerContextPacket,
     WorkerGitHubPosture, WorkerMutationPosture, WorkerStageOutcome, WorkerStageResult,
-    WorkerToolCallEvent, WorkerTransportKind, WorkerTurnStrategy,
+    WorkerToolCallEvent, WorkerToolCallOutcomeState, WorkerTransportKind, WorkerTurnStrategy,
 };
 use roger_prompt_engine::stage_execution::{
     PROMPT_INVOKED_EVENT_TYPE, ReviewStage, StageExecutionRequest, StageHarness,
@@ -56,6 +56,9 @@ impl StageHarness for StubStageHarness {
             .cloned()
             .ok_or_else(|| format!("missing stub output for stage {}", stage.as_str()))?;
         response.worker_stage_result.worker_invocation_id = Some(worker_invocation_id.to_owned());
+        for event in &mut response.tool_call_events {
+            event.worker_invocation_id = worker_invocation_id.to_owned();
+        }
         Ok(response)
     }
 }
@@ -240,6 +243,19 @@ fn sample_stage_result(
     }
 }
 
+fn sample_tool_call_event(task: &ReviewTask, id: &str, operation: &str) -> WorkerToolCallEvent {
+    WorkerToolCallEvent {
+        id: id.to_owned(),
+        review_task_id: task.id.clone(),
+        worker_invocation_id: "pending-worker-id".to_owned(),
+        operation: operation.to_owned(),
+        request_digest: format!("sha256:{id}:request"),
+        response_digest: Some(format!("sha256:{id}:response")),
+        outcome_state: WorkerToolCallOutcomeState::Succeeded,
+        occurred_at: 1_746_000_000,
+    }
+}
+
 #[test]
 fn stage_passes_run_independently_and_capture_raw_output_even_when_degraded() {
     let (_tempdir, store) = setup_store("session-1", "run-1");
@@ -265,7 +281,11 @@ fn stage_passes_run_independently_and_capture_raw_output_even_when_degraded() {
                     )),
                     WorkerStageOutcome::Completed,
                 ),
-                tool_call_events: Vec::<WorkerToolCallEvent>::new(),
+                tool_call_events: vec![sample_tool_call_event(
+                    &exploration_task,
+                    "tool-exploration-1",
+                    "worker.get_review_context",
+                )],
                 degraded_reason: None,
             },
         ),
@@ -435,6 +455,71 @@ fn stage_passes_run_independently_and_capture_raw_output_even_when_degraded() {
         exploration_invocation.prompt_preset_id,
         "preset-exploration"
     );
+
+    let worker_invocations = store
+        .worker_invocations_for_run("session-1", "run-1")
+        .expect("list worker invocations");
+    assert_eq!(worker_invocations.len(), 3);
+    let exploration_worker_invocation = worker_invocations
+        .iter()
+        .find(|invocation| invocation.id == exploration.worker_invocation.id)
+        .expect("exploration worker invocation");
+    assert_eq!(
+        exploration_worker_invocation
+            .prompt_invocation_id
+            .as_deref(),
+        Some(exploration.prompt_invocation_id.as_str())
+    );
+    assert_eq!(
+        exploration_worker_invocation.result_artifact_id.as_deref(),
+        Some(exploration.result_artifact_id.as_str())
+    );
+
+    let tool_call_events = store
+        .worker_tool_call_events_for_invocation(&exploration.worker_invocation.id)
+        .expect("list worker tool calls");
+    assert_eq!(tool_call_events.len(), 1);
+    assert_eq!(tool_call_events[0].operation, "worker.get_review_context");
+    assert_eq!(
+        tool_call_events[0].outcome_state,
+        WorkerToolCallOutcomeState::Succeeded
+    );
+
+    let worker_stage_results = store
+        .worker_stage_results_for_run("session-1", "run-1")
+        .expect("list worker stage results");
+    assert_eq!(worker_stage_results.len(), 3);
+    let exploration_stage_result = worker_stage_results
+        .iter()
+        .find(|row| row.review_task_id == "task-exploration")
+        .expect("exploration stage result");
+    assert_eq!(
+        exploration_stage_result.worker_invocation_id.as_deref(),
+        Some(exploration.worker_invocation.id.as_str())
+    );
+    assert_eq!(
+        exploration_stage_result.outcome,
+        WorkerStageOutcome::Completed
+    );
+    assert_eq!(
+        exploration_stage_result
+            .submitted_result_artifact_id
+            .as_deref(),
+        Some(exploration.result_artifact_id.as_str())
+    );
+    let pack_artifact_id = exploration_stage_result
+        .structured_findings_pack_artifact_id
+        .as_deref()
+        .expect("structured pack artifact id");
+    let stored_pack: serde_json::Value =
+        serde_json::from_slice(&store.artifact_bytes(pack_artifact_id).expect("pack bytes"))
+            .expect("parse stored pack");
+    let expected_pack: serde_json::Value = serde_json::from_str(&valid_structured_pack(
+        "Exploration finding",
+        "Something needs attention.",
+    ))
+    .expect("parse expected pack");
+    assert_eq!(stored_pack, expected_pack);
 
     let events = store
         .outcome_events_for_run("session-1", "run-1")

@@ -7,7 +7,8 @@ use roger_app_core::{
 };
 use roger_storage::{
     ArtifactBudgetClass, CreateCodeEvidenceLocation, CreateMaterializedFinding, CreateOutcomeEvent,
-    CreatePromptInvocation, MaterializedFindingRecord, RogerStore, StorageError,
+    CreatePromptInvocation, CreateWorkerStageResult, MaterializedFindingRecord, RogerStore,
+    StorageError,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -227,6 +228,25 @@ pub fn execute_review_stage(
     )?;
 
     let structured_pack_json = worker_stage_result.structured_findings_pack_json()?;
+    let structured_findings_pack_artifact_id = structured_pack_json.as_deref().map(|_| {
+        next_id(
+            "finding-pack",
+            &request.review_task.review_run_id,
+            request.stage,
+            base_nonce.wrapping_add(7),
+        )
+    });
+    if let (Some(pack_json), Some(artifact_id)) = (
+        structured_pack_json.as_deref(),
+        structured_findings_pack_artifact_id.as_deref(),
+    ) {
+        store.store_artifact(
+            artifact_id,
+            ArtifactBudgetClass::ColdArtifact,
+            "application/json",
+            pack_json.as_bytes(),
+        )?;
+    }
     let result_artifact_id = next_id(
         "result",
         &request.review_task.review_run_id,
@@ -309,6 +329,15 @@ pub fn execute_review_stage(
         raw_output_artifact_id: Some(raw_output_artifact_id.clone()),
         result_artifact_id: Some(result_artifact_id.clone()),
     };
+    store.record_worker_invocation(&worker_invocation)?;
+    for event in &harness_output.tool_call_events {
+        store.record_worker_tool_call_event(event)?;
+    }
+    store.record_worker_stage_result(CreateWorkerStageResult {
+        result: &worker_stage_result,
+        submitted_result_artifact_id: Some(&result_artifact_id),
+        structured_findings_pack_artifact_id: structured_findings_pack_artifact_id.as_deref(),
+    })?;
 
     let outcome_metadata = StageOutcomeMetadata {
         stage: request.review_task.stage.clone(),
