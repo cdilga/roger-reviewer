@@ -2826,6 +2826,218 @@ fn search_projects_canonical_recall_truth_for_seeded_hits() {
 }
 
 #[test]
+fn search_and_rr_agent_project_same_recall_envelope_truth_for_seeded_hits() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let task = sample_worker_task();
+    let task_path = temp.path().join("worker-task.json");
+    let request_path = temp.path().join("worker-search-memory-request.json");
+    write_json_fixture(&task_path, &task);
+    seed_rr_agent_session(&runtime, &task);
+
+    let store = RogerStore::open(&runtime.store_root).expect("open store");
+    seed_prior_review_lookup_records(
+        &store,
+        &task.review_session_id,
+        &task.review_run_id,
+        "owner/repo",
+    );
+    drop(store);
+
+    let search = run_rr(
+        &[
+            "search",
+            "--query",
+            "approval token stale refresh",
+            "--query-mode",
+            "candidate_audit",
+            "--robot",
+        ],
+        &runtime,
+    );
+    assert_eq!(search.exit_code, 5, "{}", search.stderr);
+    let search_payload = parse_robot_payload(&search.stdout);
+    assert_eq!(search_payload["schema_id"], "rr.robot.search.v1");
+    assert_eq!(search_payload["outcome"], "degraded");
+
+    write_json_fixture(
+        &request_path,
+        &sample_worker_request(
+            &task,
+            "worker.search_memory",
+            Some(json!({
+                "query_text": "approval token stale refresh",
+                "query_mode": "candidate_audit"
+            })),
+        ),
+    );
+    let agent_search = run_rr(
+        &[
+            "agent",
+            "worker.search_memory",
+            "--task-file",
+            task_path.to_str().expect("task path"),
+            "--request-file",
+            request_path.to_str().expect("request path"),
+        ],
+        &runtime,
+    );
+    assert_eq!(agent_search.exit_code, 0, "{}", agent_search.stderr);
+    let agent_payload = parse_robot_payload(&agent_search.stdout);
+    assert_eq!(agent_payload["schema_id"], "rr.agent.response.v1");
+    assert_eq!(agent_payload["status"], "succeeded");
+
+    let search_data = &search_payload["data"];
+    let agent_search_data = &agent_payload["operation_response"]["payload"];
+
+    assert_eq!(
+        search_data["requested_query_mode"],
+        agent_search_data["requested_query_mode"]
+    );
+    assert_eq!(
+        search_data["resolved_query_mode"],
+        agent_search_data["resolved_query_mode"]
+    );
+    assert_eq!(
+        search_data["retrieval_mode"],
+        agent_search_data["retrieval_mode"]
+    );
+    assert_eq!(
+        search_data["search_plan"]["query_plan"],
+        agent_search_data["search_plan"]["query_plan"]
+    );
+    assert_eq!(
+        search_data["search_plan"]["granted_scopes"],
+        agent_search_data["search_plan"]["granted_scopes"]
+    );
+    assert_eq!(
+        search_data["search_plan"]["scope_keys"],
+        agent_search_data["search_plan"]["scope_keys"]
+    );
+    assert_eq!(
+        search_data["search_plan"]["retrieval_classes"],
+        agent_search_data["search_plan"]["retrieval_classes"]
+    );
+    assert_eq!(
+        search_data["search_plan"]["semantic_runtime_posture"],
+        agent_search_data["search_plan"]["semantic_runtime_posture"]
+    );
+    assert_eq!(
+        search_data["search_plan"]["retrieval_strategy"],
+        agent_search_data["search_plan"]["retrieval_strategy"]
+    );
+    assert_eq!(
+        search_data["search_plan"]["strategy_reason"],
+        agent_search_data["search_plan"]["strategy_reason"]
+    );
+    assert_eq!(search_data["search_plan"]["review_session_id"], Value::Null);
+    assert_eq!(search_data["search_plan"]["review_run_id"], Value::Null);
+    assert_eq!(
+        agent_search_data["search_plan"]["review_session_id"],
+        json!(task.review_session_id)
+    );
+    assert_eq!(
+        agent_search_data["search_plan"]["review_run_id"],
+        json!(task.review_run_id)
+    );
+    assert_eq!(
+        search_data["degraded_reasons"],
+        agent_search_data["degraded_flags"]
+    );
+    assert_eq!(search_data["candidate_included"], true);
+    assert_eq!(search_data["lane_counts"]["tentative_candidates"], json!(1));
+    assert_eq!(
+        agent_search_data["tentative_candidates"]
+            .as_array()
+            .expect("tentative candidates")
+            .len(),
+        1
+    );
+
+    let projected_search_items = search_data["items"]
+        .as_array()
+        .expect("search items")
+        .iter()
+        .map(|item| {
+            (
+                format!(
+                    "{}:{}",
+                    item["kind"].as_str().expect("search item kind"),
+                    item["id"].as_str().expect("search item id")
+                ),
+                json!({
+                    "kind": item["kind"].clone(),
+                    "id": item["id"].clone(),
+                    "memory_lane": item["memory_lane"].clone(),
+                    "scope_bucket": item["scope_bucket"].clone(),
+                    "trust_state": item["trust_state"].clone(),
+                    "citation_posture": item["citation_posture"].clone(),
+                    "surface_posture": item["surface_posture"].clone(),
+                    "locator": item["locator"].clone(),
+                    "snippet": item["snippet"].clone(),
+                    "explain_summary": item["explain_summary"].clone(),
+                }),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut worker_items = Vec::new();
+    worker_items.extend(
+        agent_search_data["promoted_memory"]
+            .as_array()
+            .expect("promoted memory")
+            .iter(),
+    );
+    worker_items.extend(
+        agent_search_data["tentative_candidates"]
+            .as_array()
+            .expect("tentative candidates")
+            .iter(),
+    );
+    worker_items.extend(
+        agent_search_data["evidence_hits"]
+            .as_array()
+            .expect("evidence hits")
+            .iter(),
+    );
+
+    let projected_worker_items = worker_items
+        .into_iter()
+        .map(|item| {
+            (
+                format!(
+                    "{}:{}",
+                    item["item_kind"].as_str().expect("worker item kind"),
+                    item["item_id"].as_str().expect("worker item id")
+                ),
+                json!({
+                    "kind": item["item_kind"].clone(),
+                    "id": item["item_id"].clone(),
+                    "memory_lane": item["memory_lane"].clone(),
+                    "scope_bucket": item["scope_bucket"].clone(),
+                    "trust_state": item["trust_state"].clone(),
+                    "citation_posture": item["citation_posture"].clone(),
+                    "surface_posture": item["surface_posture"].clone(),
+                    "locator": item["locator"].clone(),
+                    "snippet": item["snippet_or_summary"].clone(),
+                    "explain_summary": item["explain_summary"].clone(),
+                }),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    assert_eq!(projected_search_items, projected_worker_items);
+}
+
+#[test]
 fn search_help_mentions_explicit_planner_modes() {
     let temp = tempdir().expect("tempdir");
     let repo = init_repo(&temp);
