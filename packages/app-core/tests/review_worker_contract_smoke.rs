@@ -1,14 +1,14 @@
 use roger_app_core::{
-    ReviewTarget, ReviewTask, ReviewTaskKind, ReviewWorkerContractError,
-    WORKER_OPERATION_REQUEST_SCHEMA_V1, WORKER_STAGE_RESULT_SCHEMA_V1, WorkerArtifactRef,
-    WorkerArtifactExcerpt, WorkerCapabilityProfile, WorkerContextPacket, WorkerEvidenceLocation,
+    RecallSourceRef, ReviewTarget, ReviewTask, ReviewTaskKind, ReviewWorkerContractError,
+    WORKER_OPERATION_REQUEST_SCHEMA_V1, WORKER_STAGE_RESULT_SCHEMA_V1, WorkerArtifactExcerpt,
+    WorkerArtifactRef, WorkerCapabilityProfile, WorkerContextPacket, WorkerEvidenceLocation,
     WorkerFindingDetail, WorkerFindingListResponse, WorkerFindingSummary, WorkerGitHubPosture,
     WorkerInvocation, WorkerInvocationOutcomeState, WorkerMemoryCard, WorkerMutationPosture,
-    WorkerOperation, WorkerOperationDenial, WorkerOperationDenialCode,
-    WorkerOperationLane, WorkerOperationRequestEnvelope, WorkerOperationResponseEnvelope,
-    WorkerOperationResponseStatus, WorkerRecallEnvelope, WorkerSearchMemoryRequest,
-    WorkerSearchMemoryResponse, WorkerStageOutcome, WorkerStageResult, WorkerStatusSnapshot,
-    WorkerToolCallEvent, WorkerToolCallOutcomeState, WorkerTransportKind, WorkerTurnStrategy,
+    WorkerOperation, WorkerOperationDenial, WorkerOperationDenialCode, WorkerOperationLane,
+    WorkerOperationRequestEnvelope, WorkerOperationResponseEnvelope, WorkerOperationResponseStatus,
+    WorkerRecallEnvelope, WorkerSearchMemoryRequest, WorkerSearchMemoryResponse,
+    WorkerStageOutcome, WorkerStageResult, WorkerStatusSnapshot, WorkerToolCallEvent,
+    WorkerToolCallOutcomeState, WorkerTransportKind, WorkerTurnStrategy,
 };
 use serde_json::json;
 
@@ -318,29 +318,73 @@ fn worker_operation_contract_authorizes_read_and_proposal_lanes() {
         search_auth.clone(),
         Some(
             serde_json::to_value(WorkerSearchMemoryResponse {
-                query_mode: "auto".to_owned(),
+                requested_query_mode: "auto".to_owned(),
+                resolved_query_mode: "recall".to_owned(),
                 retrieval_mode: "hybrid".to_owned(),
                 degraded_flags: Vec::new(),
                 promoted_memory: vec![WorkerRecallEnvelope {
-                    citation_id: "memory-1".to_owned(),
-                    source_kind: "memory".to_owned(),
-                    source_id: "mem-1".to_owned(),
-                    summary: "Prior approval invalidation regression".to_owned(),
-                    scope: "repo".to_owned(),
-                    provenance: "promoted_memory".to_owned(),
-                    trust_tier: Some("validated".to_owned()),
-                    citation_posture: "citeable".to_owned(),
+                    item_kind: "promoted_memory".to_owned(),
+                    item_id: "memory-1".to_owned(),
+                    requested_query_mode: "auto".to_owned(),
+                    resolved_query_mode: "recall".to_owned(),
+                    retrieval_mode: "hybrid".to_owned(),
+                    scope_bucket: "repository".to_owned(),
+                    memory_lane: "promoted_memory".to_owned(),
+                    trust_state: Some("established".to_owned()),
+                    source_refs: vec![
+                        RecallSourceRef {
+                            kind: "memory".to_owned(),
+                            id: "memory-1".to_owned(),
+                        },
+                        RecallSourceRef {
+                            kind: "scope".to_owned(),
+                            id: "repo:owner/repo".to_owned(),
+                        },
+                    ],
+                    locator: json!({
+                        "scope_key": "repo:owner/repo",
+                        "memory_class": "fact",
+                        "state": "established"
+                    }),
+                    snippet_or_summary: "Prior approval invalidation regression".to_owned(),
+                    anchor_overlap_summary: "no anchor hints supplied".to_owned(),
+                    degraded_flags: Vec::new(),
+                    explain_summary: "promoted_memory surfaced from promoted_memory in repository with requested query_mode auto, resolved query_mode recall, retrieval_mode hybrid, posture cite_allowed/ordinary; no degraded flags".to_owned(),
+                    citation_posture: "cite_allowed".to_owned(),
+                    surface_posture: "ordinary".to_owned(),
                 }],
                 tentative_candidates: Vec::new(),
                 evidence_hits: vec![WorkerRecallEnvelope {
-                    citation_id: "finding-1".to_owned(),
-                    source_kind: "finding".to_owned(),
-                    source_id: "finding-1".to_owned(),
-                    summary: "Approval batch survives stale refresh".to_owned(),
-                    scope: "repo".to_owned(),
-                    provenance: "evidence_hits".to_owned(),
-                    trust_tier: Some("observed".to_owned()),
-                    citation_posture: "citeable".to_owned(),
+                    item_kind: "evidence_finding".to_owned(),
+                    item_id: "finding-1".to_owned(),
+                    requested_query_mode: "auto".to_owned(),
+                    resolved_query_mode: "recall".to_owned(),
+                    retrieval_mode: "hybrid".to_owned(),
+                    scope_bucket: "repository".to_owned(),
+                    memory_lane: "evidence_hits".to_owned(),
+                    trust_state: None,
+                    source_refs: vec![
+                        RecallSourceRef {
+                            kind: "finding".to_owned(),
+                            id: "finding-1".to_owned(),
+                        },
+                        RecallSourceRef {
+                            kind: "review_session".to_owned(),
+                            id: "session-1".to_owned(),
+                        },
+                    ],
+                    locator: json!({
+                        "session_id": "session-1",
+                        "review_run_id": "run-1",
+                        "repository": "owner/repo",
+                        "pull_request": 42
+                    }),
+                    snippet_or_summary: "Approval batch survives stale refresh".to_owned(),
+                    anchor_overlap_summary: "no anchor hints supplied".to_owned(),
+                    degraded_flags: Vec::new(),
+                    explain_summary: "evidence_finding surfaced from evidence_hits in repository with requested query_mode auto, resolved query_mode recall, retrieval_mode hybrid, posture cite_allowed/ordinary; no degraded flags".to_owned(),
+                    citation_posture: "cite_allowed".to_owned(),
+                    surface_posture: "ordinary".to_owned(),
                 }],
             })
             .expect("serialize search response"),
@@ -353,9 +397,33 @@ fn worker_operation_contract_authorizes_read_and_proposal_lanes() {
     let search_payload: WorkerSearchMemoryResponse =
         serde_json::from_value(response.payload.clone().expect("response payload"))
             .expect("deserialize search response");
-    assert_eq!(search_payload.query_mode, "auto");
+    assert_eq!(search_payload.requested_query_mode, "auto");
+    assert_eq!(search_payload.resolved_query_mode, "recall");
     assert_eq!(search_payload.promoted_memory.len(), 1);
     assert_eq!(search_payload.evidence_hits.len(), 1);
+    assert_eq!(
+        search_payload.promoted_memory[0].memory_lane,
+        "promoted_memory"
+    );
+    assert_eq!(
+        search_payload.promoted_memory[0].citation_posture,
+        "cite_allowed"
+    );
+    assert_eq!(
+        search_payload.promoted_memory[0].surface_posture,
+        "ordinary"
+    );
+    assert_eq!(
+        search_payload.promoted_memory[0].requested_query_mode,
+        search_payload.requested_query_mode
+    );
+    assert_eq!(search_payload.evidence_hits[0].memory_lane, "evidence_hits");
+    assert!(search_payload.evidence_hits[0].locator.is_object());
+    assert!(
+        search_payload.evidence_hits[0]
+            .explain_summary
+            .contains("retrieval_mode hybrid")
+    );
 
     let round_trip: WorkerOperationResponseEnvelope =
         serde_json::from_str(&serde_json::to_string(&response).expect("serialize response"))

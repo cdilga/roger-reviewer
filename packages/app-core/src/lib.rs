@@ -1,5 +1,5 @@
 pub use crate::time::now_ts;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, from_str};
 use std::collections::{HashMap, HashSet};
 
@@ -793,6 +793,8 @@ pub struct WorkerCapabilityProfile {
 
 pub const WORKER_OPERATION_REQUEST_SCHEMA_V1: &str = "worker_operation_request.v1";
 pub const WORKER_OPERATION_RESPONSE_SCHEMA_V1: &str = "worker_operation_response.v1";
+pub const AGENT_TRANSPORT_REQUEST_SCHEMA_V1: &str = "rr.agent.request.v1";
+pub const AGENT_TRANSPORT_RESPONSE_SCHEMA_V1: &str = "rr.agent.response.v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1011,9 +1013,132 @@ impl WorkerOperationResponseEnvelope {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerGatewaySnapshot {
+    #[serde(default)]
+    pub status: Option<WorkerStatusSnapshot>,
+    #[serde(default)]
+    pub search_memory_response: Option<WorkerSearchMemoryResponse>,
+    #[serde(default)]
+    pub findings: Option<WorkerFindingListResponse>,
+    #[serde(default)]
+    pub finding_details: Vec<WorkerFindingDetail>,
+    #[serde(default)]
+    pub artifact_excerpts: Vec<WorkerArtifactExcerpt>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentTransportRequestEnvelope {
+    pub schema_id: String,
+    pub review_task: ReviewTask,
+    pub worker_context: WorkerContextPacket,
+    pub capability_profile: WorkerCapabilityProfile,
+    pub operation_request: WorkerOperationRequestEnvelope,
+    #[serde(default)]
+    pub gateway_snapshot: WorkerGatewaySnapshot,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTransportResponseStatus {
+    Succeeded,
+    Denied,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTransportErrorCode {
+    InvalidRequestSchema,
+    ValidationFailed,
+    TransportKindMismatch,
+    PayloadMissing,
+    PayloadInvalid,
+    GatewayDataMissing,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTransportError {
+    pub code: AgentTransportErrorCode,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentTransportResponseEnvelope {
+    pub schema_id: String,
+    pub transport_kind: WorkerTransportKind,
+    pub status: AgentTransportResponseStatus,
+    #[serde(default)]
+    pub operation_response: Option<WorkerOperationResponseEnvelope>,
+    #[serde(default)]
+    pub error: Option<AgentTransportError>,
+}
+
+impl AgentTransportResponseEnvelope {
+    pub fn success(operation_response: WorkerOperationResponseEnvelope) -> Self {
+        Self {
+            schema_id: AGENT_TRANSPORT_RESPONSE_SCHEMA_V1.to_owned(),
+            transport_kind: WorkerTransportKind::AgentCli,
+            status: AgentTransportResponseStatus::Succeeded,
+            operation_response: Some(operation_response),
+            error: None,
+        }
+    }
+
+    pub fn denied(operation_response: WorkerOperationResponseEnvelope) -> Self {
+        Self {
+            schema_id: AGENT_TRANSPORT_RESPONSE_SCHEMA_V1.to_owned(),
+            transport_kind: WorkerTransportKind::AgentCli,
+            status: AgentTransportResponseStatus::Denied,
+            operation_response: Some(operation_response),
+            error: None,
+        }
+    }
+
+    pub fn error(code: AgentTransportErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            schema_id: AGENT_TRANSPORT_RESPONSE_SCHEMA_V1.to_owned(),
+            transport_kind: WorkerTransportKind::AgentCli,
+            status: AgentTransportResponseStatus::Error,
+            operation_response: None,
+            error: Some(AgentTransportError {
+                code,
+                message: message.into(),
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerFindingDetailRequest {
+    pub finding_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerArtifactExcerptRequest {
+    pub artifact_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerStageResultAcceptance {
+    pub review_session_id: String,
+    pub review_run_id: String,
+    pub review_task_id: String,
+    pub task_nonce: String,
+    pub result_schema_id: String,
+    pub outcome: WorkerStageOutcome,
+    pub structured_findings_pack_present: bool,
+    pub clarification_request_count: usize,
+    pub memory_review_request_count: usize,
+    pub follow_up_proposal_count: usize,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerSearchMemoryRequest {
     pub query_text: String,
+    #[serde(default = "default_search_query_mode_ingress")]
     pub query_mode: String,
     #[serde(default)]
     pub requested_retrieval_classes: Vec<String>,
@@ -1021,21 +1146,237 @@ pub struct WorkerSearchMemoryRequest {
     pub anchor_hints: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkerRecallEnvelope {
-    pub citation_id: String,
-    pub source_kind: String,
-    pub source_id: String,
-    pub summary: String,
-    pub scope: String,
-    pub provenance: String,
-    pub trust_tier: Option<String>,
-    pub citation_posture: String,
+fn default_search_query_mode_ingress() -> String {
+    SearchQueryMode::Auto.as_str().to_owned()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchQueryMode {
+    Auto,
+    ExactLookup,
+    Recall,
+    RelatedContext,
+    CandidateAudit,
+    PromotionReview,
+}
+
+impl SearchQueryMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::ExactLookup => "exact_lookup",
+            Self::Recall => "recall",
+            Self::RelatedContext => "related_context",
+            Self::CandidateAudit => "candidate_audit",
+            Self::PromotionReview => "promotion_review",
+        }
+    }
+
+    pub fn parse(raw: &str) -> SearchQueryPlanResult<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" => Ok(Self::Auto),
+            "exact_lookup" => Ok(Self::ExactLookup),
+            "recall" => Ok(Self::Recall),
+            "related_context" => Ok(Self::RelatedContext),
+            "candidate_audit" => Ok(Self::CandidateAudit),
+            "promotion_review" => Ok(Self::PromotionReview),
+            other => Err(SearchQueryPlanError::UnsupportedQueryMode {
+                query_mode: other.to_owned(),
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchQueryPlanningInput<'a> {
+    pub query_text: &'a str,
+    pub query_mode: Option<&'a str>,
+    pub anchor_hints: &'a [String],
+    pub supports_candidate_audit: bool,
+    pub supports_promotion_review: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchQueryPlan {
+    pub requested_query_mode: SearchQueryMode,
+    pub resolved_query_mode: SearchQueryMode,
+}
+
+impl SearchQueryPlan {
+    pub fn includes_tentative_candidates(self) -> bool {
+        self.resolved_query_mode == SearchQueryMode::CandidateAudit
+    }
+}
+
+pub type SearchQueryPlanResult<T> = std::result::Result<T, SearchQueryPlanError>;
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SearchQueryPlanError {
+    #[error(
+        "search query input must include non-empty query text or anchor hints before Roger can plan intent"
+    )]
+    MissingSearchInputs,
+    #[error(
+        "search query mode '{query_mode}' is not part of Roger's canonical search intent contract"
+    )]
+    UnsupportedQueryMode { query_mode: String },
+    #[error("related_context requires anchor hints or current-object context")]
+    RelatedContextRequiresAnchors,
+    #[error("candidate_audit is not supported on this search surface")]
+    CandidateAuditUnsupported,
+    #[error("promotion_review is not supported on this search surface")]
+    PromotionReviewUnsupported,
+}
+
+impl SearchQueryPlanError {
+    pub fn reason_code(&self) -> &'static str {
+        match self {
+            Self::MissingSearchInputs => "search_inputs_missing",
+            Self::UnsupportedQueryMode { .. } => "query_mode_invalid",
+            Self::RelatedContextRequiresAnchors => "query_mode_requires_anchor_hints",
+            Self::CandidateAuditUnsupported => "query_mode_not_supported",
+            Self::PromotionReviewUnsupported => "query_mode_not_supported",
+        }
+    }
+}
+
+pub fn plan_search_query(
+    input: SearchQueryPlanningInput<'_>,
+) -> SearchQueryPlanResult<SearchQueryPlan> {
+    let trimmed_query = input.query_text.trim();
+    let requested_query_mode = input
+        .query_mode
+        .map(SearchQueryMode::parse)
+        .transpose()?
+        .unwrap_or(SearchQueryMode::Auto);
+
+    if trimmed_query.is_empty() && input.anchor_hints.is_empty() {
+        return Err(SearchQueryPlanError::MissingSearchInputs);
+    }
+
+    let resolved_query_mode = match requested_query_mode {
+        SearchQueryMode::Auto => {
+            if !input.anchor_hints.is_empty() {
+                SearchQueryMode::RelatedContext
+            } else if query_looks_like_exact_lookup(trimmed_query) {
+                SearchQueryMode::ExactLookup
+            } else {
+                SearchQueryMode::Recall
+            }
+        }
+        SearchQueryMode::ExactLookup | SearchQueryMode::Recall => requested_query_mode,
+        SearchQueryMode::RelatedContext => {
+            if input.anchor_hints.is_empty() {
+                return Err(SearchQueryPlanError::RelatedContextRequiresAnchors);
+            }
+            SearchQueryMode::RelatedContext
+        }
+        SearchQueryMode::CandidateAudit => {
+            if !input.supports_candidate_audit {
+                return Err(SearchQueryPlanError::CandidateAuditUnsupported);
+            }
+            SearchQueryMode::CandidateAudit
+        }
+        SearchQueryMode::PromotionReview => {
+            if !input.supports_promotion_review {
+                return Err(SearchQueryPlanError::PromotionReviewUnsupported);
+            }
+            SearchQueryMode::PromotionReview
+        }
+    };
+
+    Ok(SearchQueryPlan {
+        requested_query_mode,
+        resolved_query_mode,
+    })
+}
+
+fn query_looks_like_exact_lookup(query: &str) -> bool {
+    if query.is_empty() || query.split_whitespace().count() != 1 {
+        return false;
+    }
+
+    let lowered = query.to_ascii_lowercase();
+    let exact_prefix_match = [
+        "fp:",
+        "finding-",
+        "mem-",
+        "session-",
+        "run-",
+        "artifact-",
+        "prompt-",
+        "rr-",
+    ]
+    .iter()
+    .any(|prefix| lowered.starts_with(prefix));
+
+    exact_prefix_match
+        || query.contains("::")
+        || query.contains('/')
+        || query.contains('#')
+        || query_has_known_file_extension(&lowered)
+}
+
+fn query_has_known_file_extension(query: &str) -> bool {
+    let Some((_, extension)) = query.rsplit_once('.') else {
+        return false;
+    };
+
+    matches!(
+        extension,
+        "rs" | "md"
+            | "txt"
+            | "json"
+            | "toml"
+            | "yaml"
+            | "yml"
+            | "lock"
+            | "sql"
+            | "js"
+            | "ts"
+            | "tsx"
+            | "jsx"
+            | "go"
+            | "py"
+            | "java"
+            | "kt"
+            | "swift"
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecallSourceRef {
+    pub kind: String,
+    pub id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecallEnvelope {
+    pub item_kind: String,
+    pub item_id: String,
+    pub requested_query_mode: String,
+    pub resolved_query_mode: String,
+    pub retrieval_mode: String,
+    pub scope_bucket: String,
+    pub memory_lane: String,
+    pub trust_state: Option<String>,
+    pub source_refs: Vec<RecallSourceRef>,
+    pub locator: Value,
+    pub snippet_or_summary: String,
+    pub anchor_overlap_summary: String,
+    pub degraded_flags: Vec<String>,
+    pub explain_summary: String,
+    pub citation_posture: String,
+    pub surface_posture: String,
+}
+
+pub type WorkerRecallEnvelope = RecallEnvelope;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerSearchMemoryResponse {
-    pub query_mode: String,
+    pub requested_query_mode: String,
+    pub resolved_query_mode: String,
     pub retrieval_mode: String,
     #[serde(default)]
     pub degraded_flags: Vec<String>,
@@ -1249,7 +1590,9 @@ pub enum ReviewWorkerContractError {
         "worker operation request review_task_id '{found}' does not match review task '{expected}'"
     )]
     RequestTaskMismatch { expected: String, found: String },
-    #[error("worker operation request task_nonce '{found}' does not match review task '{expected}'")]
+    #[error(
+        "worker operation request task_nonce '{found}' does not match review task '{expected}'"
+    )]
     RequestNonceMismatch { expected: String, found: String },
     #[error("worker operation '{operation}' is not part of the canonical Roger worker API")]
     UnsupportedOperation { operation: String },
@@ -1412,7 +1755,11 @@ impl ReviewTask {
             });
         }
         for requested_scope in &request.requested_scopes {
-            if !self.allowed_scopes.iter().any(|allowed| allowed == requested_scope) {
+            if !self
+                .allowed_scopes
+                .iter()
+                .any(|allowed| allowed == requested_scope)
+            {
                 return Err(ReviewWorkerContractError::ScopeEscalationDenied {
                     requested: requested_scope.clone(),
                     allowed: self.allowed_scopes.clone(),
@@ -1554,6 +1901,483 @@ impl ReviewTask {
         }
         Ok(())
     }
+}
+
+pub fn execute_agent_transport_request(
+    request: &AgentTransportRequestEnvelope,
+) -> AgentTransportResponseEnvelope {
+    if request.schema_id != AGENT_TRANSPORT_REQUEST_SCHEMA_V1 {
+        return AgentTransportResponseEnvelope::error(
+            AgentTransportErrorCode::InvalidRequestSchema,
+            format!(
+                "agent transport request schema_id '{}' does not match expected '{}'",
+                request.schema_id, AGENT_TRANSPORT_REQUEST_SCHEMA_V1
+            ),
+        );
+    }
+
+    if request.worker_context.transport_kind != WorkerTransportKind::AgentCli {
+        return AgentTransportResponseEnvelope::error(
+            AgentTransportErrorCode::TransportKindMismatch,
+            format!(
+                "worker context transport_kind '{}' is invalid for rr agent",
+                request.worker_context.transport_kind.as_str()
+            ),
+        );
+    }
+
+    if request.capability_profile.transport_kind != WorkerTransportKind::AgentCli {
+        return AgentTransportResponseEnvelope::error(
+            AgentTransportErrorCode::TransportKindMismatch,
+            format!(
+                "worker capability profile transport_kind '{}' is invalid for rr agent",
+                request.capability_profile.transport_kind.as_str()
+            ),
+        );
+    }
+
+    if let Err(err) = request
+        .review_task
+        .validate_context_packet(&request.worker_context)
+    {
+        return AgentTransportResponseEnvelope::error(
+            AgentTransportErrorCode::ValidationFailed,
+            err.to_string(),
+        );
+    }
+
+    let authorization = match request
+        .review_task
+        .validate_operation_request(&request.operation_request, &request.capability_profile)
+    {
+        Ok(authorization) => authorization,
+        Err(err) => {
+            if let Some(denial) = worker_operation_denial(&request.operation_request, err.clone()) {
+                return AgentTransportResponseEnvelope::denied(
+                    WorkerOperationResponseEnvelope::denied(
+                        &request.operation_request,
+                        denial,
+                        Vec::new(),
+                    ),
+                );
+            }
+            return AgentTransportResponseEnvelope::error(
+                AgentTransportErrorCode::ValidationFailed,
+                err.to_string(),
+            );
+        }
+    };
+
+    let payload = match authorization.operation {
+        WorkerOperation::GetReviewContext => serde_json::to_value(&request.worker_context)
+            .map_err(|err| (AgentTransportErrorCode::PayloadInvalid, err.to_string())),
+        WorkerOperation::GetStatus => snapshot_status_payload(request),
+        WorkerOperation::SearchMemory => search_memory_payload(request),
+        WorkerOperation::ListFindings => snapshot_findings_payload(request),
+        WorkerOperation::GetFindingDetail => finding_detail_payload(request),
+        WorkerOperation::GetArtifactExcerpt => artifact_excerpt_payload(request),
+        WorkerOperation::SubmitStageResult => submit_stage_result_payload(request),
+        WorkerOperation::RequestClarification => {
+            echo_request_payload::<WorkerClarificationRequest>(
+                request,
+                "worker.request_clarification",
+            )
+        }
+        WorkerOperation::RequestMemoryReview => echo_request_payload::<WorkerMemoryReviewRequest>(
+            request,
+            "worker.request_memory_review",
+        ),
+        WorkerOperation::ProposeFollowUp => {
+            echo_request_payload::<WorkerFollowUpProposal>(request, "worker.propose_follow_up")
+        }
+    };
+
+    match payload {
+        Ok(payload) => {
+            AgentTransportResponseEnvelope::success(WorkerOperationResponseEnvelope::success(
+                &request.operation_request,
+                authorization,
+                Some(payload),
+            ))
+        }
+        Err((code, message)) => AgentTransportResponseEnvelope::error(code, message),
+    }
+}
+
+fn worker_operation_denial(
+    request: &WorkerOperationRequestEnvelope,
+    err: ReviewWorkerContractError,
+) -> Option<WorkerOperationDenial> {
+    match err {
+        ReviewWorkerContractError::UnsupportedOperation { operation } => {
+            Some(WorkerOperationDenial {
+                code: WorkerOperationDenialCode::UnsupportedOperation,
+                message: format!(
+                    "worker operation '{operation}' is not part of the canonical rr agent API"
+                ),
+                denied_scopes: request.requested_scopes.clone(),
+            })
+        }
+        ReviewWorkerContractError::OperationNotAllowed { operation } => {
+            Some(WorkerOperationDenial {
+                code: WorkerOperationDenialCode::OperationNotAllowed,
+                message: format!(
+                    "worker operation '{operation}' is outside the current ReviewTask allowance"
+                ),
+                denied_scopes: request.requested_scopes.clone(),
+            })
+        }
+        ReviewWorkerContractError::ScopeEscalationDenied { requested, allowed } => {
+            Some(WorkerOperationDenial {
+                code: WorkerOperationDenialCode::ScopeDenied,
+                message: format!(
+                    "worker requested scope '{requested}' outside the allowed rr agent scopes {allowed:?}"
+                ),
+                denied_scopes: vec![requested],
+            })
+        }
+        ReviewWorkerContractError::OperationCapabilityUnsupported {
+            operation,
+            capability,
+        } => Some(WorkerOperationDenial {
+            code: WorkerOperationDenialCode::CapabilityDenied,
+            message: format!(
+                "worker operation '{operation}' requires capability '{capability}' which this rr agent transport snapshot does not provide"
+            ),
+            denied_scopes: request.requested_scopes.clone(),
+        }),
+        _ => None,
+    }
+}
+
+fn snapshot_status_payload(
+    request: &AgentTransportRequestEnvelope,
+) -> std::result::Result<Value, (AgentTransportErrorCode, String)> {
+    let snapshot = request.gateway_snapshot.status.as_ref().ok_or_else(|| {
+        (
+            AgentTransportErrorCode::GatewayDataMissing,
+            "rr agent get_status requires a WorkerStatusSnapshot in gateway_snapshot.status"
+                .to_owned(),
+        )
+    })?;
+    if snapshot.review_session_id != request.review_task.review_session_id
+        || snapshot.review_run_id != request.review_task.review_run_id
+    {
+        return Err((
+            AgentTransportErrorCode::ValidationFailed,
+            "worker status snapshot does not match the bound ReviewTask session/run".to_owned(),
+        ));
+    }
+    serde_json::to_value(snapshot)
+        .map_err(|err| (AgentTransportErrorCode::PayloadInvalid, err.to_string()))
+}
+
+fn search_memory_payload(
+    request: &AgentTransportRequestEnvelope,
+) -> std::result::Result<Value, (AgentTransportErrorCode, String)> {
+    let search_request =
+        decode_operation_payload::<WorkerSearchMemoryRequest>(request, "worker.search_memory")?;
+    let plan = plan_search_query(SearchQueryPlanningInput {
+        query_text: &search_request.query_text,
+        query_mode: Some(&search_request.query_mode),
+        anchor_hints: &search_request.anchor_hints,
+        supports_candidate_audit: true,
+        supports_promotion_review: false,
+    })
+    .map_err(|err| (AgentTransportErrorCode::ValidationFailed, err.to_string()))?;
+    let response = request
+        .gateway_snapshot
+        .search_memory_response
+        .as_ref()
+        .ok_or_else(|| {
+            (
+                AgentTransportErrorCode::GatewayDataMissing,
+                "rr agent search_memory requires a WorkerSearchMemoryResponse in gateway_snapshot.search_memory_response"
+                    .to_owned(),
+            )
+        })?;
+    if response.requested_query_mode != plan.requested_query_mode.as_str()
+        || response.resolved_query_mode != plan.resolved_query_mode.as_str()
+    {
+        return Err((
+            AgentTransportErrorCode::ValidationFailed,
+            "worker search response query-mode resolution does not match Roger's planned search intent"
+                .to_owned(),
+        ));
+    }
+    validate_search_memory_response(response)?;
+    serde_json::to_value(response)
+        .map_err(|err| (AgentTransportErrorCode::PayloadInvalid, err.to_string()))
+}
+
+fn validate_search_memory_response(
+    response: &WorkerSearchMemoryResponse,
+) -> std::result::Result<(), (AgentTransportErrorCode, String)> {
+    validate_recall_envelopes(
+        &response.promoted_memory,
+        "promoted_memory",
+        &response.requested_query_mode,
+        &response.resolved_query_mode,
+        &response.retrieval_mode,
+        &response.degraded_flags,
+    )?;
+    validate_recall_envelopes(
+        &response.tentative_candidates,
+        "tentative_candidates",
+        &response.requested_query_mode,
+        &response.resolved_query_mode,
+        &response.retrieval_mode,
+        &response.degraded_flags,
+    )?;
+    validate_recall_envelopes(
+        &response.evidence_hits,
+        "evidence_hits",
+        &response.requested_query_mode,
+        &response.resolved_query_mode,
+        &response.retrieval_mode,
+        &response.degraded_flags,
+    )?;
+    Ok(())
+}
+
+fn validate_recall_envelopes(
+    envelopes: &[WorkerRecallEnvelope],
+    expected_lane: &str,
+    expected_requested_query_mode: &str,
+    expected_resolved_query_mode: &str,
+    expected_retrieval_mode: &str,
+    expected_degraded_flags: &[String],
+) -> std::result::Result<(), (AgentTransportErrorCode, String)> {
+    for envelope in envelopes {
+        if envelope.item_kind.trim().is_empty() {
+            return Err((
+                AgentTransportErrorCode::ValidationFailed,
+                "worker search response recall envelope is missing item_kind".to_owned(),
+            ));
+        }
+        if envelope.item_id.trim().is_empty() {
+            return Err((
+                AgentTransportErrorCode::ValidationFailed,
+                "worker search response recall envelope is missing item_id".to_owned(),
+            ));
+        }
+        if envelope.requested_query_mode != expected_requested_query_mode
+            || envelope.resolved_query_mode != expected_resolved_query_mode
+            || envelope.retrieval_mode != expected_retrieval_mode
+        {
+            return Err((
+                AgentTransportErrorCode::ValidationFailed,
+                "worker search response recall envelope query/retrieval truth drifted from the top-level search response".to_owned(),
+            ));
+        }
+        if envelope.memory_lane != expected_lane {
+            return Err((
+                AgentTransportErrorCode::ValidationFailed,
+                format!(
+                    "worker search response recall envelope lane {} does not match expected lane {}",
+                    envelope.memory_lane, expected_lane
+                ),
+            ));
+        }
+        if envelope.scope_bucket.trim().is_empty()
+            || envelope.snippet_or_summary.trim().is_empty()
+            || envelope.anchor_overlap_summary.trim().is_empty()
+            || envelope.explain_summary.trim().is_empty()
+        {
+            return Err((
+                AgentTransportErrorCode::ValidationFailed,
+                "worker search response recall envelope omitted required truth fields".to_owned(),
+            ));
+        }
+        if envelope.degraded_flags != expected_degraded_flags {
+            return Err((
+                AgentTransportErrorCode::ValidationFailed,
+                "worker search response recall envelope degraded_flags drifted from the top-level search response".to_owned(),
+            ));
+        }
+        if envelope.source_refs.is_empty()
+            || envelope.source_refs.iter().any(|source_ref| {
+                source_ref.kind.trim().is_empty() || source_ref.id.trim().is_empty()
+            })
+        {
+            return Err((
+                AgentTransportErrorCode::ValidationFailed,
+                "worker search response recall envelope must include non-empty source_refs"
+                    .to_owned(),
+            ));
+        }
+        if !envelope.locator.is_object() {
+            return Err((
+                AgentTransportErrorCode::ValidationFailed,
+                "worker search response recall envelope locator must be an object".to_owned(),
+            ));
+        }
+        match envelope.citation_posture.as_str() {
+            "cite_allowed" | "inspect_only" | "warning_only" => {}
+            other => {
+                return Err((
+                    AgentTransportErrorCode::ValidationFailed,
+                    format!(
+                        "worker search response recall envelope has unsupported citation_posture {other}"
+                    ),
+                ));
+            }
+        }
+        match envelope.surface_posture.as_str() {
+            "ordinary" | "candidate_review" | "operator_review_only" => {}
+            other => {
+                return Err((
+                    AgentTransportErrorCode::ValidationFailed,
+                    format!(
+                        "worker search response recall envelope has unsupported surface_posture {other}"
+                    ),
+                ));
+            }
+        }
+        if expected_lane == "tentative_candidates" && envelope.citation_posture == "cite_allowed" {
+            return Err((
+                AgentTransportErrorCode::ValidationFailed,
+                "tentative candidate memory cannot surface as cite_allowed".to_owned(),
+            ));
+        }
+        if matches!(
+            envelope.trust_state.as_deref(),
+            Some("contradicted" | "anti_pattern")
+        ) && envelope.citation_posture != "warning_only"
+        {
+            return Err((
+                AgentTransportErrorCode::ValidationFailed,
+                "contradicted or anti_pattern memory must surface as warning_only".to_owned(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn snapshot_findings_payload(
+    request: &AgentTransportRequestEnvelope,
+) -> std::result::Result<Value, (AgentTransportErrorCode, String)> {
+    let response = request
+        .gateway_snapshot
+        .findings
+        .as_ref()
+        .ok_or_else(|| {
+            (
+                AgentTransportErrorCode::GatewayDataMissing,
+                "rr agent list_findings requires a WorkerFindingListResponse in gateway_snapshot.findings"
+                    .to_owned(),
+            )
+        })?;
+    serde_json::to_value(response)
+        .map_err(|err| (AgentTransportErrorCode::PayloadInvalid, err.to_string()))
+}
+
+fn finding_detail_payload(
+    request: &AgentTransportRequestEnvelope,
+) -> std::result::Result<Value, (AgentTransportErrorCode, String)> {
+    let detail_request = decode_operation_payload::<WorkerFindingDetailRequest>(
+        request,
+        "worker.get_finding_detail",
+    )?;
+    let detail = request
+        .gateway_snapshot
+        .finding_details
+        .iter()
+        .find(|detail| detail.finding.finding_id == detail_request.finding_id)
+        .ok_or_else(|| {
+            (
+                AgentTransportErrorCode::GatewayDataMissing,
+                format!(
+                    "rr agent could not find finding detail '{}' in gateway_snapshot.finding_details",
+                    detail_request.finding_id
+                ),
+            )
+        })?;
+    serde_json::to_value(detail)
+        .map_err(|err| (AgentTransportErrorCode::PayloadInvalid, err.to_string()))
+}
+
+fn artifact_excerpt_payload(
+    request: &AgentTransportRequestEnvelope,
+) -> std::result::Result<Value, (AgentTransportErrorCode, String)> {
+    let excerpt_request = decode_operation_payload::<WorkerArtifactExcerptRequest>(
+        request,
+        "worker.get_artifact_excerpt",
+    )?;
+    let excerpt = request
+        .gateway_snapshot
+        .artifact_excerpts
+        .iter()
+        .find(|excerpt| excerpt.artifact_id == excerpt_request.artifact_id)
+        .ok_or_else(|| {
+            (
+                AgentTransportErrorCode::GatewayDataMissing,
+                format!(
+                    "rr agent could not find artifact excerpt '{}' in gateway_snapshot.artifact_excerpts",
+                    excerpt_request.artifact_id
+                ),
+            )
+        })?;
+    serde_json::to_value(excerpt)
+        .map_err(|err| (AgentTransportErrorCode::PayloadInvalid, err.to_string()))
+}
+
+fn submit_stage_result_payload(
+    request: &AgentTransportRequestEnvelope,
+) -> std::result::Result<Value, (AgentTransportErrorCode, String)> {
+    request
+        .review_task
+        .validate_capability_profile(&request.capability_profile)
+        .map_err(|err| (AgentTransportErrorCode::ValidationFailed, err.to_string()))?;
+    let result =
+        decode_operation_payload::<WorkerStageResult>(request, "worker.submit_stage_result")?;
+    request
+        .review_task
+        .validate_stage_result(&result)
+        .map_err(|err| (AgentTransportErrorCode::ValidationFailed, err.to_string()))?;
+    let acceptance = WorkerStageResultAcceptance {
+        review_session_id: result.review_session_id.clone(),
+        review_run_id: result.review_run_id.clone(),
+        review_task_id: result.review_task_id.clone(),
+        task_nonce: result.task_nonce.clone(),
+        result_schema_id: result.schema_id.clone(),
+        outcome: result.outcome,
+        structured_findings_pack_present: result.structured_findings_pack.is_some(),
+        clarification_request_count: result.clarification_requests.len(),
+        memory_review_request_count: result.memory_review_requests.len(),
+        follow_up_proposal_count: result.follow_up_proposals.len(),
+        warnings: result.warnings.clone(),
+    };
+    serde_json::to_value(acceptance)
+        .map_err(|err| (AgentTransportErrorCode::PayloadInvalid, err.to_string()))
+}
+
+fn echo_request_payload<T: Serialize + DeserializeOwned>(
+    request: &AgentTransportRequestEnvelope,
+    operation_name: &str,
+) -> std::result::Result<Value, (AgentTransportErrorCode, String)> {
+    let payload = decode_operation_payload::<T>(request, operation_name)?;
+    serde_json::to_value(payload)
+        .map_err(|err| (AgentTransportErrorCode::PayloadInvalid, err.to_string()))
+}
+
+fn decode_operation_payload<T: DeserializeOwned>(
+    request: &AgentTransportRequestEnvelope,
+    operation_name: &str,
+) -> std::result::Result<T, (AgentTransportErrorCode, String)> {
+    let payload = request.operation_request.payload.clone().ok_or_else(|| {
+        (
+            AgentTransportErrorCode::PayloadMissing,
+            format!("rr agent {operation_name} requires a JSON payload"),
+        )
+    })?;
+    serde_json::from_value(payload).map_err(|err| {
+        (
+            AgentTransportErrorCode::PayloadInvalid,
+            format!("rr agent {operation_name} payload is invalid: {err}"),
+        )
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
