@@ -8,14 +8,15 @@ use roger_app_core::{
     AppError, ContinuityQuality, FindingTriageState, HarnessAdapter, LaunchAction, LaunchIntent,
     RecallSourceRef, ResumeAttemptOutcome, ResumeBundle, ResumeBundleProfile, ReviewTarget,
     ReviewTask, RogerCommand, RogerCommandId, RogerCommandInvocationSurface, RogerCommandResult,
-    RogerCommandRouteStatus, SearchQueryPlanError, SearchQueryPlanningInput, SessionLocator,
-    Surface, WorkerArtifactExcerpt, WorkerArtifactExcerptRequest, WorkerCapabilityProfile,
-    WorkerContextPacket, WorkerEvidenceLocation, WorkerFindingDetail, WorkerFindingDetailRequest,
+    RogerCommandRouteStatus, SearchPlanError, SearchPlanInput, SearchQueryPlanError,
+    SearchRetrievalClass, SessionLocator, Surface, WorkerArtifactExcerpt,
+    WorkerArtifactExcerptRequest, WorkerCapabilityProfile, WorkerContextPacket,
+    WorkerEvidenceLocation, WorkerFindingDetail, WorkerFindingDetailRequest,
     WorkerFindingListResponse, WorkerFindingSummary, WorkerGatewaySnapshot, WorkerGitHubPosture,
     WorkerMutationPosture, WorkerOperation, WorkerOperationRequestEnvelope, WorkerRecallEnvelope,
     WorkerSearchMemoryRequest, WorkerSearchMemoryResponse, WorkerStatusSnapshot,
-    WorkerTransportKind, execute_agent_transport_request, plan_search_query, route_harness_command,
-    safe_harness_command_bindings,
+    WorkerTransportKind, execute_agent_transport_request, materialize_search_plan,
+    route_harness_command, safe_harness_command_bindings,
 };
 use roger_bridge::{
     NativeHostManifest, SupportedBrowser, SupportedOs, native_host_install_path_for,
@@ -1349,6 +1350,7 @@ fn search_item_from_recall_envelope(
 fn build_agent_search_response(
     store: &RogerStore,
     session: &roger_storage::ReviewSessionRecord,
+    task: &ReviewTask,
     request: &WorkerOperationRequestEnvelope,
 ) -> Result<Option<WorkerSearchMemoryResponse>, String> {
     let Some(payload) = request.payload.clone() else {
@@ -1358,12 +1360,23 @@ fn build_agent_search_response(
         return Ok(None);
     };
 
-    let search_plan = plan_search_query(SearchQueryPlanningInput {
+    let granted_scopes = if request.requested_scopes.is_empty() {
+        task.allowed_scopes.clone()
+    } else {
+        request.requested_scopes.clone()
+    };
+    let search_plan = materialize_search_plan(SearchPlanInput {
+        review_session_id: Some(&task.review_session_id),
+        review_run_id: Some(&task.review_run_id),
+        repository: &session.review_target.repository,
+        granted_scopes: &granted_scopes,
         query_text: &search_request.query_text,
         query_mode: Some(&search_request.query_mode),
+        requested_retrieval_classes: &search_request.requested_retrieval_classes,
         anchor_hints: &search_request.anchor_hints,
         supports_candidate_audit: true,
         supports_promotion_review: false,
+        semantic_assets_verified: false,
     })
     .map_err(|err| format!("failed to plan rr agent search intent: {err}"))?;
 
@@ -1385,57 +1398,81 @@ fn build_agent_search_response(
     let retrieval_mode = retrieval_mode_label(&lookup.mode).to_owned();
 
     Ok(Some(WorkerSearchMemoryResponse {
-        requested_query_mode: search_plan.requested_query_mode.as_str().to_owned(),
-        resolved_query_mode: search_plan.resolved_query_mode.as_str().to_owned(),
+        requested_query_mode: search_plan
+            .query_plan
+            .requested_query_mode
+            .as_str()
+            .to_owned(),
+        resolved_query_mode: search_plan
+            .query_plan
+            .resolved_query_mode
+            .as_str()
+            .to_owned(),
+        search_plan: search_plan.clone(),
         retrieval_mode: retrieval_mode.clone(),
         degraded_flags: lookup.degraded_reasons.clone(),
-        promoted_memory: lookup
-            .promoted_memory
-            .iter()
-            .map(|hit| {
-                worker_recall_from_memory_hit(
-                    hit,
-                    search_plan.requested_query_mode.as_str(),
-                    search_plan.resolved_query_mode.as_str(),
-                    &retrieval_mode,
-                    &lookup.scope_bucket,
-                    &lookup.degraded_reasons,
-                    "promoted_memory",
-                    &search_request.anchor_hints,
-                )
-            })
-            .collect(),
-        tentative_candidates: lookup
-            .tentative_candidates
-            .iter()
-            .map(|hit| {
-                worker_recall_from_memory_hit(
-                    hit,
-                    search_plan.requested_query_mode.as_str(),
-                    search_plan.resolved_query_mode.as_str(),
-                    &retrieval_mode,
-                    &lookup.scope_bucket,
-                    &lookup.degraded_reasons,
-                    "tentative_candidates",
-                    &search_request.anchor_hints,
-                )
-            })
-            .collect(),
-        evidence_hits: lookup
-            .evidence_hits
-            .iter()
-            .map(|hit| {
-                worker_recall_from_evidence_hit(
-                    hit,
-                    search_plan.requested_query_mode.as_str(),
-                    search_plan.resolved_query_mode.as_str(),
-                    &retrieval_mode,
-                    &lookup.scope_bucket,
-                    &lookup.degraded_reasons,
-                    &search_request.anchor_hints,
-                )
-            })
-            .collect(),
+        promoted_memory: if search_plan.allows_retrieval_class(SearchRetrievalClass::PromotedMemory)
+        {
+            lookup
+                .promoted_memory
+                .iter()
+                .map(|hit| {
+                    worker_recall_from_memory_hit(
+                        hit,
+                        search_plan.query_plan.requested_query_mode.as_str(),
+                        search_plan.query_plan.resolved_query_mode.as_str(),
+                        &retrieval_mode,
+                        &lookup.scope_bucket,
+                        &lookup.degraded_reasons,
+                        "promoted_memory",
+                        &search_request.anchor_hints,
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
+        tentative_candidates: if search_plan
+            .allows_retrieval_class(SearchRetrievalClass::TentativeCandidates)
+        {
+            lookup
+                .tentative_candidates
+                .iter()
+                .map(|hit| {
+                    worker_recall_from_memory_hit(
+                        hit,
+                        search_plan.query_plan.requested_query_mode.as_str(),
+                        search_plan.query_plan.resolved_query_mode.as_str(),
+                        &retrieval_mode,
+                        &lookup.scope_bucket,
+                        &lookup.degraded_reasons,
+                        "tentative_candidates",
+                        &search_request.anchor_hints,
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
+        evidence_hits: if search_plan.allows_retrieval_class(SearchRetrievalClass::EvidenceHits) {
+            lookup
+                .evidence_hits
+                .iter()
+                .map(|hit| {
+                    worker_recall_from_evidence_hit(
+                        hit,
+                        search_plan.query_plan.requested_query_mode.as_str(),
+                        search_plan.query_plan.resolved_query_mode.as_str(),
+                        &retrieval_mode,
+                        &lookup.scope_bucket,
+                        &lookup.degraded_reasons,
+                        &search_request.anchor_hints,
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
     }))
 }
 
@@ -1562,7 +1599,8 @@ fn build_agent_gateway_snapshot(
             )?);
         }
         WorkerOperation::SearchMemory => {
-            snapshot.search_memory_response = build_agent_search_response(store, session, request)?;
+            snapshot.search_memory_response =
+                build_agent_search_response(store, session, task, request)?;
         }
         WorkerOperation::ListFindings => {
             snapshot.findings = Some(WorkerFindingListResponse {
@@ -4439,45 +4477,6 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         );
     };
 
-    let search_plan = match plan_search_query(SearchQueryPlanningInput {
-        query_text,
-        query_mode: parsed.query_mode.as_deref(),
-        anchor_hints: &[],
-        supports_candidate_audit: true,
-        supports_promotion_review: false,
-    }) {
-        Ok(plan) => plan,
-        Err(err) => {
-            let repair_actions = match &err {
-                SearchQueryPlanError::MissingSearchInputs => {
-                    vec!["pass --query \"<search text>\"".to_owned()]
-                }
-                SearchQueryPlanError::UnsupportedQueryMode { .. } => vec![
-                    "pass --query-mode auto, exact_lookup, recall, related_context, candidate_audit, or promotion_review".to_owned(),
-                ],
-                SearchQueryPlanError::RelatedContextRequiresAnchors => vec![
-                    "omit --query-mode to let Roger resolve auto for this entrypoint".to_owned(),
-                    "or use --query-mode recall, exact_lookup, or candidate_audit on rr search"
-                        .to_owned(),
-                ],
-                SearchQueryPlanError::CandidateAuditUnsupported => vec![
-                    "retry on a surface that supports candidate inspection".to_owned(),
-                ],
-                SearchQueryPlanError::PromotionReviewUnsupported => vec![
-                    "rr search does not support promotion_review in this slice; use candidate_audit or recall instead".to_owned(),
-                ],
-            };
-            return blocked_response(
-                err.to_string(),
-                repair_actions,
-                json!({
-                    "reason_code": err.reason_code(),
-                    "requested_query_mode": parsed.query_mode.as_deref().unwrap_or("auto"),
-                }),
-            );
-        }
-    };
-
     let Some(repository) = resolve_repository(parsed.repo.clone(), &runtime.cwd) else {
         return blocked_response(
             "repo context inference failed; search scope is ambiguous".to_owned(),
@@ -4492,6 +4491,63 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     };
 
     let limit = parsed.limit.unwrap_or(10).min(100);
+    let granted_scopes = vec!["repo".to_owned()];
+    let search_plan = match materialize_search_plan(SearchPlanInput {
+        review_session_id: None,
+        review_run_id: None,
+        repository: &repository,
+        granted_scopes: &granted_scopes,
+        query_text,
+        query_mode: parsed.query_mode.as_deref(),
+        requested_retrieval_classes: &[],
+        anchor_hints: &[],
+        supports_candidate_audit: true,
+        supports_promotion_review: false,
+        semantic_assets_verified: false,
+    }) {
+        Ok(plan) => plan,
+        Err(err) => {
+            let repair_actions = match &err {
+                SearchPlanError::QueryPlanning(SearchQueryPlanError::MissingSearchInputs) => {
+                    vec!["pass --query \"<search text>\"".to_owned()]
+                }
+                SearchPlanError::QueryPlanning(SearchQueryPlanError::UnsupportedQueryMode { .. }) => vec![
+                    "pass --query-mode auto, exact_lookup, recall, related_context, candidate_audit, or promotion_review".to_owned(),
+                ],
+                SearchPlanError::QueryPlanning(
+                    SearchQueryPlanError::RelatedContextRequiresAnchors,
+                ) => vec![
+                    "omit --query-mode to let Roger resolve auto for this entrypoint".to_owned(),
+                    "or use --query-mode recall, exact_lookup, or candidate_audit on rr search"
+                        .to_owned(),
+                ],
+                SearchPlanError::QueryPlanning(SearchQueryPlanError::CandidateAuditUnsupported) => {
+                    vec!["retry on a surface that supports candidate inspection".to_owned()]
+                }
+                SearchPlanError::QueryPlanning(
+                    SearchQueryPlanError::PromotionReviewUnsupported,
+                ) => vec![
+                    "rr search does not support promotion_review in this slice; use candidate_audit or recall instead".to_owned(),
+                ],
+                SearchPlanError::MissingGrantedScopes | SearchPlanError::UnsupportedScope { .. } => vec![
+                    "rr search currently executes with repo-only scope; retry with --repo owner/repo".to_owned(),
+                ],
+                SearchPlanError::UnsupportedRetrievalClass { .. }
+                | SearchPlanError::CandidateAwareQueryRequiresTentativeCandidates { .. }
+                | SearchPlanError::TentativeCandidatesRequireCandidateAwareQuery { .. } => vec![
+                    "this surface resolves retrieval lanes automatically; retry without overriding the worker retrieval contract".to_owned(),
+                ],
+            };
+            return blocked_response(
+                err.to_string(),
+                repair_actions,
+                json!({
+                    "reason_code": err.reason_code(),
+                    "requested_query_mode": parsed.query_mode.as_deref().unwrap_or("auto"),
+                }),
+            );
+        }
+    };
     let scope_key = format!("repo:{repository}");
     let lookup = match store.prior_review_lookup(PriorReviewLookupQuery {
         scope_key: &scope_key,
@@ -4509,63 +4565,81 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     };
 
     let lane_counts = json!({
-        "evidence_hits": lookup.evidence_hits.len(),
-        "promoted_memory": lookup.promoted_memory.len(),
-        "tentative_candidates": lookup.tentative_candidates.len(),
+        "evidence_hits": if search_plan.allows_retrieval_class(SearchRetrievalClass::EvidenceHits) {
+            lookup.evidence_hits.len()
+        } else {
+            0
+        },
+        "promoted_memory": if search_plan.allows_retrieval_class(SearchRetrievalClass::PromotedMemory) {
+            lookup.promoted_memory.len()
+        } else {
+            0
+        },
+        "tentative_candidates": if search_plan.includes_tentative_candidates() {
+            lookup.tentative_candidates.len()
+        } else {
+            0
+        },
     });
     let scope_bucket = lookup.scope_bucket.clone();
     let degraded_reasons = lookup.degraded_reasons.clone();
     let mut items = Vec::new();
     let retrieval_mode = retrieval_mode_label(&lookup.mode).to_owned();
-    for hit in lookup.evidence_hits {
-        let recall = worker_recall_from_evidence_hit(
-            &hit,
-            search_plan.requested_query_mode.as_str(),
-            search_plan.resolved_query_mode.as_str(),
-            &retrieval_mode,
-            &scope_bucket,
-            &degraded_reasons,
-            &[],
-        );
-        items.push(search_item_from_recall_envelope(
-            &recall,
-            &hit.title,
-            hit.fused_score,
-        ));
+    if search_plan.allows_retrieval_class(SearchRetrievalClass::EvidenceHits) {
+        for hit in lookup.evidence_hits {
+            let recall = worker_recall_from_evidence_hit(
+                &hit,
+                search_plan.query_plan.requested_query_mode.as_str(),
+                search_plan.query_plan.resolved_query_mode.as_str(),
+                &retrieval_mode,
+                &scope_bucket,
+                &degraded_reasons,
+                &[],
+            );
+            items.push(search_item_from_recall_envelope(
+                &recall,
+                &hit.title,
+                hit.fused_score,
+            ));
+        }
     }
-    for hit in lookup.promoted_memory {
-        let recall = worker_recall_from_memory_hit(
-            &hit,
-            search_plan.requested_query_mode.as_str(),
-            search_plan.resolved_query_mode.as_str(),
-            &retrieval_mode,
-            &scope_bucket,
-            &degraded_reasons,
-            "promoted_memory",
-            &[],
-        );
-        items.push(search_item_from_recall_envelope(
-            &recall,
-            &hit.statement,
-            hit.fused_score,
-        ));
+    if search_plan.allows_retrieval_class(SearchRetrievalClass::PromotedMemory) {
+        for hit in lookup.promoted_memory {
+            let recall = worker_recall_from_memory_hit(
+                &hit,
+                search_plan.query_plan.requested_query_mode.as_str(),
+                search_plan.query_plan.resolved_query_mode.as_str(),
+                &retrieval_mode,
+                &scope_bucket,
+                &degraded_reasons,
+                "promoted_memory",
+                &[],
+            );
+            items.push(search_item_from_recall_envelope(
+                &recall,
+                &hit.statement,
+                hit.fused_score,
+            ));
+        }
     }
-    for hit in lookup.tentative_candidates {
-        let recall = worker_recall_from_memory_hit(
-            &hit,
-            search_plan.requested_query_mode.as_str(),
-            search_plan.resolved_query_mode.as_str(),
-            &retrieval_mode,
-            &scope_bucket,
-            &degraded_reasons,
-            "tentative_candidates",
-            &[],
-        );
-        items.push(search_item_from_recall_envelope(
-            &recall,
-            &hit.statement,
-            hit.fused_score,
-        ));
+    if search_plan.includes_tentative_candidates() {
+        for hit in lookup.tentative_candidates {
+            let recall = worker_recall_from_memory_hit(
+                &hit,
+                search_plan.query_plan.requested_query_mode.as_str(),
+                search_plan.query_plan.resolved_query_mode.as_str(),
+                &retrieval_mode,
+                &scope_bucket,
+                &degraded_reasons,
+                "tentative_candidates",
+                &[],
+            );
+            items.push(search_item_from_recall_envelope(
+                &recall,
+                &hit.statement,
+                hit.fused_score,
+            ));
+        }
     }
 
     items.sort_by(|left, right| {
@@ -4601,8 +4675,9 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         outcome,
         data: json!({
             "query": query_text,
-            "requested_query_mode": search_plan.requested_query_mode.as_str(),
-            "resolved_query_mode": search_plan.resolved_query_mode.as_str(),
+            "requested_query_mode": search_plan.query_plan.requested_query_mode.as_str(),
+            "resolved_query_mode": search_plan.query_plan.resolved_query_mode.as_str(),
+            "search_plan": search_plan.clone(),
             "retrieval_mode": mode,
             "mode": mode,
             "scope_key": scope_key,
@@ -4620,7 +4695,7 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         repair_actions: Vec::new(),
         message: format!(
             "search completed with query_mode {} and retrieval_mode {mode}",
-            search_plan.resolved_query_mode.as_str()
+            search_plan.query_plan.resolved_query_mode.as_str()
         ),
     }
 }
@@ -7235,6 +7310,7 @@ fn compact_data(command: CommandKind, data: Value) -> Value {
             "query": data.get("query").cloned().unwrap_or(Value::Null),
             "requested_query_mode": data.get("requested_query_mode").cloned().unwrap_or(Value::Null),
             "resolved_query_mode": data.get("resolved_query_mode").cloned().unwrap_or(Value::Null),
+            "search_plan": data.get("search_plan").cloned().unwrap_or(Value::Null),
             "retrieval_mode": data.get("retrieval_mode").cloned().unwrap_or(Value::Null),
             "mode": data.get("mode").cloned().unwrap_or(Value::Null),
             "scope_bucket": data.get("scope_bucket").cloned().unwrap_or(Value::Null),

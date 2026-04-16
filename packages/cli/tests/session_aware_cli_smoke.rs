@@ -2204,9 +2204,29 @@ fn search_reports_truthful_degraded_mode_and_stable_robot_fields() {
     assert_eq!(payload["data"]["retrieval_mode"], "recovery_scan");
     assert_eq!(payload["data"]["mode"], "recovery_scan");
     assert_eq!(payload["data"]["candidate_included"], false);
+    assert_eq!(
+        payload["data"]["search_plan"]["query_plan"]["strategy"]["primary_lane"],
+        "lexical_recall"
+    );
     assert!(payload["data"]["items"].is_array());
     assert!(payload["data"]["count"].is_number());
     assert!(payload["data"]["truncated"].is_boolean());
+    assert_eq!(
+        payload["data"]["search_plan"]["scope_keys"],
+        json!(["repo:owner/repo"])
+    );
+    assert_eq!(
+        payload["data"]["search_plan"]["retrieval_classes"],
+        json!(["promoted_memory", "evidence_hits"])
+    );
+    assert_eq!(
+        payload["data"]["search_plan"]["semantic_runtime_posture"],
+        "disabled_pending_verification"
+    );
+    assert_eq!(
+        payload["data"]["search_plan"]["retrieval_strategy"]["semantic"],
+        false
+    );
     assert!(
         payload["data"]["degraded_reasons"]
             .as_array()
@@ -2236,6 +2256,10 @@ fn search_reports_truthful_degraded_mode_and_stable_robot_fields() {
     assert_eq!(compact_payload["data"]["requested_query_mode"], "auto");
     assert_eq!(compact_payload["data"]["resolved_query_mode"], "recall");
     assert_eq!(compact_payload["data"]["retrieval_mode"], "recovery_scan");
+    assert_eq!(
+        compact_payload["data"]["search_plan"]["retrieval_classes"],
+        json!(["promoted_memory", "evidence_hits"])
+    );
     assert!(compact_payload["data"]["items"].is_array());
 }
 
@@ -2343,6 +2367,18 @@ fn search_projects_canonical_recall_truth_for_seeded_hits() {
     assert_eq!(payload["data"]["resolved_query_mode"], "candidate_audit");
     assert_eq!(payload["data"]["retrieval_mode"], "recovery_scan");
     assert_eq!(payload["data"]["candidate_included"], true);
+    assert_eq!(
+        payload["data"]["search_plan"]["retrieval_classes"],
+        json!(["promoted_memory", "tentative_candidates", "evidence_hits"])
+    );
+    assert_eq!(
+        payload["data"]["search_plan"]["retrieval_strategy"]["candidate_audit"],
+        true
+    );
+    assert_eq!(
+        payload["data"]["search_plan"]["semantic_runtime_posture"],
+        "disabled_by_query_mode"
+    );
 
     let items = payload["data"]["items"].as_array().expect("search items");
     let scope_bucket = payload["data"]["scope_bucket"].clone();
@@ -3208,6 +3244,18 @@ fn rr_agent_supports_search_artifact_and_advisory_operations() {
     assert_eq!(
         search_operation["payload"]["resolved_query_mode"],
         "candidate_audit"
+    );
+    assert_eq!(
+        search_operation["payload"]["search_plan"]["query_plan"]["candidate_visibility"],
+        "candidate_audit_only"
+    );
+    assert_eq!(
+        search_operation["payload"]["search_plan"]["retrieval_classes"],
+        json!(["promoted_memory", "tentative_candidates", "evidence_hits"])
+    );
+    assert_eq!(
+        search_operation["payload"]["search_plan"]["retrieval_strategy"]["semantic"],
+        false
     );
     assert!(search_operation["payload"]["promoted_memory"].is_array());
     assert!(search_operation["payload"]["tentative_candidates"].is_array());

@@ -1,13 +1,13 @@
 use roger_app_core::{
     AGENT_TRANSPORT_REQUEST_SCHEMA_V1, AGENT_TRANSPORT_RESPONSE_SCHEMA_V1, AgentTransportErrorCode,
     AgentTransportRequestEnvelope, AgentTransportResponseStatus, RecallSourceRef, ReviewTarget,
-    ReviewTask, ReviewTaskKind, WORKER_OPERATION_REQUEST_SCHEMA_V1, WORKER_STAGE_RESULT_SCHEMA_V1,
-    WorkerArtifactExcerpt, WorkerCapabilityProfile, WorkerContextPacket, WorkerFindingDetail,
-    WorkerFindingDetailRequest, WorkerFindingSummary, WorkerGatewaySnapshot, WorkerGitHubPosture,
-    WorkerMutationPosture, WorkerOperationDenialCode, WorkerOperationResponseStatus,
-    WorkerRecallEnvelope, WorkerSearchMemoryRequest, WorkerSearchMemoryResponse,
-    WorkerStageOutcome, WorkerStageResult, WorkerTransportKind, WorkerTurnStrategy,
-    execute_agent_transport_request,
+    ReviewTask, ReviewTaskKind, SearchPlanInput, WORKER_OPERATION_REQUEST_SCHEMA_V1,
+    WORKER_STAGE_RESULT_SCHEMA_V1, WorkerArtifactExcerpt, WorkerCapabilityProfile,
+    WorkerContextPacket, WorkerFindingDetail, WorkerFindingDetailRequest, WorkerFindingSummary,
+    WorkerGatewaySnapshot, WorkerGitHubPosture, WorkerMutationPosture, WorkerOperationDenialCode,
+    WorkerOperationResponseStatus, WorkerRecallEnvelope, WorkerSearchMemoryRequest,
+    WorkerSearchMemoryResponse, WorkerStageOutcome, WorkerStageResult, WorkerTransportKind,
+    WorkerTurnStrategy, execute_agent_transport_request, materialize_search_plan,
 };
 use serde_json::json;
 
@@ -148,6 +148,40 @@ fn request(
     }
 }
 
+fn sample_search_plan(
+    query_text: &str,
+    query_mode: &str,
+    requested_retrieval_classes: &[&str],
+    anchor_hints: &[&str],
+) -> roger_app_core::SearchPlan {
+    let target = sample_target();
+    let task = sample_task();
+    let granted_scopes = vec!["repo".to_owned()];
+    let requested_retrieval_classes = requested_retrieval_classes
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect::<Vec<_>>();
+    let anchor_hints = anchor_hints
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect::<Vec<_>>();
+
+    materialize_search_plan(SearchPlanInput {
+        review_session_id: Some(&task.review_session_id),
+        review_run_id: Some(&task.review_run_id),
+        repository: &target.repository,
+        granted_scopes: &granted_scopes,
+        query_text,
+        query_mode: Some(query_mode),
+        requested_retrieval_classes: &requested_retrieval_classes,
+        anchor_hints: &anchor_hints,
+        supports_candidate_audit: true,
+        supports_promotion_review: false,
+        semantic_assets_verified: false,
+    })
+    .expect("sample search plan should materialize")
+}
+
 fn transport_request(
     operation_request: roger_app_core::WorkerOperationRequestEnvelope,
 ) -> AgentTransportRequestEnvelope {
@@ -196,17 +230,24 @@ fn agent_transport_returns_search_memory_payload_for_planned_query() {
         "worker.search_memory",
         Some(serde_json::to_value(search_request).expect("serialize search request")),
     ));
+    let search_plan = sample_search_plan(
+        "approval invalidation",
+        "auto",
+        &["promoted_memory"],
+        &["finding-1"],
+    );
     request.gateway_snapshot.search_memory_response = Some(WorkerSearchMemoryResponse {
         requested_query_mode: "auto".to_owned(),
         resolved_query_mode: "related_context".to_owned(),
-        retrieval_mode: "hybrid".to_owned(),
+        search_plan,
+        retrieval_mode: "lexical_only".to_owned(),
         degraded_flags: Vec::new(),
         promoted_memory: vec![WorkerRecallEnvelope {
             item_kind: "promoted_memory".to_owned(),
             item_id: "memory-1".to_owned(),
             requested_query_mode: "auto".to_owned(),
             resolved_query_mode: "related_context".to_owned(),
-            retrieval_mode: "hybrid".to_owned(),
+            retrieval_mode: "lexical_only".to_owned(),
             scope_bucket: "repository".to_owned(),
             memory_lane: "promoted_memory".to_owned(),
             trust_state: Some("established".to_owned()),
@@ -228,7 +269,7 @@ fn agent_transport_returns_search_memory_payload_for_planned_query() {
             snippet_or_summary: "Prior approval invalidation regression".to_owned(),
             anchor_overlap_summary: "1 anchor hint(s) supplied; overlap scoring is unavailable for this record".to_owned(),
             degraded_flags: Vec::new(),
-            explain_summary: "promoted_memory surfaced from promoted_memory in repository with requested query_mode auto, resolved query_mode related_context, retrieval_mode hybrid, posture cite_allowed/ordinary; no degraded flags".to_owned(),
+            explain_summary: "promoted_memory surfaced from promoted_memory in repository with requested query_mode auto, resolved query_mode related_context, retrieval_mode lexical_only, posture cite_allowed/ordinary; no degraded flags".to_owned(),
             citation_posture: "cite_allowed".to_owned(),
             surface_posture: "ordinary".to_owned(),
         }],
@@ -243,6 +284,14 @@ fn agent_transport_returns_search_memory_payload_for_planned_query() {
         .and_then(|item| item.payload)
         .expect("search payload");
     assert_eq!(payload["resolved_query_mode"], "related_context");
+    assert_eq!(
+        payload["search_plan"]["query_plan"]["candidate_visibility"],
+        "hidden"
+    );
+    assert_eq!(
+        payload["search_plan"]["retrieval_classes"],
+        json!(["promoted_memory"])
+    );
     assert_eq!(
         payload["promoted_memory"][0]["citation_posture"],
         "cite_allowed"
@@ -266,9 +315,16 @@ fn agent_transport_preserves_degraded_recovery_search_truth() {
     ));
     let degraded_reason =
         "lexical sidecar unavailable or stale; using canonical DB lexical scan".to_owned();
+    let search_plan = sample_search_plan(
+        "approval refresh",
+        "candidate_audit",
+        &["promoted_memory", "tentative_candidates"],
+        &["finding-1"],
+    );
     request.gateway_snapshot.search_memory_response = Some(WorkerSearchMemoryResponse {
         requested_query_mode: "candidate_audit".to_owned(),
         resolved_query_mode: "candidate_audit".to_owned(),
+        search_plan,
         retrieval_mode: "recovery_scan".to_owned(),
         degraded_flags: vec![degraded_reason.clone()],
         promoted_memory: vec![WorkerRecallEnvelope {
@@ -362,11 +418,81 @@ fn agent_transport_preserves_degraded_recovery_search_truth() {
         payload["tentative_candidates"][0]["memory_lane"],
         "tentative_candidates"
     );
+    assert_eq!(
+        payload["search_plan"]["retrieval_strategy"]["semantic"],
+        false
+    );
     assert!(
         payload["tentative_candidates"][0]["explain_summary"]
             .as_str()
             .expect("candidate explain summary")
             .contains("retrieval_mode recovery_scan")
+    );
+}
+
+#[test]
+fn agent_transport_rejects_search_payload_that_widens_past_search_plan() {
+    let search_request = WorkerSearchMemoryRequest {
+        query_text: "approval invalidation".to_owned(),
+        query_mode: "recall".to_owned(),
+        requested_retrieval_classes: vec!["promoted_memory".to_owned()],
+        anchor_hints: Vec::new(),
+    };
+    let mut request = transport_request(request(
+        "worker.search_memory",
+        Some(serde_json::to_value(search_request).expect("serialize search request")),
+    ));
+    request.gateway_snapshot.search_memory_response = Some(WorkerSearchMemoryResponse {
+        requested_query_mode: "recall".to_owned(),
+        resolved_query_mode: "recall".to_owned(),
+        search_plan: sample_search_plan("approval invalidation", "recall", &["promoted_memory"], &[]),
+        retrieval_mode: "lexical_only".to_owned(),
+        degraded_flags: Vec::new(),
+        promoted_memory: Vec::new(),
+        tentative_candidates: vec![WorkerRecallEnvelope {
+            item_kind: "candidate_memory".to_owned(),
+            item_id: "memory-candidate-1".to_owned(),
+            requested_query_mode: "recall".to_owned(),
+            resolved_query_mode: "recall".to_owned(),
+            retrieval_mode: "lexical_only".to_owned(),
+            scope_bucket: "repository".to_owned(),
+            memory_lane: "tentative_candidates".to_owned(),
+            trust_state: Some("candidate".to_owned()),
+            source_refs: vec![
+                RecallSourceRef {
+                    kind: "memory".to_owned(),
+                    id: "memory-candidate-1".to_owned(),
+                },
+                RecallSourceRef {
+                    kind: "scope".to_owned(),
+                    id: "repo:owner/repo".to_owned(),
+                },
+            ],
+            locator: json!({
+                "scope_key": "repo:owner/repo",
+                "memory_class": "semantic",
+                "state": "candidate"
+            }),
+            snippet_or_summary: "Candidate should not appear in ordinary recall".to_owned(),
+            anchor_overlap_summary: "no anchor hints supplied".to_owned(),
+            degraded_flags: Vec::new(),
+            explain_summary: "candidate_memory surfaced from tentative_candidates in repository with requested query_mode recall, resolved query_mode recall, retrieval_mode lexical_only, posture inspect_only/candidate_review; no degraded flags".to_owned(),
+            citation_posture: "inspect_only".to_owned(),
+            surface_posture: "candidate_review".to_owned(),
+        }],
+        evidence_hits: Vec::new(),
+    });
+
+    let response = execute_agent_transport_request(&request);
+    assert_eq!(response.status, AgentTransportResponseStatus::Error);
+    let error = response.error.expect("transport error");
+    assert_eq!(error.code, AgentTransportErrorCode::ValidationFailed);
+    assert!(
+        error
+            .message
+            .contains("surfaced tentative_candidates outside the planned retrieval classes"),
+        "{}",
+        error.message
     );
 }
 

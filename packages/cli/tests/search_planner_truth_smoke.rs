@@ -152,6 +152,48 @@ fn search_robot_surfaces_explicit_recovery_scan_for_degraded_runs() {
     assert_eq!(payload["data"]["requested_query_mode"], "auto");
     assert_eq!(payload["data"]["resolved_query_mode"], "recall");
     assert_eq!(payload["data"]["retrieval_mode"], "recovery_scan");
+    assert_eq!(
+        payload["data"]["search_plan"]["query_plan"]["strategy"]["primary_lane"],
+        "lexical_recall"
+    );
+    assert_eq!(
+        payload["data"]["search_plan"]["query_plan"]["candidate_visibility"],
+        "hidden"
+    );
+    assert_eq!(
+        payload["data"]["search_plan"]["query_plan"]["trust_floor"],
+        "promoted_and_evidence_only"
+    );
+    assert_eq!(
+        payload["data"]["search_plan"]["scope_keys"],
+        serde_json::json!(["repo:owner/repo"])
+    );
+    assert_eq!(
+        payload["data"]["search_plan"]["retrieval_classes"],
+        serde_json::json!(["promoted_memory", "evidence_hits"])
+    );
+    assert_eq!(
+        payload["data"]["search_plan"]["semantic_runtime_posture"],
+        "disabled_pending_verification"
+    );
+    assert_eq!(
+        payload["data"]["search_plan"]["retrieval_strategy"]["lexical"],
+        true
+    );
+    assert_eq!(
+        payload["data"]["search_plan"]["retrieval_strategy"]["prior_review"],
+        true
+    );
+    assert_eq!(
+        payload["data"]["search_plan"]["retrieval_strategy"]["semantic"],
+        false
+    );
+    assert!(
+        payload["data"]["search_plan"]["strategy_reason"]
+            .as_str()
+            .expect("search plan strategy reason")
+            .contains("free-text recall")
+    );
     assert!(
         payload["data"]["degraded_reasons"]
             .as_array()
@@ -185,6 +227,40 @@ fn search_robot_keeps_requested_vs_resolved_planner_truth() {
     assert_eq!(exact_payload["data"]["requested_query_mode"], "auto");
     assert_eq!(exact_payload["data"]["resolved_query_mode"], "exact_lookup");
     assert_eq!(exact_payload["data"]["retrieval_mode"], "recovery_scan");
+    assert_eq!(
+        exact_payload["data"]["search_plan"]["query_plan"]["strategy"]["primary_lane"],
+        "exact_lookup"
+    );
+    assert_eq!(
+        exact_payload["data"]["search_plan"]["query_plan"]["candidate_visibility"],
+        "hidden"
+    );
+    assert_eq!(
+        exact_payload["data"]["search_plan"]["retrieval_classes"],
+        serde_json::json!(["promoted_memory", "evidence_hits"])
+    );
+    assert_eq!(
+        exact_payload["data"]["search_plan"]["semantic_runtime_posture"],
+        "disabled_by_query_mode"
+    );
+    assert_eq!(
+        exact_payload["data"]["search_plan"]["retrieval_strategy"]["lexical"],
+        true
+    );
+    assert_eq!(
+        exact_payload["data"]["search_plan"]["retrieval_strategy"]["prior_review"],
+        false
+    );
+    assert_eq!(
+        exact_payload["data"]["search_plan"]["retrieval_strategy"]["semantic"],
+        false
+    );
+    assert!(
+        exact_payload["data"]["search_plan"]["strategy_reason"]
+            .as_str()
+            .expect("exact lookup strategy reason")
+            .contains("exact lookup")
+    );
 
     let blocked = run_rr(
         &[
@@ -265,6 +341,44 @@ fn search_robot_preserves_candidate_and_promoted_recall_truth() {
     assert_eq!(payload["data"]["resolved_query_mode"], "candidate_audit");
     assert_eq!(payload["data"]["retrieval_mode"], "recovery_scan");
     assert_eq!(payload["data"]["candidate_included"], true);
+    assert_eq!(
+        payload["data"]["search_plan"]["query_plan"]["strategy"]["primary_lane"],
+        "candidate_audit"
+    );
+    assert_eq!(
+        payload["data"]["search_plan"]["query_plan"]["candidate_visibility"],
+        "candidate_audit_only"
+    );
+    assert_eq!(
+        payload["data"]["search_plan"]["query_plan"]["trust_floor"],
+        "candidate_inspection_allowed"
+    );
+    assert_eq!(
+        payload["data"]["search_plan"]["scope_keys"],
+        serde_json::json!(["repo:owner/repo"])
+    );
+    assert_eq!(
+        payload["data"]["search_plan"]["retrieval_classes"],
+        serde_json::json!(["promoted_memory", "tentative_candidates", "evidence_hits"])
+    );
+    assert_eq!(
+        payload["data"]["search_plan"]["semantic_runtime_posture"],
+        "disabled_by_query_mode"
+    );
+    assert_eq!(
+        payload["data"]["search_plan"]["retrieval_strategy"]["candidate_audit"],
+        true
+    );
+    assert_eq!(
+        payload["data"]["search_plan"]["retrieval_strategy"]["semantic"],
+        false
+    );
+    assert!(
+        payload["data"]["search_plan"]["strategy_reason"]
+            .as_str()
+            .expect("candidate audit strategy reason")
+            .contains("candidate audit")
+    );
 
     let items = payload["data"]["items"].as_array().expect("search items");
     let promoted = items

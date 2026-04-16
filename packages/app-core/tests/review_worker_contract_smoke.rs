@@ -1,14 +1,15 @@
 use roger_app_core::{
     RecallSourceRef, ReviewTarget, ReviewTask, ReviewTaskKind, ReviewWorkerContractError,
-    WORKER_OPERATION_REQUEST_SCHEMA_V1, WORKER_STAGE_RESULT_SCHEMA_V1, WorkerArtifactExcerpt,
-    WorkerArtifactRef, WorkerCapabilityProfile, WorkerContextPacket, WorkerEvidenceLocation,
-    WorkerFindingDetail, WorkerFindingListResponse, WorkerFindingSummary, WorkerGitHubPosture,
-    WorkerInvocation, WorkerInvocationOutcomeState, WorkerMemoryCard, WorkerMutationPosture,
-    WorkerOperation, WorkerOperationDenial, WorkerOperationDenialCode, WorkerOperationLane,
-    WorkerOperationRequestEnvelope, WorkerOperationResponseEnvelope, WorkerOperationResponseStatus,
-    WorkerRecallEnvelope, WorkerSearchMemoryRequest, WorkerSearchMemoryResponse,
-    WorkerStageOutcome, WorkerStageResult, WorkerStatusSnapshot, WorkerToolCallEvent,
-    WorkerToolCallOutcomeState, WorkerTransportKind, WorkerTurnStrategy,
+    SearchPlanInput, WORKER_OPERATION_REQUEST_SCHEMA_V1, WORKER_STAGE_RESULT_SCHEMA_V1,
+    WorkerArtifactExcerpt, WorkerArtifactRef, WorkerCapabilityProfile, WorkerContextPacket,
+    WorkerEvidenceLocation, WorkerFindingDetail, WorkerFindingListResponse, WorkerFindingSummary,
+    WorkerGitHubPosture, WorkerInvocation, WorkerInvocationOutcomeState, WorkerMemoryCard,
+    WorkerMutationPosture, WorkerOperation, WorkerOperationDenial, WorkerOperationDenialCode,
+    WorkerOperationLane, WorkerOperationRequestEnvelope, WorkerOperationResponseEnvelope,
+    WorkerOperationResponseStatus, WorkerRecallEnvelope, WorkerSearchMemoryRequest,
+    WorkerSearchMemoryResponse, WorkerStageOutcome, WorkerStageResult, WorkerStatusSnapshot,
+    WorkerToolCallEvent, WorkerToolCallOutcomeState, WorkerTransportKind, WorkerTurnStrategy,
+    materialize_search_plan,
 };
 use serde_json::json;
 
@@ -118,6 +119,40 @@ fn sample_capability_profile() -> WorkerCapabilityProfile {
         supports_follow_up_hints: true,
         supports_fix_mode: false,
     }
+}
+
+fn sample_search_plan(
+    query_text: &str,
+    query_mode: &str,
+    requested_retrieval_classes: &[&str],
+    anchor_hints: &[&str],
+) -> roger_app_core::SearchPlan {
+    let target = sample_target();
+    let task = sample_task();
+    let granted_scopes = vec!["repo".to_owned()];
+    let requested_retrieval_classes = requested_retrieval_classes
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect::<Vec<_>>();
+    let anchor_hints = anchor_hints
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect::<Vec<_>>();
+
+    materialize_search_plan(SearchPlanInput {
+        review_session_id: Some(&task.review_session_id),
+        review_run_id: Some(&task.review_run_id),
+        repository: &target.repository,
+        granted_scopes: &granted_scopes,
+        query_text,
+        query_mode: Some(query_mode),
+        requested_retrieval_classes: &requested_retrieval_classes,
+        anchor_hints: &anchor_hints,
+        supports_candidate_audit: true,
+        supports_promotion_review: false,
+        semantic_assets_verified: false,
+    })
+    .expect("sample search plan should materialize")
 }
 
 fn sample_invocation() -> WorkerInvocation {
@@ -320,14 +355,20 @@ fn worker_operation_contract_authorizes_read_and_proposal_lanes() {
             serde_json::to_value(WorkerSearchMemoryResponse {
                 requested_query_mode: "auto".to_owned(),
                 resolved_query_mode: "recall".to_owned(),
-                retrieval_mode: "hybrid".to_owned(),
+                search_plan: sample_search_plan(
+                    "approval invalidation refresh",
+                    "auto",
+                    &["promoted_memory", "evidence_hits"],
+                    &[],
+                ),
+                retrieval_mode: "lexical_only".to_owned(),
                 degraded_flags: Vec::new(),
                 promoted_memory: vec![WorkerRecallEnvelope {
                     item_kind: "promoted_memory".to_owned(),
                     item_id: "memory-1".to_owned(),
                     requested_query_mode: "auto".to_owned(),
                     resolved_query_mode: "recall".to_owned(),
-                    retrieval_mode: "hybrid".to_owned(),
+                    retrieval_mode: "lexical_only".to_owned(),
                     scope_bucket: "repository".to_owned(),
                     memory_lane: "promoted_memory".to_owned(),
                     trust_state: Some("established".to_owned()),
@@ -349,7 +390,7 @@ fn worker_operation_contract_authorizes_read_and_proposal_lanes() {
                     snippet_or_summary: "Prior approval invalidation regression".to_owned(),
                     anchor_overlap_summary: "no anchor hints supplied".to_owned(),
                     degraded_flags: Vec::new(),
-                    explain_summary: "promoted_memory surfaced from promoted_memory in repository with requested query_mode auto, resolved query_mode recall, retrieval_mode hybrid, posture cite_allowed/ordinary; no degraded flags".to_owned(),
+                    explain_summary: "promoted_memory surfaced from promoted_memory in repository with requested query_mode auto, resolved query_mode recall, retrieval_mode lexical_only, posture cite_allowed/ordinary; no degraded flags".to_owned(),
                     citation_posture: "cite_allowed".to_owned(),
                     surface_posture: "ordinary".to_owned(),
                 }],
@@ -359,7 +400,7 @@ fn worker_operation_contract_authorizes_read_and_proposal_lanes() {
                     item_id: "finding-1".to_owned(),
                     requested_query_mode: "auto".to_owned(),
                     resolved_query_mode: "recall".to_owned(),
-                    retrieval_mode: "hybrid".to_owned(),
+                    retrieval_mode: "lexical_only".to_owned(),
                     scope_bucket: "repository".to_owned(),
                     memory_lane: "evidence_hits".to_owned(),
                     trust_state: None,
@@ -382,7 +423,7 @@ fn worker_operation_contract_authorizes_read_and_proposal_lanes() {
                     snippet_or_summary: "Approval batch survives stale refresh".to_owned(),
                     anchor_overlap_summary: "no anchor hints supplied".to_owned(),
                     degraded_flags: Vec::new(),
-                    explain_summary: "evidence_finding surfaced from evidence_hits in repository with requested query_mode auto, resolved query_mode recall, retrieval_mode hybrid, posture cite_allowed/ordinary; no degraded flags".to_owned(),
+                    explain_summary: "evidence_finding surfaced from evidence_hits in repository with requested query_mode auto, resolved query_mode recall, retrieval_mode lexical_only, posture cite_allowed/ordinary; no degraded flags".to_owned(),
                     citation_posture: "cite_allowed".to_owned(),
                     surface_posture: "ordinary".to_owned(),
                 }],
@@ -399,6 +440,10 @@ fn worker_operation_contract_authorizes_read_and_proposal_lanes() {
             .expect("deserialize search response");
     assert_eq!(search_payload.requested_query_mode, "auto");
     assert_eq!(search_payload.resolved_query_mode, "recall");
+    assert_eq!(
+        search_payload.search_plan.query_plan.candidate_visibility,
+        roger_app_core::SearchCandidateVisibility::Hidden
+    );
     assert_eq!(search_payload.promoted_memory.len(), 1);
     assert_eq!(search_payload.evidence_hits.len(), 1);
     assert_eq!(
@@ -422,7 +467,7 @@ fn worker_operation_contract_authorizes_read_and_proposal_lanes() {
     assert!(
         search_payload.evidence_hits[0]
             .explain_summary
-            .contains("retrieval_mode hybrid")
+            .contains("retrieval_mode lexical_only")
     );
 
     let round_trip: WorkerOperationResponseEnvelope =
@@ -474,6 +519,12 @@ fn worker_search_response_keeps_recovery_scan_and_candidate_posture_explicit() {
             serde_json::to_value(WorkerSearchMemoryResponse {
                 requested_query_mode: "candidate_audit".to_owned(),
                 resolved_query_mode: "candidate_audit".to_owned(),
+                search_plan: sample_search_plan(
+                    "approval refresh",
+                    "candidate_audit",
+                    &["promoted_memory", "tentative_candidates", "evidence_hits"],
+                    &["finding-1"],
+                ),
                 retrieval_mode: "recovery_scan".to_owned(),
                 degraded_flags: vec![degraded_reason.clone()],
                 promoted_memory: vec![WorkerRecallEnvelope {
@@ -553,6 +604,10 @@ fn worker_search_response_keeps_recovery_scan_and_candidate_posture_explicit() {
             .expect("deserialize search response");
     assert_eq!(search_payload.requested_query_mode, "candidate_audit");
     assert_eq!(search_payload.resolved_query_mode, "candidate_audit");
+    assert_eq!(
+        search_payload.search_plan.query_plan.candidate_visibility,
+        roger_app_core::SearchCandidateVisibility::CandidateAuditOnly
+    );
     assert_eq!(search_payload.retrieval_mode, "recovery_scan");
     assert_eq!(search_payload.degraded_flags, vec![degraded_reason]);
     assert_eq!(search_payload.promoted_memory.len(), 1);
