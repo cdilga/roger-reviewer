@@ -3,10 +3,18 @@
 use roger_app_core::cli_config;
 use roger_app_core::time;
 use roger_app_core::{
-    AppError, ContinuityQuality, FindingTriageState, HarnessAdapter,
-    LaunchAction, LaunchIntent, ResumeAttemptOutcome, ResumeBundle, ResumeBundleProfile,
-    ReviewTarget, RogerCommand, RogerCommandId, RogerCommandInvocationSurface, RogerCommandResult,
-    RogerCommandRouteStatus, SessionLocator, Surface, route_harness_command,
+    AGENT_TRANSPORT_REQUEST_SCHEMA_V1, AGENT_TRANSPORT_RESPONSE_SCHEMA_V1, AgentTransportErrorCode,
+    AgentTransportRequestEnvelope, AgentTransportResponseEnvelope, AgentTransportResponseStatus,
+    AppError, ContinuityQuality, FindingTriageState, HarnessAdapter, LaunchAction, LaunchIntent,
+    RecallSourceRef, ResumeAttemptOutcome, ResumeBundle, ResumeBundleProfile, ReviewTarget,
+    ReviewTask, RogerCommand, RogerCommandId, RogerCommandInvocationSurface, RogerCommandResult,
+    RogerCommandRouteStatus, SearchQueryPlanError, SearchQueryPlanningInput, SessionLocator,
+    Surface, WorkerArtifactExcerpt, WorkerArtifactExcerptRequest, WorkerCapabilityProfile,
+    WorkerContextPacket, WorkerEvidenceLocation, WorkerFindingDetail, WorkerFindingDetailRequest,
+    WorkerFindingListResponse, WorkerFindingSummary, WorkerGatewaySnapshot, WorkerGitHubPosture,
+    WorkerMutationPosture, WorkerOperation, WorkerOperationRequestEnvelope, WorkerRecallEnvelope,
+    WorkerSearchMemoryRequest, WorkerSearchMemoryResponse, WorkerStatusSnapshot,
+    WorkerTransportKind, execute_agent_transport_request, plan_search_query, route_harness_command,
     safe_harness_command_bindings,
 };
 use roger_bridge::{
@@ -28,12 +36,12 @@ use roger_storage::{
     StorageLayout, UpdateLaunchAttempt,
 };
 use rusqlite::Connection as SqliteConnection;
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::result::Result;
@@ -90,6 +98,7 @@ pub struct HarnessCommandInvocation {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CommandKind {
+    Agent,
     Review,
     Resume,
     Return,
@@ -106,6 +115,7 @@ enum CommandKind {
 impl CommandKind {
     fn as_rr_command(self, dry_run: bool) -> &'static str {
         match (self, dry_run) {
+            (Self::Agent, _) => "rr agent",
             (Self::Review, true) => "rr review --dry-run",
             (Self::Resume, true) => "rr resume --dry-run",
             (Self::Review, false) => "rr review",
@@ -124,6 +134,7 @@ impl CommandKind {
 
     fn schema_id(self) -> &'static str {
         match self {
+            Self::Agent => "rr.agent.transport.v1",
             Self::Review => "rr.robot.review.v1",
             Self::Resume => "rr.robot.resume.v1",
             Self::Return => "rr.robot.return.v1",
@@ -174,6 +185,11 @@ impl RobotFormat {
 #[derive(Clone, Debug)]
 struct ParsedArgs {
     command: CommandKind,
+    agent_operation: Option<String>,
+    agent_task_file: Option<PathBuf>,
+    agent_request_file: Option<PathBuf>,
+    agent_context_file: Option<PathBuf>,
+    agent_capability_file: Option<PathBuf>,
     bridge_command: Option<BridgeCommandKind>,
     extension_command: Option<ExtensionCommandKind>,
     extension_browser: Option<SupportedBrowser>,
@@ -193,6 +209,7 @@ struct ParsedArgs {
     attention_states: Vec<String>,
     limit: Option<usize>,
     query_text: Option<String>,
+    query_mode: Option<String>,
     robot_docs_topic: Option<String>,
     robot: bool,
     robot_format: RobotFormat,
@@ -511,6 +528,7 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
     }
 
     let command = match argv[0].as_str() {
+        "agent" => CommandKind::Agent,
         "review" => CommandKind::Review,
         "resume" => CommandKind::Resume,
         "return" => CommandKind::Return,
@@ -530,6 +548,11 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
 
     let mut parsed = ParsedArgs {
         command,
+        agent_operation: None,
+        agent_task_file: None,
+        agent_request_file: None,
+        agent_context_file: None,
+        agent_capability_file: None,
         bridge_command: None,
         extension_command: None,
         extension_browser: None,
@@ -549,6 +572,7 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         attention_states: Vec::new(),
         limit: None,
         query_text: None,
+        query_mode: None,
         robot_docs_topic: None,
         robot: false,
         robot_format: RobotFormat::Json,
@@ -564,6 +588,34 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
                     .get(i + 1)
                     .ok_or_else(|| "--repo requires a value".to_owned())?;
                 parsed.repo = Some(value.clone());
+                i += 2;
+            }
+            "--task-file" => {
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--task-file requires a value".to_owned())?;
+                parsed.agent_task_file = Some(PathBuf::from(value));
+                i += 2;
+            }
+            "--request-file" => {
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--request-file requires a value".to_owned())?;
+                parsed.agent_request_file = Some(PathBuf::from(value));
+                i += 2;
+            }
+            "--context-file" => {
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--context-file requires a value".to_owned())?;
+                parsed.agent_context_file = Some(PathBuf::from(value));
+                i += 2;
+            }
+            "--capability-file" => {
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--capability-file requires a value".to_owned())?;
+                parsed.agent_capability_file = Some(PathBuf::from(value));
                 i += 2;
             }
             "--pr" => {
@@ -659,6 +711,13 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
                 parsed.query_text = Some(value.clone());
                 i += 2;
             }
+            "--query-mode" => {
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--query-mode requires a value".to_owned())?;
+                parsed.query_mode = Some(value.clone());
+                i += 2;
+            }
             "--topic" => {
                 let value = argv
                     .get(i + 1)
@@ -733,6 +792,10 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
                     return Err(format!("unknown flag: {positional}"));
                 }
                 match parsed.command {
+                    CommandKind::Agent if parsed.agent_operation.is_none() => {
+                        parsed.agent_operation = Some(positional.to_owned());
+                        i += 1;
+                    }
                     CommandKind::Bridge if parsed.bridge_command.is_none() => {
                         parsed.bridge_command = match positional {
                             "export-contracts" => Some(BridgeCommandKind::ExportContracts),
@@ -803,11 +866,19 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         );
     }
 
+    if parsed.command == CommandKind::Agent && parsed.agent_operation.is_none() {
+        return Err("rr agent requires an operation name".to_owned());
+    }
+
     if parsed.command == CommandKind::Extension && parsed.extension_command.is_none() {
         return Err("rr extension requires a subcommand: setup or doctor".to_owned());
     }
 
-    if parsed.command != CommandKind::Bridge
+    if parsed.command != CommandKind::Search && parsed.query_mode.is_some() {
+        return Err("--query-mode is only supported by rr search".to_owned());
+    }
+
+    if !matches!(parsed.command, CommandKind::Bridge)
         && (parsed.bridge_extension_id.is_some()
             || parsed.bridge_binary_path.is_some()
             || parsed.bridge_output_dir.is_some())
@@ -823,6 +894,18 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
 
     if parsed.command != CommandKind::Extension && parsed.extension_browser.is_some() {
         return Err("--browser is only supported by rr extension".to_owned());
+    }
+
+    if parsed.command != CommandKind::Agent
+        && (parsed.agent_task_file.is_some()
+            || parsed.agent_request_file.is_some()
+            || parsed.agent_context_file.is_some()
+            || parsed.agent_capability_file.is_some())
+    {
+        return Err(
+            "--task-file/--request-file/--context-file/--capability-file are only supported by rr agent"
+                .to_owned(),
+        );
     }
 
     if parsed.command != CommandKind::Update
@@ -851,6 +934,7 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
             || !parsed.attention_states.is_empty()
             || parsed.limit.is_some()
             || parsed.query_text.is_some()
+            || parsed.query_mode.is_some()
             || parsed.robot_docs_topic.is_some()
             || parsed.provider != "opencode"
             || parsed.bridge_command.is_some()
@@ -867,11 +951,51 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         }
     }
 
+    if parsed.command == CommandKind::Agent {
+        if parsed.robot {
+            return Err("rr agent is a separate transport from --robot; omit --robot".to_owned());
+        }
+        if parsed.dry_run {
+            return Err("rr agent does not support --dry-run".to_owned());
+        }
+        if parsed.agent_task_file.is_none() {
+            return Err("rr agent requires --task-file <path>".to_owned());
+        }
+        if parsed.repo.is_some()
+            || parsed.pr.is_some()
+            || parsed.session_id.is_some()
+            || !parsed.attention_states.is_empty()
+            || parsed.limit.is_some()
+            || parsed.query_text.is_some()
+            || parsed.robot_docs_topic.is_some()
+            || parsed.provider != "opencode"
+            || parsed.bridge_command.is_some()
+            || parsed.extension_command.is_some()
+            || parsed.extension_browser.is_some()
+            || parsed.bridge_extension_id.is_some()
+            || parsed.bridge_binary_path.is_some()
+            || parsed.bridge_install_root.is_some()
+            || parsed.bridge_output_dir.is_some()
+            || parsed.update_channel != "stable"
+            || parsed.update_version.is_some()
+            || parsed.update_api_root.is_some()
+            || parsed.update_download_root.is_some()
+            || parsed.update_target.is_some()
+            || parsed.update_yes
+        {
+            return Err(
+                "rr agent only supports <operation> plus --task-file, --request-file, --context-file, and --capability-file"
+                    .to_owned(),
+            );
+        }
+    }
+
     Ok(parsed)
 }
 
 fn execute_command(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     match parsed.command {
+        CommandKind::Agent => handle_agent(parsed, runtime),
         CommandKind::Review => handle_review(parsed, runtime),
         CommandKind::Resume => handle_resume(parsed, runtime),
         CommandKind::Return => handle_return(parsed, runtime),
@@ -884,6 +1008,725 @@ fn execute_command(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
         CommandKind::Findings => handle_findings(parsed, runtime),
         CommandKind::Status => handle_status(parsed, runtime),
     }
+}
+
+fn built_in_agent_capability_profile() -> WorkerCapabilityProfile {
+    WorkerCapabilityProfile {
+        transport_kind: WorkerTransportKind::AgentCli,
+        supports_context_reads: true,
+        supports_memory_search: true,
+        supports_finding_reads: true,
+        supports_artifact_reads: true,
+        supports_stage_result_submission: true,
+        supports_clarification_requests: true,
+        supports_follow_up_hints: true,
+        supports_fix_mode: false,
+    }
+}
+
+fn effective_agent_capability_profile(
+    requested: Option<WorkerCapabilityProfile>,
+) -> WorkerCapabilityProfile {
+    let live = built_in_agent_capability_profile();
+    let Some(requested) = requested else {
+        return live;
+    };
+
+    WorkerCapabilityProfile {
+        transport_kind: WorkerTransportKind::AgentCli,
+        supports_context_reads: live.supports_context_reads && requested.supports_context_reads,
+        supports_memory_search: live.supports_memory_search && requested.supports_memory_search,
+        supports_finding_reads: live.supports_finding_reads && requested.supports_finding_reads,
+        supports_artifact_reads: live.supports_artifact_reads && requested.supports_artifact_reads,
+        supports_stage_result_submission: live.supports_stage_result_submission
+            && requested.supports_stage_result_submission,
+        supports_clarification_requests: live.supports_clarification_requests
+            && requested.supports_clarification_requests,
+        supports_follow_up_hints: live.supports_follow_up_hints
+            && requested.supports_follow_up_hints,
+        supports_fix_mode: live.supports_fix_mode && requested.supports_fix_mode,
+    }
+}
+
+fn read_json_bytes_from_stdin_or_file(
+    path: Option<&PathBuf>,
+    stdin_label: &str,
+) -> Result<Vec<u8>, String> {
+    if let Some(path) = path {
+        return fs::read(path).map_err(|err| format!("failed to read {}: {err}", path.display()));
+    }
+
+    if io::stdin().is_terminal() {
+        return Err(format!(
+            "{stdin_label} must be provided via --request-file or stdin"
+        ));
+    }
+
+    let mut bytes = Vec::new();
+    io::stdin()
+        .read_to_end(&mut bytes)
+        .map_err(|err| format!("failed to read {stdin_label} from stdin: {err}"))?;
+    if bytes.is_empty() {
+        return Err(format!("{stdin_label} from stdin was empty"));
+    }
+    Ok(bytes)
+}
+
+fn read_json_file<T: DeserializeOwned>(path: &Path, label: &str) -> Result<T, String> {
+    let bytes = fs::read(path).map_err(|err| format!("failed to read {label}: {err}"))?;
+    serde_json::from_slice(&bytes).map_err(|err| format!("failed to parse {label} as JSON: {err}"))
+}
+
+fn finding_summary_from_record(
+    record: &roger_storage::MaterializedFindingRecord,
+) -> WorkerFindingSummary {
+    WorkerFindingSummary {
+        finding_id: record.id.clone(),
+        fingerprint: record.fingerprint.clone(),
+        summary: record.normalized_summary.clone(),
+        triage_state: record.triage_state.clone(),
+        outbound_state: record.outbound_state.clone(),
+        primary_evidence_ref: None,
+    }
+}
+
+fn load_agent_findings(
+    store: &RogerStore,
+    task: &ReviewTask,
+) -> Result<Vec<WorkerFindingSummary>, String> {
+    let findings = store
+        .materialized_findings_for_run(&task.review_session_id, &task.review_run_id)
+        .map_err(|err| format!("failed to load materialized findings for rr agent: {err}"))?;
+    Ok(findings.iter().map(finding_summary_from_record).collect())
+}
+
+fn synthesize_agent_context(
+    session: &roger_storage::ReviewSessionRecord,
+    task: &ReviewTask,
+    unresolved_findings: Vec<WorkerFindingSummary>,
+) -> WorkerContextPacket {
+    WorkerContextPacket {
+        review_target: session.review_target.clone(),
+        review_session_id: task.review_session_id.clone(),
+        review_run_id: task.review_run_id.clone(),
+        review_task_id: task.id.clone(),
+        task_nonce: task.task_nonce.clone(),
+        baseline_snapshot_ref: None,
+        provider: session.provider.clone(),
+        transport_kind: WorkerTransportKind::AgentCli,
+        stage: task.stage.clone(),
+        objective: task.objective.clone(),
+        allowed_scopes: task.allowed_scopes.clone(),
+        allowed_operations: task.allowed_operations.clone(),
+        mutation_posture: WorkerMutationPosture::ReviewOnly,
+        github_posture: WorkerGitHubPosture::Blocked,
+        unresolved_findings,
+        continuity_summary: Some(session.continuity_state.clone()),
+        memory_cards: Vec::new(),
+        artifact_refs: Vec::new(),
+    }
+}
+
+fn build_agent_status_snapshot(
+    store: &RogerStore,
+    session: &roger_storage::ReviewSessionRecord,
+    task: &ReviewTask,
+    unresolved_finding_count: usize,
+) -> Result<WorkerStatusSnapshot, String> {
+    let draft_count = store
+        .session_overview(&task.review_session_id)
+        .map_err(|err| format!("failed to build session overview for rr agent: {err}"))?
+        .draft_count
+        .max(0) as usize;
+    Ok(WorkerStatusSnapshot {
+        review_session_id: task.review_session_id.clone(),
+        review_run_id: task.review_run_id.clone(),
+        attention_state: session.attention_state.clone(),
+        continuity_summary: Some(session.continuity_state.clone()),
+        degraded_flags: Vec::new(),
+        unresolved_finding_count,
+        pending_clarification_count: 0,
+        draft_count,
+    })
+}
+
+fn retrieval_mode_label(mode: &PriorReviewRetrievalMode) -> &'static str {
+    match mode {
+        PriorReviewRetrievalMode::Hybrid => "hybrid",
+        PriorReviewRetrievalMode::LexicalOnly => "lexical_only",
+        PriorReviewRetrievalMode::RecoveryScan => "recovery_scan",
+    }
+}
+
+fn recall_anchor_overlap_summary(anchor_hints: &[String], anchor_digest: Option<&str>) -> String {
+    match (anchor_hints.is_empty(), anchor_digest) {
+        (true, Some(digest)) => {
+            format!("anchor digest {digest} recorded; no anchor hints supplied")
+        }
+        (true, None) => "no anchor hints supplied".to_owned(),
+        (false, Some(digest)) => format!(
+            "{} anchor hint(s) supplied; digest {digest} is recorded but overlap scoring is not implemented in this slice",
+            anchor_hints.len()
+        ),
+        (false, None) => format!(
+            "{} anchor hint(s) supplied; overlap scoring is unavailable for this record",
+            anchor_hints.len()
+        ),
+    }
+}
+
+fn recall_explain_summary(
+    item_kind: &str,
+    memory_lane: &str,
+    scope_bucket: &str,
+    requested_query_mode: &str,
+    resolved_query_mode: &str,
+    retrieval_mode: &str,
+    citation_posture: &str,
+    surface_posture: &str,
+    degraded_flags: &[String],
+) -> String {
+    let degraded_summary = if degraded_flags.is_empty() {
+        "no degraded flags".to_owned()
+    } else {
+        format!("degraded flags: {}", degraded_flags.join(", "))
+    };
+    format!(
+        "{item_kind} surfaced from {memory_lane} in {scope_bucket} with requested query_mode {requested_query_mode}, resolved query_mode {resolved_query_mode}, retrieval_mode {retrieval_mode}, posture {citation_posture}/{surface_posture}; {degraded_summary}"
+    )
+}
+
+fn recall_source_ref(kind: &str, id: impl Into<String>) -> RecallSourceRef {
+    RecallSourceRef {
+        kind: kind.to_owned(),
+        id: id.into(),
+    }
+}
+
+fn recall_posture_for_memory_hit(memory_lane: &str, state: &str) -> (&'static str, &'static str) {
+    match (memory_lane, state) {
+        (_, "contradicted" | "anti_pattern") => ("warning_only", "operator_review_only"),
+        ("tentative_candidates", _) | (_, "candidate") => ("inspect_only", "candidate_review"),
+        _ => ("cite_allowed", "ordinary"),
+    }
+}
+
+fn worker_recall_from_memory_hit(
+    hit: &roger_storage::PriorReviewMemoryHit,
+    requested_query_mode: &str,
+    resolved_query_mode: &str,
+    retrieval_mode: &str,
+    scope_bucket: &str,
+    degraded_flags: &[String],
+    memory_lane: &str,
+    anchor_hints: &[String],
+) -> WorkerRecallEnvelope {
+    let (citation_posture, surface_posture) =
+        recall_posture_for_memory_hit(memory_lane, &hit.state);
+    WorkerRecallEnvelope {
+        item_kind: if memory_lane == "tentative_candidates" {
+            "candidate_memory".to_owned()
+        } else {
+            "promoted_memory".to_owned()
+        },
+        item_id: hit.memory_id.clone(),
+        requested_query_mode: requested_query_mode.to_owned(),
+        resolved_query_mode: resolved_query_mode.to_owned(),
+        retrieval_mode: retrieval_mode.to_owned(),
+        scope_bucket: scope_bucket.to_owned(),
+        memory_lane: memory_lane.to_owned(),
+        trust_state: Some(hit.state.clone()),
+        source_refs: vec![
+            recall_source_ref("memory", hit.memory_id.clone()),
+            recall_source_ref("scope", hit.scope_key.clone()),
+        ],
+        locator: json!({
+            "scope_key": hit.scope_key,
+            "memory_class": hit.memory_class,
+            "state": hit.state,
+        }),
+        snippet_or_summary: hit.statement.clone(),
+        anchor_overlap_summary: recall_anchor_overlap_summary(
+            anchor_hints,
+            hit.anchor_digest.as_deref(),
+        ),
+        degraded_flags: degraded_flags.to_vec(),
+        explain_summary: recall_explain_summary(
+            if memory_lane == "tentative_candidates" {
+                "candidate_memory"
+            } else {
+                "promoted_memory"
+            },
+            memory_lane,
+            scope_bucket,
+            requested_query_mode,
+            resolved_query_mode,
+            retrieval_mode,
+            citation_posture,
+            surface_posture,
+            degraded_flags,
+        ),
+        citation_posture: citation_posture.to_owned(),
+        surface_posture: surface_posture.to_owned(),
+    }
+}
+
+fn worker_recall_from_evidence_hit(
+    hit: &roger_storage::PriorReviewEvidenceHit,
+    requested_query_mode: &str,
+    resolved_query_mode: &str,
+    retrieval_mode: &str,
+    scope_bucket: &str,
+    degraded_flags: &[String],
+    anchor_hints: &[String],
+) -> WorkerRecallEnvelope {
+    let mut source_refs = vec![
+        recall_source_ref("finding", hit.finding_id.clone()),
+        recall_source_ref("review_session", hit.session_id.clone()),
+        recall_source_ref("repository", hit.repository.clone()),
+    ];
+    if let Some(review_run_id) = hit.review_run_id.as_ref() {
+        source_refs.push(recall_source_ref("review_run", review_run_id.clone()));
+    }
+
+    WorkerRecallEnvelope {
+        item_kind: "evidence_finding".to_owned(),
+        item_id: hit.finding_id.clone(),
+        requested_query_mode: requested_query_mode.to_owned(),
+        resolved_query_mode: resolved_query_mode.to_owned(),
+        retrieval_mode: retrieval_mode.to_owned(),
+        scope_bucket: scope_bucket.to_owned(),
+        memory_lane: "evidence_hits".to_owned(),
+        trust_state: None,
+        source_refs,
+        locator: json!({
+            "session_id": hit.session_id,
+            "review_run_id": hit.review_run_id,
+            "repository": hit.repository,
+            "pull_request": hit.pull_request_number,
+        }),
+        snippet_or_summary: hit.normalized_summary.clone(),
+        anchor_overlap_summary: recall_anchor_overlap_summary(anchor_hints, None),
+        degraded_flags: degraded_flags.to_vec(),
+        explain_summary: recall_explain_summary(
+            "evidence_finding",
+            "evidence_hits",
+            scope_bucket,
+            requested_query_mode,
+            resolved_query_mode,
+            retrieval_mode,
+            "cite_allowed",
+            "ordinary",
+            degraded_flags,
+        ),
+        citation_posture: "cite_allowed".to_owned(),
+        surface_posture: "ordinary".to_owned(),
+    }
+}
+
+fn search_item_from_recall_envelope(
+    envelope: &WorkerRecallEnvelope,
+    title: &str,
+    score: i64,
+) -> Value {
+    json!({
+        "kind": envelope.item_kind,
+        "id": envelope.item_id,
+        "title": title,
+        "score": score,
+        "memory_lane": envelope.memory_lane,
+        "scope_bucket": envelope.scope_bucket,
+        "trust_state": envelope.trust_state,
+        "citation_posture": envelope.citation_posture,
+        "surface_posture": envelope.surface_posture,
+        "locator": envelope.locator,
+        "snippet": envelope.snippet_or_summary,
+        "explain_summary": envelope.explain_summary,
+    })
+}
+
+fn build_agent_search_response(
+    store: &RogerStore,
+    session: &roger_storage::ReviewSessionRecord,
+    request: &WorkerOperationRequestEnvelope,
+) -> Result<Option<WorkerSearchMemoryResponse>, String> {
+    let Some(payload) = request.payload.clone() else {
+        return Ok(None);
+    };
+    let Ok(search_request) = serde_json::from_value::<WorkerSearchMemoryRequest>(payload) else {
+        return Ok(None);
+    };
+
+    let search_plan = plan_search_query(SearchQueryPlanningInput {
+        query_text: &search_request.query_text,
+        query_mode: Some(&search_request.query_mode),
+        anchor_hints: &search_request.anchor_hints,
+        supports_candidate_audit: true,
+        supports_promotion_review: false,
+    })
+    .map_err(|err| format!("failed to plan rr agent search intent: {err}"))?;
+
+    let repository = &session.review_target.repository;
+    let scope_key = format!("repo:{repository}");
+    let lookup = store
+        .prior_review_lookup(PriorReviewLookupQuery {
+            scope_key: &scope_key,
+            repository,
+            query_text: &search_request.query_text,
+            limit: 25,
+            include_tentative_candidates: search_plan.includes_tentative_candidates(),
+            allow_project_scope: false,
+            allow_org_scope: false,
+            semantic_assets_verified: false,
+            semantic_candidates: Vec::new(),
+        })
+        .map_err(|err| format!("failed to run rr agent prior-review lookup: {err}"))?;
+    let retrieval_mode = retrieval_mode_label(&lookup.mode).to_owned();
+
+    Ok(Some(WorkerSearchMemoryResponse {
+        requested_query_mode: search_plan.requested_query_mode.as_str().to_owned(),
+        resolved_query_mode: search_plan.resolved_query_mode.as_str().to_owned(),
+        retrieval_mode: retrieval_mode.clone(),
+        degraded_flags: lookup.degraded_reasons.clone(),
+        promoted_memory: lookup
+            .promoted_memory
+            .iter()
+            .map(|hit| {
+                worker_recall_from_memory_hit(
+                    hit,
+                    search_plan.requested_query_mode.as_str(),
+                    search_plan.resolved_query_mode.as_str(),
+                    &retrieval_mode,
+                    &lookup.scope_bucket,
+                    &lookup.degraded_reasons,
+                    "promoted_memory",
+                    &search_request.anchor_hints,
+                )
+            })
+            .collect(),
+        tentative_candidates: lookup
+            .tentative_candidates
+            .iter()
+            .map(|hit| {
+                worker_recall_from_memory_hit(
+                    hit,
+                    search_plan.requested_query_mode.as_str(),
+                    search_plan.resolved_query_mode.as_str(),
+                    &retrieval_mode,
+                    &lookup.scope_bucket,
+                    &lookup.degraded_reasons,
+                    "tentative_candidates",
+                    &search_request.anchor_hints,
+                )
+            })
+            .collect(),
+        evidence_hits: lookup
+            .evidence_hits
+            .iter()
+            .map(|hit| {
+                worker_recall_from_evidence_hit(
+                    hit,
+                    search_plan.requested_query_mode.as_str(),
+                    search_plan.resolved_query_mode.as_str(),
+                    &retrieval_mode,
+                    &lookup.scope_bucket,
+                    &lookup.degraded_reasons,
+                    &search_request.anchor_hints,
+                )
+            })
+            .collect(),
+    }))
+}
+
+fn finding_binds_to_task(
+    finding: &roger_storage::MaterializedFindingRecord,
+    task: &ReviewTask,
+) -> bool {
+    finding.session_id == task.review_session_id
+        && finding
+            .last_seen_run_id
+            .as_deref()
+            .unwrap_or(finding.first_run_id.as_str())
+            == task.review_run_id
+}
+
+fn worker_evidence_location_from_record(
+    record: &roger_storage::CodeEvidenceLocationRecord,
+) -> Option<WorkerEvidenceLocation> {
+    let artifact_id = record.excerpt_artifact_id.clone()?;
+    Some(WorkerEvidenceLocation {
+        artifact_id,
+        repo_rel_path: Some(record.repo_rel_path.clone()),
+        start_line: u32::try_from(record.start_line).ok(),
+        end_line: record.end_line.and_then(|value| u32::try_from(value).ok()),
+        evidence_role: Some(record.evidence_role.clone()),
+    })
+}
+
+fn build_agent_finding_detail(
+    store: &RogerStore,
+    task: &ReviewTask,
+    request: &WorkerOperationRequestEnvelope,
+) -> Result<Option<WorkerFindingDetail>, String> {
+    let Some(payload) = request.payload.clone() else {
+        return Ok(None);
+    };
+    let Ok(detail_request) = serde_json::from_value::<WorkerFindingDetailRequest>(payload) else {
+        return Ok(None);
+    };
+
+    let finding = store
+        .materialized_finding(&detail_request.finding_id)
+        .map_err(|err| format!("failed to load finding detail for rr agent: {err}"))?;
+    let Some(finding) = finding else {
+        return Err(format!(
+            "finding '{}' was not found in the Roger store",
+            detail_request.finding_id
+        ));
+    };
+    if !finding_binds_to_task(&finding, task) {
+        return Err(format!(
+            "finding '{}' is outside the bound rr agent session/run",
+            detail_request.finding_id
+        ));
+    }
+
+    let evidence_locations = store
+        .code_evidence_locations_for_finding(&detail_request.finding_id)
+        .map_err(|err| format!("failed to load code evidence locations for rr agent: {err}"))?
+        .iter()
+        .filter_map(worker_evidence_location_from_record)
+        .collect();
+
+    Ok(Some(WorkerFindingDetail {
+        finding: finding_summary_from_record(&finding),
+        evidence_locations,
+        clarification_ids: Vec::new(),
+        outbound_draft_ids: Vec::new(),
+    }))
+}
+
+fn build_agent_artifact_excerpt(
+    store: &RogerStore,
+    request: &WorkerOperationRequestEnvelope,
+) -> Result<Option<WorkerArtifactExcerpt>, String> {
+    const MAX_EXCERPT_BYTES: usize = 2048;
+
+    let Some(payload) = request.payload.clone() else {
+        return Ok(None);
+    };
+    let Ok(excerpt_request) = serde_json::from_value::<WorkerArtifactExcerptRequest>(payload)
+    else {
+        return Ok(None);
+    };
+
+    let bytes = store
+        .artifact_bytes(&excerpt_request.artifact_id)
+        .map_err(|err| format!("failed to load rr agent artifact excerpt: {err}"))?;
+    let excerpt_bytes = if bytes.len() > MAX_EXCERPT_BYTES {
+        &bytes[..MAX_EXCERPT_BYTES]
+    } else {
+        &bytes[..]
+    };
+
+    Ok(Some(WorkerArtifactExcerpt {
+        artifact_id: excerpt_request.artifact_id,
+        excerpt: String::from_utf8_lossy(excerpt_bytes).to_string(),
+        digest: Some(sha256_hex(&bytes)),
+        truncated: bytes.len() > excerpt_bytes.len(),
+        byte_count: bytes.len(),
+    }))
+}
+
+fn build_agent_gateway_snapshot(
+    store: &RogerStore,
+    session: &roger_storage::ReviewSessionRecord,
+    task: &ReviewTask,
+    request: &WorkerOperationRequestEnvelope,
+    findings: &[WorkerFindingSummary],
+) -> Result<WorkerGatewaySnapshot, String> {
+    let mut snapshot = WorkerGatewaySnapshot::default();
+
+    let Ok(operation) = WorkerOperation::parse(&request.operation) else {
+        return Ok(snapshot);
+    };
+
+    match operation {
+        WorkerOperation::GetStatus => {
+            snapshot.status = Some(build_agent_status_snapshot(
+                store,
+                session,
+                task,
+                findings.len(),
+            )?);
+        }
+        WorkerOperation::SearchMemory => {
+            snapshot.search_memory_response = build_agent_search_response(store, session, request)?;
+        }
+        WorkerOperation::ListFindings => {
+            snapshot.findings = Some(WorkerFindingListResponse {
+                items: findings.to_vec(),
+            });
+        }
+        WorkerOperation::GetFindingDetail => {
+            if let Some(detail) = build_agent_finding_detail(store, task, request)? {
+                snapshot.finding_details.push(detail);
+            }
+        }
+        WorkerOperation::GetArtifactExcerpt => {
+            if let Some(excerpt) = build_agent_artifact_excerpt(store, request)? {
+                snapshot.artifact_excerpts.push(excerpt);
+            }
+        }
+        WorkerOperation::GetReviewContext
+        | WorkerOperation::SubmitStageResult
+        | WorkerOperation::RequestClarification
+        | WorkerOperation::RequestMemoryReview
+        | WorkerOperation::ProposeFollowUp => {}
+    }
+
+    Ok(snapshot)
+}
+
+fn agent_command_response(envelope: AgentTransportResponseEnvelope) -> CommandResponse {
+    let outcome = match envelope.status {
+        AgentTransportResponseStatus::Succeeded => OutcomeKind::Complete,
+        AgentTransportResponseStatus::Denied => OutcomeKind::Blocked,
+        AgentTransportResponseStatus::Error => OutcomeKind::Error,
+    };
+    CommandResponse {
+        outcome,
+        data: serde_json::to_value(envelope).expect("serialize agent transport response"),
+        warnings: Vec::new(),
+        repair_actions: Vec::new(),
+        message: "rr agent request completed".to_owned(),
+    }
+}
+
+fn agent_error_response(
+    code: AgentTransportErrorCode,
+    message: impl Into<String>,
+) -> CommandResponse {
+    agent_command_response(AgentTransportResponseEnvelope::error(code, message))
+}
+
+fn handle_agent(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
+    let task_path = parsed
+        .agent_task_file
+        .as_deref()
+        .expect("agent task file validated during parse");
+    let task: ReviewTask = match read_json_file(task_path, "ReviewTask file") {
+        Ok(task) => task,
+        Err(message) => {
+            return agent_error_response(AgentTransportErrorCode::PayloadInvalid, message);
+        }
+    };
+
+    let capability_profile = match parsed.agent_capability_file.as_deref() {
+        Some(path) => match read_json_file(path, "WorkerCapabilityProfile file") {
+            Ok(profile) => effective_agent_capability_profile(Some(profile)),
+            Err(message) => {
+                return agent_error_response(AgentTransportErrorCode::PayloadInvalid, message);
+            }
+        },
+        None => built_in_agent_capability_profile(),
+    };
+
+    let request_bytes = match read_json_bytes_from_stdin_or_file(
+        parsed.agent_request_file.as_ref(),
+        "rr agent request envelope",
+    ) {
+        Ok(bytes) => bytes,
+        Err(message) => {
+            return agent_error_response(AgentTransportErrorCode::PayloadMissing, message);
+        }
+    };
+    let request: WorkerOperationRequestEnvelope = match serde_json::from_slice(&request_bytes) {
+        Ok(request) => request,
+        Err(err) => {
+            return agent_error_response(
+                AgentTransportErrorCode::PayloadInvalid,
+                format!("failed to parse rr agent request envelope as JSON: {err}"),
+            );
+        }
+    };
+
+    let Some(expected_operation) = parsed.agent_operation.as_deref() else {
+        return agent_error_response(
+            AgentTransportErrorCode::ValidationFailed,
+            "rr agent operation is missing",
+        );
+    };
+    if request.operation != expected_operation {
+        return agent_error_response(
+            AgentTransportErrorCode::ValidationFailed,
+            format!(
+                "request operation '{}' does not match rr agent operation '{}'",
+                request.operation, expected_operation
+            ),
+        );
+    }
+
+    let store = match RogerStore::open(&runtime.store_root) {
+        Ok(store) => store,
+        Err(err) => {
+            return agent_error_response(
+                AgentTransportErrorCode::ValidationFailed,
+                format!("failed to open Roger store for rr agent: {err}"),
+            );
+        }
+    };
+    let session = match store.review_session(&task.review_session_id) {
+        Ok(Some(session)) => session,
+        Ok(None) => {
+            return agent_error_response(
+                AgentTransportErrorCode::ValidationFailed,
+                format!(
+                    "review session '{}' is not present in the Roger store",
+                    task.review_session_id
+                ),
+            );
+        }
+        Err(err) => {
+            return agent_error_response(
+                AgentTransportErrorCode::ValidationFailed,
+                format!("failed to load rr agent review session: {err}"),
+            );
+        }
+    };
+    let findings = match load_agent_findings(&store, &task) {
+        Ok(findings) => findings,
+        Err(message) => {
+            return agent_error_response(AgentTransportErrorCode::ValidationFailed, message);
+        }
+    };
+    let worker_context = match parsed.agent_context_file.as_deref() {
+        Some(path) => match read_json_file(path, "WorkerContextPacket file") {
+            Ok(context) => context,
+            Err(message) => {
+                return agent_error_response(AgentTransportErrorCode::PayloadInvalid, message);
+            }
+        },
+        None => synthesize_agent_context(&session, &task, findings.clone()),
+    };
+    let gateway_snapshot =
+        match build_agent_gateway_snapshot(&store, &session, &task, &request, &findings) {
+            Ok(snapshot) => snapshot,
+            Err(message) => {
+                return agent_error_response(AgentTransportErrorCode::ValidationFailed, message);
+            }
+        };
+
+    agent_command_response(execute_agent_transport_request(
+        &AgentTransportRequestEnvelope {
+            schema_id: AGENT_TRANSPORT_REQUEST_SCHEMA_V1.to_owned(),
+            review_task: task,
+            worker_context,
+            capability_profile,
+            operation_request: request,
+            gateway_snapshot,
+        },
+    ))
 }
 
 fn parse_supported_browser(value: &str) -> Result<SupportedBrowser, String> {
@@ -3581,6 +4424,45 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         );
     };
 
+    let search_plan = match plan_search_query(SearchQueryPlanningInput {
+        query_text,
+        query_mode: parsed.query_mode.as_deref(),
+        anchor_hints: &[],
+        supports_candidate_audit: true,
+        supports_promotion_review: false,
+    }) {
+        Ok(plan) => plan,
+        Err(err) => {
+            let repair_actions = match &err {
+                SearchQueryPlanError::MissingSearchInputs => {
+                    vec!["pass --query \"<search text>\"".to_owned()]
+                }
+                SearchQueryPlanError::UnsupportedQueryMode { .. } => vec![
+                    "pass --query-mode auto, exact_lookup, recall, related_context, candidate_audit, or promotion_review".to_owned(),
+                ],
+                SearchQueryPlanError::RelatedContextRequiresAnchors => vec![
+                    "omit --query-mode to let Roger resolve auto for this entrypoint".to_owned(),
+                    "or use --query-mode recall, exact_lookup, or candidate_audit on rr search"
+                        .to_owned(),
+                ],
+                SearchQueryPlanError::CandidateAuditUnsupported => vec![
+                    "retry on a surface that supports candidate inspection".to_owned(),
+                ],
+                SearchQueryPlanError::PromotionReviewUnsupported => vec![
+                    "rr search does not support promotion_review in this slice; use candidate_audit or recall instead".to_owned(),
+                ],
+            };
+            return blocked_response(
+                err.to_string(),
+                repair_actions,
+                json!({
+                    "reason_code": err.reason_code(),
+                    "requested_query_mode": parsed.query_mode.as_deref().unwrap_or("auto"),
+                }),
+            );
+        }
+    };
+
     let Some(repository) = resolve_repository(parsed.repo.clone(), &runtime.cwd) else {
         return blocked_response(
             "repo context inference failed; search scope is ambiguous".to_owned(),
@@ -3595,12 +4477,13 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     };
 
     let limit = parsed.limit.unwrap_or(10).min(100);
+    let scope_key = format!("repo:{repository}");
     let lookup = match store.prior_review_lookup(PriorReviewLookupQuery {
-        scope_key: &format!("repo:{repository}"),
+        scope_key: &scope_key,
         repository: &repository,
         query_text,
         limit: limit.saturating_add(1),
-        include_tentative_candidates: false,
+        include_tentative_candidates: search_plan.includes_tentative_candidates(),
         allow_project_scope: false,
         allow_org_scope: false,
         semantic_assets_verified: false,
@@ -3610,34 +4493,64 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         Err(err) => return error_response(format!("failed to run prior-review lookup: {err}")),
     };
 
+    let lane_counts = json!({
+        "evidence_hits": lookup.evidence_hits.len(),
+        "promoted_memory": lookup.promoted_memory.len(),
+        "tentative_candidates": lookup.tentative_candidates.len(),
+    });
+    let scope_bucket = lookup.scope_bucket.clone();
+    let degraded_reasons = lookup.degraded_reasons.clone();
     let mut items = Vec::new();
+    let retrieval_mode = retrieval_mode_label(&lookup.mode).to_owned();
     for hit in lookup.evidence_hits {
-        items.push(json!({
-            "kind": "evidence_finding",
-            "id": hit.finding_id,
-            "title": hit.title,
-            "score": hit.fused_score,
-            "locator": {
-                "session_id": hit.session_id,
-                "review_run_id": hit.review_run_id,
-                "repository": hit.repository,
-                "pull_request": hit.pull_request_number,
-            },
-            "snippet": hit.normalized_summary,
-        }));
+        let recall = worker_recall_from_evidence_hit(
+            &hit,
+            search_plan.requested_query_mode.as_str(),
+            search_plan.resolved_query_mode.as_str(),
+            &retrieval_mode,
+            &scope_bucket,
+            &degraded_reasons,
+            &[],
+        );
+        items.push(search_item_from_recall_envelope(
+            &recall,
+            &hit.title,
+            hit.fused_score,
+        ));
     }
     for hit in lookup.promoted_memory {
-        items.push(json!({
-            "kind": "promoted_memory",
-            "id": hit.memory_id,
-            "title": hit.statement,
-            "score": hit.fused_score,
-            "locator": {
-                "scope_key": hit.scope_key,
-                "memory_class": hit.memory_class,
-            },
-            "snippet": hit.statement,
-        }));
+        let recall = worker_recall_from_memory_hit(
+            &hit,
+            search_plan.requested_query_mode.as_str(),
+            search_plan.resolved_query_mode.as_str(),
+            &retrieval_mode,
+            &scope_bucket,
+            &degraded_reasons,
+            "promoted_memory",
+            &[],
+        );
+        items.push(search_item_from_recall_envelope(
+            &recall,
+            &hit.statement,
+            hit.fused_score,
+        ));
+    }
+    for hit in lookup.tentative_candidates {
+        let recall = worker_recall_from_memory_hit(
+            &hit,
+            search_plan.requested_query_mode.as_str(),
+            search_plan.resolved_query_mode.as_str(),
+            &retrieval_mode,
+            &scope_bucket,
+            &degraded_reasons,
+            "tentative_candidates",
+            &[],
+        );
+        items.push(search_item_from_recall_envelope(
+            &recall,
+            &hit.statement,
+            hit.fused_score,
+        ));
     }
 
     items.sort_by(|left, right| {
@@ -3657,12 +4570,10 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         items.truncate(limit);
     }
 
-    let mode = match lookup.mode {
-        PriorReviewRetrievalMode::Hybrid => "hybrid",
-        PriorReviewRetrievalMode::LexicalOnly => "lexical_only",
-    };
+    let mode = retrieval_mode;
     let count = items.len();
-    let degraded = mode == "lexical_only" && !lookup.degraded_reasons.is_empty();
+    let degraded =
+        mode == "recovery_scan" || (mode == "lexical_only" && !degraded_reasons.is_empty());
     let outcome = if degraded {
         OutcomeKind::Degraded
     } else if count == 0 {
@@ -3675,16 +4586,27 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         outcome,
         data: json!({
             "query": query_text,
+            "requested_query_mode": search_plan.requested_query_mode.as_str(),
+            "resolved_query_mode": search_plan.resolved_query_mode.as_str(),
+            "retrieval_mode": mode,
             "mode": mode,
+            "scope_key": scope_key,
+            "candidate_included": search_plan.includes_tentative_candidates(),
+            "allow_project_scope": false,
+            "allow_org_scope": false,
             "items": items,
             "count": count,
             "truncated": truncated,
-            "degraded_reasons": lookup.degraded_reasons,
-            "scope_bucket": lookup.scope_bucket,
+            "degraded_reasons": degraded_reasons,
+            "scope_bucket": scope_bucket,
+            "lane_counts": lane_counts,
         }),
         warnings: Vec::new(),
         repair_actions: Vec::new(),
-        message: format!("search completed with mode {mode}"),
+        message: format!(
+            "search completed with query_mode {} and retrieval_mode {mode}",
+            search_plan.resolved_query_mode.as_str()
+        ),
     }
 }
 
@@ -5559,6 +6481,31 @@ fn handle_findings(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
 }
 
 fn render_output(parsed: &ParsedArgs, mut response: CommandResponse) -> CliRunResult {
+    if parsed.command == CommandKind::Agent {
+        let stdout = match serde_json::to_string_pretty(&response.data) {
+            Ok(text) => format!("{text}\n"),
+            Err(err) => {
+                return CliRunResult {
+                    exit_code: 1,
+                    stdout: String::new(),
+                    stderr: format!("failed to serialize rr agent output: {err}\n"),
+                };
+            }
+        };
+
+        let mut stderr = String::new();
+        if !response.warnings.is_empty() {
+            stderr.push_str(&response.warnings.join("\n"));
+            stderr.push('\n');
+        }
+
+        return CliRunResult {
+            exit_code: response.outcome.exit_code(),
+            stdout,
+            stderr,
+        };
+    }
+
     if parsed.robot
         && (parsed.robot_format == RobotFormat::Compact || parsed.robot_format == RobotFormat::Toon)
     {
@@ -6218,7 +7165,12 @@ fn compact_data(command: CommandKind, data: Value) -> Value {
         }),
         CommandKind::Search => json!({
             "query": data.get("query").cloned().unwrap_or(Value::Null),
+            "requested_query_mode": data.get("requested_query_mode").cloned().unwrap_or(Value::Null),
+            "resolved_query_mode": data.get("resolved_query_mode").cloned().unwrap_or(Value::Null),
+            "retrieval_mode": data.get("retrieval_mode").cloned().unwrap_or(Value::Null),
             "mode": data.get("mode").cloned().unwrap_or(Value::Null),
+            "scope_bucket": data.get("scope_bucket").cloned().unwrap_or(Value::Null),
+            "candidate_included": data.get("candidate_included").cloned().unwrap_or(Value::Null),
             "count": data.get("count").cloned().unwrap_or(Value::Null),
             "truncated": data.get("truncated").cloned().unwrap_or(Value::Null),
             "items": data
@@ -6233,6 +7185,7 @@ fn compact_data(command: CommandKind, data: Value) -> Value {
                                 "id": item.get("id").cloned().unwrap_or(Value::Null),
                                 "score": item.get("score").cloned().unwrap_or(Value::Null),
                                 "title": item.get("title").cloned().unwrap_or(Value::Null),
+                                "memory_lane": item.get("memory_lane").cloned().unwrap_or(Value::Null),
                             })
                         })
                         .collect::<Vec<_>>()
@@ -6260,7 +7213,7 @@ fn next_id(prefix: &str) -> String {
 }
 
 fn usage_text() -> &'static str {
-    "Usage:\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--repo owner/repo] [--limit <n>] [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--yes|-y] [--dry-run] [--robot]\n  rr bridge export-contracts [--robot]\n  rr bridge verify-contracts [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge install [--extension-id <id>] [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr extension setup [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr extension doctor [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n\nProvider support in 0.1.0:\n  - opencode is the first-class tier-b continuity path; rr resume can reopen and rr return is supported\n  - codex, gemini, and claude are bounded tier-a providers; start/reseed/raw-capture only, no locator reopen or rr return\n  - copilot is planned but not yet a live --provider value\n  - pi-agent is not part of the 0.1.0 live CLI surface\n\nUpdate notes:\n  - default rr update apply prompts for confirmation on interactive TTY\n  - pass --yes|-y for non-interactive apply confirmation; --robot apply requires --yes|-y\n  - --dry-run and --robot without --yes are non-mutating metadata checks\n  - local/unpublished builds fail closed; migration-capable updates are deferred in 0.1.x"
+    "Usage:\n  rr agent <operation> --task-file <path> [--request-file <path>] [--context-file <path>] [--capability-file <path>]\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--query-mode auto|exact_lookup|recall|related_context|candidate_audit|promotion_review] [--repo owner/repo] [--limit <n>] [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--yes|-y] [--dry-run] [--robot]\n  rr bridge export-contracts [--robot]\n  rr bridge verify-contracts [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge install [--extension-id <id>] [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr extension setup [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr extension doctor [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n\nAgent transport:\n  - rr agent is the dedicated in-session worker transport; it is separate from --robot\n  - current live rr agent operations cover context/status/search/finding/artifact reads, advisory clarification or follow-up proposals, and worker.submit_stage_result\n  - rr agent emits rr.agent.response.v1 envelopes over the canonical worker operation response payload instead of reusing the --robot surface\n\nProvider support in 0.1.0:\n  - opencode is the first-class tier-b continuity path; rr resume can reopen and rr return is supported\n  - codex, gemini, and claude are bounded tier-a providers; start/reseed/raw-capture only, no locator reopen or rr return\n  - copilot is planned but not yet a live --provider value\n  - pi-agent is not part of the 0.1.0 live CLI surface\n\nUpdate notes:\n  - default rr update apply prompts for confirmation on interactive TTY\n  - pass --yes|-y for non-interactive apply confirmation; --robot apply requires --yes|-y\n  - --dry-run and --robot without --yes are non-mutating metadata checks\n  - local/unpublished builds fail closed; migration-capable updates are deferred in 0.1.x"
 }
 
 #[cfg(test)]

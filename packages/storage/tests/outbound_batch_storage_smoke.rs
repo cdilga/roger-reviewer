@@ -86,6 +86,8 @@ fn canonical_outbound_batch_storage_round_trips_and_counts_toward_session_overvi
         payload_digest: batch.payload_digest.clone(),
         approval_state: ApprovalState::Approved,
         anchor_digest: "anchor:one".to_owned(),
+        target_locator: "github:owner/repo#42/files#thread-1".to_owned(),
+        body: "Canonical outbound body one".to_owned(),
         row_version: 1,
     };
     let draft_two = OutboundDraft {
@@ -99,6 +101,8 @@ fn canonical_outbound_batch_storage_round_trips_and_counts_toward_session_overvi
         payload_digest: batch.payload_digest.clone(),
         approval_state: ApprovalState::Approved,
         anchor_digest: "anchor:two".to_owned(),
+        target_locator: "github:owner/repo#42/files#thread-2".to_owned(),
+        body: "Canonical outbound body two".to_owned(),
         row_version: 1,
     };
     let approval = OutboundApprovalToken {
@@ -202,6 +206,8 @@ fn canonical_outbound_storage_rejects_binding_drift_fail_closed() -> Result<()> 
         payload_digest: batch.payload_digest.clone(),
         approval_state: ApprovalState::Drafted,
         anchor_digest: "anchor:one".to_owned(),
+        target_locator: "github:owner/repo#42/files#thread-1".to_owned(),
+        body: "Canonical outbound body one".to_owned(),
         row_version: 0,
     };
     wrong_draft.remote_review_target_id = "pr-99".to_owned();
@@ -231,6 +237,28 @@ fn canonical_outbound_storage_rejects_binding_drift_fail_closed() -> Result<()> 
             .to_string()
             .contains("outbound_draft_item_identity"),
         "{draft_identity_err}"
+    );
+
+    let mut relocalized_draft = valid_draft.clone();
+    relocalized_draft.target_locator = "github:owner/repo#42/files#thread-2".to_owned();
+    let locator_identity_err = store
+        .store_outbound_draft_item(&relocalized_draft)
+        .expect_err("same draft id should not silently rewrite target locator");
+    assert!(
+        locator_identity_err
+            .to_string()
+            .contains("target_locator_mismatch"),
+        "{locator_identity_err}"
+    );
+
+    let mut rewritten_body_draft = valid_draft.clone();
+    rewritten_body_draft.body = "Canonical outbound body rewritten".to_owned();
+    let body_identity_err = store
+        .store_outbound_draft_item(&rewritten_body_draft)
+        .expect_err("same draft id should not silently rewrite postable body");
+    assert!(
+        body_identity_err.to_string().contains("body_mismatch"),
+        "{body_identity_err}"
     );
 
     let valid_approval = OutboundApprovalToken {
@@ -329,6 +357,8 @@ fn canonical_outbound_storage_upserts_state_transitions_for_invalidation() -> Re
         payload_digest: batch.payload_digest.clone(),
         approval_state: ApprovalState::Drafted,
         anchor_digest: "anchor:one".to_owned(),
+        target_locator: "github:owner/repo#42/files#thread-1".to_owned(),
+        body: "Canonical outbound body one".to_owned(),
         row_version: 0,
     };
 
@@ -379,6 +409,64 @@ fn canonical_outbound_storage_upserts_state_transitions_for_invalidation() -> Re
             .expect("approval should exist"),
         approval
     );
+
+    Ok(())
+}
+
+#[test]
+fn canonical_drafted_batch_projects_queryable_local_draft_state() -> Result<()> {
+    let temp = tempdir()?;
+    let root = temp.path().join("profile");
+    let store = RogerStore::open(&root)?;
+    seed_review(&store)?;
+
+    let batch = OutboundDraftBatch {
+        id: "batch-drafted".to_owned(),
+        review_session_id: "session-1".to_owned(),
+        review_run_id: "run-1".to_owned(),
+        repo_id: "owner/repo".to_owned(),
+        remote_review_target_id: "pr-42".to_owned(),
+        payload_digest: "sha256:payload-drafted".to_owned(),
+        approval_state: ApprovalState::Drafted,
+        approved_at: None,
+        invalidated_at: None,
+        invalidation_reason_code: None,
+        row_version: 0,
+    };
+    store.store_outbound_draft_batch(&batch)?;
+    store.store_outbound_draft_item(&OutboundDraft {
+        id: "draft-drafted".to_owned(),
+        review_session_id: "session-1".to_owned(),
+        review_run_id: "run-1".to_owned(),
+        finding_id: Some("finding-1".to_owned()),
+        draft_batch_id: batch.id.clone(),
+        repo_id: batch.repo_id.clone(),
+        remote_review_target_id: batch.remote_review_target_id.clone(),
+        payload_digest: batch.payload_digest.clone(),
+        approval_state: ApprovalState::Drafted,
+        anchor_digest: "anchor:drafted".to_owned(),
+        target_locator: "github:owner/repo#42/files#thread-drafted".to_owned(),
+        body: "Canonical outbound body drafted".to_owned(),
+        row_version: 0,
+    })?;
+
+    let projection = store.outbound_surface_projection_for_finding("finding-1", "drafted")?;
+    assert_eq!(projection.state, "awaiting_approval");
+    assert_eq!(projection.source, "canonical_batch");
+    assert_eq!(projection.draft_id.as_deref(), Some("draft-drafted"));
+    assert_eq!(projection.draft_batch_id.as_deref(), Some("batch-drafted"));
+    assert!(projection.approval_id.is_none());
+    assert!(projection.posted_action_id.is_none());
+    assert!(projection.posted_action_status.is_none());
+    assert!(projection.invalidation_reason_code.is_none());
+    assert!(!projection.mutation_elevated);
+
+    let counts = store.outbound_state_counts_for_run("session-1", "run-1")?;
+    assert_eq!(counts.awaiting_approval, 2);
+    assert_eq!(counts.approved, 0);
+    assert_eq!(counts.invalidated, 0);
+    assert_eq!(counts.posted, 0);
+    assert_eq!(counts.failed, 0);
 
     Ok(())
 }
@@ -451,6 +539,8 @@ fn outbound_surface_projection_reconciles_canonical_and_legacy_state_paths() -> 
         payload_digest: approved_batch.payload_digest.clone(),
         approval_state: ApprovalState::Approved,
         anchor_digest: "anchor:approved".to_owned(),
+        target_locator: "github:owner/repo#42/files#thread-2".to_owned(),
+        body: "Approved canonical outbound body".to_owned(),
         row_version: 1,
     })?;
     store.store_outbound_approval_token(&OutboundApprovalToken {
@@ -487,6 +577,8 @@ fn outbound_surface_projection_reconciles_canonical_and_legacy_state_paths() -> 
         payload_digest: invalidated_batch.payload_digest.clone(),
         approval_state: ApprovalState::Invalidated,
         anchor_digest: "anchor:invalidated".to_owned(),
+        target_locator: "github:owner/repo#42/files#thread-3".to_owned(),
+        body: "Invalidated canonical outbound body".to_owned(),
         row_version: 2,
     })?;
 
@@ -537,6 +629,8 @@ fn outbound_surface_projection_reconciles_canonical_and_legacy_state_paths() -> 
         payload_digest: failed_batch.payload_digest.clone(),
         approval_state: ApprovalState::Approved,
         anchor_digest: "anchor:failed".to_owned(),
+        target_locator: "github:owner/repo#42/files#thread-5".to_owned(),
+        body: "Failed canonical outbound body".to_owned(),
         row_version: 1,
     })?;
     store.store_posted_batch_action(&PostedAction {
@@ -557,20 +651,17 @@ fn outbound_surface_projection_reconciles_canonical_and_legacy_state_paths() -> 
     assert_eq!(counts.posted, 1);
     assert_eq!(counts.failed, 1);
 
-    let awaiting =
-        store.outbound_surface_projection_for_finding("finding-1", "drafted")?;
+    let awaiting = store.outbound_surface_projection_for_finding("finding-1", "drafted")?;
     assert_eq!(awaiting.state, "awaiting_approval");
     assert_eq!(awaiting.source, "legacy_draft");
     assert!(!awaiting.mutation_elevated);
 
-    let approved =
-        store.outbound_surface_projection_for_finding("finding-2", "approved")?;
+    let approved = store.outbound_surface_projection_for_finding("finding-2", "approved")?;
     assert_eq!(approved.state, "approved");
     assert_eq!(approved.source, "canonical_batch");
     assert!(approved.mutation_elevated);
 
-    let invalidated =
-        store.outbound_surface_projection_for_finding("finding-3", "drafted")?;
+    let invalidated = store.outbound_surface_projection_for_finding("finding-3", "drafted")?;
     assert_eq!(invalidated.state, "invalidated");
     assert_eq!(
         invalidated.invalidation_reason_code.as_deref(),

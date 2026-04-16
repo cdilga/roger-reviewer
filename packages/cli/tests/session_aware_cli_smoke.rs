@@ -15,7 +15,7 @@ use roger_cli::{CliRuntime, HarnessCommandInvocation, run, run_harness_command};
 use roger_session_opencode::OpenCodeAdapter;
 use roger_storage::{
     ArtifactBudgetClass, CreateMaterializedFinding, CreateReviewRun, CreateReviewSession,
-    CreateSessionLaunchBinding, LaunchAttemptState, LaunchSurface, RogerStore,
+    CreateSessionLaunchBinding, LaunchAttemptState, LaunchSurface, RogerStore, UpsertMemoryItem,
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -170,6 +170,54 @@ fn seed_rr_agent_session(runtime: &CliRuntime, task: &ReviewTask) {
             session_locator_artifact_id: None,
         })
         .expect("create review run");
+}
+
+fn seed_prior_review_lookup_records(
+    store: &RogerStore,
+    session_id: &str,
+    review_run_id: &str,
+    repository: &str,
+) {
+    let scope_key = format!("repo:{repository}");
+    store
+        .upsert_materialized_finding(CreateMaterializedFinding {
+            id: "finding-search-1",
+            session_id,
+            review_run_id,
+            stage: "deep_review",
+            fingerprint: "fp:approval-refresh",
+            title: "Approval token survives stale refresh",
+            normalized_summary: "approval token stale refresh should gate posting",
+            severity: "high",
+            confidence: "high",
+            triage_state: "accepted",
+            outbound_state: "drafted",
+        })
+        .expect("seed materialized finding");
+    store
+        .upsert_memory_item(UpsertMemoryItem {
+            id: "memory-promoted-1",
+            scope_key: &scope_key,
+            memory_class: "procedural",
+            state: "proven",
+            statement: "approval refresh should reconfirm posting safety",
+            normalized_key: "approval refresh reconfirm posting safety",
+            anchor_digest: Some("anchor:approval-refresh"),
+            source_kind: "manual",
+        })
+        .expect("seed promoted memory");
+    store
+        .upsert_memory_item(UpsertMemoryItem {
+            id: "memory-candidate-1",
+            scope_key: &scope_key,
+            memory_class: "semantic",
+            state: "candidate",
+            statement: "approval token stale refresh might need operator triage",
+            normalized_key: "approval token stale refresh operator triage",
+            anchor_digest: None,
+            source_kind: "manual",
+        })
+        .expect("seed candidate memory");
 }
 
 fn sample_launch_intent(action: LaunchAction) -> LaunchIntent {
@@ -2153,8 +2201,8 @@ fn search_reports_truthful_degraded_mode_and_stable_robot_fields() {
     assert_eq!(payload["data"]["query"], "stale draft");
     assert_eq!(payload["data"]["requested_query_mode"], "auto");
     assert_eq!(payload["data"]["resolved_query_mode"], "recall");
-    assert_eq!(payload["data"]["retrieval_mode"], "lexical_only");
-    assert_eq!(payload["data"]["mode"], "lexical_only");
+    assert_eq!(payload["data"]["retrieval_mode"], "recovery_scan");
+    assert_eq!(payload["data"]["mode"], "recovery_scan");
     assert_eq!(payload["data"]["candidate_included"], false);
     assert!(payload["data"]["items"].is_array());
     assert!(payload["data"]["count"].is_number());
@@ -2187,7 +2235,7 @@ fn search_reports_truthful_degraded_mode_and_stable_robot_fields() {
     assert_eq!(compact_payload["robot_format"], "compact");
     assert_eq!(compact_payload["data"]["requested_query_mode"], "auto");
     assert_eq!(compact_payload["data"]["resolved_query_mode"], "recall");
-    assert_eq!(compact_payload["data"]["retrieval_mode"], "lexical_only");
+    assert_eq!(compact_payload["data"]["retrieval_mode"], "recovery_scan");
     assert!(compact_payload["data"]["items"].is_array());
 }
 
@@ -2212,7 +2260,7 @@ fn search_resolves_auto_to_exact_lookup_and_blocks_anchor_free_related_context()
     assert_eq!(exact_payload["outcome"], "degraded");
     assert_eq!(exact_payload["data"]["requested_query_mode"], "auto");
     assert_eq!(exact_payload["data"]["resolved_query_mode"], "exact_lookup");
-    assert_eq!(exact_payload["data"]["retrieval_mode"], "lexical_only");
+    assert_eq!(exact_payload["data"]["retrieval_mode"], "recovery_scan");
 
     let blocked = run_rr(
         &[
@@ -2235,6 +2283,133 @@ fn search_resolves_auto_to_exact_lookup_and_blocks_anchor_free_related_context()
     assert_eq!(
         blocked_payload["data"]["requested_query_mode"],
         "related_context"
+    );
+}
+
+#[test]
+fn search_projects_canonical_recall_truth_for_seeded_hits() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let target = sample_target(42);
+    let store = RogerStore::open(&runtime.store_root).expect("open store");
+    store
+        .create_review_session(CreateReviewSession {
+            id: "session-search-1",
+            review_target: &target,
+            provider: "opencode",
+            session_locator: None,
+            resume_bundle_artifact_id: None,
+            continuity_state: "awaiting_resume",
+            attention_state: "awaiting_user_input",
+            launch_profile_id: Some("profile-open-pr"),
+        })
+        .expect("create review session");
+    store
+        .create_review_run(CreateReviewRun {
+            id: "run-search-1",
+            session_id: "session-search-1",
+            run_kind: "deep_review",
+            repo_snapshot: "{\"head\":\"bbb\"}",
+            continuity_quality: "usable",
+            session_locator_artifact_id: None,
+        })
+        .expect("create review run");
+    seed_prior_review_lookup_records(&store, "session-search-1", "run-search-1", "owner/repo");
+
+    let search = run_rr(
+        &[
+            "search",
+            "--query",
+            "approval refresh",
+            "--query-mode",
+            "candidate_audit",
+            "--robot",
+        ],
+        &runtime,
+    );
+    assert_eq!(search.exit_code, 5, "{}", search.stderr);
+    let payload = parse_robot_payload(&search.stdout);
+    assert_eq!(payload["schema_id"], "rr.robot.search.v1");
+    assert_eq!(payload["outcome"], "degraded");
+    assert_eq!(payload["data"]["requested_query_mode"], "candidate_audit");
+    assert_eq!(payload["data"]["resolved_query_mode"], "candidate_audit");
+    assert_eq!(payload["data"]["retrieval_mode"], "recovery_scan");
+    assert_eq!(payload["data"]["candidate_included"], true);
+
+    let items = payload["data"]["items"].as_array().expect("search items");
+    let scope_bucket = payload["data"]["scope_bucket"].clone();
+    let promoted = items
+        .iter()
+        .find(|item| item["kind"] == "promoted_memory")
+        .expect("promoted memory item");
+    assert_eq!(promoted["memory_lane"], "promoted_memory");
+    assert_eq!(promoted["scope_bucket"], scope_bucket);
+    assert_eq!(promoted["citation_posture"], "cite_allowed");
+    assert_eq!(promoted["surface_posture"], "ordinary");
+    assert_eq!(promoted["locator"]["state"], "proven");
+    assert!(
+        promoted["explain_summary"]
+            .as_str()
+            .expect("promoted explain summary")
+            .contains("retrieval_mode recovery_scan")
+    );
+
+    let candidate = items
+        .iter()
+        .find(|item| item["kind"] == "candidate_memory")
+        .expect("candidate memory item");
+    assert_eq!(candidate["memory_lane"], "tentative_candidates");
+    assert_eq!(candidate["scope_bucket"], scope_bucket);
+    assert_eq!(candidate["citation_posture"], "inspect_only");
+    assert_eq!(candidate["surface_posture"], "candidate_review");
+    assert_eq!(candidate["locator"]["state"], "candidate");
+    assert!(
+        candidate["explain_summary"]
+            .as_str()
+            .expect("candidate explain summary")
+            .contains("candidate_review")
+    );
+
+    let evidence = items
+        .iter()
+        .find(|item| item["kind"] == "evidence_finding")
+        .expect("evidence finding item");
+    assert_eq!(evidence["memory_lane"], "evidence_hits");
+    assert_eq!(evidence["scope_bucket"], scope_bucket);
+    assert_eq!(evidence["citation_posture"], "cite_allowed");
+    assert_eq!(evidence["surface_posture"], "ordinary");
+    assert_eq!(evidence["locator"]["repository"], "owner/repo");
+    assert!(payload["data"]["lane_counts"]["tentative_candidates"].as_u64() >= Some(1));
+}
+
+#[test]
+fn search_help_mentions_explicit_planner_modes() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let help = run_rr(&["--help"], &runtime);
+    assert_eq!(help.exit_code, 0, "{}", help.stderr);
+    assert!(
+        help.stdout.contains(
+            "rr search --query <text> [--query-mode auto|exact_lookup|recall|related_context|candidate_audit|promotion_review]"
+        ),
+        "{}",
+        help.stdout
     );
 }
 #[test]
@@ -2979,6 +3154,12 @@ fn rr_agent_supports_search_artifact_and_advisory_operations() {
     seed_rr_agent_session(&runtime, &task);
 
     let store = RogerStore::open(&runtime.store_root).expect("open store");
+    seed_prior_review_lookup_records(
+        &store,
+        &task.review_session_id,
+        &task.review_run_id,
+        "owner/repo",
+    );
     let artifact = store
         .store_artifact(
             "artifact-rr-agent-1",
@@ -2996,7 +3177,7 @@ fn rr_agent_supports_search_artifact_and_advisory_operations() {
             "worker.search_memory",
             Some(json!({
                 "query_text": "approval token stale refresh",
-                "query_mode": "recall"
+                "query_mode": "candidate_audit"
             })),
         ),
     );
@@ -3022,12 +3203,31 @@ fn rr_agent_supports_search_artifact_and_advisory_operations() {
     );
     assert_eq!(
         search_operation["payload"]["requested_query_mode"],
-        "recall"
+        "candidate_audit"
     );
-    assert_eq!(search_operation["payload"]["resolved_query_mode"], "recall");
+    assert_eq!(
+        search_operation["payload"]["resolved_query_mode"],
+        "candidate_audit"
+    );
     assert!(search_operation["payload"]["promoted_memory"].is_array());
     assert!(search_operation["payload"]["tentative_candidates"].is_array());
     assert!(search_operation["payload"]["evidence_hits"].is_array());
+    assert_eq!(
+        search_operation["payload"]["promoted_memory"][0]["citation_posture"],
+        "cite_allowed"
+    );
+    assert_eq!(
+        search_operation["payload"]["tentative_candidates"][0]["citation_posture"],
+        "inspect_only"
+    );
+    assert_eq!(
+        search_operation["payload"]["tentative_candidates"][0]["surface_posture"],
+        "candidate_review"
+    );
+    assert_eq!(
+        search_operation["payload"]["evidence_hits"][0]["memory_lane"],
+        "evidence_hits"
+    );
 
     let artifact_request_path = temp.path().join("worker-artifact-request.json");
     write_json_fixture(
