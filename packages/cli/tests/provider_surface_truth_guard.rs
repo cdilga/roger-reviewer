@@ -9,19 +9,6 @@ use tempfile::tempdir;
 const LIVE_PROVIDERS: &[&str] = &["opencode", "codex", "gemini", "claude"];
 const PLANNED_NOT_LIVE_PROVIDERS: &[&str] = &["copilot"];
 const NOT_SUPPORTED_PROVIDERS: &[&str] = &["pi-agent"];
-const LIVE_AGENT_OPERATIONS: &[&str] = &[
-    "worker.get_review_context",
-    "worker.search_memory",
-    "worker.get_status",
-    "worker.list_findings",
-    "worker.get_finding_detail",
-    "worker.get_artifact_excerpt",
-    "worker.request_clarification",
-    "worker.request_memory_review",
-    "worker.propose_follow_up",
-    "worker.submit_stage_result",
-];
-
 const OPENCODE_NOTE: &str = "first-class tier-b continuity path with locator reopen and rr return";
 const BOUNDED_PROVIDER_NOTE: &str =
     "bounded tier-a start/reseed/raw-capture path only; no locator reopen or rr return";
@@ -75,28 +62,6 @@ fn assert_provider_entry(
     assert_eq!(entry["supports"]["resume_reopen"], resume_reopen);
     assert_eq!(entry["supports"]["return"], rr_return);
     assert_eq!(entry["notes"], notes);
-}
-
-fn assert_string_array_matches(actual: &Value, expected: &[&str], context: &str) {
-    assert!(actual.is_array(), "{context} should be an array");
-    let mut actual_items = actual
-        .as_array()
-        .expect("array should exist after shape assertion")
-        .iter()
-        .map(|item| {
-            assert!(item.is_string(), "{context} should contain only strings");
-            item.as_str()
-                .expect("string should exist after element-type assertion")
-                .to_owned()
-        })
-        .collect::<Vec<_>>();
-    let mut expected_items = expected
-        .iter()
-        .map(|item| (*item).to_owned())
-        .collect::<Vec<_>>();
-    actual_items.sort();
-    expected_items.sort();
-    assert_eq!(actual_items, expected_items, "{context}");
 }
 
 #[test]
@@ -247,14 +212,9 @@ fn provider_support_truth_guard_matches_live_cli_help_and_docs() {
         inside_roger["finding_return_contract"]["canonical_transport"],
         "rr agent worker.submit_stage_result"
     );
-    assert_string_array_matches(
-        &inside_roger["finding_return_contract"]["supported_operations"],
-        LIVE_AGENT_OPERATIONS,
-        "inside Roger supported_operations",
-    );
     assert_eq!(
         inside_roger["finding_return_contract"]["availability"],
-        "live dedicated worker transport for bound context/status/search/finding/artifact reads plus advisory worker proposals and stage-result submission; separate from the --robot command shortlist"
+        "canonical worker contract; separate from the --robot command shortlist and not implied to be shipped by this discovery item alone"
     );
     assert_eq!(
         inside_roger["finding_return_contract"]["binding_fields"],
@@ -264,6 +224,31 @@ fn provider_support_truth_guard_matches_live_cli_help_and_docs() {
             "review_task_id",
             "task_nonce"
         ])
+    );
+    assert_eq!(
+        inside_roger["finding_return_contract"]["result_fields"],
+        json!([
+            "schema_id",
+            "stage",
+            "task_kind",
+            "outcome",
+            "summary",
+            "structured_findings_pack"
+        ])
+    );
+    assert_eq!(
+        inside_roger["finding_return_contract"]["finding_pack"],
+        json!({
+            "schema_version": "structured_findings_pack/v1",
+            "finding_fields": [
+                "fingerprint",
+                "title",
+                "normalized_summary",
+                "severity",
+                "confidence",
+                "code_evidence"
+            ]
+        })
     );
 
     let commands = run(
@@ -292,17 +277,12 @@ fn provider_support_truth_guard_matches_live_cli_help_and_docs() {
         review_dry_run["not_supported_providers"],
         json!(NOT_SUPPORTED_PROVIDERS)
     );
-    let agent_command = command_items
-        .iter()
-        .find(|item| item["command"] == "rr agent <operation>")
-        .expect("rr agent command docs item");
-    assert_string_array_matches(
-        &agent_command["supported_operations"],
-        LIVE_AGENT_OPERATIONS,
-        "rr agent command supported_operations",
+    assert!(
+        command_items
+            .iter()
+            .all(|item| item["command"] != "rr agent" && item["command"] != "rr agent <operation>"),
+        "rr agent should remain outside the --robot command inventory"
     );
-    assert_eq!(agent_command["surface"], "dedicated_worker_transport");
-    assert_eq!(agent_command["separate_from_robot"], true);
 
     let schemas = run(
         &[
