@@ -1717,6 +1717,8 @@ fn status_and_findings_surface_outbound_approval_states_truthfully() {
             payload_digest: approved_batch.payload_digest.clone(),
             approval_state: ApprovalState::Approved,
             anchor_digest: "anchor:approved".to_owned(),
+            target_locator: "github:owner/repo#42/files#thread-approved".to_owned(),
+            body: "Approved canonical outbound body".to_owned(),
             row_version: 1,
         })
         .expect("store approved draft item");
@@ -1759,6 +1761,8 @@ fn status_and_findings_surface_outbound_approval_states_truthfully() {
             payload_digest: invalidated_batch.payload_digest.clone(),
             approval_state: ApprovalState::Invalidated,
             anchor_digest: "anchor:invalidated".to_owned(),
+            target_locator: "github:owner/repo#42/files#thread-invalidated".to_owned(),
+            body: "Invalidated canonical outbound body".to_owned(),
             row_version: 2,
         })
         .expect("store invalidated draft item");
@@ -1819,6 +1823,8 @@ fn status_and_findings_surface_outbound_approval_states_truthfully() {
             payload_digest: failed_batch.payload_digest.clone(),
             approval_state: ApprovalState::Approved,
             anchor_digest: "anchor:failed".to_owned(),
+            target_locator: "github:owner/repo#42/files#thread-failed".to_owned(),
+            body: "Failed canonical outbound body".to_owned(),
             row_version: 1,
         })
         .expect("store failed draft item");
