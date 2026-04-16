@@ -408,8 +408,10 @@ dependencies = [
 name = "roger-test-harness"
 version = "0.1.0"
 dependencies = [
+ "roger-bridge",
  "serde",
  "serde_json",
+ "tempfile",
  "toml",
 ]
 

@@ -1,8 +1,12 @@
+use roger_bridge::{BridgeLaunchPath, required_launch_artifacts};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt::{Display, Formatter};
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -308,6 +312,288 @@ pub fn artifact_dir(
     root.as_ref()
         .join(suite.tier.artifact_subdir())
         .join(&suite.id)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserHarnessRuntime {
+    DeterministicChromium,
+    ChromeSmoke,
+    BraveSmoke,
+    EdgeSmoke,
+}
+
+impl BrowserHarnessRuntime {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DeterministicChromium => "deterministic_chromium",
+            Self::ChromeSmoke => "chrome_smoke",
+            Self::BraveSmoke => "brave_smoke",
+            Self::EdgeSmoke => "edge_smoke",
+        }
+    }
+
+    pub fn is_deterministic(self) -> bool {
+        matches!(self, Self::DeterministicChromium)
+    }
+
+    pub fn evidence_class(self) -> &'static str {
+        if self.is_deterministic() {
+            "canonical_automation"
+        } else {
+            "branded_browser_smoke"
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "deterministic_chromium" => Ok(Self::DeterministicChromium),
+            "chrome_smoke" => Ok(Self::ChromeSmoke),
+            "brave_smoke" => Ok(Self::BraveSmoke),
+            "edge_smoke" => Ok(Self::EdgeSmoke),
+            other => Err(format!("unsupported browser harness runtime: {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserHarnessArtifacts {
+    pub run_root: PathBuf,
+    pub user_data_dir: PathBuf,
+    pub report_path: PathBuf,
+    pub launch_command_path: PathBuf,
+    pub browser_launch_transcript_path: PathBuf,
+    pub browser_repair_transcript_path: PathBuf,
+    pub native_request_envelope_path: PathBuf,
+    pub native_response_envelope_path: PathBuf,
+    pub bridge_launch_transcript_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserHarnessOutcome {
+    Launched,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserHarnessReport {
+    pub outcome: BrowserHarnessOutcome,
+    pub runtime: BrowserHarnessRuntime,
+    pub runtime_label: String,
+    pub evidence_class: String,
+    pub browser_binary: PathBuf,
+    pub extension_dir: PathBuf,
+    pub start_url: String,
+    pub startup_probe_ms: u64,
+    pub startup_state: String,
+    pub reason_code: Option<String>,
+    pub repair_guidance: Option<String>,
+    pub launch_args: Vec<String>,
+    pub artifacts: BrowserHarnessArtifacts,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserHarnessConfig {
+    pub browser_binary: PathBuf,
+    pub extension_dir: PathBuf,
+    pub artifact_root: PathBuf,
+    pub start_url: String,
+    pub runtime: BrowserHarnessRuntime,
+    pub startup_probe_ms: u64,
+}
+
+pub fn browser_harness_artifacts(root: impl AsRef<Path>) -> BrowserHarnessArtifacts {
+    let root = root.as_ref().to_path_buf();
+    let native_artifacts = required_launch_artifacts(BridgeLaunchPath::NativeMessaging);
+    BrowserHarnessArtifacts {
+        run_root: root.clone(),
+        user_data_dir: root.join("user-data-dir"),
+        report_path: root.join("browser_harness_report.json"),
+        launch_command_path: root.join("browser_launch_command.json"),
+        browser_launch_transcript_path: root.join("browser_launch_transcript.log"),
+        browser_repair_transcript_path: root.join("browser_repair_transcript.json"),
+        native_request_envelope_path: root.join(native_artifacts[0]),
+        native_response_envelope_path: root.join(native_artifacts[1]),
+        bridge_launch_transcript_path: root.join(native_artifacts[2]),
+    }
+}
+
+fn deterministic_browser_launch_args(
+    extension_dir: &Path,
+    user_data_dir: &Path,
+    start_url: &str,
+) -> Vec<String> {
+    vec![
+        "--no-first-run".to_owned(),
+        "--no-default-browser-check".to_owned(),
+        format!("--user-data-dir={}", user_data_dir.display()),
+        format!("--disable-extensions-except={}", extension_dir.display()),
+        format!("--load-extension={}", extension_dir.display()),
+        "--remote-debugging-port=0".to_owned(),
+        start_url.to_owned(),
+    ]
+}
+
+fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(|err| err.to_string())?;
+    fs::write(path, bytes).map_err(|err| err.to_string())
+}
+
+fn blocked_browser_harness_report(
+    config: &BrowserHarnessConfig,
+    artifacts: &BrowserHarnessArtifacts,
+    launch_args: Vec<String>,
+    startup_state: &str,
+    reason_code: &str,
+    repair_guidance: String,
+) -> Result<BrowserHarnessReport, String> {
+    let repair_payload = serde_json::json!({
+        "runtime": config.runtime,
+        "runtime_label": config.runtime.label(),
+        "startup_state": startup_state,
+        "reason_code": reason_code,
+        "repair_guidance": repair_guidance,
+        "browser_binary": config.browser_binary,
+        "extension_dir": config.extension_dir,
+        "native_request_envelope_path": artifacts.native_request_envelope_path,
+        "native_response_envelope_path": artifacts.native_response_envelope_path,
+        "bridge_launch_transcript_path": artifacts.bridge_launch_transcript_path,
+    });
+    write_json(&artifacts.browser_repair_transcript_path, &repair_payload)?;
+
+    let report = BrowserHarnessReport {
+        outcome: BrowserHarnessOutcome::Blocked,
+        runtime: config.runtime,
+        runtime_label: config.runtime.label().to_owned(),
+        evidence_class: config.runtime.evidence_class().to_owned(),
+        browser_binary: config.browser_binary.clone(),
+        extension_dir: config.extension_dir.clone(),
+        start_url: config.start_url.clone(),
+        startup_probe_ms: config.startup_probe_ms,
+        startup_state: startup_state.to_owned(),
+        reason_code: Some(reason_code.to_owned()),
+        repair_guidance: Some(repair_guidance),
+        launch_args,
+        artifacts: artifacts.clone(),
+    };
+    write_json(&artifacts.report_path, &report)?;
+    Ok(report)
+}
+
+pub fn run_browser_harness(config: &BrowserHarnessConfig) -> Result<BrowserHarnessReport, String> {
+    fs::create_dir_all(&config.artifact_root).map_err(|err| err.to_string())?;
+    let artifacts = browser_harness_artifacts(&config.artifact_root);
+    fs::create_dir_all(&artifacts.user_data_dir).map_err(|err| err.to_string())?;
+
+    let launch_args = deterministic_browser_launch_args(
+        &config.extension_dir,
+        &artifacts.user_data_dir,
+        &config.start_url,
+    );
+    let launch_command = serde_json::json!({
+        "runtime": config.runtime,
+        "runtime_label": config.runtime.label(),
+        "evidence_class": config.runtime.evidence_class(),
+        "browser_binary": config.browser_binary,
+        "extension_dir": config.extension_dir,
+        "start_url": config.start_url,
+        "startup_probe_ms": config.startup_probe_ms,
+        "launch_args": launch_args,
+        "artifacts": artifacts,
+    });
+    write_json(&artifacts.launch_command_path, &launch_command)?;
+
+    if !config.browser_binary.is_file() {
+        return blocked_browser_harness_report(
+            config,
+            &artifacts,
+            launch_args,
+            "preflight_failed",
+            "browser_binary_missing",
+            format!(
+                "deterministic browser harness could not find the configured browser binary at {}",
+                config.browser_binary.display()
+            ),
+        );
+    }
+
+    let manifest_path = config.extension_dir.join("manifest.json");
+    if !manifest_path.is_file() {
+        return blocked_browser_harness_report(
+            config,
+            &artifacts,
+            launch_args,
+            "preflight_failed",
+            "extension_manifest_missing",
+            format!(
+                "browser harness requires an unpacked extension with manifest.json at {}; prepare the unpacked Roger extension artifact first",
+                manifest_path.display()
+            ),
+        );
+    }
+
+    let transcript_file =
+        File::create(&artifacts.browser_launch_transcript_path).map_err(|err| err.to_string())?;
+    let transcript_stderr = transcript_file.try_clone().map_err(|err| err.to_string())?;
+    let mut child = match Command::new(&config.browser_binary)
+        .args(&launch_args)
+        .stdout(Stdio::from(transcript_file))
+        .stderr(Stdio::from(transcript_stderr))
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => {
+            return blocked_browser_harness_report(
+                config,
+                &artifacts,
+                launch_args,
+                "spawn_failed",
+                "browser_spawn_failed",
+                format!("failed to spawn deterministic browser runtime: {err}"),
+            );
+        }
+    };
+
+    thread::sleep(Duration::from_millis(config.startup_probe_ms));
+    let startup_state = match child.try_wait().map_err(|err| err.to_string())? {
+        Some(status) if status.success() => "exited_cleanly".to_owned(),
+        Some(status) => {
+            return blocked_browser_harness_report(
+                config,
+                &artifacts,
+                launch_args,
+                "process_exited_nonzero",
+                "browser_startup_failed",
+                format!(
+                    "deterministic browser runtime exited non-zero during startup probe: {status}"
+                ),
+            );
+        }
+        None => {
+            child.kill().map_err(|err| err.to_string())?;
+            let _ = child.wait().map_err(|err| err.to_string())?;
+            "running_after_probe".to_owned()
+        }
+    };
+
+    let report = BrowserHarnessReport {
+        outcome: BrowserHarnessOutcome::Launched,
+        runtime: config.runtime,
+        runtime_label: config.runtime.label().to_owned(),
+        evidence_class: config.runtime.evidence_class().to_owned(),
+        browser_binary: config.browser_binary.clone(),
+        extension_dir: config.extension_dir.clone(),
+        start_url: config.start_url.clone(),
+        startup_probe_ms: config.startup_probe_ms,
+        startup_state,
+        reason_code: None,
+        repair_guidance: None,
+        launch_args,
+        artifacts,
+    };
+    write_json(&report.artifacts.report_path, &report)?;
+    Ok(report)
 }
 
 pub fn evaluate_e2e_budget(policy: &E2eBudgetPolicy, suites: &[SuiteMetadata]) -> BudgetReport {
