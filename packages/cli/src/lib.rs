@@ -31,6 +31,7 @@ use roger_storage::{
     CreateLaunchAttempt, CreateReviewRun, CreateReviewSession, CreateSessionLaunchBinding,
     FinalizeReviewLaunchAttempt, LaunchAttemptAction, LaunchAttemptState, LaunchSurface,
     PriorReviewLookupQuery, PriorReviewRetrievalMode, ResolveSessionLaunchBinding,
+    ResolveSessionLocalRoot,
     ResolveSessionReentry, ReviewLaunchFinalizationError, RogerStore, SessionBindingResolution,
     SessionFinderEntry, SessionFinderQuery, SessionLaunchBindingRecord, SessionReentryResolution,
     StorageLayout, UpdateLaunchAttempt,
@@ -3228,6 +3229,7 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         return error_response(err);
     }
 
+    let binding_context = LaunchBindingContext::for_cwd(&runtime.cwd);
     let intent = launch_intent(LaunchAction::StartReview, runtime);
     let record_failure = |state: LaunchAttemptState, reason: &str| {
         persist_launch_attempt_state(
@@ -3555,8 +3557,8 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             launch_profile_id: Some(cli_config::PROFILE_ID),
             ui_target: Some(cli_config::UI_TARGET),
             instance_preference: Some(cli_config::INSTANCE_PREFERENCE),
-            cwd: Some(runtime.cwd.to_string_lossy().as_ref()),
-            worktree_root: None,
+            cwd: Some(binding_context.cwd.as_str()),
+            worktree_root: binding_context.worktree_root.as_deref(),
         },
     }) {
         let detail = format!("failed to finalize review launch: {err}");
@@ -3676,6 +3678,7 @@ fn infer_strongest_reentry_selection(
     candidates: &[SessionFinderEntry],
     requested_pull_request: Option<u64>,
     source_surface: LaunchSurface,
+    local_root: ResolveSessionLocalRoot<'_>,
     ui_target: Option<&str>,
     instance_preference: Option<&str>,
 ) -> std::result::Result<
@@ -3699,14 +3702,17 @@ fn infer_strongest_reentry_selection(
         };
 
         let binding_resolution = store
-            .resolve_session_launch_binding(ResolveSessionLaunchBinding {
-                explicit_session_id: Some(&session.id),
-                surface: source_surface,
-                repo_locator: &session.review_target.repository,
-                review_target: Some(&session.review_target),
-                ui_target,
-                instance_preference,
-            })
+            .resolve_session_launch_binding_with_context(
+                ResolveSessionLaunchBinding {
+                    explicit_session_id: Some(&session.id),
+                    surface: source_surface,
+                    repo_locator: &session.review_target.repository,
+                    review_target: Some(&session.review_target),
+                    ui_target,
+                    instance_preference,
+                },
+                local_root,
+            )
             .map_err(|err| format!("failed to resolve launch binding for {}: {err}", session.id))?;
 
         let (binding_quality_rank, binding) = match binding_resolution {
@@ -3755,15 +3761,19 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         Err(err) => return error_response(format!("failed to open Roger store: {err}")),
     };
 
+    let binding_context = LaunchBindingContext::for_cwd(&runtime.cwd);
     let repository = resolve_repository(parsed.repo.clone(), &runtime.cwd);
-    let resolution = match store.resolve_session_reentry(ResolveSessionReentry {
-        explicit_session_id: parsed.session_id.clone(),
-        repository,
-        pull_request_number: parsed.pr,
-        source_surface: LaunchSurface::Cli,
-        ui_target: Some(cli_config::UI_TARGET.to_owned()),
-        instance_preference: Some(cli_config::INSTANCE_PREFERENCE.to_owned()),
-    }) {
+    let resolution = match store.resolve_session_reentry_with_context(
+        ResolveSessionReentry {
+            explicit_session_id: parsed.session_id.clone(),
+            repository,
+            pull_request_number: parsed.pr,
+            source_surface: LaunchSurface::Cli,
+            ui_target: Some(cli_config::UI_TARGET.to_owned()),
+            instance_preference: Some(cli_config::INSTANCE_PREFERENCE.to_owned()),
+        },
+        binding_context.storage_local_root(),
+    ) {
         Ok(resolution) => resolution,
         Err(err) => return error_response(format!("failed to resolve session re-entry: {err}")),
     };
@@ -3781,6 +3791,7 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 &candidates,
                 parsed.pr,
                 LaunchSurface::Cli,
+                binding_context.storage_local_root(),
                 Some(cli_config::UI_TARGET),
                 Some(cli_config::INSTANCE_PREFERENCE),
             ) {
@@ -4180,15 +4191,19 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         Err(err) => return error_response(format!("failed to open Roger store: {err}")),
     };
 
+    let binding_context = LaunchBindingContext::for_cwd(&runtime.cwd);
     let repository = resolve_repository(parsed.repo.clone(), &runtime.cwd);
-    let resolution = match store.resolve_session_reentry(ResolveSessionReentry {
-        explicit_session_id: parsed.session_id.clone(),
-        repository,
-        pull_request_number: parsed.pr,
-        source_surface: LaunchSurface::Cli,
-        ui_target: Some(cli_config::UI_TARGET.to_owned()),
-        instance_preference: Some(cli_config::INSTANCE_PREFERENCE.to_owned()),
-    }) {
+    let resolution = match store.resolve_session_reentry_with_context(
+        ResolveSessionReentry {
+            explicit_session_id: parsed.session_id.clone(),
+            repository,
+            pull_request_number: parsed.pr,
+            source_surface: LaunchSurface::Cli,
+            ui_target: Some(cli_config::UI_TARGET.to_owned()),
+            instance_preference: Some(cli_config::INSTANCE_PREFERENCE.to_owned()),
+        },
+        binding_context.storage_local_root(),
+    ) {
         Ok(resolution) => resolution,
         Err(err) => {
             return error_response(format!("failed to resolve session for rr return: {err}"));
@@ -6199,15 +6214,19 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         Err(err) => return error_response(format!("failed to open Roger store: {err}")),
     };
 
+    let binding_context = LaunchBindingContext::for_cwd(&runtime.cwd);
     let repository = resolve_repository(parsed.repo.clone(), &runtime.cwd);
-    let resolution = match store.resolve_session_reentry(ResolveSessionReentry {
-        explicit_session_id: parsed.session_id.clone(),
-        repository,
-        pull_request_number: parsed.pr,
-        source_surface: LaunchSurface::Cli,
-        ui_target: Some(cli_config::UI_TARGET.to_owned()),
-        instance_preference: Some(cli_config::INSTANCE_PREFERENCE.to_owned()),
-    }) {
+    let resolution = match store.resolve_session_reentry_with_context(
+        ResolveSessionReentry {
+            explicit_session_id: parsed.session_id.clone(),
+            repository,
+            pull_request_number: parsed.pr,
+            source_surface: LaunchSurface::Cli,
+            ui_target: Some(cli_config::UI_TARGET.to_owned()),
+            instance_preference: Some(cli_config::INSTANCE_PREFERENCE.to_owned()),
+        },
+        binding_context.storage_local_root(),
+    ) {
         Ok(resolution) => resolution,
         Err(err) => return error_response(format!("failed to resolve status context: {err}")),
     };
@@ -6350,15 +6369,19 @@ fn handle_findings(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
         Err(err) => return error_response(format!("failed to open Roger store: {err}")),
     };
 
+    let binding_context = LaunchBindingContext::for_cwd(&runtime.cwd);
     let repository = resolve_repository(parsed.repo.clone(), &runtime.cwd);
-    let resolution = match store.resolve_session_reentry(ResolveSessionReentry {
-        explicit_session_id: parsed.session_id.clone(),
-        repository,
-        pull_request_number: parsed.pr,
-        source_surface: LaunchSurface::Cli,
-        ui_target: Some(cli_config::UI_TARGET.to_owned()),
-        instance_preference: Some(cli_config::INSTANCE_PREFERENCE.to_owned()),
-    }) {
+    let resolution = match store.resolve_session_reentry_with_context(
+        ResolveSessionReentry {
+            explicit_session_id: parsed.session_id.clone(),
+            repository,
+            pull_request_number: parsed.pr,
+            source_surface: LaunchSurface::Cli,
+            ui_target: Some(cli_config::UI_TARGET.to_owned()),
+            instance_preference: Some(cli_config::INSTANCE_PREFERENCE.to_owned()),
+        },
+        binding_context.storage_local_root(),
+    ) {
         Ok(resolution) => resolution,
         Err(err) => return error_response(format!("failed to resolve findings context: {err}")),
     };
@@ -6612,6 +6635,29 @@ fn resolve_repository(explicit: Option<String>, cwd: &Path) -> Option<String> {
 struct GitLookupSnapshot {
     repository: Option<String>,
     branch: Option<String>,
+    worktree_root: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct LaunchBindingContext {
+    cwd: String,
+    worktree_root: Option<String>,
+}
+
+impl LaunchBindingContext {
+    fn for_cwd(cwd: &Path) -> Self {
+        Self {
+            cwd: git_cache_key(cwd).to_string_lossy().into_owned(),
+            worktree_root: infer_git_worktree_root(cwd),
+        }
+    }
+
+    fn storage_local_root(&self) -> ResolveSessionLocalRoot<'_> {
+        ResolveSessionLocalRoot {
+            cwd: Some(self.cwd.as_str()),
+            worktree_root: self.worktree_root.as_deref(),
+        }
+    }
 }
 
 fn git_lookup_cache() -> &'static Mutex<HashMap<PathBuf, GitLookupSnapshot>> {
@@ -6635,6 +6681,7 @@ fn cached_git_snapshot(cwd: &Path) -> GitLookupSnapshot {
     let snapshot = GitLookupSnapshot {
         repository: infer_repository_from_git_uncached(cwd),
         branch: infer_git_branch_uncached(cwd),
+        worktree_root: infer_git_worktree_root_uncached(cwd),
     };
 
     if let Ok(mut cache) = git_lookup_cache().lock() {
@@ -6686,6 +6733,10 @@ fn infer_git_branch(cwd: &Path) -> Option<String> {
     cached_git_snapshot(cwd).branch
 }
 
+fn infer_git_worktree_root(cwd: &Path) -> Option<String> {
+    cached_git_snapshot(cwd).worktree_root
+}
+
 fn infer_git_branch_uncached(cwd: &Path) -> Option<String> {
     let output = ProcessCommand::new("git")
         .arg("-C")
@@ -6703,14 +6754,31 @@ fn infer_git_branch_uncached(cwd: &Path) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+fn infer_git_worktree_root_uncached(cwd: &Path) -> Option<String> {
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .arg("rev-parse")
+        .arg("--show-toplevel")
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
 fn launch_intent(action: LaunchAction, runtime: &CliRuntime) -> LaunchIntent {
+    let binding_context = LaunchBindingContext::for_cwd(&runtime.cwd);
     LaunchIntent {
         action,
         source_surface: Surface::Cli,
         objective: None,
         launch_profile_id: Some(cli_config::PROFILE_ID.to_owned()),
-        cwd: Some(runtime.cwd.to_string_lossy().into_owned()),
-        worktree_root: None,
+        cwd: Some(binding_context.cwd),
+        worktree_root: binding_context.worktree_root,
     }
 }
 
@@ -7486,6 +7554,7 @@ mod tests {
             &candidates,
             None,
             LaunchSurface::Cli,
+            ResolveSessionLocalRoot::default(),
             Some(cli_config::UI_TARGET),
             Some(cli_config::INSTANCE_PREFERENCE),
         )
@@ -7543,6 +7612,7 @@ mod tests {
             &candidates,
             None,
             LaunchSurface::Cli,
+            ResolveSessionLocalRoot::default(),
             Some(cli_config::UI_TARGET),
             Some(cli_config::INSTANCE_PREFERENCE),
         )
