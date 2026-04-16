@@ -48,4 +48,16 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
         "0013_outbound_batch_storage",
         include_str!("../migrations/0013_outbound_batch_storage.sql"),
     ),
+    (
+        "0014_outbound_postable_payload",
+        include_str!("../migrations/0014_outbound_postable_payload.sql"),
+    ),
+    (
+        "0015_worker_audit_trail",
+        include_str!("../migrations/0015_worker_audit_trail.sql"),
+    ),
+    (
+        "0016_posted_action_items",
+        include_str!("../migrations/0016_posted_action_items.sql"),
+    ),
 ];

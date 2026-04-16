@@ -3,12 +3,13 @@
 use roger_app_core::{
     ApprovalState, ContinuityQuality, HarnessAdapter, HarnessCommandBinding, LaunchAction,
     LaunchIntent, OutboundApprovalToken, OutboundDraft, OutboundDraftBatch, PostedAction,
-    PostedActionStatus, ResumeBundle, ResumeBundleProfile, ReviewTarget, ReviewTask,
-    ReviewTaskKind, RogerCommand, RogerCommandId, RogerCommandInvocationSurface,
-    RogerCommandRouteStatus, Surface, WORKER_OPERATION_REQUEST_SCHEMA_V1,
-    WORKER_STAGE_RESULT_SCHEMA_V1, WorkerContextPacket, WorkerGitHubPosture, WorkerMutationPosture,
-    WorkerOperationResponseStatus, WorkerStageOutcome, WorkerStageResult, WorkerTransportKind,
-    outbound_target_tuple_json, route_harness_command,
+    PostedActionStatus, PostingAdapterItemResult, PostingAdapterItemStatus, ResumeBundle,
+    ResumeBundleProfile, ReviewTarget, ReviewTask, ReviewTaskKind, RogerCommand, RogerCommandId,
+    RogerCommandInvocationSurface, RogerCommandRouteStatus, Surface,
+    WORKER_OPERATION_REQUEST_SCHEMA_V1, WORKER_STAGE_RESULT_SCHEMA_V1, WorkerContextPacket,
+    WorkerGitHubPosture, WorkerMutationPosture, WorkerOperationResponseStatus, WorkerStageOutcome,
+    WorkerStageResult, WorkerTransportKind, outbound_target_tuple_json,
+    posted_action_items_from_item_results, route_harness_command,
 };
 use roger_bridge::{BridgeLaunchIntent, BridgePreflight, BridgeResponse, handle_bridge_intent};
 use roger_cli::{CliRuntime, HarnessCommandInvocation, run, run_harness_command};
@@ -1919,6 +1920,241 @@ fn status_and_findings_surface_outbound_approval_states_truthfully() {
     assert_eq!(
         indexed["finding-failed"]["outbound_detail"]["posted_action_status"],
         "Failed"
+    );
+}
+
+#[test]
+fn status_and_findings_preserve_partial_post_membership_after_restart() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let target = sample_target(42);
+    let session_id = "session-partial".to_owned();
+    let review_run_id = "run-partial".to_owned();
+    let store = RogerStore::open(&runtime.store_root).expect("open store");
+    store
+        .create_review_session(CreateReviewSession {
+            id: &session_id,
+            review_target: &target,
+            provider: "opencode",
+            session_locator: None,
+            resume_bundle_artifact_id: None,
+            continuity_state: "active",
+            attention_state: "ready",
+            launch_profile_id: None,
+        })
+        .expect("create session");
+    store
+        .put_session_launch_binding(CreateSessionLaunchBinding {
+            id: "binding-partial",
+            session_id: &session_id,
+            repo_locator: &target.repository,
+            review_target: Some(&target),
+            surface: LaunchSurface::Cli,
+            launch_profile_id: Some("profile-open-pr"),
+            ui_target: Some("cli"),
+            instance_preference: Some("reuse_if_possible"),
+            cwd: Some(runtime.cwd.to_string_lossy().as_ref()),
+            worktree_root: None,
+        })
+        .expect("create binding");
+    store
+        .create_review_run(CreateReviewRun {
+            id: &review_run_id,
+            session_id: &session_id,
+            run_kind: "review",
+            repo_snapshot: "git:partial",
+            continuity_quality: "usable",
+            session_locator_artifact_id: None,
+        })
+        .expect("create run");
+    for (finding_id, fingerprint, title) in [
+        (
+            "finding-partial-posted",
+            "fp:partial-posted",
+            "Posted partial finding",
+        ),
+        (
+            "finding-partial-failed",
+            "fp:partial-failed",
+            "Failed partial finding",
+        ),
+    ] {
+        store
+            .upsert_materialized_finding(CreateMaterializedFinding {
+                id: finding_id,
+                session_id: &session_id,
+                review_run_id: &review_run_id,
+                stage: "analysis",
+                fingerprint,
+                title,
+                normalized_summary: "partial outbound state",
+                severity: "medium",
+                confidence: "high",
+                triage_state: "accepted",
+                outbound_state: "approved",
+            })
+            .expect("create materialized finding");
+    }
+
+    let batch = OutboundDraftBatch {
+        id: "batch-partial".to_owned(),
+        review_session_id: session_id.clone(),
+        review_run_id: review_run_id.clone(),
+        repo_id: "owner/repo".to_owned(),
+        remote_review_target_id: "pr-42".to_owned(),
+        payload_digest: "sha256:payload-partial".to_owned(),
+        approval_state: ApprovalState::Approved,
+        approved_at: Some(1_710_030_000),
+        invalidated_at: None,
+        invalidation_reason_code: None,
+        row_version: 1,
+    };
+    let draft_posted = OutboundDraft {
+        id: "draft-partial-posted".to_owned(),
+        review_session_id: session_id.clone(),
+        review_run_id: review_run_id.clone(),
+        finding_id: Some("finding-partial-posted".to_owned()),
+        draft_batch_id: batch.id.clone(),
+        repo_id: batch.repo_id.clone(),
+        remote_review_target_id: batch.remote_review_target_id.clone(),
+        payload_digest: batch.payload_digest.clone(),
+        approval_state: ApprovalState::Approved,
+        anchor_digest: "anchor:partial-posted".to_owned(),
+        target_locator: "github:owner/repo#42/files#thread-partial-posted".to_owned(),
+        body: "First post succeeds.".to_owned(),
+        row_version: 1,
+    };
+    let draft_failed = OutboundDraft {
+        id: "draft-partial-failed".to_owned(),
+        review_session_id: session_id.clone(),
+        review_run_id: review_run_id.clone(),
+        finding_id: Some("finding-partial-failed".to_owned()),
+        draft_batch_id: batch.id.clone(),
+        repo_id: batch.repo_id.clone(),
+        remote_review_target_id: batch.remote_review_target_id.clone(),
+        payload_digest: batch.payload_digest.clone(),
+        approval_state: ApprovalState::Approved,
+        anchor_digest: "anchor:partial-failed".to_owned(),
+        target_locator: "github:owner/repo#42/files#thread-partial-failed".to_owned(),
+        body: "Second post needs repair.".to_owned(),
+        row_version: 1,
+    };
+    let approval = OutboundApprovalToken {
+        id: "approval-partial".to_owned(),
+        draft_batch_id: batch.id.clone(),
+        payload_digest: batch.payload_digest.clone(),
+        target_tuple_json: outbound_target_tuple_json(&batch),
+        approved_at: 1_710_030_001,
+        revoked_at: None,
+    };
+    let posted_action = PostedAction {
+        id: "posted-partial".to_owned(),
+        draft_batch_id: batch.id.clone(),
+        provider: "github".to_owned(),
+        remote_identifier: "73".to_owned(),
+        status: PostedActionStatus::Partial,
+        posted_payload_digest: batch.payload_digest.clone(),
+        posted_at: 1_710_030_010,
+        failure_code: Some("partial_failure".to_owned()),
+    };
+    let posted_items = posted_action_items_from_item_results(
+        &posted_action.id,
+        &[
+            PostingAdapterItemResult {
+                draft_id: draft_posted.id.clone(),
+                status: PostingAdapterItemStatus::Posted,
+                remote_identifier: Some("73".to_owned()),
+                failure_code: None,
+            },
+            PostingAdapterItemResult {
+                draft_id: draft_failed.id.clone(),
+                status: PostingAdapterItemStatus::Failed,
+                remote_identifier: None,
+                failure_code: Some("retryable:service_unavailable".to_owned()),
+            },
+        ],
+    );
+
+    store
+        .store_outbound_draft_batch(&batch)
+        .expect("store batch");
+    store
+        .store_outbound_draft_item(&draft_posted)
+        .expect("store posted draft");
+    store
+        .store_outbound_draft_item(&draft_failed)
+        .expect("store failed draft");
+    store
+        .store_outbound_approval_token(&approval)
+        .expect("store approval");
+    store
+        .store_posted_batch_action(&posted_action)
+        .expect("store posted action");
+    store
+        .store_posted_action_items(&posted_items)
+        .expect("store posted action items");
+
+    drop(store);
+
+    let status = run_rr(&["status", "--session", &session_id, "--robot"], &runtime);
+    assert_eq!(status.exit_code, 0, "{}", status.stderr);
+    let status_payload = parse_robot_payload(&status.stdout);
+    assert_eq!(
+        status_payload["data"]["outbound"]["state_counts"]["posted"],
+        serde_json::json!(1)
+    );
+    assert_eq!(
+        status_payload["data"]["outbound"]["state_counts"]["failed"],
+        serde_json::json!(1)
+    );
+    assert_eq!(
+        status_payload["data"]["outbound"]["state_counts"]["approved"],
+        serde_json::json!(0)
+    );
+    assert_eq!(
+        status_payload["data"]["outbound"]["posting_gate"]["ready_count"],
+        serde_json::json!(0)
+    );
+
+    let findings = run_rr(&["findings", "--session", &session_id, "--robot"], &runtime);
+    assert_eq!(findings.exit_code, 0, "{}", findings.stderr);
+    let findings_payload = parse_robot_payload(&findings.stdout);
+    let items = findings_payload["data"]["items"]
+        .as_array()
+        .expect("findings items");
+    let indexed = items
+        .iter()
+        .map(|item| {
+            (
+                item["finding_id"].as_str().expect("finding id").to_owned(),
+                item,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    assert_eq!(
+        indexed["finding-partial-posted"]["outbound_state"],
+        "posted"
+    );
+    assert_eq!(
+        indexed["finding-partial-posted"]["outbound_detail"]["posted_action_status"],
+        "Partial"
+    );
+    assert_eq!(
+        indexed["finding-partial-failed"]["outbound_state"],
+        "failed"
+    );
+    assert_eq!(
+        indexed["finding-partial-failed"]["outbound_detail"]["posted_action_status"],
+        "Partial"
     );
 }
 

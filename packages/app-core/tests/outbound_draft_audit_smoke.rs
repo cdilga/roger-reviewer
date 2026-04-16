@@ -4,7 +4,7 @@ use roger_app_core::{
     OutboundPostingAdapter, PostedAction, PostedActionStatus, PostingAdapterItemResult,
     PostingAdapterItemStatus, ReviewTarget, evaluate_outbound_post_gate,
     execute_explicit_posting_flow, outbound_target_tuple_json,
-    validate_outbound_draft_batch_linkage,
+    posted_action_items_from_item_results, validate_outbound_draft_batch_linkage,
 };
 use serde::Deserialize;
 use std::cell::Cell;
@@ -458,6 +458,72 @@ fn explicit_posting_records_partial_outcome_and_retry_candidates() {
     assert_eq!(posted.status, PostedActionStatus::Partial);
     assert_eq!(posted.failure_code.as_deref(), Some("partial_failure"));
     assert!(posted.remote_identifier.contains("/reviews/123"));
+}
+
+#[test]
+fn partial_post_materializes_per_draft_audit_items_for_restart_lineage() {
+    let fixture = load_fixture();
+    let batch = fixture.valid_batch;
+    let draft_one = fixture.valid_draft;
+    let mut draft_two = draft_one.clone();
+    draft_two.id = "draft-2".to_owned();
+    draft_two.finding_id = Some("finding-2".to_owned());
+    draft_two.anchor_digest = "anchor-2".to_owned();
+    draft_two.target_locator = "github:owner/repo#42/files#thread-2".to_owned();
+    let drafts = vec![draft_one.clone(), draft_two.clone()];
+    let mut approval = fixture.valid_approval;
+    approval.target_tuple_json = outbound_target_tuple_json(&batch);
+
+    let adapter = StubPostingAdapter::succeeds(vec![
+        PostingAdapterItemResult {
+            draft_id: draft_one.id.clone(),
+            status: PostingAdapterItemStatus::Posted,
+            remote_identifier: Some("https://api.github.com/reviews/123".to_owned()),
+            failure_code: None,
+        },
+        PostingAdapterItemResult {
+            draft_id: draft_two.id.clone(),
+            status: PostingAdapterItemStatus::Failed,
+            remote_identifier: None,
+            failure_code: Some("retryable:service_unavailable".to_owned()),
+        },
+    ]);
+
+    let result = execute_explicit_posting_flow(
+        ExplicitPostingInput {
+            action_id: "posted-action-partial-items",
+            provider: "github",
+            target: &sample_target(),
+            batch: &batch,
+            drafts: &drafts,
+            approval: &approval,
+            refresh_signals: &[],
+            reconfirmed_finding_ids: &HashSet::new(),
+        },
+        &adapter,
+    );
+
+    let posted = result.posted_action.expect("posted action");
+    let items = posted_action_items_from_item_results(&posted.id, &result.item_results);
+    assert_eq!(items.len(), 2);
+
+    assert_eq!(items[0].id, format!("{}:{}", posted.id, draft_one.id));
+    assert_eq!(items[0].posted_action_id, posted.id);
+    assert_eq!(items[0].draft_id, draft_one.id);
+    assert_eq!(items[0].status, PostingAdapterItemStatus::Posted);
+    assert_eq!(
+        items[0].remote_identifier.as_deref(),
+        Some("https://api.github.com/reviews/123")
+    );
+    assert_eq!(items[0].failure_code, None);
+
+    assert_eq!(items[1].draft_id, draft_two.id);
+    assert_eq!(items[1].status, PostingAdapterItemStatus::Failed);
+    assert_eq!(items[1].remote_identifier, None);
+    assert_eq!(
+        items[1].failure_code.as_deref(),
+        Some("retryable:service_unavailable")
+    );
 }
 
 #[test]

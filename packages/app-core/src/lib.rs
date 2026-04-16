@@ -3002,6 +3002,16 @@ pub struct PostingAdapterItemResult {
     pub failure_code: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostedActionItem {
+    pub id: String,
+    pub posted_action_id: String,
+    pub draft_id: String,
+    pub status: PostingAdapterItemStatus,
+    pub remote_identifier: Option<String>,
+    pub failure_code: Option<String>,
+}
+
 pub trait OutboundPostingAdapter {
     fn post_approved_draft_batch(
         &self,
@@ -3038,6 +3048,27 @@ pub struct ExplicitPostingResult {
     pub posted_action: Option<PostedAction>,
     pub item_results: Vec<PostingAdapterItemResult>,
     pub retry_draft_ids: Vec<String>,
+}
+
+pub fn posted_action_item_id(posted_action_id: &str, draft_id: &str) -> String {
+    format!("{posted_action_id}:{draft_id}")
+}
+
+pub fn posted_action_items_from_item_results(
+    posted_action_id: &str,
+    item_results: &[PostingAdapterItemResult],
+) -> Vec<PostedActionItem> {
+    item_results
+        .iter()
+        .map(|item| PostedActionItem {
+            id: posted_action_item_id(posted_action_id, &item.draft_id),
+            posted_action_id: posted_action_id.to_owned(),
+            draft_id: item.draft_id.clone(),
+            status: item.status.clone(),
+            remote_identifier: item.remote_identifier.clone(),
+            failure_code: item.failure_code.clone(),
+        })
+        .collect()
 }
 
 pub fn outbound_target_tuple_json(batch: &OutboundDraftBatch) -> String {

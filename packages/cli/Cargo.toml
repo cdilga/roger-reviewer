@@ -12,6 +12,7 @@ path = "src/main.rs"
 roger-app-core = { path = "../app-core" }
 roger-bridge = { path = "../bridge" }
 roger-config = { path = "../config" }
+roger-github-adapter = { path = "../github-adapter" }
 roger-session-claude = { path = "../session-claude" }
 roger-session-codex = { path = "../session-codex" }
 roger-session-gemini = { path = "../session-gemini" }

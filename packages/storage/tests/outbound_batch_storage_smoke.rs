@@ -2,7 +2,8 @@ use tempfile::tempdir;
 
 use roger_app_core::{
     ApprovalState, OutboundApprovalToken, OutboundDraft, OutboundDraftBatch, PostedAction,
-    PostedActionStatus, ReviewTarget, outbound_target_tuple_json,
+    PostedActionStatus, PostingAdapterItemResult, PostingAdapterItemStatus, ReviewTarget,
+    outbound_target_tuple_json, posted_action_items_from_item_results,
 };
 use roger_storage::{CreateFinding, CreateReviewRun, CreateReviewSession, Result, RogerStore};
 
@@ -152,6 +153,11 @@ fn canonical_outbound_batch_storage_round_trips_and_counts_toward_session_overvi
         approval
     );
     assert_eq!(reopened.posted_actions_for_batch("batch-1")?, vec![posted]);
+    assert!(
+        reopened
+            .posted_action_items_for_batch("batch-1")?
+            .is_empty()
+    );
 
     let overview = reopened.session_overview("session-1")?;
     assert_eq!(overview.draft_count, 2);
@@ -321,6 +327,75 @@ fn canonical_outbound_storage_rejects_binding_drift_fail_closed() -> Result<()> 
             .to_string()
             .contains("posted_batch_action_binding"),
         "{posted_err}"
+    );
+
+    let valid_posted = PostedAction {
+        posted_payload_digest: batch.payload_digest.clone(),
+        ..wrong_posted.clone()
+    };
+    store.store_posted_batch_action(&valid_posted)?;
+
+    let missing_remote_identifier = roger_app_core::PostedActionItem {
+        id: "posted-1:draft-1".to_owned(),
+        posted_action_id: valid_posted.id.clone(),
+        draft_id: valid_draft.id.clone(),
+        status: PostingAdapterItemStatus::Posted,
+        remote_identifier: None,
+        failure_code: None,
+    };
+    let item_err = store
+        .store_posted_action_item(&missing_remote_identifier)
+        .expect_err("posted item without remote identifier should fail closed");
+    assert!(
+        item_err.to_string().contains("posted_action_item_binding"),
+        "{item_err}"
+    );
+
+    let second_batch = OutboundDraftBatch {
+        id: "batch-2".to_owned(),
+        review_session_id: "session-1".to_owned(),
+        review_run_id: "run-1".to_owned(),
+        repo_id: "owner/repo".to_owned(),
+        remote_review_target_id: "pr-42".to_owned(),
+        payload_digest: "sha256:payload-batch-2".to_owned(),
+        approval_state: ApprovalState::Drafted,
+        approved_at: None,
+        invalidated_at: None,
+        invalidation_reason_code: None,
+        row_version: 0,
+    };
+    store.store_outbound_draft_batch(&second_batch)?;
+    store.store_outbound_draft_item(&OutboundDraft {
+        id: "draft-2".to_owned(),
+        review_session_id: "session-1".to_owned(),
+        review_run_id: "run-1".to_owned(),
+        finding_id: Some("finding-2".to_owned()),
+        draft_batch_id: second_batch.id.clone(),
+        repo_id: second_batch.repo_id.clone(),
+        remote_review_target_id: second_batch.remote_review_target_id.clone(),
+        payload_digest: second_batch.payload_digest.clone(),
+        approval_state: ApprovalState::Drafted,
+        anchor_digest: "anchor:two".to_owned(),
+        target_locator: "github:owner/repo#42/files#thread-2".to_owned(),
+        body: "Canonical outbound body two".to_owned(),
+        row_version: 0,
+    })?;
+    let batch_mismatch_item = roger_app_core::PostedActionItem {
+        id: "posted-1:draft-2".to_owned(),
+        posted_action_id: valid_posted.id.clone(),
+        draft_id: "draft-2".to_owned(),
+        status: PostingAdapterItemStatus::Failed,
+        remote_identifier: None,
+        failure_code: Some("retryable:service_unavailable".to_owned()),
+    };
+    let batch_mismatch_err = store
+        .store_posted_action_item(&batch_mismatch_item)
+        .expect_err("posted item bound to the wrong draft batch should fail closed");
+    assert!(
+        batch_mismatch_err
+            .to_string()
+            .contains("posted_action_item_binding"),
+        "{batch_mismatch_err}"
     );
 
     Ok(())
@@ -676,6 +751,151 @@ fn outbound_surface_projection_reconciles_canonical_and_legacy_state_paths() -> 
     assert_eq!(failed.state, "failed");
     assert_eq!(failed.source, "canonical_batch");
     assert_eq!(failed.posted_action_status.as_deref(), Some("Failed"));
+
+    Ok(())
+}
+
+#[test]
+fn partial_post_restart_preserves_exact_per_finding_membership_and_retry_lineage() -> Result<()> {
+    let temp = tempdir()?;
+    let root = temp.path().join("profile");
+    let batch = OutboundDraftBatch {
+        id: "batch-partial".to_owned(),
+        review_session_id: "session-1".to_owned(),
+        review_run_id: "run-1".to_owned(),
+        repo_id: "owner/repo".to_owned(),
+        remote_review_target_id: "pr-42".to_owned(),
+        payload_digest: "sha256:payload-partial".to_owned(),
+        approval_state: ApprovalState::Approved,
+        approved_at: Some(1_710_020_000),
+        invalidated_at: None,
+        invalidation_reason_code: None,
+        row_version: 1,
+    };
+    let draft_one = OutboundDraft {
+        id: "draft-partial-1".to_owned(),
+        review_session_id: "session-1".to_owned(),
+        review_run_id: "run-1".to_owned(),
+        finding_id: Some("finding-1".to_owned()),
+        draft_batch_id: batch.id.clone(),
+        repo_id: batch.repo_id.clone(),
+        remote_review_target_id: batch.remote_review_target_id.clone(),
+        payload_digest: batch.payload_digest.clone(),
+        approval_state: ApprovalState::Approved,
+        anchor_digest: "anchor:partial-1".to_owned(),
+        target_locator: "github:owner/repo#42/files#thread-partial-1".to_owned(),
+        body: "Canonical outbound body one".to_owned(),
+        row_version: 1,
+    };
+    let draft_two = OutboundDraft {
+        id: "draft-partial-2".to_owned(),
+        review_session_id: "session-1".to_owned(),
+        review_run_id: "run-1".to_owned(),
+        finding_id: Some("finding-2".to_owned()),
+        draft_batch_id: batch.id.clone(),
+        repo_id: batch.repo_id.clone(),
+        remote_review_target_id: batch.remote_review_target_id.clone(),
+        payload_digest: batch.payload_digest.clone(),
+        approval_state: ApprovalState::Approved,
+        anchor_digest: "anchor:partial-2".to_owned(),
+        target_locator: "github:owner/repo#42/files#thread-partial-2".to_owned(),
+        body: "Canonical outbound body two".to_owned(),
+        row_version: 1,
+    };
+    let approval = OutboundApprovalToken {
+        id: "approval-partial".to_owned(),
+        draft_batch_id: batch.id.clone(),
+        payload_digest: batch.payload_digest.clone(),
+        target_tuple_json: outbound_target_tuple_json(&batch),
+        approved_at: 1_710_020_001,
+        revoked_at: None,
+    };
+    let posted = PostedAction {
+        id: "posted-partial".to_owned(),
+        draft_batch_id: batch.id.clone(),
+        provider: "github".to_owned(),
+        remote_identifier: "73".to_owned(),
+        status: PostedActionStatus::Partial,
+        posted_payload_digest: batch.payload_digest.clone(),
+        posted_at: 1_710_020_020,
+        failure_code: Some("partial_failure".to_owned()),
+    };
+    let item_results = vec![
+        PostingAdapterItemResult {
+            draft_id: draft_one.id.clone(),
+            status: PostingAdapterItemStatus::Posted,
+            remote_identifier: Some("73".to_owned()),
+            failure_code: None,
+        },
+        PostingAdapterItemResult {
+            draft_id: draft_two.id.clone(),
+            status: PostingAdapterItemStatus::Failed,
+            remote_identifier: None,
+            failure_code: Some("retryable:service_unavailable".to_owned()),
+        },
+    ];
+    let posted_items = posted_action_items_from_item_results(&posted.id, &item_results);
+
+    {
+        let store = RogerStore::open(&root)?;
+        seed_review(&store)?;
+        store.store_outbound_draft_batch(&batch)?;
+        store.store_outbound_draft_item(&draft_one)?;
+        store.store_outbound_draft_item(&draft_two)?;
+        store.store_outbound_approval_token(&approval)?;
+        store.store_posted_batch_action(&posted)?;
+        store.store_posted_action_items(&posted_items)?;
+    }
+
+    let reopened = RogerStore::open(&root)?;
+    assert_eq!(
+        reopened.posted_actions_for_batch(&batch.id)?,
+        vec![posted.clone()]
+    );
+    assert_eq!(
+        reopened.posted_action_items_for_batch(&batch.id)?,
+        posted_items
+    );
+
+    let counts = reopened.outbound_state_counts_for_run("session-1", "run-1")?;
+    assert_eq!(counts.awaiting_approval, 0);
+    assert_eq!(counts.approved, 0);
+    assert_eq!(counts.invalidated, 0);
+    assert_eq!(counts.posted, 1);
+    assert_eq!(counts.failed, 1);
+
+    let posted_projection =
+        reopened.outbound_surface_projection_for_finding("finding-1", "approved")?;
+    assert_eq!(posted_projection.state, "posted");
+    assert_eq!(posted_projection.source, "canonical_batch");
+    assert_eq!(
+        posted_projection.posted_action_status.as_deref(),
+        Some("Partial")
+    );
+    assert_eq!(
+        posted_projection.posted_action_item_status.as_deref(),
+        Some("Posted")
+    );
+    assert_eq!(posted_projection.remote_identifier.as_deref(), Some("73"));
+    assert_eq!(posted_projection.failure_code, None);
+
+    let failed_projection =
+        reopened.outbound_surface_projection_for_finding("finding-2", "approved")?;
+    assert_eq!(failed_projection.state, "failed");
+    assert_eq!(failed_projection.source, "canonical_batch");
+    assert_eq!(
+        failed_projection.posted_action_status.as_deref(),
+        Some("Partial")
+    );
+    assert_eq!(
+        failed_projection.posted_action_item_status.as_deref(),
+        Some("Failed")
+    );
+    assert_eq!(failed_projection.remote_identifier, None);
+    assert_eq!(
+        failed_projection.failure_code.as_deref(),
+        Some("retryable:service_unavailable")
+    );
 
     Ok(())
 }
