@@ -1,3 +1,4 @@
+use roger_config::{ResolvedLaunchBaseline, ResolvedProviderCapability};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,8 +18,41 @@ pub struct SessionChrome {
     pub repository: String,
     pub pull_request_number: u64,
     pub provider: String,
+    pub support_tier: String,
+    pub isolation_mode: String,
+    pub policy_profile: String,
     pub continuity_state: String,
     pub attention_state: String,
+    #[serde(default)]
+    pub status_reason: Option<String>,
+}
+
+impl SessionChrome {
+    pub fn from_resolved_config(
+        session_id: impl Into<String>,
+        repository: impl Into<String>,
+        pull_request_number: u64,
+        continuity_state: impl Into<String>,
+        attention_state: impl Into<String>,
+        launch: &ResolvedLaunchBaseline,
+        provider: &ResolvedProviderCapability,
+        status_reason: Option<String>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            repository: repository.into(),
+            pull_request_number,
+            provider: provider.provider.clone(),
+            support_tier: provider.support_tier.clone(),
+            isolation_mode: launch.isolation_mode.value.clone(),
+            policy_profile: provider.policy_profile.id.clone(),
+            continuity_state: continuity_state.into(),
+            attention_state: attention_state.into(),
+            status_reason: status_reason
+                .or_else(|| provider.degraded_reason.clone())
+                .or_else(|| provider.fail_closed_reason.clone()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,9 +208,44 @@ pub struct ActiveSessionEntry {
     pub repository: String,
     pub pull_request_number: u64,
     pub provider: String,
+    pub support_tier: String,
+    pub isolation_mode: String,
+    pub policy_profile: String,
     pub continuity_state: String,
     pub attention_state: String,
     pub degraded: bool,
+    #[serde(default)]
+    pub status_reason: Option<String>,
+}
+
+impl ActiveSessionEntry {
+    pub fn from_resolved_config(
+        session_id: impl Into<String>,
+        repository: impl Into<String>,
+        pull_request_number: u64,
+        continuity_state: impl Into<String>,
+        attention_state: impl Into<String>,
+        degraded: bool,
+        launch: &ResolvedLaunchBaseline,
+        provider: &ResolvedProviderCapability,
+        status_reason: Option<String>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            repository: repository.into(),
+            pull_request_number,
+            provider: provider.provider.clone(),
+            support_tier: provider.support_tier.clone(),
+            isolation_mode: launch.isolation_mode.value.clone(),
+            policy_profile: provider.policy_profile.id.clone(),
+            continuity_state: continuity_state.into(),
+            attention_state: attention_state.into(),
+            degraded,
+            status_reason: status_reason
+                .or_else(|| provider.degraded_reason.clone())
+                .or_else(|| provider.fail_closed_reason.clone()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,9 +298,13 @@ impl MinimalTuiShell {
                 repository: snapshot.chrome.repository.clone(),
                 pull_request_number: snapshot.chrome.pull_request_number,
                 provider: snapshot.chrome.provider.clone(),
+                support_tier: snapshot.chrome.support_tier.clone(),
+                isolation_mode: snapshot.chrome.isolation_mode.clone(),
+                policy_profile: snapshot.chrome.policy_profile.clone(),
                 continuity_state: snapshot.chrome.continuity_state.clone(),
                 attention_state: snapshot.chrome.attention_state.clone(),
                 degraded: false,
+                status_reason: snapshot.chrome.status_reason.clone(),
             }]
         } else {
             snapshot.active_sessions
@@ -279,10 +352,12 @@ impl MinimalTuiShell {
 
     pub fn render_chrome_line(&self) -> String {
         format!(
-            "{} · PR #{} · {} · {}",
+            "{} · PR #{} · {} · {} · {} · {}",
             self.chrome.repository,
             self.chrome.pull_request_number,
             self.chrome.provider,
+            self.chrome.support_tier,
+            self.chrome.isolation_mode,
             self.chrome.attention_state
         )
     }
@@ -505,9 +580,13 @@ impl MinimalTuiShell {
                 repository: snapshot.chrome.repository.clone(),
                 pull_request_number: snapshot.chrome.pull_request_number,
                 provider: snapshot.chrome.provider.clone(),
+                support_tier: snapshot.chrome.support_tier.clone(),
+                isolation_mode: snapshot.chrome.isolation_mode.clone(),
+                policy_profile: snapshot.chrome.policy_profile.clone(),
                 continuity_state: snapshot.chrome.continuity_state.clone(),
                 attention_state: snapshot.chrome.attention_state.clone(),
                 degraded: false,
+                status_reason: snapshot.chrome.status_reason.clone(),
             }]
         } else {
             snapshot.active_sessions
@@ -644,11 +723,20 @@ impl MinimalTuiShell {
         let mut lines = self.overview_lines.clone();
         let active = self.active_session();
         lines.push(format!(
-            "active_session={} · {}#{} · {}",
-            active.session_id, active.repository, active.pull_request_number, active.provider
+            "active_session={} · {}#{} · {} · tier={} · isolation={}",
+            active.session_id,
+            active.repository,
+            active.pull_request_number,
+            active.provider,
+            active.support_tier,
+            active.isolation_mode
         ));
+        lines.push(format!("policy_profile={}", active.policy_profile));
         if active.degraded {
             lines.push("active_session_degraded=true".to_owned());
+        }
+        if let Some(reason) = active.status_reason.as_deref() {
+            lines.push(format!("status_reason={reason}"));
         }
         if self.active_sessions.len() > 1 {
             lines.push("available_sessions:".to_owned());
@@ -659,11 +747,13 @@ impl MinimalTuiShell {
                     "-"
                 };
                 lines.push(format!(
-                    "{marker} {} {}#{} {}",
+                    "{marker} {} {}#{} {} tier={} isolation={}",
                     session.session_id,
                     session.repository,
                     session.pull_request_number,
-                    session.attention_state
+                    session.attention_state,
+                    session.support_tier,
+                    session.isolation_mode
                 ));
             }
         }
@@ -764,8 +854,12 @@ impl MinimalTuiShell {
         self.chrome.repository = active.repository;
         self.chrome.pull_request_number = active.pull_request_number;
         self.chrome.provider = active.provider;
+        self.chrome.support_tier = active.support_tier;
+        self.chrome.isolation_mode = active.isolation_mode;
+        self.chrome.policy_profile = active.policy_profile;
         self.chrome.continuity_state = active.continuity_state;
         self.chrome.attention_state = active.attention_state;
+        self.chrome.status_reason = active.status_reason;
     }
 
     fn has_finding(&self, finding_id: &str) -> bool {

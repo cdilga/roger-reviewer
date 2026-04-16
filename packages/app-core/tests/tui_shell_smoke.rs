@@ -4,17 +4,26 @@ use roger_app_core::tui_shell::{
     LocalDraftReviewEntry, MinimalTuiShell, ReadOnlySessionSnapshot, SessionChrome,
     SupervisorSnapshot, WakeReason, WakeSignal,
 };
+use roger_config::resolve_cli_config_from_lookup;
+use std::path::Path;
 
 fn sample_snapshot() -> ReadOnlySessionSnapshot {
+    let resolved = resolve_cli_config_from_lookup(Path::new("/tmp/roger"), |_| None);
+    let launch = &resolved.launch;
+    let opencode = resolved.provider("opencode").expect("opencode capability");
+    let codex = resolved.provider("codex").expect("codex capability");
+
     ReadOnlySessionSnapshot {
-        chrome: SessionChrome {
-            session_id: "session-42".to_owned(),
-            repository: "owner/repo".to_owned(),
-            pull_request_number: 42,
-            provider: "opencode".to_owned(),
-            continuity_state: "review_launched".to_owned(),
-            attention_state: "awaiting_user_input".to_owned(),
-        },
+        chrome: SessionChrome::from_resolved_config(
+            "session-42",
+            "owner/repo",
+            42,
+            "review_launched",
+            "awaiting_user_input",
+            launch,
+            opencode,
+            None,
+        ),
         overview_lines: vec!["Session launched from CLI".to_owned()],
         recent_run_lines: vec!["explore: completed".to_owned()],
         findings_preview_lines: vec!["FP-1: possible invalidation bug".to_owned()],
@@ -64,24 +73,28 @@ fn sample_snapshot() -> ReadOnlySessionSnapshot {
             updated_at: 1_700_000_000,
         }],
         active_sessions: vec![
-            ActiveSessionEntry {
-                session_id: "session-42".to_owned(),
-                repository: "owner/repo".to_owned(),
-                pull_request_number: 42,
-                provider: "opencode".to_owned(),
-                continuity_state: "review_launched".to_owned(),
-                attention_state: "awaiting_user_input".to_owned(),
-                degraded: false,
-            },
-            ActiveSessionEntry {
-                session_id: "session-43".to_owned(),
-                repository: "owner/repo".to_owned(),
-                pull_request_number: 43,
-                provider: "opencode".to_owned(),
-                continuity_state: "awaiting_resume".to_owned(),
-                attention_state: "review_launched".to_owned(),
-                degraded: true,
-            },
+            ActiveSessionEntry::from_resolved_config(
+                "session-42",
+                "owner/repo",
+                42,
+                "review_launched",
+                "awaiting_user_input",
+                false,
+                launch,
+                opencode,
+                None,
+            ),
+            ActiveSessionEntry::from_resolved_config(
+                "session-43",
+                "owner/repo",
+                43,
+                "awaiting_resume",
+                "review_launched",
+                true,
+                launch,
+                codex,
+                Some("preflight selected reseed-only bounded provider policy".to_owned()),
+            ),
         ],
     }
 }
@@ -93,6 +106,8 @@ fn renders_session_chrome_with_read_only_context() {
     assert!(line.contains("owner/repo"));
     assert!(line.contains("PR #42"));
     assert!(line.contains("opencode"));
+    assert!(line.contains("tier_b"));
+    assert!(line.contains("current_checkout"));
     assert!(line.contains("awaiting_user_input"));
 }
 
@@ -321,6 +336,13 @@ fn session_switching_updates_active_chrome_without_side_effects() {
         .lines
         .join("\n");
     assert!(session_lines.contains("active_session=session-43"));
+    assert!(session_lines.contains("tier=tier_a"));
+    assert!(session_lines.contains("isolation=current_checkout"));
+    assert!(session_lines.contains("policy_profile=review_safe_tier_a_reseed_only"));
+    assert!(
+        session_lines
+            .contains("status_reason=preflight selected reseed-only bounded provider policy")
+    );
     assert!(session_lines.contains("available_sessions:"));
 }
 
