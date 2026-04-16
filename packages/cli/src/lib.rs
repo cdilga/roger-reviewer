@@ -5,23 +5,24 @@ use roger_app_core::time;
 use roger_app_core::{
     AGENT_TRANSPORT_REQUEST_SCHEMA_V1, AGENT_TRANSPORT_RESPONSE_SCHEMA_V1, AgentTransportErrorCode,
     AgentTransportRequestEnvelope, AgentTransportResponseEnvelope, AgentTransportResponseStatus,
-    AppError, ContinuityQuality, FindingTriageState, HarnessAdapter, LaunchAction, LaunchIntent,
-    RecallSourceRef, ResumeAttemptOutcome, ResumeBundle, ResumeBundleProfile, ReviewTarget,
-    ReviewTask, RogerCommand, RogerCommandId, RogerCommandInvocationSurface, RogerCommandResult,
-    RogerCommandRouteStatus, SearchPlanError, SearchPlanInput, SearchQueryPlanError,
-    SearchRetrievalClass, SessionLocator, Surface, WorkerArtifactExcerpt,
-    WorkerArtifactExcerptRequest, WorkerCapabilityProfile, WorkerContextPacket,
-    WorkerEvidenceLocation, WorkerFindingDetail, WorkerFindingDetailRequest,
+    AppError, ApprovalState, ContinuityQuality, FindingTriageState, HarnessAdapter, LaunchAction,
+    LaunchIntent, OutboundDraft, OutboundDraftBatch, RecallSourceRef, ResumeAttemptOutcome,
+    ResumeBundle, ResumeBundleProfile, ReviewTarget, ReviewTask, RogerCommand, RogerCommandId,
+    RogerCommandInvocationSurface, RogerCommandResult, RogerCommandRouteStatus, SearchPlanError,
+    SearchPlanInput, SearchQueryPlanError, SearchRetrievalClass, SessionLocator, Surface,
+    WorkerArtifactExcerpt, WorkerArtifactExcerptRequest, WorkerCapabilityProfile,
+    WorkerContextPacket, WorkerEvidenceLocation, WorkerFindingDetail, WorkerFindingDetailRequest,
     WorkerFindingListResponse, WorkerFindingSummary, WorkerGatewaySnapshot, WorkerGitHubPosture,
     WorkerMutationPosture, WorkerOperation, WorkerOperationRequestEnvelope, WorkerRecallEnvelope,
     WorkerSearchMemoryRequest, WorkerSearchMemoryResponse, WorkerStatusSnapshot,
     WorkerTransportKind, execute_agent_transport_request, materialize_search_plan,
-    route_harness_command, safe_harness_command_bindings,
+    outbound_target_tuple_json, route_harness_command, safe_harness_command_bindings,
 };
 use roger_bridge::{
     NativeHostManifest, SupportedBrowser, SupportedOs, native_host_install_path_for,
 };
 use roger_config::cli_defaults::{DEFAULT_OPENCODE_BIN, ENV_OPENCODE_BIN, ENV_STORE_ROOT};
+use roger_config::{ResolvedProviderCapability, ResolvedRoutineSurfaceBaseline};
 use roger_session_claude::{ClaudeAdapter, ClaudeSessionPath};
 use roger_session_codex::{CodexAdapter, CodexSessionPath};
 use roger_session_gemini::{GeminiAdapter, GeminiSessionPath};
@@ -106,6 +107,7 @@ enum CommandKind {
     Return,
     Sessions,
     Search,
+    Draft,
     Update,
     Bridge,
     Extension,
@@ -125,6 +127,7 @@ impl CommandKind {
             (Self::Return, _) => "rr return",
             (Self::Sessions, _) => "rr sessions",
             (Self::Search, _) => "rr search",
+            (Self::Draft, _) => "rr draft",
             (Self::Update, _) => "rr update",
             (Self::Bridge, _) => "rr bridge",
             (Self::Extension, _) => "rr extension",
@@ -142,6 +145,7 @@ impl CommandKind {
             Self::Return => "rr.robot.return.v1",
             Self::Sessions => "rr.robot.sessions.v1",
             Self::Search => "rr.robot.search.v1",
+            Self::Draft => "rr.robot.draft.v1",
             Self::Update => "rr.robot.update.v1",
             Self::Bridge => "rr.robot.bridge.v1",
             Self::Extension => "rr.robot.extension.v1",
@@ -202,6 +206,8 @@ struct ParsedArgs {
     repo: Option<String>,
     pr: Option<u64>,
     session_id: Option<String>,
+    draft_finding_ids: Vec<String>,
+    draft_all_findings: bool,
     update_channel: String,
     update_version: Option<String>,
     update_api_root: Option<String>,
@@ -536,6 +542,7 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         "return" => CommandKind::Return,
         "sessions" => CommandKind::Sessions,
         "search" => CommandKind::Search,
+        "draft" => CommandKind::Draft,
         "update" => CommandKind::Update,
         "bridge" => CommandKind::Bridge,
         "extension" => CommandKind::Extension,
@@ -565,6 +572,8 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         repo: None,
         pr: None,
         session_id: None,
+        draft_finding_ids: Vec::new(),
+        draft_all_findings: false,
         update_channel: "stable".to_owned(),
         update_version: None,
         update_api_root: None,
@@ -637,6 +646,17 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
                     .ok_or_else(|| "--session requires a value".to_owned())?;
                 parsed.session_id = Some(value.clone());
                 i += 2;
+            }
+            "--finding" => {
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--finding requires a value".to_owned())?;
+                parsed.draft_finding_ids.push(value.clone());
+                i += 2;
+            }
+            "--all-findings" => {
+                parsed.draft_all_findings = true;
+                i += 1;
             }
             "--channel" => {
                 let value = argv
@@ -894,6 +914,12 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         return Err("--install-root is only supported by rr bridge and rr extension".to_owned());
     }
 
+    if parsed.command != CommandKind::Draft
+        && (parsed.draft_all_findings || !parsed.draft_finding_ids.is_empty())
+    {
+        return Err("--finding/--all-findings are only supported by rr draft".to_owned());
+    }
+
     if parsed.command != CommandKind::Extension && parsed.extension_browser.is_some() {
         return Err("--browser is only supported by rr extension".to_owned());
     }
@@ -953,6 +979,39 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         }
     }
 
+    if parsed.command == CommandKind::Draft {
+        if parsed.dry_run {
+            return Err("rr draft does not support --dry-run in this slice".to_owned());
+        }
+        if parsed.draft_all_findings && !parsed.draft_finding_ids.is_empty() {
+            return Err("--all-findings cannot be combined with --finding".to_owned());
+        }
+        if !parsed.attention_states.is_empty()
+            || parsed.limit.is_some()
+            || parsed.query_text.is_some()
+            || parsed.query_mode.is_some()
+            || parsed.robot_docs_topic.is_some()
+            || parsed.provider != "opencode"
+            || parsed.bridge_command.is_some()
+            || parsed.extension_command.is_some()
+            || parsed.extension_browser.is_some()
+            || parsed.bridge_extension_id.is_some()
+            || parsed.bridge_binary_path.is_some()
+            || parsed.bridge_install_root.is_some()
+            || parsed.bridge_output_dir.is_some()
+            || parsed.update_channel != "stable"
+            || parsed.update_version.is_some()
+            || parsed.update_api_root.is_some()
+            || parsed.update_download_root.is_some()
+            || parsed.update_target.is_some()
+            || parsed.update_yes
+        {
+            return Err(
+                "rr draft only supports --repo, --pr, --session, --finding, --all-findings, and --robot".to_owned(),
+            );
+        }
+    }
+
     if parsed.command == CommandKind::Agent {
         if parsed.robot {
             return Err("rr agent is a separate transport from --robot; omit --robot".to_owned());
@@ -1003,6 +1062,7 @@ fn execute_command(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
         CommandKind::Return => handle_return(parsed, runtime),
         CommandKind::Sessions => handle_sessions(parsed, runtime),
         CommandKind::Search => handle_search(parsed, runtime),
+        CommandKind::Draft => handle_draft(parsed, runtime),
         CommandKind::Update => handle_update(parsed, runtime),
         CommandKind::Bridge => handle_bridge(parsed, runtime),
         CommandKind::Extension => handle_extension(parsed, runtime),
@@ -6283,6 +6343,436 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
     }
 }
 
+fn handle_draft(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
+    #[derive(Clone, Serialize)]
+    struct DraftPreviewDescriptor {
+        finding_id: String,
+        fingerprint: String,
+        title: String,
+        normalized_summary: String,
+        severity: String,
+        confidence: String,
+        anchor_digest: String,
+        target_locator: String,
+        body: String,
+    }
+
+    let store = match RogerStore::open(&runtime.store_root) {
+        Ok(store) => store,
+        Err(err) => return error_response(format!("failed to open Roger store: {err}")),
+    };
+
+    let binding_context = LaunchBindingContext::for_cwd(&runtime.cwd);
+    let repository = resolve_repository(parsed.repo.clone(), &runtime.cwd);
+    let resolution = match store.resolve_session_reentry_with_context(
+        ResolveSessionReentry {
+            explicit_session_id: parsed.session_id.clone(),
+            repository,
+            pull_request_number: parsed.pr,
+            source_surface: LaunchSurface::Cli,
+            ui_target: Some(cli_config::UI_TARGET.to_owned()),
+            instance_preference: Some(cli_config::INSTANCE_PREFERENCE.to_owned()),
+        },
+        binding_context.storage_local_root(),
+    ) {
+        Ok(resolution) => resolution,
+        Err(err) => return error_response(format!("failed to resolve draft context: {err}")),
+    };
+
+    let (session, _binding) = match resolution {
+        SessionReentryResolution::Resolved { session, binding } => (session, binding),
+        SessionReentryResolution::PickerRequired { reason, candidates } => {
+            return blocked_picker_response(reason, candidates);
+        }
+    };
+
+    if session.attention_state == "refresh_recommended" {
+        let reconciliation = json!({
+            "mode": "persisted_readback",
+            "manual_refresh_supported": false,
+            "stale_target_detected": true,
+            "repair_required": true,
+            "freshness_basis": "persisted_attention_state",
+            "attention_updated_at": session.updated_at,
+            "recommended_reentry_command": format!("rr resume --session {}", session.id),
+            "recommended_fresh_pass_command": format!(
+                "rr review --repo {} --pr {}",
+                session.review_target.repository, session.review_target.pull_request_number
+            ),
+        });
+        return blocked_response(
+            "rr draft is blocked because the persisted review state requires explicit reconciliation before outbound material can be derived".to_owned(),
+            vec![
+                format!(
+                    "run rr resume --session {} to reopen the Roger session locally",
+                    session.id
+                ),
+                format!(
+                    "run rr review --repo {} --pr {} to start a fresh pass if target drift invalidated the older review",
+                    session.review_target.repository, session.review_target.pull_request_number
+                ),
+            ],
+            json!({
+                "reason_code": "stale_local_state",
+                "session_id": session.id,
+                "attention_state": session.attention_state,
+                "reconciliation": reconciliation,
+            }),
+        );
+    }
+
+    if session.review_target.repository.trim().is_empty()
+        || session.review_target.pull_request_number == 0
+    {
+        return blocked_response(
+            "rr draft requires a concrete review target before Roger can bind local outbound state"
+                .to_owned(),
+            vec![
+                "re-run rr review --repo <owner/repo> --pr <number> to capture a real target"
+                    .to_owned(),
+                format!("or inspect rr status --session {} --robot", session.id),
+            ],
+            json!({
+                "reason_code": "missing_review_target",
+                "session_id": session.id,
+                "review_target": session.review_target,
+            }),
+        );
+    }
+
+    let Some(run) = (match store.latest_review_run(&session.id) {
+        Ok(run) => run,
+        Err(err) => return error_response(format!("failed to load latest run: {err}")),
+    }) else {
+        return blocked_response(
+            "rr draft requires persisted local review state for the selected target".to_owned(),
+            vec![format!(
+                "run rr review --repo {} --pr {} to materialize a local review first",
+                session.review_target.repository, session.review_target.pull_request_number
+            )],
+            json!({
+                "reason_code": "missing_local_state",
+                "session_id": session.id,
+            }),
+        );
+    };
+
+    let findings = match store.materialized_findings_for_run(&session.id, &run.id) {
+        Ok(findings) => findings,
+        Err(err) => {
+            return error_response(format!("failed to load findings for latest run: {err}"));
+        }
+    };
+
+    if findings.is_empty() {
+        return blocked_response(
+            "rr draft requires persisted findings from the latest local review run".to_owned(),
+            vec![format!(
+                "run rr review --repo {} --pr {} to materialize findings before drafting",
+                session.review_target.repository, session.review_target.pull_request_number
+            )],
+            json!({
+                "reason_code": "missing_local_state",
+                "session_id": session.id,
+                "review_run_id": run.id,
+            }),
+        );
+    }
+
+    if !parsed.draft_all_findings && parsed.draft_finding_ids.is_empty() {
+        return blocked_response(
+            "rr draft requires explicit finding selection in this slice".to_owned(),
+            vec![
+                "pass --finding <id> one or more times".to_owned(),
+                "or pass --all-findings to group every finding in the latest run".to_owned(),
+            ],
+            json!({
+                "reason_code": "finding_selection_required",
+                "session_id": session.id,
+                "review_run_id": run.id,
+                "available_finding_ids": findings
+                    .iter()
+                    .map(|finding| finding.id.clone())
+                    .collect::<Vec<_>>(),
+            }),
+        );
+    }
+
+    let findings_by_id = findings
+        .iter()
+        .map(|finding| (finding.id.as_str(), finding))
+        .collect::<HashMap<_, _>>();
+    let selection_mode = if parsed.draft_all_findings {
+        "all_findings"
+    } else {
+        "explicit_findings"
+    };
+
+    let mut selected_findings = if parsed.draft_all_findings {
+        findings.clone()
+    } else {
+        let mut selected = Vec::new();
+        let mut missing = Vec::new();
+        for finding_id in &parsed.draft_finding_ids {
+            match findings_by_id.get(finding_id.as_str()) {
+                Some(finding) => selected.push((*finding).clone()),
+                None => missing.push(finding_id.clone()),
+            }
+        }
+        if !missing.is_empty() {
+            return blocked_response(
+                "rr draft could not find every requested finding in the latest local run"
+                    .to_owned(),
+                vec![format!(
+                    "inspect rr findings --session {} --robot for the current finding ids",
+                    session.id
+                )],
+                json!({
+                    "reason_code": "missing_local_state",
+                    "session_id": session.id,
+                    "review_run_id": run.id,
+                    "missing_finding_ids": missing,
+                }),
+            );
+        }
+        selected
+    };
+    selected_findings.sort_by(|left, right| left.id.cmp(&right.id));
+    selected_findings.dedup_by(|left, right| left.id == right.id);
+
+    let mut selection_issues = Vec::new();
+    for finding in &selected_findings {
+        let projection = match store
+            .outbound_surface_projection_for_finding(&finding.id, &finding.outbound_state)
+        {
+            Ok(projection) => projection,
+            Err(err) => {
+                return error_response(format!(
+                    "failed to inspect outbound state for finding {}: {err}",
+                    finding.id
+                ));
+            }
+        };
+
+        if !finding.triage_state.eq_ignore_ascii_case("accepted") {
+            selection_issues.push(json!({
+                "finding_id": finding.id.clone(),
+                "reason_code": "triage_state_not_accepted",
+                "triage_state": finding.triage_state.clone(),
+            }));
+        }
+        if projection.state != "not_drafted" {
+            selection_issues.push(json!({
+                "finding_id": finding.id.clone(),
+                "reason_code": "existing_outbound_state",
+                "current_outbound_state": projection.state,
+                "draft_id": projection.draft_id,
+                "draft_batch_id": projection.draft_batch_id,
+                "approval_id": projection.approval_id,
+                "posted_action_id": projection.posted_action_id,
+            }));
+        }
+    }
+
+    if !selection_issues.is_empty() {
+        return blocked_response(
+            "selected findings cannot be drafted from the current local state".to_owned(),
+            vec![
+                format!(
+                    "inspect rr findings --session {} --robot to review triage and outbound state",
+                    session.id
+                ),
+                "choose only Accepted findings whose outbound state is still not_drafted"
+                    .to_owned(),
+            ],
+            json!({
+                "reason_code": "stale_local_state",
+                "session_id": session.id,
+                "review_run_id": run.id,
+                "selection_issues": selection_issues,
+            }),
+        );
+    }
+
+    let repo_id = session.review_target.repository.clone();
+    let remote_review_target_id = format!("pr-{}", session.review_target.pull_request_number);
+    let mut draft_previews = Vec::with_capacity(selected_findings.len());
+    for finding in &selected_findings {
+        let body = render_local_outbound_draft_body(finding);
+        let anchor_digest = match outbound_draft_anchor_digest(finding) {
+            Ok(digest) => digest,
+            Err(err) => {
+                return error_response(format!(
+                    "failed to build draft anchor digest for finding {}: {err}",
+                    finding.id
+                ));
+            }
+        };
+        draft_previews.push(DraftPreviewDescriptor {
+            finding_id: finding.id.clone(),
+            fingerprint: finding.fingerprint.clone(),
+            title: finding.title.clone(),
+            normalized_summary: finding.normalized_summary.clone(),
+            severity: finding.severity.clone(),
+            confidence: finding.confidence.clone(),
+            anchor_digest,
+            target_locator: outbound_draft_target_locator(&session.review_target, &finding.id),
+            body,
+        });
+    }
+
+    let payload_digest = match sha256_prefixed_json(&json!({
+        "repo_id": repo_id.clone(),
+        "remote_review_target_id": remote_review_target_id.clone(),
+        "drafts": draft_previews.clone(),
+    })) {
+        Ok(digest) => digest,
+        Err(err) => return error_response(format!("failed to build batch payload digest: {err}")),
+    };
+
+    let batch = OutboundDraftBatch {
+        id: next_id("draft-batch"),
+        review_session_id: session.id.clone(),
+        review_run_id: run.id.clone(),
+        repo_id: repo_id.clone(),
+        remote_review_target_id: remote_review_target_id.clone(),
+        payload_digest: payload_digest.clone(),
+        approval_state: ApprovalState::Drafted,
+        approved_at: None,
+        invalidated_at: None,
+        invalidation_reason_code: None,
+        row_version: 0,
+    };
+
+    if let Err(err) = store.store_outbound_draft_batch(&batch) {
+        return error_response(format!("failed to store outbound draft batch: {err}"));
+    }
+
+    let mut stored_drafts = Vec::with_capacity(draft_previews.len());
+    for preview in &draft_previews {
+        let draft = OutboundDraft {
+            id: next_id("draft"),
+            review_session_id: session.id.clone(),
+            review_run_id: run.id.clone(),
+            finding_id: Some(preview.finding_id.clone()),
+            draft_batch_id: batch.id.clone(),
+            repo_id: repo_id.clone(),
+            remote_review_target_id: remote_review_target_id.clone(),
+            payload_digest: payload_digest.clone(),
+            approval_state: ApprovalState::Drafted,
+            anchor_digest: preview.anchor_digest.clone(),
+            target_locator: preview.target_locator.clone(),
+            body: preview.body.clone(),
+            row_version: 0,
+        };
+        if let Err(err) = store.store_outbound_draft_item(&draft) {
+            return error_response(format!(
+                "failed to store outbound draft item for finding {}: {err}",
+                preview.finding_id
+            ));
+        }
+        stored_drafts.push(draft);
+    }
+
+    let state_counts = match store.outbound_state_counts_for_run(&session.id, &run.id) {
+        Ok(counts) => counts,
+        Err(err) => {
+            return error_response(format!(
+                "failed to project outbound approval state after drafting: {err}"
+            ));
+        }
+    };
+
+    let routine_surface = runtime_routine_surface_projection(runtime, &session.provider);
+    let provider_capability = runtime_provider_capability(runtime, &session.provider);
+    let warnings = match session.provider.as_str() {
+        "opencode" => Vec::new(),
+        "codex" | "gemini" | "claude" => vec![format!(
+            "provider '{}' has bounded support (tier-a start/reseed/raw-capture only); 'rr draft' does not support locator reopen or rr return",
+            session.provider
+        )],
+        _ => vec![format!(
+            "provider '{}' has bounded support (tier-a); 'rr draft' may offer reduced continuity behavior",
+            session.provider
+        )],
+    };
+
+    CommandResponse {
+        outcome: OutcomeKind::Complete,
+        data: json!({
+            "session_id": session.id.clone(),
+            "review_run_id": run.id.clone(),
+            "selection": {
+                "mode": selection_mode,
+                "grouped": stored_drafts.len() > 1,
+                "finding_ids": selected_findings
+                    .iter()
+                    .map(|finding| finding.id.clone())
+                    .collect::<Vec<_>>(),
+                "count": stored_drafts.len(),
+            },
+            "target": {
+                "provider": "github",
+                "repository": session.review_target.repository.clone(),
+                "pull_request": session.review_target.pull_request_number,
+                "repo_id": batch.repo_id.clone(),
+                "remote_review_target_id": batch.remote_review_target_id.clone(),
+            },
+            "draft_batch": {
+                "id": batch.id.clone(),
+                "approval_state": "drafted",
+                "payload_digest": batch.payload_digest.clone(),
+                "target_tuple_json": outbound_target_tuple_json(&batch),
+                "draft_count": stored_drafts.len(),
+            },
+            "drafts": stored_drafts
+                .iter()
+                .zip(draft_previews.iter())
+                .map(|(draft, preview)| {
+                    json!({
+                        "id": draft.id.clone(),
+                        "finding_id": draft.finding_id.clone(),
+                        "fingerprint": preview.fingerprint.clone(),
+                        "title": preview.title.clone(),
+                        "summary": preview.normalized_summary.clone(),
+                        "target_locator": draft.target_locator.clone(),
+                        "anchor_digest": draft.anchor_digest.clone(),
+                        "payload_digest": draft.payload_digest.clone(),
+                        "body": draft.body.clone(),
+                        "approval_state": "drafted",
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "mutation_guard": {
+                "github_posture": "blocked",
+                "approval_required": true,
+                "posted": false,
+            },
+            "queryable_surfaces": {
+                "status_command": format!("rr status --session {}", session.id),
+                "findings_command": format!("rr findings --session {} --robot", session.id),
+                "outbound_state_counts": {
+                    "not_drafted": state_counts.not_drafted,
+                    "awaiting_approval": state_counts.awaiting_approval,
+                    "approved": state_counts.approved,
+                    "invalidated": state_counts.invalidated,
+                    "posted": state_counts.posted,
+                    "failed": state_counts.failed,
+                },
+            },
+            "provider_capability": provider_capability,
+            "routine_surface": routine_surface,
+        }),
+        warnings,
+        repair_actions: Vec::new(),
+        message: format!(
+            "materialized {} local outbound draft{}",
+            stored_drafts.len(),
+            if stored_drafts.len() == 1 { "" } else { "s" }
+        ),
+    }
+}
+
 fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let store = match RogerStore::open(&runtime.store_root) {
         Ok(store) => store,
@@ -6672,6 +7162,7 @@ fn render_output(parsed: &ParsedArgs, mut response: CommandResponse) -> CliRunRe
             | CommandKind::Findings
             | CommandKind::Sessions
             | CommandKind::Search
+            | CommandKind::Draft
             | CommandKind::RobotDocs
     ) || response.outcome == OutcomeKind::Blocked
     {
@@ -6994,6 +7485,86 @@ fn provider_capability(provider: &str) -> Value {
     })
 }
 
+fn resolved_routine_surface_baseline(
+    runtime: &CliRuntime,
+    provider: &str,
+) -> Result<ResolvedRoutineSurfaceBaseline, String> {
+    cli_config::resolved_cli_config(&runtime.cwd)
+        .routine_surface_baseline(Some(provider))
+        .map_err(|err| {
+            format!(
+                "failed to resolve routine surface baseline for provider '{provider}': {}",
+                err.message
+            )
+        })
+}
+
+fn provider_supports_json(provider: &ResolvedProviderCapability) -> Value {
+    json!({
+        "review_start": provider.supports.review_start,
+        "resume_reseed": provider.supports.resume_reseed,
+        "resume_reopen": provider.supports.resume_reopen,
+        "return": provider.supports.rr_return,
+        "status": provider.supports.status,
+        "findings": provider.supports.findings,
+        "sessions": provider.supports.sessions,
+        "doctor": provider.supports.doctor,
+    })
+}
+
+fn provider_capability_projection(
+    provider: &ResolvedProviderCapability,
+    status_reason: Option<&str>,
+) -> Value {
+    json!({
+        "provider": provider.provider,
+        "display_name": provider.display_name,
+        "status": provider.status,
+        "tier": provider.support_tier,
+        "support_tier": provider.support_tier,
+        "surface_class": provider.surface_class,
+        "policy_profile": {
+            "id": provider.policy_profile.id,
+            "summary": provider.policy_profile.summary,
+            "mutation_posture": provider.policy_profile.mutation_posture,
+            "continuity_mode": provider.policy_profile.continuity_mode,
+        },
+        "status_reason": status_reason,
+        "supports": provider_supports_json(provider),
+        "notes": provider.notes,
+    })
+}
+
+fn routine_surface_baseline_projection(baseline: &ResolvedRoutineSurfaceBaseline) -> Value {
+    json!({
+        "surface": baseline.surface,
+        "launch_profile_id": baseline.launch_profile_id.value,
+        "provider": provider_capability_projection(&baseline.provider, baseline.status_reason.as_deref()),
+        "ui_target": baseline.ui_target.value,
+        "instance_preference": baseline.instance_preference.value,
+        "isolation_mode": baseline.isolation_mode.value,
+        "named_instance_on_collision": baseline.named_instance_on_collision.value,
+        "repair_overrides_active": baseline.repair_overrides_active,
+        "active_repair_override_keys": baseline.active_repair_override_keys,
+        "status_reason": baseline.status_reason,
+    })
+}
+
+fn runtime_provider_capability(runtime: &CliRuntime, provider: &str) -> Value {
+    match resolved_routine_surface_baseline(runtime, provider) {
+        Ok(baseline) => {
+            provider_capability_projection(&baseline.provider, baseline.status_reason.as_deref())
+        }
+        Err(_) => provider_capability(provider),
+    }
+}
+
+fn runtime_routine_surface_projection(runtime: &CliRuntime, provider: &str) -> Option<Value> {
+    resolved_routine_surface_baseline(runtime, provider)
+        .ok()
+        .map(|baseline| routine_surface_baseline_projection(&baseline))
+}
+
 fn review_provider_support_matrix() -> Vec<Value> {
     SUPPORTED_REVIEW_PROVIDERS
         .iter()
@@ -7203,6 +7774,41 @@ fn sha256_hex(bytes: &[u8]) -> String {
     text
 }
 
+fn sha256_prefixed_json<T: Serialize>(value: &T) -> Result<String, String> {
+    serde_json::to_vec(value)
+        .map(|bytes| format!("sha256:{}", sha256_hex(&bytes)))
+        .map_err(|err| format!("failed to serialize draft payload: {err}"))
+}
+
+fn render_local_outbound_draft_body(finding: &roger_storage::MaterializedFindingRecord) -> String {
+    format!(
+        "Finding: {}\n\nSummary:\n{}\n\nSeverity: {}\nConfidence: {}\nFingerprint: {}",
+        finding.title,
+        finding.normalized_summary,
+        finding.severity,
+        finding.confidence,
+        finding.fingerprint
+    )
+}
+
+fn outbound_draft_anchor_digest(
+    finding: &roger_storage::MaterializedFindingRecord,
+) -> Result<String, String> {
+    sha256_prefixed_json(&json!({
+        "finding_id": finding.id,
+        "fingerprint": finding.fingerprint,
+        "title": finding.title,
+        "normalized_summary": finding.normalized_summary,
+    }))
+}
+
+fn outbound_draft_target_locator(target: &ReviewTarget, finding_id: &str) -> String {
+    format!(
+        "github:{}#{}:finding/{}",
+        target.repository, target.pull_request_number, finding_id
+    )
+}
+
 fn bridge_contract_snapshot() -> &'static str {
     r#"// Generated bridge contract snapshot for extension-side typing.
 // Source of truth: packages/bridge/src/lib.rs (BridgeLaunchIntent / BridgeResponse).
@@ -7357,7 +7963,7 @@ fn next_id(prefix: &str) -> String {
 }
 
 fn usage_text() -> &'static str {
-    "Usage:\n  rr agent <operation> --task-file <path> [--request-file <path>] [--context-file <path>] [--capability-file <path>]\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--query-mode auto|exact_lookup|recall|related_context|candidate_audit|promotion_review] [--repo owner/repo] [--limit <n>] [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--yes|-y] [--dry-run] [--robot]\n  rr bridge export-contracts [--robot]\n  rr bridge verify-contracts [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge install [--extension-id <id>] [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr extension setup [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr extension doctor [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n\nAgent transport:\n  - rr agent is the dedicated in-session worker transport; it is separate from --robot\n  - current live rr agent operations cover context/status/search/finding/artifact reads, advisory clarification or follow-up proposals, and worker.submit_stage_result\n  - rr agent emits rr.agent.response.v1 envelopes over the canonical worker operation response payload instead of reusing the --robot surface\n\nProvider support in 0.1.0:\n  - opencode is the first-class tier-b continuity path; rr resume can reopen and rr return is supported\n  - codex, gemini, and claude are bounded tier-a providers; start/reseed/raw-capture only, no locator reopen or rr return\n  - copilot is planned but not yet a live --provider value\n  - pi-agent is not part of the 0.1.0 live CLI surface\n\nUpdate notes:\n  - default rr update apply prompts for confirmation on interactive TTY\n  - pass --yes|-y for non-interactive apply confirmation; --robot apply requires --yes|-y\n  - --dry-run and --robot without --yes are non-mutating metadata checks\n  - local/unpublished builds fail closed; migration-capable updates are deferred in 0.1.x"
+    "Usage:\n  rr agent <operation> --task-file <path> [--request-file <path>] [--context-file <path>] [--capability-file <path>]\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--query-mode auto|exact_lookup|recall|related_context|candidate_audit|promotion_review] [--repo owner/repo] [--limit <n>] [--robot]\n  rr draft [--repo owner/repo] [--pr <number>] [--session <id>] (--finding <id>... | --all-findings) [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--yes|-y] [--dry-run] [--robot]\n  rr bridge export-contracts [--robot]\n  rr bridge verify-contracts [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge install [--extension-id <id>] [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr extension setup [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr extension doctor [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n\nAgent transport:\n  - rr agent is the dedicated in-session worker transport; it is separate from --robot\n  - current live rr agent operations cover context/status/search/finding/artifact reads, advisory clarification or follow-up proposals, and worker.submit_stage_result\n  - rr agent emits rr.agent.response.v1 envelopes over the canonical worker operation response payload instead of reusing the --robot surface\n\nProvider support in 0.1.0:\n  - opencode is the first-class tier-b continuity path; rr resume can reopen and rr return is supported\n  - codex, gemini, and claude are bounded tier-a providers; start/reseed/raw-capture only, no locator reopen or rr return\n  - copilot is planned but not yet a live --provider value\n  - pi-agent is not part of the 0.1.0 live CLI surface\n\nOutbound draft notes:\n  - rr draft materializes Roger-owned local draft batches only; it does not approve or post to GitHub\n  - draft selection is explicit in this slice: pass one or more --finding ids or --all-findings\n  - stale persisted review state fails closed before Roger derives outbound payloads\n\nUpdate notes:\n  - default rr update apply prompts for confirmation on interactive TTY\n  - pass --yes|-y for non-interactive apply confirmation; --robot apply requires --yes|-y\n  - --dry-run and --robot without --yes are non-mutating metadata checks\n  - local/unpublished builds fail closed; migration-capable updates are deferred in 0.1.x"
 }
 
 #[cfg(test)]
@@ -8394,6 +9000,38 @@ mod tests {
                 && usage_text().contains("[--yes|-y] [--dry-run] [--robot]"),
             "{}",
             usage_text()
+        );
+    }
+
+    #[test]
+    fn draft_usage_text_and_flag_contract_are_explicit() {
+        assert!(
+            usage_text().contains("rr draft")
+                && usage_text().contains("(--finding <id>... | --all-findings)"),
+            "{}",
+            usage_text()
+        );
+
+        let runtime = CliRuntime {
+            cwd: PathBuf::from("."),
+            store_root: PathBuf::from(".roger-test"),
+            opencode_bin: "opencode".to_owned(),
+        };
+        let result = run(
+            &[
+                "draft".to_owned(),
+                "--dry-run".to_owned(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(result.exit_code, 2);
+        assert!(
+            result
+                .stderr
+                .contains("rr draft does not support --dry-run"),
+            "{}",
+            result.stderr
         );
     }
 
