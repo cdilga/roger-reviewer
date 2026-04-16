@@ -783,6 +783,10 @@ fn seed_session_with_provider(
     session_id: &str,
 ) {
     let target = sample_target(pr_number);
+    let binding_cwd = std::fs::canonicalize(&runtime.cwd)
+        .unwrap_or_else(|_| runtime.cwd.clone())
+        .to_string_lossy()
+        .to_string();
     let store = RogerStore::open(&runtime.store_root).expect("open store");
     store
         .create_review_session(CreateReviewSession {
@@ -808,7 +812,7 @@ fn seed_session_with_provider(
             launch_profile_id: Some("profile-open-pr"),
             ui_target: Some("cli"),
             instance_preference: Some("reuse_if_possible"),
-            cwd: Some("/tmp/repo"),
+            cwd: Some(&binding_cwd),
             worktree_root: None,
         })
         .expect("create binding");
@@ -1514,7 +1518,10 @@ fn bounded_provider_outputs_are_truthful_for_claude_and_gemini() {
             &session_id,
         );
 
-        let status = run_rr(&["status", "--pr", pr, "--robot"], &runtime);
+        let status = run_rr(
+            &["status", "--repo", "owner/repo", "--pr", pr, "--robot"],
+            &runtime,
+        );
         assert_eq!(status.exit_code, 0, "{provider}: {}", status.stderr);
         let status_payload = parse_robot_payload(&status.stdout);
         assert_eq!(status_payload["outcome"], "complete");
@@ -1563,7 +1570,10 @@ fn bounded_provider_outputs_are_truthful_for_claude_and_gemini() {
                     .contains("bounded support"))
         );
 
-        let resume = run_rr(&["resume", "--pr", pr, "--robot"], &runtime);
+        let resume = run_rr(
+            &["resume", "--repo", "owner/repo", "--pr", pr, "--robot"],
+            &runtime,
+        );
         assert_eq!(resume.exit_code, 5, "{provider}: {}", resume.stderr);
         let resume_payload = parse_robot_payload(&resume.stdout);
         assert_eq!(resume_payload["outcome"], "degraded");
@@ -1608,7 +1618,10 @@ fn bounded_provider_outputs_are_truthful_for_claude_and_gemini() {
                     .contains("bounded support"))
         );
 
-        let ret = run_rr(&["return", "--pr", pr, "--robot"], &runtime);
+        let ret = run_rr(
+            &["return", "--repo", "owner/repo", "--pr", pr, "--robot"],
+            &runtime,
+        );
         assert_eq!(ret.exit_code, 3, "{provider}: {}", ret.stderr);
         let return_payload = parse_robot_payload(&ret.stdout);
         assert_eq!(return_payload["outcome"], "blocked");
