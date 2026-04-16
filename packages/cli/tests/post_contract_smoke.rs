@@ -460,6 +460,129 @@ fn post_executes_exact_approved_batch_and_records_posted_action() {
 }
 
 #[test]
+fn post_blocks_duplicate_attempt_and_preserves_recorded_post_lineage() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: "opencode".to_owned(),
+    };
+    seed_session_with_findings(
+        &runtime,
+        "session-post-duplicate",
+        "run-post-duplicate",
+        &sample_target("owner/repo", 42),
+        "awaiting_user_input",
+    );
+
+    let (batch_id, _) = seed_approved_batch(&runtime, "session-post-duplicate");
+    let (_guard, log_path) = install_fake_gh(&temp, None);
+
+    let first_post = run_rr(
+        &[
+            "post",
+            "--session",
+            "session-post-duplicate",
+            "--batch",
+            &batch_id,
+            "--robot",
+        ],
+        &runtime,
+    );
+    assert_eq!(first_post.exit_code, 0, "{}", first_post.stderr);
+    let first_payload = parse_robot_payload(&first_post.stdout);
+    let posted_action_id = first_payload["data"]["posted_action"]["id"]
+        .as_str()
+        .expect("posted action id")
+        .to_owned();
+
+    let second_post = run_rr(
+        &[
+            "post",
+            "--session",
+            "session-post-duplicate",
+            "--batch",
+            &batch_id,
+            "--robot",
+        ],
+        &runtime,
+    );
+    assert_eq!(second_post.exit_code, 3, "{}", second_post.stderr);
+    let second_payload = parse_robot_payload(&second_post.stdout);
+    assert_eq!(second_payload["schema_id"], "rr.robot.post.v1");
+    assert_eq!(second_payload["outcome"], "blocked");
+    assert_eq!(
+        second_payload["data"]["reason_code"],
+        Value::String("existing_posted_action".to_owned())
+    );
+    assert_eq!(
+        second_payload["data"]["posted_action_id"],
+        Value::String(posted_action_id)
+    );
+    assert_eq!(
+        second_payload["data"]["posted_action_status"],
+        Value::String("Succeeded".to_owned())
+    );
+    assert_eq!(second_payload["data"]["failure_code"], Value::Null);
+
+    let store = RogerStore::open(&runtime.store_root).expect("open store");
+    let actions = store
+        .posted_actions_for_batch(&batch_id)
+        .expect("posted actions lookup");
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].status, PostedActionStatus::Succeeded);
+
+    let status = run_rr(
+        &["status", "--session", "session-post-duplicate", "--robot"],
+        &runtime,
+    );
+    assert_eq!(status.exit_code, 0, "{}", status.stderr);
+    let status_payload = parse_robot_payload(&status.stdout);
+    assert_eq!(
+        status_payload["data"]["outbound"]["state_counts"]["approved"],
+        0
+    );
+    assert_eq!(
+        status_payload["data"]["outbound"]["state_counts"]["posted"],
+        2
+    );
+    assert_eq!(
+        status_payload["data"]["outbound"]["state_counts"]["failed"],
+        0
+    );
+
+    let findings = run_rr(
+        &["findings", "--session", "session-post-duplicate", "--robot"],
+        &runtime,
+    );
+    assert_eq!(findings.exit_code, 0, "{}", findings.stderr);
+    let findings_payload = parse_robot_payload(&findings.stdout);
+    let finding_items = findings_payload["data"]["items"]
+        .as_array()
+        .expect("finding items");
+    assert!(
+        finding_items
+            .iter()
+            .all(|item| item["outbound_state"] == "posted")
+    );
+    assert!(finding_items.iter().all(|item| {
+        item["outbound_detail"]["posted_action_status"] == "Succeeded"
+            && item["outbound_detail"]["posted_action_id"]
+                == first_payload["data"]["posted_action"]["id"]
+    }));
+
+    let log_lines = read_log_lines(&log_path);
+    assert_eq!(
+        log_lines
+            .iter()
+            .filter(|line| line.contains("repos/owner/repo/issues/42/comments"))
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn post_blocks_when_stored_approval_payload_digest_drifted() {
     let temp = tempdir().expect("tempdir");
     let repo = init_repo(&temp);
