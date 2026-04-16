@@ -1260,6 +1260,51 @@ pub struct SearchStrategySelection {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchRetrievalClass {
+    PromotedMemory,
+    TentativeCandidates,
+    EvidenceHits,
+}
+
+impl SearchRetrievalClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PromotedMemory => "promoted_memory",
+            Self::TentativeCandidates => "tentative_candidates",
+            Self::EvidenceHits => "evidence_hits",
+        }
+    }
+
+    pub fn parse(raw: &str) -> SearchPlanResult<Self> {
+        match raw.trim() {
+            "promoted_memory" => Ok(Self::PromotedMemory),
+            "tentative_candidates" => Ok(Self::TentativeCandidates),
+            "evidence_hits" => Ok(Self::EvidenceHits),
+            other => Err(SearchPlanError::UnsupportedRetrievalClass {
+                retrieval_class: other.to_owned(),
+            }),
+        }
+    }
+
+    fn sort_key(self) -> u8 {
+        match self {
+            Self::PromotedMemory => 0,
+            Self::TentativeCandidates => 1,
+            Self::EvidenceHits => 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchSemanticRuntimePosture {
+    DisabledByQueryMode,
+    DisabledPendingVerification,
+    EnabledVerifiedLocalAssets,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchQueryPlan {
     pub requested_query_mode: SearchQueryMode,
     pub resolved_query_mode: SearchQueryMode,
@@ -1298,7 +1343,49 @@ impl SearchQueryPlan {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchPlanInput<'a> {
+    pub review_session_id: Option<&'a str>,
+    pub review_run_id: Option<&'a str>,
+    pub repository: &'a str,
+    pub granted_scopes: &'a [String],
+    pub query_text: &'a str,
+    pub query_mode: Option<&'a str>,
+    pub requested_retrieval_classes: &'a [String],
+    pub anchor_hints: &'a [String],
+    pub supports_candidate_audit: bool,
+    pub supports_promotion_review: bool,
+    pub semantic_assets_verified: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchPlan {
+    pub query_plan: SearchQueryPlan,
+    pub review_session_id: Option<String>,
+    pub review_run_id: Option<String>,
+    #[serde(default)]
+    pub granted_scopes: Vec<String>,
+    #[serde(default)]
+    pub scope_keys: Vec<String>,
+    #[serde(default)]
+    pub retrieval_classes: Vec<SearchRetrievalClass>,
+    pub semantic_runtime_posture: SearchSemanticRuntimePosture,
+    pub retrieval_strategy: SearchStrategySelection,
+    pub strategy_reason: String,
+}
+
+impl SearchPlan {
+    pub fn includes_tentative_candidates(&self) -> bool {
+        self.allows_retrieval_class(SearchRetrievalClass::TentativeCandidates)
+    }
+
+    pub fn allows_retrieval_class(&self, class: SearchRetrievalClass) -> bool {
+        self.retrieval_classes.contains(&class)
+    }
+}
+
 pub type SearchQueryPlanResult<T> = std::result::Result<T, SearchQueryPlanError>;
+pub type SearchPlanResult<T> = std::result::Result<T, SearchPlanError>;
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SearchQueryPlanError {
@@ -1326,6 +1413,45 @@ impl SearchQueryPlanError {
             Self::RelatedContextRequiresAnchors => "query_mode_requires_anchor_hints",
             Self::CandidateAuditUnsupported => "query_mode_not_supported",
             Self::PromotionReviewUnsupported => "query_mode_not_supported",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SearchPlanError {
+    #[error(transparent)]
+    QueryPlanning(#[from] SearchQueryPlanError),
+    #[error("search plan requires at least one granted scope before Roger can execute retrieval")]
+    MissingGrantedScopes,
+    #[error("search scope '{scope}' is not supported on this surface")]
+    UnsupportedScope { scope: String },
+    #[error(
+        "retrieval class '{retrieval_class}' is not part of Roger's canonical retrieval contract"
+    )]
+    UnsupportedRetrievalClass { retrieval_class: String },
+    #[error(
+        "query_mode '{query_mode}' requires tentative_candidates retrieval so Roger does not silently hide candidate review"
+    )]
+    CandidateAwareQueryRequiresTentativeCandidates { query_mode: String },
+    #[error(
+        "tentative_candidates retrieval requires candidate-aware query_mode, but Roger resolved '{query_mode}'"
+    )]
+    TentativeCandidatesRequireCandidateAwareQuery { query_mode: String },
+}
+
+impl SearchPlanError {
+    pub fn reason_code(&self) -> &'static str {
+        match self {
+            Self::QueryPlanning(err) => err.reason_code(),
+            Self::MissingGrantedScopes => "search_scope_missing",
+            Self::UnsupportedScope { .. } => "search_scope_unsupported",
+            Self::UnsupportedRetrievalClass { .. } => "retrieval_class_invalid",
+            Self::CandidateAwareQueryRequiresTentativeCandidates { .. } => {
+                "candidate_visibility_hidden"
+            }
+            Self::TentativeCandidatesRequireCandidateAwareQuery { .. } => {
+                "candidate_visibility_invalid"
+            }
         }
     }
 }
@@ -1460,6 +1586,151 @@ pub fn plan_search_query(
     })
 }
 
+pub fn materialize_search_plan(input: SearchPlanInput<'_>) -> SearchPlanResult<SearchPlan> {
+    let query_plan = plan_search_query(SearchQueryPlanningInput {
+        query_text: input.query_text,
+        query_mode: input.query_mode,
+        anchor_hints: input.anchor_hints,
+        supports_candidate_audit: input.supports_candidate_audit,
+        supports_promotion_review: input.supports_promotion_review,
+    })?;
+
+    let granted_scopes = canonicalize_granted_scopes(input.granted_scopes);
+    if granted_scopes.is_empty() {
+        return Err(SearchPlanError::MissingGrantedScopes);
+    }
+    if let Some(scope) = granted_scopes.iter().find(|scope| scope.as_str() != "repo") {
+        return Err(SearchPlanError::UnsupportedScope {
+            scope: scope.clone(),
+        });
+    }
+
+    let retrieval_classes =
+        resolve_search_retrieval_classes(&query_plan, input.requested_retrieval_classes)?;
+    let semantic_runtime_posture = if !query_plan.strategy.semantic {
+        SearchSemanticRuntimePosture::DisabledByQueryMode
+    } else if input.semantic_assets_verified {
+        SearchSemanticRuntimePosture::EnabledVerifiedLocalAssets
+    } else {
+        SearchSemanticRuntimePosture::DisabledPendingVerification
+    };
+    let retrieval_strategy = SearchStrategySelection {
+        primary_lane: query_plan.strategy.primary_lane,
+        lexical: query_plan.strategy.lexical,
+        prior_review: query_plan.strategy.prior_review,
+        semantic: query_plan.strategy.semantic && input.semantic_assets_verified,
+        candidate_audit: query_plan.strategy.candidate_audit
+            && retrieval_classes.contains(&SearchRetrievalClass::TentativeCandidates),
+        query_expansion: query_plan.strategy.query_expansion,
+    };
+
+    let scope_keys = granted_scopes
+        .iter()
+        .map(|scope| match scope.as_str() {
+            "repo" => Ok(format!("repo:{}", input.repository)),
+            other => Err(SearchPlanError::UnsupportedScope {
+                scope: other.to_owned(),
+            }),
+        })
+        .collect::<SearchPlanResult<Vec<_>>>()?;
+    let scope_summary = scope_keys.join(", ");
+    let retrieval_class_summary = retrieval_classes
+        .iter()
+        .map(|class| class.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let candidate_summary = if retrieval_strategy.candidate_audit {
+        "tentative candidate review remains explicitly enabled"
+    } else {
+        "tentative candidate review remains hidden"
+    };
+    let semantic_summary = match semantic_runtime_posture {
+        SearchSemanticRuntimePosture::DisabledByQueryMode => {
+            "semantic retrieval is intentionally disabled for this query mode"
+        }
+        SearchSemanticRuntimePosture::DisabledPendingVerification => {
+            "semantic retrieval is disabled until verified local semantic assets are available"
+        }
+        SearchSemanticRuntimePosture::EnabledVerifiedLocalAssets => {
+            "semantic retrieval is enabled with verified local assets"
+        }
+    };
+    let strategy_reason = format!(
+        "{} Scope stays bound to {scope_summary}; retrieval classes: {retrieval_class_summary}; {candidate_summary}; {semantic_summary}.",
+        query_plan.strategy_reason()
+    );
+
+    Ok(SearchPlan {
+        query_plan,
+        review_session_id: input.review_session_id.map(str::to_owned),
+        review_run_id: input.review_run_id.map(str::to_owned),
+        granted_scopes,
+        scope_keys,
+        retrieval_classes,
+        semantic_runtime_posture,
+        retrieval_strategy,
+        strategy_reason,
+    })
+}
+
+fn canonicalize_granted_scopes(scopes: &[String]) -> Vec<String> {
+    let mut canonical = Vec::new();
+    for scope in scopes {
+        let trimmed = scope.trim();
+        if trimmed.is_empty() || canonical.iter().any(|existing| existing == trimmed) {
+            continue;
+        }
+        canonical.push(trimmed.to_owned());
+    }
+    canonical.sort_unstable();
+    canonical
+}
+
+fn resolve_search_retrieval_classes(
+    query_plan: &SearchQueryPlan,
+    requested_retrieval_classes: &[String],
+) -> SearchPlanResult<Vec<SearchRetrievalClass>> {
+    let mut retrieval_classes = if requested_retrieval_classes.is_empty() {
+        let mut defaults = vec![
+            SearchRetrievalClass::PromotedMemory,
+            SearchRetrievalClass::EvidenceHits,
+        ];
+        if query_plan.includes_tentative_candidates() {
+            defaults.push(SearchRetrievalClass::TentativeCandidates);
+        }
+        defaults
+    } else {
+        let mut explicit = Vec::new();
+        for class in requested_retrieval_classes {
+            let class = SearchRetrievalClass::parse(class)?;
+            if !explicit.contains(&class) {
+                explicit.push(class);
+            }
+        }
+        explicit
+    };
+
+    let tentative_candidates_requested =
+        retrieval_classes.contains(&SearchRetrievalClass::TentativeCandidates);
+    if query_plan.includes_tentative_candidates() && !tentative_candidates_requested {
+        return Err(
+            SearchPlanError::CandidateAwareQueryRequiresTentativeCandidates {
+                query_mode: query_plan.resolved_query_mode.as_str().to_owned(),
+            },
+        );
+    }
+    if tentative_candidates_requested && !query_plan.includes_tentative_candidates() {
+        return Err(
+            SearchPlanError::TentativeCandidatesRequireCandidateAwareQuery {
+                query_mode: query_plan.resolved_query_mode.as_str().to_owned(),
+            },
+        );
+    }
+
+    retrieval_classes.sort_by_key(|class| class.sort_key());
+    Ok(retrieval_classes)
+}
+
 fn query_looks_like_exact_lookup(query: &str) -> bool {
     if query.is_empty() || query.split_whitespace().count() != 1 {
         return false;
@@ -1540,11 +1811,13 @@ pub struct RecallEnvelope {
 }
 
 pub type WorkerRecallEnvelope = RecallEnvelope;
+pub type WorkerSearchPlan = SearchPlan;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerSearchMemoryResponse {
     pub requested_query_mode: String,
     pub resolved_query_mode: String,
+    pub search_plan: WorkerSearchPlan,
     pub retrieval_mode: String,
     #[serde(default)]
     pub degraded_flags: Vec<String>,
@@ -2245,12 +2518,23 @@ fn search_memory_payload(
 ) -> std::result::Result<Value, (AgentTransportErrorCode, String)> {
     let search_request =
         decode_operation_payload::<WorkerSearchMemoryRequest>(request, "worker.search_memory")?;
-    let plan = plan_search_query(SearchQueryPlanningInput {
+    let granted_scopes = if request.operation_request.requested_scopes.is_empty() {
+        request.review_task.allowed_scopes.clone()
+    } else {
+        request.operation_request.requested_scopes.clone()
+    };
+    let plan = materialize_search_plan(SearchPlanInput {
+        review_session_id: Some(&request.review_task.review_session_id),
+        review_run_id: Some(&request.review_task.review_run_id),
+        repository: &request.worker_context.review_target.repository,
+        granted_scopes: &granted_scopes,
         query_text: &search_request.query_text,
         query_mode: Some(&search_request.query_mode),
+        requested_retrieval_classes: &search_request.requested_retrieval_classes,
         anchor_hints: &search_request.anchor_hints,
         supports_candidate_audit: true,
         supports_promotion_review: false,
+        semantic_assets_verified: false,
     })
     .map_err(|err| (AgentTransportErrorCode::ValidationFailed, err.to_string()))?;
     let response = request
@@ -2264,8 +2548,8 @@ fn search_memory_payload(
                     .to_owned(),
             )
         })?;
-    if response.requested_query_mode != plan.requested_query_mode.as_str()
-        || response.resolved_query_mode != plan.resolved_query_mode.as_str()
+    if response.requested_query_mode != plan.query_plan.requested_query_mode.as_str()
+        || response.resolved_query_mode != plan.query_plan.resolved_query_mode.as_str()
     {
         return Err((
             AgentTransportErrorCode::ValidationFailed,
@@ -2273,14 +2557,71 @@ fn search_memory_payload(
                 .to_owned(),
         ));
     }
-    validate_search_memory_response(response)?;
+    validate_search_memory_response(response, &plan)?;
     serde_json::to_value(response)
         .map_err(|err| (AgentTransportErrorCode::PayloadInvalid, err.to_string()))
 }
 
 fn validate_search_memory_response(
     response: &WorkerSearchMemoryResponse,
+    expected_plan: &SearchPlan,
 ) -> std::result::Result<(), (AgentTransportErrorCode, String)> {
+    if response.search_plan != *expected_plan {
+        return Err((
+            AgentTransportErrorCode::ValidationFailed,
+            "worker search response search_plan drifted from Roger's planned retrieval objective"
+                .to_owned(),
+        ));
+    }
+    if response.requested_query_mode
+        != response
+            .search_plan
+            .query_plan
+            .requested_query_mode
+            .as_str()
+        || response.resolved_query_mode
+            != response.search_plan.query_plan.resolved_query_mode.as_str()
+    {
+        return Err((
+            AgentTransportErrorCode::ValidationFailed,
+            "worker search response top-level query-mode fields drifted from Roger's planned retrieval objective"
+                .to_owned(),
+        ));
+    }
+    if !expected_plan.allows_retrieval_class(SearchRetrievalClass::PromotedMemory)
+        && !response.promoted_memory.is_empty()
+    {
+        return Err((
+            AgentTransportErrorCode::ValidationFailed,
+            "worker search response surfaced promoted_memory outside the planned retrieval classes"
+                .to_owned(),
+        ));
+    }
+    if !expected_plan.allows_retrieval_class(SearchRetrievalClass::TentativeCandidates)
+        && !response.tentative_candidates.is_empty()
+    {
+        return Err((
+            AgentTransportErrorCode::ValidationFailed,
+            "worker search response surfaced tentative_candidates outside the planned retrieval classes"
+                .to_owned(),
+        ));
+    }
+    if !expected_plan.allows_retrieval_class(SearchRetrievalClass::EvidenceHits)
+        && !response.evidence_hits.is_empty()
+    {
+        return Err((
+            AgentTransportErrorCode::ValidationFailed,
+            "worker search response surfaced evidence_hits outside the planned retrieval classes"
+                .to_owned(),
+        ));
+    }
+    if !expected_plan.retrieval_strategy.semantic && response.retrieval_mode == "hybrid" {
+        return Err((
+            AgentTransportErrorCode::ValidationFailed,
+            "worker search response reported hybrid retrieval even though the search_plan disabled semantic retrieval"
+                .to_owned(),
+        ));
+    }
     validate_recall_envelopes(
         &response.promoted_memory,
         "promoted_memory",
