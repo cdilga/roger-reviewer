@@ -1,3 +1,4 @@
+use crate::RecallEnvelope;
 use roger_config::{ResolvedLaunchBaseline, ResolvedProviderCapability};
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +10,7 @@ pub enum ShellPanelKind {
     FindingsList,
     FindingDetail,
     DraftApprovalQueue,
+    SearchHistory,
     ActivityFeed,
 }
 
@@ -249,6 +251,48 @@ impl ActiveSessionEntry {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchBaselineSnapshot {
+    pub id: String,
+    pub default_query_mode: String,
+    #[serde(default)]
+    pub allowed_scopes: Vec<String>,
+    pub candidate_visibility_policy: String,
+    #[serde(default)]
+    pub degraded_flags: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchHistoryReviewRequest {
+    pub id: String,
+    pub request_kind: String,
+    pub subject_memory_id: String,
+    pub status: String,
+    pub reason_summary: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchHistorySnapshot {
+    pub query_text: String,
+    pub requested_query_mode: String,
+    pub resolved_query_mode: String,
+    pub retrieval_mode: String,
+    #[serde(default)]
+    pub anchor_hints: Vec<String>,
+    #[serde(default)]
+    pub degraded_flags: Vec<String>,
+    #[serde(default)]
+    pub promoted_memory: Vec<RecallEnvelope>,
+    #[serde(default)]
+    pub tentative_candidates: Vec<RecallEnvelope>,
+    #[serde(default)]
+    pub evidence_hits: Vec<RecallEnvelope>,
+    #[serde(default)]
+    pub review_requests: Vec<SearchHistoryReviewRequest>,
+    #[serde(default)]
+    pub baseline: Option<SearchBaselineSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadOnlySessionSnapshot {
     pub chrome: SessionChrome,
     pub overview_lines: Vec<String>,
@@ -265,6 +309,8 @@ pub struct ReadOnlySessionSnapshot {
     pub local_draft_queue: Vec<LocalDraftReviewEntry>,
     #[serde(default)]
     pub active_sessions: Vec<ActiveSessionEntry>,
+    #[serde(default)]
+    pub search_history: Option<SearchHistorySnapshot>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,6 +328,7 @@ pub struct MinimalTuiShell {
     pub clarification_intents: Vec<ClarificationIntent>,
     pub local_draft_queue: Vec<LocalDraftReviewEntry>,
     pub active_sessions: Vec<ActiveSessionEntry>,
+    pub search_history: Option<SearchHistorySnapshot>,
     pub active_session_index: usize,
     pub posting_requested: bool,
     overview_lines: Vec<String>,
@@ -339,6 +386,7 @@ impl MinimalTuiShell {
             clarification_intents: Vec::new(),
             local_draft_queue: snapshot.local_draft_queue,
             active_sessions,
+            search_history: snapshot.search_history,
             active_session_index,
             posting_requested: false,
             overview_lines: snapshot.overview_lines,
@@ -599,6 +647,7 @@ impl MinimalTuiShell {
         self.finding_details = snapshot.finding_details;
         self.local_draft_queue = snapshot.local_draft_queue;
         self.active_sessions = active_sessions;
+        self.search_history = snapshot.search_history;
         self.overview_lines = snapshot.overview_lines;
         self.recent_run_lines = snapshot.recent_run_lines;
         self.findings_preview_lines = snapshot.findings_preview_lines;
@@ -665,6 +714,11 @@ impl MinimalTuiShell {
                 kind: ShellPanelKind::DraftApprovalQueue,
                 title: "Draft Queue".to_owned(),
                 lines: self.render_draft_queue_lines(),
+            },
+            ReadOnlyPanelState {
+                kind: ShellPanelKind::SearchHistory,
+                title: "Search/History".to_owned(),
+                lines: self.render_search_history_lines(),
             },
             ReadOnlyPanelState {
                 kind: ShellPanelKind::ActivityFeed,
@@ -848,6 +902,134 @@ impl MinimalTuiShell {
             .collect()
     }
 
+    fn render_search_history_lines(&self) -> Vec<String> {
+        let Some(search) = self.search_history.as_ref() else {
+            return Vec::new();
+        };
+
+        let mut lines = vec![format!(
+            "query=\"{}\" · requested={} · resolved={} · retrieval={}",
+            search.query_text,
+            search.requested_query_mode,
+            search.resolved_query_mode,
+            search.retrieval_mode
+        )];
+
+        if !search.anchor_hints.is_empty() {
+            lines.push(format!("anchor_hints={}", search.anchor_hints.join(", ")));
+        }
+        if !search.degraded_flags.is_empty() {
+            lines.push(format!(
+                "degraded_flags={}",
+                search.degraded_flags.join(", ")
+            ));
+        }
+        lines.push(format!(
+            "lanes promoted={} tentative={} evidence={} review_requests={}",
+            search.promoted_memory.len(),
+            search.tentative_candidates.len(),
+            search.evidence_hits.len(),
+            search.review_requests.len()
+        ));
+
+        if let Some(baseline) = search.baseline.as_ref() {
+            let scopes = if baseline.allowed_scopes.is_empty() {
+                "none".to_owned()
+            } else {
+                baseline.allowed_scopes.join(", ")
+            };
+            lines.push(format!(
+                "baseline={} · default_query_mode={} · candidate_visibility={} · allowed_scopes={}",
+                baseline.id,
+                baseline.default_query_mode,
+                baseline.candidate_visibility_policy,
+                scopes
+            ));
+            if !baseline.degraded_flags.is_empty() {
+                lines.push(format!(
+                    "baseline_degraded_flags={}",
+                    baseline.degraded_flags.join(", ")
+                ));
+            }
+        }
+
+        if !search.review_requests.is_empty() {
+            lines.push("review_requests:".to_owned());
+            for request in &search.review_requests {
+                lines.push(format!(
+                    "{} · kind={} · subject={} · status={} · reason={}",
+                    request.id,
+                    request.request_kind,
+                    request.subject_memory_id,
+                    request.status,
+                    request.reason_summary
+                ));
+            }
+        }
+
+        Self::push_recall_lane_lines(&mut lines, "promoted_memory", &search.promoted_memory);
+        Self::push_recall_lane_lines(
+            &mut lines,
+            "tentative_candidates",
+            &search.tentative_candidates,
+        );
+        Self::push_recall_lane_lines(&mut lines, "evidence_hits", &search.evidence_hits);
+
+        lines
+    }
+
+    fn push_recall_lane_lines(lines: &mut Vec<String>, lane: &str, envelopes: &[RecallEnvelope]) {
+        if envelopes.is_empty() {
+            return;
+        }
+
+        lines.push(format!("{lane}:"));
+        for envelope in envelopes {
+            let trust_state = envelope.trust_state.as_deref().unwrap_or("unclassified");
+            lines.push(format!(
+                "{}:{} · requested={} · resolved={} · retrieval={} · scope={}",
+                envelope.item_kind,
+                envelope.item_id,
+                envelope.requested_query_mode,
+                envelope.resolved_query_mode,
+                envelope.retrieval_mode,
+                envelope.scope_bucket
+            ));
+            let mut posture_line = format!(
+                "  lane={} · trust={} · citation={} · surface={}",
+                envelope.memory_lane,
+                trust_state,
+                envelope.citation_posture,
+                envelope.surface_posture
+            );
+            if let Some(visibility) = recall_visibility_label(envelope) {
+                posture_line.push_str(&format!(" · visibility={visibility}"));
+            }
+            lines.push(posture_line);
+            lines.push(format!("  summary={}", envelope.snippet_or_summary));
+            lines.push(format!(
+                "  anchor_overlap={}",
+                envelope.anchor_overlap_summary
+            ));
+            lines.push(format!(
+                "  source_refs={}",
+                envelope
+                    .source_refs
+                    .iter()
+                    .map(|source_ref| format!("{}:{}", source_ref.kind, source_ref.id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            if !envelope.degraded_flags.is_empty() {
+                lines.push(format!(
+                    "  degraded_flags={}",
+                    envelope.degraded_flags.join(", ")
+                ));
+            }
+            lines.push(format!("  explain={}", envelope.explain_summary));
+        }
+    }
+
     fn apply_active_session_chrome(&mut self) {
         let active = self.active_session().clone();
         self.chrome.session_id = active.session_id;
@@ -881,5 +1063,18 @@ impl MinimalTuiShell {
                     .first()
                     .map(|detail| detail.finding_id.clone())
             })
+    }
+}
+
+fn recall_visibility_label(envelope: &RecallEnvelope) -> Option<&'static str> {
+    if matches!(
+        envelope.trust_state.as_deref(),
+        Some("contradicted" | "anti_pattern")
+    ) {
+        Some("contradicted_warning")
+    } else if envelope.memory_lane == "tentative_candidates" {
+        Some("tentative_candidate")
+    } else {
+        None
     }
 }

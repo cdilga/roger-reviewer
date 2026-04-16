@@ -1,11 +1,60 @@
 use roger_app_core::tui_shell::{
     ActiveSessionEntry, BackgroundJobClass, BackgroundJobSnapshot, BackgroundJobStatus,
     ClarificationIntentStatus, DraftReviewDecision, EvidenceSnippet, FindingDetail, FindingListRow,
-    LocalDraftReviewEntry, MinimalTuiShell, ReadOnlySessionSnapshot, SessionChrome,
-    SupervisorSnapshot, WakeReason, WakeSignal,
+    LocalDraftReviewEntry, MinimalTuiShell, ReadOnlySessionSnapshot, SearchBaselineSnapshot,
+    SearchHistoryReviewRequest, SearchHistorySnapshot, SessionChrome, SupervisorSnapshot,
+    WakeReason, WakeSignal,
 };
+use roger_app_core::{RecallEnvelope, RecallSourceRef};
 use roger_config::resolve_cli_config_from_lookup;
+use serde_json::json;
 use std::path::Path;
+
+fn recall_envelope(
+    item_kind: &str,
+    item_id: &str,
+    requested_query_mode: &str,
+    resolved_query_mode: &str,
+    memory_lane: &str,
+    trust_state: Option<&str>,
+    citation_posture: &str,
+    surface_posture: &str,
+    snippet_or_summary: &str,
+    degraded_flags: &[&str],
+) -> RecallEnvelope {
+    RecallEnvelope {
+        item_kind: item_kind.to_owned(),
+        item_id: item_id.to_owned(),
+        requested_query_mode: requested_query_mode.to_owned(),
+        resolved_query_mode: resolved_query_mode.to_owned(),
+        retrieval_mode: "hybrid".to_owned(),
+        scope_bucket: "repository".to_owned(),
+        memory_lane: memory_lane.to_owned(),
+        trust_state: trust_state.map(ToOwned::to_owned),
+        source_refs: vec![
+            RecallSourceRef {
+                kind: "memory".to_owned(),
+                id: item_id.to_owned(),
+            },
+            RecallSourceRef {
+                kind: "scope".to_owned(),
+                id: "repo:owner/repo".to_owned(),
+            },
+        ],
+        locator: json!({
+            "scope_key": "repo:owner/repo",
+            "memory_id": item_id,
+        }),
+        snippet_or_summary: snippet_or_summary.to_owned(),
+        anchor_overlap_summary: "1 anchor hint(s) supplied".to_owned(),
+        degraded_flags: degraded_flags.iter().map(|flag| (*flag).to_owned()).collect(),
+        explain_summary: format!(
+            "{item_kind} surfaced from {memory_lane} with requested query_mode {requested_query_mode}, resolved query_mode {resolved_query_mode}, retrieval_mode hybrid, posture {citation_posture}/{surface_posture}"
+        ),
+        citation_posture: citation_posture.to_owned(),
+        surface_posture: surface_posture.to_owned(),
+    }
+}
 
 fn sample_snapshot() -> ReadOnlySessionSnapshot {
     let resolved = resolve_cli_config_from_lookup(Path::new("/tmp/roger"), |_| None);
@@ -96,6 +145,78 @@ fn sample_snapshot() -> ReadOnlySessionSnapshot {
                 Some("preflight selected reseed-only bounded provider policy".to_owned()),
             ),
         ],
+        search_history: Some(SearchHistorySnapshot {
+            query_text: "approval invalidation".to_owned(),
+            requested_query_mode: "auto".to_owned(),
+            resolved_query_mode: "promotion_review".to_owned(),
+            retrieval_mode: "hybrid".to_owned(),
+            anchor_hints: vec!["finding-1".to_owned()],
+            degraded_flags: vec!["stale_index".to_owned()],
+            promoted_memory: vec![recall_envelope(
+                "promoted_memory",
+                "memory-1",
+                "auto",
+                "promotion_review",
+                "promoted_memory",
+                Some("established"),
+                "cite_allowed",
+                "ordinary",
+                "Prior approval invalidation regression",
+                &[],
+            )],
+            tentative_candidates: vec![
+                recall_envelope(
+                    "candidate_memory",
+                    "memory-2",
+                    "auto",
+                    "promotion_review",
+                    "tentative_candidates",
+                    Some("candidate"),
+                    "inspect_only",
+                    "candidate_review",
+                    "Tentative reminder to recheck approval payload drift",
+                    &["stale_index"],
+                ),
+                recall_envelope(
+                    "candidate_memory",
+                    "memory-3",
+                    "auto",
+                    "promotion_review",
+                    "tentative_candidates",
+                    Some("contradicted"),
+                    "warning_only",
+                    "operator_review_only",
+                    "Older advice to keep approval token after target retargeting",
+                    &["stale_index"],
+                ),
+            ],
+            evidence_hits: vec![recall_envelope(
+                "evidence_finding",
+                "finding-77",
+                "auto",
+                "promotion_review",
+                "evidence_hits",
+                None,
+                "cite_allowed",
+                "ordinary",
+                "Current review evidence showing approval drift on refresh",
+                &[],
+            )],
+            review_requests: vec![SearchHistoryReviewRequest {
+                id: "mrr-1".to_owned(),
+                request_kind: "promote".to_owned(),
+                subject_memory_id: "memory-2".to_owned(),
+                status: "pending_review".to_owned(),
+                reason_summary: "candidate has repeated supporting evidence".to_owned(),
+            }],
+            baseline: Some(SearchBaselineSnapshot {
+                id: "baseline-1".to_owned(),
+                default_query_mode: "recall".to_owned(),
+                allowed_scopes: vec!["repository".to_owned(), "pull_request".to_owned()],
+                candidate_visibility_policy: "review_only".to_owned(),
+                degraded_flags: vec!["stale_index".to_owned()],
+            }),
+        }),
     }
 }
 
@@ -150,6 +271,35 @@ fn finding_detail_surfaces_lineage_degraded_state_and_evidence() {
             .len()
             == 1
     );
+}
+
+#[test]
+fn search_history_projects_canonical_recall_truth_and_tentative_posture() {
+    let shell = MinimalTuiShell::open(sample_snapshot());
+
+    let search_lines = shell
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Search/History")
+        .expect("search/history panel")
+        .lines
+        .join("\n");
+
+    assert!(search_lines.contains("query=\"approval invalidation\""));
+    assert!(search_lines.contains("requested=auto"));
+    assert!(search_lines.contains("resolved=promotion_review"));
+    assert!(search_lines.contains("retrieval=hybrid"));
+    assert!(search_lines.contains("degraded_flags=stale_index"));
+    assert!(search_lines.contains("baseline=baseline-1"));
+    assert!(search_lines.contains("default_query_mode=recall"));
+    assert!(search_lines.contains("candidate_visibility=review_only"));
+    assert!(search_lines.contains("allowed_scopes=repository, pull_request"));
+    assert!(search_lines.contains("lanes promoted=1 tentative=2 evidence=1 review_requests=1"));
+    assert!(search_lines.contains("mrr-1 · kind=promote · subject=memory-2"));
+    assert!(search_lines.contains("visibility=tentative_candidate"));
+    assert!(search_lines.contains("visibility=contradicted_warning"));
+    assert!(search_lines.contains("trust=contradicted"));
+    assert!(search_lines.contains("citation=warning_only"));
 }
 
 #[test]
@@ -339,10 +489,8 @@ fn session_switching_updates_active_chrome_without_side_effects() {
     assert!(session_lines.contains("tier=tier_a"));
     assert!(session_lines.contains("isolation=current_checkout"));
     assert!(session_lines.contains("policy_profile=review_safe_tier_a_reseed_only"));
-    assert!(
-        session_lines
-            .contains("status_reason=preflight selected reseed-only bounded provider policy")
-    );
+    assert!(session_lines
+        .contains("status_reason=preflight selected reseed-only bounded provider policy"));
     assert!(session_lines.contains("available_sessions:"));
 }
 
