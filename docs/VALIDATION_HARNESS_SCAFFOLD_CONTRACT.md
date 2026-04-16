@@ -130,6 +130,7 @@ id = "<prefix>_<suite_name>"         # e.g. "int_harness_opencode_resume"
 family = "<prefix>"                   # must match one of the prefix families above
 flow_ids = ["F01", "F01.1"]          # flow families this suite defends
 invariant_ids = ["INV-SESSION-002"]   # release-critical truths this suite defends
+persona_ids = ["PJ-03C"]              # user-visible journey cuts this suite anchors
 fixture_families = [                  # fixture families consumed
   "fixture_resumebundle_stale_locator"
 ]
@@ -148,6 +149,9 @@ preserve_failure_artifacts = true     # must be true for acceptance, e2e, bridge
 - `invariant_ids` should map to ids defined in
   [`VALIDATION_INVARIANT_MATRIX.md`](docs/VALIDATION_INVARIANT_MATRIX.md)
   whenever the suite defends a release-critical product truth.
+- `persona_ids` should map to scenario ids defined in
+  [`PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md`](docs/PERSONA_JOURNEYS_AND_CHAOS_RECOVERY.md)
+  whenever the suite anchors a user-visible journey or recovery cut.
 - `fixture_families` must map to families defined in
   [`VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md`](docs/VALIDATION_MATRIX_AND_FIXTURE_OWNERSHIP.md).
 - `degraded = true` and `bounded = true` must be explicit for any suite

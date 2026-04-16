@@ -2,6 +2,8 @@ id = "int_tui_findings_degraded_modes"
 budget_id = "INT-FINDINGS-01"
 family = "int_tui"
 flow_ids = ["F11", "F14"]
+invariant_ids = ["INV-HARNESS-002"]
+persona_ids = ["PJ-04C"]
 fixture_families = [
   "fixture_findings_valid_minimal",
   "fixture_findings_partial_mixed",

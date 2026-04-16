@@ -92,11 +92,32 @@ Current repo truth:
 - `E2E-01` is the first implemented executable heavyweight E2E
 - `E2E-02` through `E2E-06` are budget-approved scenario slots until their
   suites land and run
+- the machine-readable budget now carries persona ids, flow ids, invariant ids,
+  current executable suite ids, current cheaper-suite owners, and follow-on
+  bead ids so this mapping is derivable without re-reading every matrix doc
+
+Current ownership map:
+
+| E2E | Persona anchors | Invariant anchors | Executable proof today | Current cheaper proof owners | Missing executable owner |
+|-----|-----------------|-------------------|------------------------|------------------------------|--------------------------|
+| `E2E-01` | `PJ-03A`, `PJ-05A` | `INV-HARNESS-002`, `INV-POST-001` | `e2e_core_review_happy_path` | `int_harness_opencode_resume`, `int_github_outbound_audit`, `int_github_posting_safety_recovery` still own malformed/degraded/post-recovery truth | none |
+| `E2E-02` | `PJ-02A`, `PJ-02D`, `PJ-04A`, `PJ-04B` | `INV-SESSION-002`, `INV-CONTEXT-001`, `INV-SEARCH-003`, `INV-SEARCH-004` | none | `int_cli_session_aware`, `accept_opencode_resume`, `int_search_prior_review_lookup` | `rr-6iah.1` |
+| `E2E-03` | `PJ-03A`, `PJ-03C`, `PJ-04A` | `INV-TUI-001`, `INV-TUI-002`, `INV-SEARCH-003`, `INV-SEARCH-004` | none | `int_search_prior_review_lookup`, `int_cli_session_aware` | `rr-6iah.2` |
+| `E2E-04` | `PJ-02D`, `PJ-04D`, `PJ-05B` | `INV-POST-002`, `INV-POST-003`, `INV-HARNESS-003` | none | `prop_refresh_identity_lifecycle`, `int_github_posting_safety_recovery` | `rr-6iah.3` |
+| `E2E-05` | `PJ-01A`, `PJ-01B`, `PJ-01C` | `INV-BRIDGE-001`, `INV-BRIDGE-002`, `INV-SESSION-001` | none | `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, `smoke_browser_launch_edge`, `int_bridge_launch_only_no_status` | `rr-6iah.4` |
+| `E2E-06` | `PJ-03C`, `PJ-04A`, `PJ-04B` | `INV-SESSION-002`, `INV-CONTEXT-001` | none | `accept_opencode_dropout_return`, `accept_opencode_resume`, `smoke_opencode_continuity`, `int_storage_opencode_dropout_return` | `rr-6iah.5` |
 
 The detailed scenario contract lives in
 [`docs/RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md), and the
 machine-readable budget source of truth lives in
 [`docs/AUTOMATED_E2E_BUDGET.json`](docs/AUTOMATED_E2E_BUDGET.json).
+
+Recovery ownership for `PJ-04` through `PJ-06` now has a dedicated guard:
+
+- `cargo run -q -p roger-validation -- guard-persona-recovery tests/suites .beads/issues.jsonl`
+- the guard checks that recovery-heavy scenario cuts still point at both live
+  suite metadata and explicit bead owners, so crash/restart/bootstrap truth does
+  not drift back into prose-only matrices
 
 ## Current Tooling Posture
 

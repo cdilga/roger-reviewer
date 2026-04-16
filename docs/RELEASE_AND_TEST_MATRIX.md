@@ -461,6 +461,11 @@ Purpose:
 
 - prove the full Roger loop works without the browser
 - primary persona anchors: `PJ-03A` and `PJ-05A`
+- invariant anchors: `INV-HARNESS-002`, `INV-POST-001`
+- executable proof today: `e2e_core_review_happy_path`
+- cheaper suites still own malformed-findings, invalidation, and post-recovery
+  truth through `int_harness_opencode_resume`, `int_github_outbound_audit`, and
+  `int_github_posting_safety_recovery`
 
 Rules:
 
@@ -518,7 +523,14 @@ Purpose:
 - defend Roger's cross-surface continuity claim across extension or bridge
   entry, provider continuity, TUI triage, memory-aware recall, and local draft
   persistence
-- likely persona anchors: `PJ-02A`, `PJ-02D`, `PJ-04A`, and `PJ-04B`
+- persona anchors: `PJ-02A`, `PJ-02D`, `PJ-04A`, and `PJ-04B`
+- invariant anchors: `INV-SESSION-002`, `INV-CONTEXT-001`,
+  `INV-SEARCH-003`, `INV-SEARCH-004`
+- executable proof today: none
+- until the executable suite lands, the current cheaper owners are
+  `int_cli_session_aware`, `accept_opencode_resume`, and
+  `int_search_prior_review_lookup`
+- missing executable proof owner: `rr-6iah.1`
 
 Execution posture:
 
@@ -559,8 +571,13 @@ Purpose:
 
 - defend Roger's TUI-first operating model when review triage depends on prior
   review memory rather than only the current findings pack
-- likely persona anchors: `PJ-03A`, `PJ-03C`, and selected `PJ-04` recovery
-  cuts
+- persona anchors: `PJ-03A`, `PJ-03C`, and `PJ-04A`
+- invariant anchors: `INV-TUI-001`, `INV-TUI-002`, `INV-SEARCH-003`,
+  `INV-SEARCH-004`
+- executable proof today: none
+- until the executable suite lands, the current cheaper owners are
+  `int_search_prior_review_lookup` and `int_cli_session_aware`
+- missing executable proof owner: `rr-6iah.2`
 
 Execution posture:
 
@@ -592,7 +609,12 @@ Purpose:
 
 - defend Roger's refresh contract as a real product journey rather than as a
   pile of narrower reconciliation helpers
-- likely persona anchors: `PJ-02D`, `PJ-04D`, and `PJ-05B`
+- persona anchors: `PJ-02D`, `PJ-04D`, and `PJ-05B`
+- invariant anchors: `INV-POST-002`, `INV-POST-003`, `INV-HARNESS-003`
+- executable proof today: none
+- until the executable suite lands, the current cheaper owners are
+  `prop_refresh_identity_lifecycle` and `int_github_posting_safety_recovery`
+- missing executable proof owner: `rr-6iah.3`
 
 Execution posture:
 
@@ -622,7 +644,14 @@ Purpose:
 
 - defend Roger's first-use browser contract across setup, registration,
   companion truth, and first PR-page launch
-- likely persona anchors: `PJ-01A`, `PJ-01B`, and `PJ-01C`
+- persona anchors: `PJ-01A`, `PJ-01B`, and `PJ-01C`
+- invariant anchors: `INV-BRIDGE-001`, `INV-BRIDGE-002`,
+  `INV-SESSION-001`
+- executable proof today: none
+- until the executable suite lands, the current cheaper owners are
+  `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`,
+  `smoke_browser_launch_edge`, and `int_bridge_launch_only_no_status`
+- missing executable proof owner: `rr-6iah.4`
 
 Execution posture:
 
@@ -652,8 +681,13 @@ Purpose:
 
 - defend Roger's OpenCode-first fallback story and the promise that the bare
   harness path remains a real way out and back
-- likely persona anchors: selected `PJ-04` recovery cuts plus fallback-oriented
-  local re-entry from `PJ-03C`
+- persona anchors: `PJ-03C`, `PJ-04A`, and `PJ-04B`
+- invariant anchors: `INV-SESSION-002`, `INV-CONTEXT-001`
+- executable proof today: none
+- until the executable suite lands, the current cheaper owners are
+  `accept_opencode_dropout_return`, `accept_opencode_resume`,
+  `smoke_opencode_continuity`, and `int_storage_opencode_dropout_return`
+- missing executable proof owner: `rr-6iah.5`
 
 Execution posture:
 

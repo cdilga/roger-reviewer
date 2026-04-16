@@ -191,6 +191,10 @@ Current implementation status:
   `packages/cli/tests/e2e_core_review_happy_path.rs`
 - `E2E-02` through `E2E-06` are budget-approved scenario slots only and do not
   count as functional coverage until executable suites land and run
+- `docs/AUTOMATED_E2E_BUDGET.json` is also the machine-readable mapping source
+  for persona ids, flow ids, invariant ids, current executable suite ids,
+  current cheaper-suite owners, and the follow-on beads that own each missing
+  executable proof
 
 These six slots protect the main product-defining journeys across the surfaces
 Roger actually claims:
@@ -288,6 +292,10 @@ Contract:
 - `blessed_automated_e2e_budget` is the current allowed baseline
 - `blessed_e2e_ids` lists approved heavyweight E2Es by stable id; entries may
   be implemented or budget-approved-not-yet-implemented
+- each `blessed_e2e_ids` entry should also carry the concrete persona ids,
+  flow ids, invariant ids, current executable suite ids, current cheaper-suite
+  owners, and follow-on bead ids that make the support posture mechanically
+  derivable
 - `cataloged_candidate_e2e_ids`, when present, lists pre-shaped future E2Es
   that do not count toward the budget until they are promoted into
   `blessed_e2e_ids`

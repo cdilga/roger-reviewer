@@ -1,0 +1,14 @@
+id = "int_storage_release_migration_gate"
+budget_id = "INT-STORAGE-MIGRATION-01"
+family = "int_storage"
+flow_ids = ["F08"]
+invariant_ids = ["INV-STORE-001"]
+persona_ids = ["PJ-06C", "PJ-06D"]
+fixture_families = ["fixture_migration_and_artifact_integrity"]
+support_tier = "roger_store_upgrade"
+support_status = "blessed"
+degraded = false
+bounded = false
+tier = "integration"
+preserve_failure_artifacts = true
+artifact_retention = "on_failure"

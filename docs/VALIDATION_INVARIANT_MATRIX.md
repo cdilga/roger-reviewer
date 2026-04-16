@@ -111,6 +111,6 @@ If that chain breaks, the claim is not yet fully proof-derivable.
   than the full suite inventory.
 - Not every suite family needs a new invariant row; many suites defend local
   shaping logic under a broader invariant.
-- A future implementation may add machine-readable invariant ids directly to the
-  suite metadata envelope. That would strengthen the proof chain and is aligned
-  with this document.
+- Suite metadata may now carry machine-readable invariant ids directly in the
+  envelope; use them when a suite anchors a release-critical proof so the proof
+  chain stays mechanically derivable rather than prose-only.
