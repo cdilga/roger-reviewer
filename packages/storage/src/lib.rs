@@ -5102,10 +5102,42 @@ impl RogerStore {
     ) -> Result<SessionReentryResolution> {
         if let Some(explicit_session_id) = query.explicit_session_id.clone() {
             if let Some(session) = self.review_session(&explicit_session_id)? {
-                return Ok(SessionReentryResolution::Resolved {
-                    session,
-                    binding: None,
-                });
+                let binding_resolution = self.resolve_session_launch_binding_with_context(
+                    ResolveSessionLaunchBinding {
+                        explicit_session_id: Some(&session.id),
+                        surface: query.source_surface,
+                        repo_locator: &session.review_target.repository,
+                        review_target: Some(&session.review_target),
+                        ui_target: query.ui_target.as_deref(),
+                        instance_preference: query.instance_preference.as_deref(),
+                    },
+                    local_root,
+                )?;
+                let candidates = vec![session_entry_from_record(&session)];
+                return match binding_resolution {
+                    SessionBindingResolution::Resolved(binding) => {
+                        Ok(SessionReentryResolution::Resolved {
+                            session,
+                            binding: Some(binding),
+                        })
+                    }
+                    SessionBindingResolution::NotFound => Ok(SessionReentryResolution::Resolved {
+                        session,
+                        binding: None,
+                    }),
+                    SessionBindingResolution::Ambiguous { .. } => {
+                        Ok(SessionReentryResolution::PickerRequired {
+                            reason: "multiple launch bindings matched explicit session".to_owned(),
+                            candidates,
+                        })
+                    }
+                    SessionBindingResolution::Stale { reason, .. } => {
+                        Ok(SessionReentryResolution::PickerRequired {
+                            reason: format!("launch binding is stale: {reason}"),
+                            candidates,
+                        })
+                    }
+                };
             }
 
             let candidates = self.session_finder(SessionFinderQuery {

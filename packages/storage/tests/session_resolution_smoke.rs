@@ -2,8 +2,8 @@ use tempfile::tempdir;
 
 use roger_app_core::ReviewTarget;
 use roger_storage::{
-    CreateReviewSession, CreateSessionLaunchBinding, LaunchSurface, ResolveSessionReentry, Result,
-    RogerStore, SessionFinderQuery, SessionReentryResolution,
+    CreateReviewSession, CreateSessionLaunchBinding, LaunchSurface, ResolveSessionLocalRoot,
+    ResolveSessionReentry, Result, RogerStore, SessionFinderQuery, SessionReentryResolution,
 };
 
 fn target(repository: &str, pull_request_number: u64) -> ReviewTarget {
@@ -419,6 +419,122 @@ fn global_session_picker_reentry_preserves_target_identity() -> Result<()> {
                     && session.review_target.pull_request_number == selected.pull_request_number
         ),
         "expected explicit-session resolution, got {resolved:?}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn explicit_session_reentry_reuses_binding_when_local_root_matches() -> Result<()> {
+    let temp = tempdir()?;
+    let store = RogerStore::open(temp.path())?;
+
+    let review_target = target("owner/repo", 42);
+    store.create_review_session(CreateReviewSession {
+        id: "session-explicit",
+        review_target: &review_target,
+        provider: "opencode",
+        session_locator: None,
+        resume_bundle_artifact_id: None,
+        continuity_state: "awaiting_resume",
+        attention_state: "awaiting_user_input",
+        launch_profile_id: None,
+    })?;
+    store.put_session_launch_binding(CreateSessionLaunchBinding {
+        id: "binding-explicit",
+        session_id: "session-explicit",
+        repo_locator: &review_target.repository,
+        review_target: Some(&review_target),
+        surface: LaunchSurface::Cli,
+        launch_profile_id: None,
+        ui_target: Some("cli"),
+        instance_preference: Some("reuse_if_possible"),
+        cwd: Some("/tmp/repo-a"),
+        worktree_root: Some("/tmp/repo-a/.worktrees/pr-42"),
+    })?;
+
+    let resolution = store.resolve_session_reentry_with_context(
+        ResolveSessionReentry {
+            explicit_session_id: Some("session-explicit".to_owned()),
+            repository: Some(review_target.repository.clone()),
+            pull_request_number: Some(review_target.pull_request_number),
+            source_surface: LaunchSurface::Cli,
+            ui_target: Some("cli".to_owned()),
+            instance_preference: Some("reuse_if_possible".to_owned()),
+        },
+        ResolveSessionLocalRoot {
+            cwd: Some("/tmp/repo-a/.worktrees/pr-42"),
+            worktree_root: Some("/tmp/repo-a/.worktrees/pr-42"),
+        },
+    )?;
+
+    assert!(
+        matches!(
+            &resolution,
+            SessionReentryResolution::Resolved { session, binding }
+                if session.id == "session-explicit"
+                    && binding.as_ref().expect("binding").id == "binding-explicit"
+        ),
+        "expected explicit-session reentry to keep the validated binding, got {resolution:?}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn explicit_session_reentry_rejects_cross_root_binding_reuse() -> Result<()> {
+    let temp = tempdir()?;
+    let store = RogerStore::open(temp.path())?;
+
+    let review_target = target("owner/repo", 42);
+    store.create_review_session(CreateReviewSession {
+        id: "session-explicit",
+        review_target: &review_target,
+        provider: "opencode",
+        session_locator: None,
+        resume_bundle_artifact_id: None,
+        continuity_state: "awaiting_resume",
+        attention_state: "awaiting_user_input",
+        launch_profile_id: None,
+    })?;
+    store.put_session_launch_binding(CreateSessionLaunchBinding {
+        id: "binding-explicit",
+        session_id: "session-explicit",
+        repo_locator: &review_target.repository,
+        review_target: Some(&review_target),
+        surface: LaunchSurface::Cli,
+        launch_profile_id: None,
+        ui_target: Some("cli"),
+        instance_preference: Some("reuse_if_possible"),
+        cwd: Some("/tmp/repo-a"),
+        worktree_root: Some("/tmp/repo-a/.worktrees/pr-42"),
+    })?;
+
+    let resolution = store.resolve_session_reentry_with_context(
+        ResolveSessionReentry {
+            explicit_session_id: Some("session-explicit".to_owned()),
+            repository: Some(review_target.repository.clone()),
+            pull_request_number: Some(review_target.pull_request_number),
+            source_surface: LaunchSurface::Cli,
+            ui_target: Some("cli".to_owned()),
+            instance_preference: Some("reuse_if_possible".to_owned()),
+        },
+        ResolveSessionLocalRoot {
+            cwd: Some("/tmp/repo-b/.worktrees/pr-42"),
+            worktree_root: Some("/tmp/repo-b/.worktrees/pr-42"),
+        },
+    )?;
+
+    assert!(
+        matches!(
+            &resolution,
+            SessionReentryResolution::PickerRequired { reason, candidates }
+                if reason.contains("launch binding is stale")
+                    && reason.contains("worktree root mismatch")
+                    && candidates.len() == 1
+                    && candidates[0].session_id == "session-explicit"
+        ),
+        "expected explicit-session cross-root reuse to fail closed, got {resolution:?}"
     );
 
     Ok(())
