@@ -1,13 +1,14 @@
 use roger_app_core::{
     AGENT_TRANSPORT_REQUEST_SCHEMA_V1, AGENT_TRANSPORT_RESPONSE_SCHEMA_V1, AgentTransportErrorCode,
     AgentTransportRequestEnvelope, AgentTransportResponseStatus, RecallSourceRef, ReviewTarget,
-    ReviewTask, ReviewTaskKind, SearchPlanInput, WORKER_OPERATION_REQUEST_SCHEMA_V1,
-    WORKER_STAGE_RESULT_SCHEMA_V1, WorkerArtifactExcerpt, WorkerCapabilityProfile,
-    WorkerContextPacket, WorkerFindingDetail, WorkerFindingDetailRequest, WorkerFindingSummary,
-    WorkerGatewaySnapshot, WorkerGitHubPosture, WorkerMutationPosture, WorkerOperationDenialCode,
-    WorkerOperationResponseStatus, WorkerRecallEnvelope, WorkerSearchMemoryRequest,
-    WorkerSearchMemoryResponse, WorkerStageOutcome, WorkerStageResult, WorkerTransportKind,
-    WorkerTurnStrategy, execute_agent_transport_request, materialize_search_plan,
+    ReviewTask, ReviewTaskKind, SearchPlanInput, SessionBaselineSnapshot,
+    WORKER_OPERATION_REQUEST_SCHEMA_V1, WORKER_STAGE_RESULT_SCHEMA_V1, WorkerArtifactExcerpt,
+    WorkerCapabilityProfile, WorkerContextPacket, WorkerFindingDetail, WorkerFindingDetailRequest,
+    WorkerFindingSummary, WorkerGatewaySnapshot, WorkerGitHubPosture, WorkerMutationPosture,
+    WorkerOperationDenialCode, WorkerOperationResponseStatus, WorkerRecallEnvelope,
+    WorkerSearchMemoryRequest, WorkerSearchMemoryResponse, WorkerStageOutcome, WorkerStageResult,
+    WorkerTransportKind, WorkerTurnStrategy, execute_agent_transport_request,
+    materialize_search_plan,
 };
 use serde_json::json;
 
@@ -59,6 +60,7 @@ fn sample_context(task: &ReviewTask) -> WorkerContextPacket {
         review_task_id: task.id.clone(),
         task_nonce: task.task_nonce.clone(),
         baseline_snapshot_ref: Some("baseline-1".to_owned()),
+        baseline_snapshot: Some(sample_baseline_snapshot(task)),
         provider: "opencode".to_owned(),
         transport_kind: WorkerTransportKind::AgentCli,
         stage: task.stage.clone(),
@@ -71,6 +73,23 @@ fn sample_context(task: &ReviewTask) -> WorkerContextPacket {
         continuity_summary: Some("provider session continuity is usable".to_owned()),
         memory_cards: Vec::new(),
         artifact_refs: Vec::new(),
+    }
+}
+
+fn sample_baseline_snapshot(task: &ReviewTask) -> SessionBaselineSnapshot {
+    SessionBaselineSnapshot {
+        id: "baseline-1".to_owned(),
+        review_session_id: task.review_session_id.clone(),
+        review_run_id: Some(task.review_run_id.clone()),
+        baseline_generation: 1,
+        review_target_snapshot: sample_target(),
+        allowed_scopes: task.allowed_scopes.clone(),
+        default_query_mode: "recall".to_owned(),
+        candidate_visibility_policy: "review_only".to_owned(),
+        prompt_strategy: "preset:preset-deep-review/single_turn_report".to_owned(),
+        policy_epoch_refs: vec!["config:cfg-1".to_owned()],
+        degraded_flags: Vec::new(),
+        created_at: 100,
     }
 }
 

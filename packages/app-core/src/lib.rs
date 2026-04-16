@@ -723,6 +723,25 @@ pub struct ReviewTask {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionBaselineSnapshot {
+    pub id: String,
+    pub review_session_id: String,
+    pub review_run_id: Option<String>,
+    pub baseline_generation: i64,
+    pub review_target_snapshot: ReviewTarget,
+    #[serde(default)]
+    pub allowed_scopes: Vec<String>,
+    pub default_query_mode: String,
+    pub candidate_visibility_policy: String,
+    pub prompt_strategy: String,
+    #[serde(default)]
+    pub policy_epoch_refs: Vec<String>,
+    #[serde(default)]
+    pub degraded_flags: Vec<String>,
+    pub created_at: Timestamp,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerFindingSummary {
     pub finding_id: String,
     pub fingerprint: String,
@@ -759,6 +778,8 @@ pub struct WorkerContextPacket {
     pub review_task_id: String,
     pub task_nonce: String,
     pub baseline_snapshot_ref: Option<String>,
+    #[serde(default)]
+    pub baseline_snapshot: Option<SessionBaselineSnapshot>,
     pub provider: String,
     pub transport_kind: WorkerTransportKind,
     pub stage: String,

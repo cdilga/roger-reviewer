@@ -5,7 +5,7 @@ use roger_app_core::{
     LaunchIntent, OutboundApprovalToken, OutboundDraft, OutboundDraftBatch, PostedAction,
     PostedActionStatus, PostingAdapterItemResult, PostingAdapterItemStatus, ResumeBundle,
     ResumeBundleProfile, ReviewTarget, ReviewTask, ReviewTaskKind, RogerCommand, RogerCommandId,
-    RogerCommandInvocationSurface, RogerCommandRouteStatus, Surface,
+    RogerCommandInvocationSurface, RogerCommandRouteStatus, SessionBaselineSnapshot, Surface,
     WORKER_OPERATION_REQUEST_SCHEMA_V1, WORKER_STAGE_RESULT_SCHEMA_V1, WorkerContextPacket,
     WorkerGitHubPosture, WorkerMutationPosture, WorkerOperationResponseStatus, WorkerStageOutcome,
     WorkerStageResult, WorkerTransportKind, outbound_target_tuple_json,
@@ -16,7 +16,8 @@ use roger_cli::{CliRuntime, HarnessCommandInvocation, run, run_harness_command};
 use roger_session_opencode::OpenCodeAdapter;
 use roger_storage::{
     ArtifactBudgetClass, CreateMaterializedFinding, CreateReviewRun, CreateReviewSession,
-    CreateSessionLaunchBinding, LaunchAttemptState, LaunchSurface, RogerStore, UpsertMemoryItem,
+    CreateSessionBaselineSnapshot, CreateSessionLaunchBinding, LaunchAttemptState, LaunchSurface,
+    RogerStore, UpsertMemoryItem,
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -78,6 +79,7 @@ fn sample_worker_context(task: &ReviewTask) -> WorkerContextPacket {
         review_task_id: task.id.clone(),
         task_nonce: task.task_nonce.clone(),
         baseline_snapshot_ref: Some("baseline-rr-agent-1".to_owned()),
+        baseline_snapshot: Some(sample_worker_baseline_snapshot(task)),
         provider: "opencode".to_owned(),
         transport_kind: WorkerTransportKind::AgentCli,
         stage: task.stage.clone(),
@@ -90,6 +92,23 @@ fn sample_worker_context(task: &ReviewTask) -> WorkerContextPacket {
         continuity_summary: Some("provider continuity is usable".to_owned()),
         memory_cards: Vec::new(),
         artifact_refs: Vec::new(),
+    }
+}
+
+fn sample_worker_baseline_snapshot(task: &ReviewTask) -> SessionBaselineSnapshot {
+    SessionBaselineSnapshot {
+        id: "baseline-rr-agent-1".to_owned(),
+        review_session_id: task.review_session_id.clone(),
+        review_run_id: Some(task.review_run_id.clone()),
+        baseline_generation: 1,
+        review_target_snapshot: sample_target(42),
+        allowed_scopes: task.allowed_scopes.clone(),
+        default_query_mode: "recall".to_owned(),
+        candidate_visibility_policy: "review_only".to_owned(),
+        prompt_strategy: "preset:preset-deep-review/single_turn_report".to_owned(),
+        policy_epoch_refs: vec!["config:cfg-rr-agent-1".to_owned()],
+        degraded_flags: vec!["provider_dropout".to_owned()],
+        created_at: 100,
     }
 }
 
@@ -171,6 +190,21 @@ fn seed_rr_agent_session(runtime: &CliRuntime, task: &ReviewTask) {
             session_locator_artifact_id: None,
         })
         .expect("create review run");
+    let baseline_snapshot = sample_worker_baseline_snapshot(task);
+    store
+        .create_session_baseline_snapshot(CreateSessionBaselineSnapshot {
+            id: &baseline_snapshot.id,
+            review_session_id: &baseline_snapshot.review_session_id,
+            review_run_id: baseline_snapshot.review_run_id.as_deref(),
+            review_target_snapshot: &baseline_snapshot.review_target_snapshot,
+            allowed_scopes: &baseline_snapshot.allowed_scopes,
+            default_query_mode: &baseline_snapshot.default_query_mode,
+            candidate_visibility_policy: &baseline_snapshot.candidate_visibility_policy,
+            prompt_strategy: &baseline_snapshot.prompt_strategy,
+            policy_epoch_refs: &baseline_snapshot.policy_epoch_refs,
+            degraded_flags: &baseline_snapshot.degraded_flags,
+        })
+        .expect("create baseline snapshot");
 }
 
 fn seed_prior_review_lookup_records(
@@ -3236,6 +3270,22 @@ fn rr_agent_reads_bound_context_and_rejects_robot_flag() {
     );
     assert_eq!(operation_response["payload"]["review_task_id"], task.id);
     assert_eq!(operation_response["payload"]["task_nonce"], task.task_nonce);
+    assert_eq!(
+        operation_response["payload"]["baseline_snapshot_ref"],
+        "baseline-rr-agent-1"
+    );
+    assert_eq!(
+        operation_response["payload"]["baseline_snapshot"]["review_session_id"],
+        task.review_session_id
+    );
+    assert_eq!(
+        operation_response["payload"]["baseline_snapshot"]["candidate_visibility_policy"],
+        "review_only"
+    );
+    assert_eq!(
+        operation_response["payload"]["baseline_snapshot"]["policy_epoch_refs"][0],
+        "config:cfg-rr-agent-1"
+    );
     assert!(result.stderr.trim().is_empty(), "{}", result.stderr);
 
     let blocked = run_rr(
@@ -3260,6 +3310,66 @@ fn rr_agent_reads_bound_context_and_rejects_robot_flag() {
         "{}",
         blocked.stderr
     );
+}
+
+#[test]
+fn rr_agent_synthesizes_persisted_baseline_snapshot_without_context_file() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let task = sample_worker_task();
+    let task_path = temp.path().join("worker-task.json");
+    let request_path = temp.path().join("worker-context-request.json");
+    write_json_fixture(&task_path, &task);
+    seed_rr_agent_session(&runtime, &task);
+    write_json_fixture(
+        &request_path,
+        &sample_worker_request(&task, "worker.get_review_context", None),
+    );
+
+    let result = run_rr(
+        &[
+            "agent",
+            "worker.get_review_context",
+            "--task-file",
+            task_path.to_str().expect("task path"),
+            "--request-file",
+            request_path.to_str().expect("request path"),
+        ],
+        &runtime,
+    );
+    assert_eq!(result.exit_code, 0, "{}", result.stderr);
+    let payload = parse_robot_payload(&result.stdout);
+    assert_eq!(payload["status"], "succeeded");
+    let operation_response = &payload["operation_response"];
+    assert_eq!(
+        operation_response["payload"]["baseline_snapshot_ref"],
+        "baseline-rr-agent-1"
+    );
+    assert_eq!(
+        operation_response["payload"]["baseline_snapshot"]["review_session_id"],
+        task.review_session_id
+    );
+    assert_eq!(
+        operation_response["payload"]["baseline_snapshot"]["candidate_visibility_policy"],
+        "review_only"
+    );
+    assert_eq!(
+        operation_response["payload"]["baseline_snapshot"]["policy_epoch_refs"][0],
+        "config:cfg-rr-agent-1"
+    );
+    assert_eq!(
+        operation_response["payload"]["baseline_snapshot"]["degraded_flags"][0],
+        "provider_dropout"
+    );
+    assert!(result.stderr.trim().is_empty(), "{}", result.stderr);
 }
 
 #[test]

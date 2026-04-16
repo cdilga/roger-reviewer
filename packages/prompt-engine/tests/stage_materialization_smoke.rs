@@ -2,10 +2,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use roger_app_core::{
-    LaunchAction, LaunchIntent, ReviewTarget, ReviewTask, ReviewTaskKind, SessionLocator, Surface,
-    WORKER_STAGE_RESULT_SCHEMA_V1, WorkerCapabilityProfile, WorkerContextPacket,
-    WorkerGitHubPosture, WorkerMutationPosture, WorkerStageOutcome, WorkerStageResult,
-    WorkerToolCallEvent, WorkerTransportKind, WorkerTurnStrategy,
+    LaunchAction, LaunchIntent, ReviewTarget, ReviewTask, ReviewTaskKind, SessionBaselineSnapshot,
+    SessionLocator, Surface, WORKER_STAGE_RESULT_SCHEMA_V1, WorkerCapabilityProfile,
+    WorkerContextPacket, WorkerGitHubPosture, WorkerMutationPosture, WorkerStageOutcome,
+    WorkerStageResult, WorkerToolCallEvent, WorkerTransportKind, WorkerTurnStrategy,
 };
 use roger_prompt_engine::stage_execution::{
     ReviewStage, StageExecutionRequest, StageHarness, StageHarnessOutput, StagePrompt,
@@ -170,6 +170,7 @@ fn sample_context_packet(task: &ReviewTask) -> WorkerContextPacket {
         review_task_id: task.id.clone(),
         task_nonce: task.task_nonce.clone(),
         baseline_snapshot_ref: Some("baseline-1".to_owned()),
+        baseline_snapshot: Some(sample_baseline_snapshot(task)),
         provider: "opencode".to_owned(),
         transport_kind: WorkerTransportKind::LegacyStageHarness,
         stage: task.stage.clone(),
@@ -182,6 +183,23 @@ fn sample_context_packet(task: &ReviewTask) -> WorkerContextPacket {
         continuity_summary: Some("usable continuity".to_owned()),
         memory_cards: Vec::new(),
         artifact_refs: Vec::new(),
+    }
+}
+
+fn sample_baseline_snapshot(task: &ReviewTask) -> SessionBaselineSnapshot {
+    SessionBaselineSnapshot {
+        id: "baseline-1".to_owned(),
+        review_session_id: task.review_session_id.clone(),
+        review_run_id: Some(task.review_run_id.clone()),
+        baseline_generation: 1,
+        review_target_snapshot: sample_target(),
+        allowed_scopes: task.allowed_scopes.clone(),
+        default_query_mode: "recall".to_owned(),
+        candidate_visibility_policy: "review_only".to_owned(),
+        prompt_strategy: "preset:preset-deep-review/single_turn_report".to_owned(),
+        policy_epoch_refs: vec!["config:cfg-1".to_owned()],
+        degraded_flags: Vec::new(),
+        created_at: 100,
     }
 }
 

@@ -5,7 +5,7 @@ use roger_app_core::tui_shell::{
     SearchHistoryReviewRequest, SearchHistorySnapshot, SearchHistoryView, SessionChrome,
     SupervisorSnapshot, WakeReason, WakeSignal,
 };
-use roger_app_core::{RecallEnvelope, RecallSourceRef};
+use roger_app_core::{RecallEnvelope, RecallSourceRef, ReviewTarget};
 use roger_config::resolve_cli_config_from_lookup;
 use serde_json::json;
 use std::path::Path;
@@ -326,10 +326,24 @@ fn sample_snapshot() -> ReadOnlySessionSnapshot {
             active_query_mode: "promotion_review".to_owned(),
             baseline: Some(SearchBaselineSnapshot {
                 id: "baseline-1".to_owned(),
+                review_session_id: "session-123".to_owned(),
+                review_run_id: Some("run-123".to_owned()),
+                baseline_generation: 1,
+                review_target_snapshot: ReviewTarget {
+                    repository: "owner/repo".to_owned(),
+                    pull_request_number: 42,
+                    base_ref: "main".to_owned(),
+                    head_ref: "feature".to_owned(),
+                    base_commit: "aaa".to_owned(),
+                    head_commit: "bbb".to_owned(),
+                },
                 default_query_mode: "recall".to_owned(),
                 allowed_scopes: vec!["repository".to_owned(), "pull_request".to_owned()],
                 candidate_visibility_policy: "review_only".to_owned(),
+                prompt_strategy: "preset:preset-deep-review/single_turn_report".to_owned(),
+                policy_epoch_refs: vec!["config:cfg-1".to_owned()],
                 degraded_flags: vec!["stale_index".to_owned()],
+                created_at: 123,
             }),
         }),
     }

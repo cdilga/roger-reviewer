@@ -6,8 +6,8 @@ use roger_app_core::{
     ReviewTarget, SessionLocator, Surface,
 };
 use roger_storage::{
-    CreateReviewSession, CreateSessionLaunchBinding, LaunchSurface, ResolveSessionLaunchBinding,
-    Result, ResumeLedgerResolution, RogerStore,
+    CreateReviewSession, CreateSessionBaselineSnapshot, CreateSessionLaunchBinding, LaunchSurface,
+    ResolveSessionLaunchBinding, Result, ResumeLedgerResolution, RogerStore,
 };
 
 const SESSION_ID: &str = "session-dropout-1";
@@ -67,6 +67,21 @@ fn seed_dropout_session(store: &RogerStore, target: &ReviewTarget) -> Result<()>
         continuity_state: "dropout_control_written",
         attention_state: "awaiting_return",
         launch_profile_id: Some("profile-open-pr"),
+    })?;
+    let allowed_scopes = vec!["repo".to_owned()];
+    let policy_epoch_refs = vec!["config:cfg-dropout".to_owned()];
+    let degraded_flags = vec!["awaiting_return".to_owned()];
+    store.create_session_baseline_snapshot(CreateSessionBaselineSnapshot {
+        id: "baseline-dropout-1",
+        review_session_id: SESSION_ID,
+        review_run_id: None,
+        review_target_snapshot: target,
+        allowed_scopes: &allowed_scopes,
+        default_query_mode: "recall",
+        candidate_visibility_policy: "review_only",
+        prompt_strategy: "preset:preset-deep-review/single_turn_report",
+        policy_epoch_refs: &policy_epoch_refs,
+        degraded_flags: &degraded_flags,
     })?;
 
     store.put_session_launch_binding(CreateSessionLaunchBinding {
@@ -147,6 +162,12 @@ fn rr_return_rebinds_to_the_correct_session_after_restart() -> Result<()> {
                     && ledger.decision.reason_code
                         == ResumeDecisionReason::LocatorReopenedUsable
                     && ledger
+                        .baseline_snapshot
+                        .as_ref()
+                        .expect("baseline snapshot present")
+                        .review_target_snapshot
+                        == target
+                    && ledger
                         .resume_bundle
                         .as_ref()
                         .map(|bundle| bundle.profile.clone())
@@ -192,6 +213,12 @@ fn rr_return_falls_back_to_reseed_when_locator_is_unavailable() -> Result<()> {
                     && ledger.decision.reason_code
                         == ResumeDecisionReason::ReopenUnavailableNeedsReseed
                     && ledger.decision.continuity_quality == ContinuityQuality::Degraded
+                    && ledger
+                        .baseline_snapshot
+                        .as_ref()
+                        .expect("baseline snapshot present")
+                        .degraded_flags
+                        == vec!["awaiting_return".to_owned()]
                     && ledger
                         .resume_bundle
                         .as_ref()

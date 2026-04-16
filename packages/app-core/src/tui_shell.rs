@@ -1,4 +1,4 @@
-use crate::RecallEnvelope;
+use crate::{RecallEnvelope, SessionBaselineSnapshot};
 use roger_config::{ResolvedLaunchBaseline, ResolvedProviderCapability};
 use serde::{Deserialize, Serialize};
 
@@ -250,16 +250,7 @@ impl ActiveSessionEntry {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SearchBaselineSnapshot {
-    pub id: String,
-    pub default_query_mode: String,
-    #[serde(default)]
-    pub allowed_scopes: Vec<String>,
-    pub candidate_visibility_policy: String,
-    #[serde(default)]
-    pub degraded_flags: Vec<String>,
-}
+pub type SearchBaselineSnapshot = SessionBaselineSnapshot;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchHistoryReviewRequest {

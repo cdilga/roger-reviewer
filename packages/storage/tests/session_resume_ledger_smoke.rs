@@ -6,8 +6,8 @@ use roger_app_core::{
     ReviewTarget, SessionLocator, Surface,
 };
 use roger_storage::{
-    CreateReviewSession, CreateSessionLaunchBinding, LaunchSurface, ResolveSessionLaunchBinding,
-    Result, ResumeLedgerResolution, RogerStore,
+    CreateReviewSession, CreateSessionBaselineSnapshot, CreateSessionLaunchBinding, LaunchSurface,
+    ResolveSessionLaunchBinding, Result, ResumeLedgerResolution, RogerStore,
 };
 
 fn sample_target() -> ReviewTarget {
@@ -44,6 +44,25 @@ fn sample_resume_bundle() -> ResumeBundle {
     }
 }
 
+fn store_baseline_snapshot(store: &RogerStore, session_id: &str) -> Result<()> {
+    let allowed_scopes = vec!["repo".to_owned(), "pull_request".to_owned()];
+    let policy_epoch_refs = vec!["config:cfg-1".to_owned(), "policy:review-only".to_owned()];
+    let degraded_flags = vec!["lexical_only_search".to_owned()];
+    store.create_session_baseline_snapshot(CreateSessionBaselineSnapshot {
+        id: "baseline-1",
+        review_session_id: session_id,
+        review_run_id: None,
+        review_target_snapshot: &sample_target(),
+        allowed_scopes: &allowed_scopes,
+        default_query_mode: "recall",
+        candidate_visibility_policy: "review_only",
+        prompt_strategy: "preset:preset-deep-review/single_turn_report",
+        policy_epoch_refs: &policy_epoch_refs,
+        degraded_flags: &degraded_flags,
+    })?;
+    Ok(())
+}
+
 #[test]
 fn resume_ledger_reopens_when_locator_is_usable_after_restart() -> Result<()> {
     let temp = tempdir()?;
@@ -68,6 +87,7 @@ fn resume_ledger_reopens_when_locator_is_usable_after_restart() -> Result<()> {
             attention_state: "awaiting_user_input",
             launch_profile_id: Some("profile-open-pr"),
         })?;
+        store_baseline_snapshot(&store, "session-1")?;
         store.put_session_launch_binding(CreateSessionLaunchBinding {
             id: "binding-cli",
             session_id: "session-1",
@@ -105,6 +125,18 @@ fn resume_ledger_reopens_when_locator_is_usable_after_restart() -> Result<()> {
                     && record.decision.reason_code
                         == ResumeDecisionReason::LocatorReopenedUsable
                     && record
+                        .baseline_snapshot
+                        .as_ref()
+                        .expect("baseline snapshot present")
+                        .default_query_mode
+                        == "recall"
+                    && record
+                        .baseline_snapshot
+                        .as_ref()
+                        .expect("baseline snapshot present")
+                        .prompt_strategy
+                        == "preset:preset-deep-review/single_turn_report"
+                    && record
                         .resume_bundle
                         .as_ref()
                         .expect("resume bundle present")
@@ -139,6 +171,7 @@ fn stale_locator_reseeds_with_target_identity_preserved() -> Result<()> {
         attention_state: "awaiting_user_input",
         launch_profile_id: Some("profile-open-pr"),
     })?;
+    store_baseline_snapshot(&store, "session-1")?;
     store.put_session_launch_binding(CreateSessionLaunchBinding {
         id: "binding-tui",
         session_id: "session-1",
@@ -172,6 +205,12 @@ fn stale_locator_reseeds_with_target_identity_preserved() -> Result<()> {
                 if record.decision.strategy == ResumeStrategy::ReseedFromBundle
                     && record.decision.reason_code
                         == ResumeDecisionReason::ReopenUnavailableNeedsReseed
+                    && record
+                        .baseline_snapshot
+                        .as_ref()
+                        .expect("baseline snapshot present")
+                        .candidate_visibility_policy
+                        == "review_only"
                     && record
                         .resume_bundle
                         .as_ref()

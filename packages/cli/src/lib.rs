@@ -10,15 +10,16 @@ use roger_app_core::{
     OutboundDraft, OutboundDraftBatch, RecallSourceRef, ResumeAttemptOutcome, ResumeBundle,
     ResumeBundleProfile, ReviewTarget, ReviewTask, RogerCommand, RogerCommandId,
     RogerCommandInvocationSurface, RogerCommandResult, RogerCommandRouteStatus, SearchPlanError,
-    SearchPlanInput, SearchQueryPlanError, SearchRetrievalClass, SessionLocator, Surface,
-    WorkerArtifactExcerpt, WorkerArtifactExcerptRequest, WorkerCapabilityProfile,
-    WorkerContextPacket, WorkerEvidenceLocation, WorkerFindingDetail, WorkerFindingDetailRequest,
-    WorkerFindingListResponse, WorkerFindingSummary, WorkerGatewaySnapshot, WorkerGitHubPosture,
-    WorkerMutationPosture, WorkerOperation, WorkerOperationRequestEnvelope, WorkerRecallEnvelope,
-    WorkerSearchMemoryRequest, WorkerSearchMemoryResponse, WorkerStatusSnapshot,
-    WorkerTransportKind, execute_agent_transport_request, execute_explicit_posting_flow,
-    materialize_search_plan, outbound_target_tuple_json, route_harness_command,
-    safe_harness_command_bindings, validate_outbound_draft_batch_linkage,
+    SearchPlanInput, SearchQueryPlanError, SearchRetrievalClass, SessionBaselineSnapshot,
+    SessionLocator, Surface, WorkerArtifactExcerpt, WorkerArtifactExcerptRequest,
+    WorkerCapabilityProfile, WorkerContextPacket, WorkerEvidenceLocation, WorkerFindingDetail,
+    WorkerFindingDetailRequest, WorkerFindingListResponse, WorkerFindingSummary,
+    WorkerGatewaySnapshot, WorkerGitHubPosture, WorkerMutationPosture, WorkerOperation,
+    WorkerOperationRequestEnvelope, WorkerRecallEnvelope, WorkerSearchMemoryRequest,
+    WorkerSearchMemoryResponse, WorkerStatusSnapshot, WorkerTransportKind,
+    execute_agent_transport_request, execute_explicit_posting_flow, materialize_search_plan,
+    outbound_target_tuple_json, route_harness_command, safe_harness_command_bindings,
+    validate_outbound_draft_batch_linkage,
 };
 use roger_bridge::{
     NativeHostManifest, SupportedBrowser, SupportedOs, native_host_install_path_for,
@@ -1254,18 +1255,49 @@ fn load_agent_findings(
     Ok(findings.iter().map(finding_summary_from_record).collect())
 }
 
+fn session_baseline_snapshot_projection(
+    record: &roger_storage::SessionBaselineSnapshotRecord,
+) -> SessionBaselineSnapshot {
+    SessionBaselineSnapshot {
+        id: record.id.clone(),
+        review_session_id: record.review_session_id.clone(),
+        review_run_id: record.review_run_id.clone(),
+        baseline_generation: record.baseline_generation,
+        review_target_snapshot: record.review_target_snapshot.clone(),
+        allowed_scopes: record.allowed_scopes.clone(),
+        default_query_mode: record.default_query_mode.clone(),
+        candidate_visibility_policy: record.candidate_visibility_policy.clone(),
+        prompt_strategy: record.prompt_strategy.clone(),
+        policy_epoch_refs: record.policy_epoch_refs.clone(),
+        degraded_flags: record.degraded_flags.clone(),
+        created_at: record.created_at,
+    }
+}
+
 fn synthesize_agent_context(
+    store: &RogerStore,
     session: &roger_storage::ReviewSessionRecord,
     task: &ReviewTask,
     unresolved_findings: Vec<WorkerFindingSummary>,
-) -> WorkerContextPacket {
-    WorkerContextPacket {
+) -> Result<WorkerContextPacket, String> {
+    let baseline_snapshot = store
+        .latest_session_baseline_snapshot(&task.review_session_id)
+        .map_err(|err| format!("failed to load persisted baseline snapshot for rr agent: {err}"))?;
+    let baseline_snapshot_ref = baseline_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.id.clone());
+    let baseline_snapshot = baseline_snapshot
+        .as_ref()
+        .map(session_baseline_snapshot_projection);
+
+    Ok(WorkerContextPacket {
         review_target: session.review_target.clone(),
         review_session_id: task.review_session_id.clone(),
         review_run_id: task.review_run_id.clone(),
         review_task_id: task.id.clone(),
         task_nonce: task.task_nonce.clone(),
-        baseline_snapshot_ref: None,
+        baseline_snapshot_ref,
+        baseline_snapshot,
         provider: session.provider.clone(),
         transport_kind: WorkerTransportKind::AgentCli,
         stage: task.stage.clone(),
@@ -1278,7 +1310,7 @@ fn synthesize_agent_context(
         continuity_summary: Some(session.continuity_state.clone()),
         memory_cards: Vec::new(),
         artifact_refs: Vec::new(),
-    }
+    })
 }
 
 fn build_agent_status_snapshot(
@@ -1898,7 +1930,12 @@ fn handle_agent(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 return agent_error_response(AgentTransportErrorCode::PayloadInvalid, message);
             }
         },
-        None => synthesize_agent_context(&session, &task, findings.clone()),
+        None => match synthesize_agent_context(&store, &session, &task, findings.clone()) {
+            Ok(context) => context,
+            Err(message) => {
+                return agent_error_response(AgentTransportErrorCode::ValidationFailed, message);
+            }
+        },
     };
     let gateway_snapshot =
         match build_agent_gateway_snapshot(&store, &session, &task, &request, &findings) {

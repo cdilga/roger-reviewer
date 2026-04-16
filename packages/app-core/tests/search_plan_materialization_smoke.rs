@@ -3,7 +3,7 @@ use roger_app_core::{
     AgentTransportResponseStatus, RecallSourceRef, ReviewTarget, ReviewTask, ReviewTaskKind,
     SearchAnchorSet, SearchCandidateVisibility, SearchPlanError, SearchPlanInput,
     SearchRetrievalClass, SearchRetrievalLane, SearchScopeSet, SearchSemanticPosture,
-    SearchSemanticRuntimePosture, SearchSessionBaseline, SearchTrustFloor,
+    SearchSemanticRuntimePosture, SearchSessionBaseline, SearchTrustFloor, SessionBaselineSnapshot,
     WORKER_OPERATION_REQUEST_SCHEMA_V1, WorkerCapabilityProfile, WorkerContextPacket,
     WorkerGatewaySnapshot, WorkerGitHubPosture, WorkerMutationPosture,
     WorkerOperationRequestEnvelope, WorkerRecallEnvelope, WorkerSearchMemoryRequest,
@@ -49,6 +49,7 @@ fn sample_context(task: &ReviewTask) -> WorkerContextPacket {
         review_task_id: task.id.clone(),
         task_nonce: task.task_nonce.clone(),
         baseline_snapshot_ref: Some("baseline-1".to_owned()),
+        baseline_snapshot: Some(sample_baseline_snapshot(task)),
         provider: "opencode".to_owned(),
         transport_kind: WorkerTransportKind::AgentCli,
         stage: task.stage.clone(),
@@ -61,6 +62,23 @@ fn sample_context(task: &ReviewTask) -> WorkerContextPacket {
         continuity_summary: Some("provider session continuity is usable".to_owned()),
         memory_cards: Vec::new(),
         artifact_refs: Vec::new(),
+    }
+}
+
+fn sample_baseline_snapshot(task: &ReviewTask) -> SessionBaselineSnapshot {
+    SessionBaselineSnapshot {
+        id: "baseline-1".to_owned(),
+        review_session_id: task.review_session_id.clone(),
+        review_run_id: Some(task.review_run_id.clone()),
+        baseline_generation: 1,
+        review_target_snapshot: sample_target(),
+        allowed_scopes: task.allowed_scopes.clone(),
+        default_query_mode: "recall".to_owned(),
+        candidate_visibility_policy: "review_only".to_owned(),
+        prompt_strategy: "preset:preset-deep-review/single_turn_report".to_owned(),
+        policy_epoch_refs: vec!["config:cfg-1".to_owned()],
+        degraded_flags: Vec::new(),
+        created_at: 100,
     }
 }
 
@@ -78,9 +96,7 @@ fn sample_capability_profile() -> WorkerCapabilityProfile {
     }
 }
 
-fn operation_request(
-    payload: WorkerSearchMemoryRequest,
-) -> WorkerOperationRequestEnvelope {
+fn operation_request(payload: WorkerSearchMemoryRequest) -> WorkerOperationRequestEnvelope {
     WorkerOperationRequestEnvelope {
         schema_id: WORKER_OPERATION_REQUEST_SCHEMA_V1.to_owned(),
         review_session_id: "session-1".to_owned(),
@@ -223,7 +239,10 @@ fn search_plan_materialization_is_deterministic_and_inspectable() {
     .expect("materialize same search plan twice");
 
     assert_eq!(first, second);
-    assert_eq!(first.query_plan.scope_set, SearchScopeSet::CurrentRepository);
+    assert_eq!(
+        first.query_plan.scope_set,
+        SearchScopeSet::CurrentRepository
+    );
     assert_eq!(
         first.query_plan.session_baseline,
         SearchSessionBaseline::AmbientSessionOptional
@@ -262,11 +281,9 @@ fn search_plan_materialization_is_deterministic_and_inspectable() {
     assert!(first.retrieval_strategy.prior_review);
     assert!(!first.retrieval_strategy.semantic);
     assert!(!first.retrieval_strategy.candidate_audit);
-    assert!(
-        first
-            .strategy_reason
-            .contains("semantic retrieval is disabled until verified local semantic assets are available")
-    );
+    assert!(first.strategy_reason.contains(
+        "semantic retrieval is disabled until verified local semantic assets are available"
+    ));
 
     let encoded = serde_json::to_value(&first).expect("serialize search plan");
     assert_eq!(
@@ -388,10 +405,7 @@ fn transport_rejects_hybrid_retrieval_when_semantics_are_unverified() {
     let request = WorkerSearchMemoryRequest {
         query_text: "approval invalidation refresh".to_owned(),
         query_mode: "recall".to_owned(),
-        requested_retrieval_classes: vec![
-            "promoted_memory".to_owned(),
-            "evidence_hits".to_owned(),
-        ],
+        requested_retrieval_classes: vec!["promoted_memory".to_owned(), "evidence_hits".to_owned()],
         anchor_hints: Vec::new(),
     };
     let response = WorkerSearchMemoryResponse {
@@ -433,9 +447,7 @@ fn transport_rejects_hybrid_retrieval_when_semantics_are_unverified() {
 
     let error = transport.error.expect("validation error");
     assert_eq!(error.code, AgentTransportErrorCode::ValidationFailed);
-    assert!(
-        error
-            .message
-            .contains("reported hybrid retrieval even though the search_plan disabled semantic retrieval")
-    );
+    assert!(error.message.contains(
+        "reported hybrid retrieval even though the search_plan disabled semantic retrieval"
+    ));
 }

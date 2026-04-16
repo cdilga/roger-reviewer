@@ -1,15 +1,15 @@
 use roger_app_core::{
     RecallSourceRef, ReviewTarget, ReviewTask, ReviewTaskKind, ReviewWorkerContractError,
-    SearchPlanInput, WORKER_OPERATION_REQUEST_SCHEMA_V1, WORKER_STAGE_RESULT_SCHEMA_V1,
-    WorkerArtifactExcerpt, WorkerArtifactRef, WorkerCapabilityProfile, WorkerContextPacket,
-    WorkerEvidenceLocation, WorkerFindingDetail, WorkerFindingListResponse, WorkerFindingSummary,
-    WorkerGitHubPosture, WorkerInvocation, WorkerInvocationOutcomeState, WorkerMemoryCard,
-    WorkerMutationPosture, WorkerOperation, WorkerOperationDenial, WorkerOperationDenialCode,
-    WorkerOperationLane, WorkerOperationRequestEnvelope, WorkerOperationResponseEnvelope,
-    WorkerOperationResponseStatus, WorkerRecallEnvelope, WorkerSearchMemoryRequest,
-    WorkerSearchMemoryResponse, WorkerStageOutcome, WorkerStageResult, WorkerStatusSnapshot,
-    WorkerToolCallEvent, WorkerToolCallOutcomeState, WorkerTransportKind, WorkerTurnStrategy,
-    materialize_search_plan,
+    SearchPlanInput, SessionBaselineSnapshot, WORKER_OPERATION_REQUEST_SCHEMA_V1,
+    WORKER_STAGE_RESULT_SCHEMA_V1, WorkerArtifactExcerpt, WorkerArtifactRef,
+    WorkerCapabilityProfile, WorkerContextPacket, WorkerEvidenceLocation, WorkerFindingDetail,
+    WorkerFindingListResponse, WorkerFindingSummary, WorkerGitHubPosture, WorkerInvocation,
+    WorkerInvocationOutcomeState, WorkerMemoryCard, WorkerMutationPosture, WorkerOperation,
+    WorkerOperationDenial, WorkerOperationDenialCode, WorkerOperationLane,
+    WorkerOperationRequestEnvelope, WorkerOperationResponseEnvelope, WorkerOperationResponseStatus,
+    WorkerRecallEnvelope, WorkerSearchMemoryRequest, WorkerSearchMemoryResponse,
+    WorkerStageOutcome, WorkerStageResult, WorkerStatusSnapshot, WorkerToolCallEvent,
+    WorkerToolCallOutcomeState, WorkerTransportKind, WorkerTurnStrategy, materialize_search_plan,
 };
 use serde_json::json;
 
@@ -61,6 +61,7 @@ fn sample_context() -> WorkerContextPacket {
         review_task_id: "task-1".to_owned(),
         task_nonce: "nonce-1".to_owned(),
         baseline_snapshot_ref: Some("baseline-1".to_owned()),
+        baseline_snapshot: Some(sample_baseline_snapshot()),
         provider: "opencode".to_owned(),
         transport_kind: WorkerTransportKind::AgentCli,
         stage: "deep_review".to_owned(),
@@ -104,6 +105,23 @@ fn sample_context() -> WorkerContextPacket {
             media_type: Some("text/plain".to_owned()),
             summary: Some("approval path excerpt".to_owned()),
         }],
+    }
+}
+
+fn sample_baseline_snapshot() -> SessionBaselineSnapshot {
+    SessionBaselineSnapshot {
+        id: "baseline-1".to_owned(),
+        review_session_id: "session-1".to_owned(),
+        review_run_id: Some("run-1".to_owned()),
+        baseline_generation: 1,
+        review_target_snapshot: sample_target(),
+        allowed_scopes: vec!["repo".to_owned()],
+        default_query_mode: "recall".to_owned(),
+        candidate_visibility_policy: "review_only".to_owned(),
+        prompt_strategy: "preset:preset-deep-review/single_turn_report".to_owned(),
+        policy_epoch_refs: vec!["config:cfg-1".to_owned()],
+        degraded_flags: Vec::new(),
+        created_at: 100,
     }
 }
 

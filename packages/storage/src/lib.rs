@@ -14,13 +14,16 @@ use roger_app_core::{
     WorkerTransportKind, decide_resume_strategy, outbound_target_tuple_json, time,
     validate_outbound_draft_batch_linkage,
 };
-use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value};
+use rusqlite::{
+    Connection, OptionalExtension, Row, params, params_from_iter,
+    types::{Type, Value},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub use semantic_embedder::{SemanticEmbedderStatus, semantic_embedder_status};
 
-const CURRENT_SCHEMA_VERSION: i64 = 16;
+const CURRENT_SCHEMA_VERSION: i64 = 17;
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_session_ledger.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_launch_binding_context.sql");
@@ -39,6 +42,7 @@ const MIGRATION_0013: &str = include_str!("../migrations/0013_outbound_batch_sto
 const MIGRATION_0014: &str = include_str!("../migrations/0014_outbound_postable_payload.sql");
 const MIGRATION_0015: &str = include_str!("../migrations/0015_worker_audit_trail.sql");
 const MIGRATION_0016: &str = include_str!("../migrations/0016_posted_action_items.sql");
+const MIGRATION_0017: &str = include_str!("../migrations/0017_session_baseline_snapshots.sql");
 
 const MIGRATION_TERMINAL_STARTED: &str = "started";
 const MIGRATION_TERMINAL_COMMITTED: &str = "committed";
@@ -574,6 +578,36 @@ pub struct ReviewRunRecord {
     pub repo_snapshot: String,
     pub continuity_quality: String,
     pub session_locator_artifact_id: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateSessionBaselineSnapshot<'a> {
+    pub id: &'a str,
+    pub review_session_id: &'a str,
+    pub review_run_id: Option<&'a str>,
+    pub review_target_snapshot: &'a ReviewTarget,
+    pub allowed_scopes: &'a [String],
+    pub default_query_mode: &'a str,
+    pub candidate_visibility_policy: &'a str,
+    pub prompt_strategy: &'a str,
+    pub policy_epoch_refs: &'a [String],
+    pub degraded_flags: &'a [String],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionBaselineSnapshotRecord {
+    pub id: String,
+    pub review_session_id: String,
+    pub review_run_id: Option<String>,
+    pub baseline_generation: i64,
+    pub review_target_snapshot: ReviewTarget,
+    pub allowed_scopes: Vec<String>,
+    pub default_query_mode: String,
+    pub candidate_visibility_policy: String,
+    pub prompt_strategy: String,
+    pub policy_epoch_refs: Vec<String>,
+    pub degraded_flags: Vec<String>,
     pub created_at: i64,
 }
 
@@ -1358,6 +1392,7 @@ pub struct ResumeLedgerRecord {
     pub binding: SessionLaunchBindingRecord,
     pub session: ReviewSessionRecord,
     pub resume_bundle: Option<ResumeBundle>,
+    pub baseline_snapshot: Option<SessionBaselineSnapshotRecord>,
     pub decision: ResumeDecision,
 }
 
@@ -1766,6 +1801,105 @@ impl RogerStore {
             ],
         )?;
         Ok(())
+    }
+
+    pub fn create_session_baseline_snapshot(
+        &self,
+        input: CreateSessionBaselineSnapshot<'_>,
+    ) -> Result<SessionBaselineSnapshotRecord> {
+        let now = time::now_ts();
+        let baseline_generation = self.conn.query_row(
+            "SELECT COALESCE(MAX(baseline_generation) + 1, 1)
+             FROM session_baseline_snapshots
+             WHERE review_session_id = ?1",
+            params![input.review_session_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let review_target_snapshot_json = serde_json::to_string(input.review_target_snapshot)?;
+        let allowed_scopes_json = serialize_json_string(input.allowed_scopes)?;
+        let policy_epoch_refs_json = serialize_json_string(input.policy_epoch_refs)?;
+        let degraded_flags_json = serialize_json_string(input.degraded_flags)?;
+        self.conn.execute(
+            "INSERT INTO session_baseline_snapshots (
+                id, review_session_id, review_run_id, baseline_generation,
+                review_target_snapshot, allowed_scopes_json, default_query_mode,
+                candidate_visibility_policy, prompt_strategy,
+                policy_epoch_refs_json, degraded_flags_json, created_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4,
+                ?5, ?6, ?7,
+                ?8, ?9,
+                ?10, ?11, ?12
+            )",
+            params![
+                input.id,
+                input.review_session_id,
+                input.review_run_id,
+                baseline_generation,
+                review_target_snapshot_json,
+                allowed_scopes_json,
+                input.default_query_mode,
+                input.candidate_visibility_policy,
+                input.prompt_strategy,
+                policy_epoch_refs_json,
+                degraded_flags_json,
+                now
+            ],
+        )?;
+        Ok(SessionBaselineSnapshotRecord {
+            id: input.id.to_owned(),
+            review_session_id: input.review_session_id.to_owned(),
+            review_run_id: input.review_run_id.map(ToOwned::to_owned),
+            baseline_generation,
+            review_target_snapshot: input.review_target_snapshot.clone(),
+            allowed_scopes: input.allowed_scopes.to_vec(),
+            default_query_mode: input.default_query_mode.to_owned(),
+            candidate_visibility_policy: input.candidate_visibility_policy.to_owned(),
+            prompt_strategy: input.prompt_strategy.to_owned(),
+            policy_epoch_refs: input.policy_epoch_refs.to_vec(),
+            degraded_flags: input.degraded_flags.to_vec(),
+            created_at: now,
+        })
+    }
+
+    pub fn session_baseline_snapshot(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<Option<SessionBaselineSnapshotRecord>> {
+        self.conn
+            .query_row(
+                "SELECT id, review_session_id, review_run_id, baseline_generation,
+                    review_target_snapshot, allowed_scopes_json, default_query_mode,
+                    candidate_visibility_policy, prompt_strategy,
+                    policy_epoch_refs_json, degraded_flags_json, created_at
+                 FROM session_baseline_snapshots
+                 WHERE id = ?1",
+                params![snapshot_id],
+                Self::session_baseline_snapshot_from_row,
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    pub fn latest_session_baseline_snapshot(
+        &self,
+        review_session_id: &str,
+    ) -> Result<Option<SessionBaselineSnapshotRecord>> {
+        self.conn
+            .query_row(
+                "SELECT id, review_session_id, review_run_id, baseline_generation,
+                    review_target_snapshot, allowed_scopes_json, default_query_mode,
+                    candidate_visibility_policy, prompt_strategy,
+                    policy_epoch_refs_json, degraded_flags_json, created_at
+                 FROM session_baseline_snapshots
+                 WHERE review_session_id = ?1
+                 ORDER BY baseline_generation DESC, created_at DESC
+                 LIMIT 1",
+                params![review_session_id],
+                Self::session_baseline_snapshot_from_row,
+            )
+            .optional()
+            .map_err(StorageError::from)
     }
 
     pub fn create_launch_attempt(
@@ -5000,6 +5134,7 @@ impl RogerStore {
             Some(artifact_id) => Some(self.load_resume_bundle(artifact_id)?),
             None => None,
         };
+        let baseline_snapshot = self.latest_session_baseline_snapshot(&session.id)?;
 
         let decision = decide_resume_strategy(
             capability,
@@ -5014,6 +5149,7 @@ impl RogerStore {
             binding,
             session,
             resume_bundle,
+            baseline_snapshot,
             decision,
         }))
     }
@@ -5926,6 +6062,42 @@ impl RogerStore {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
+    fn session_baseline_snapshot_from_row(
+        row: &Row<'_>,
+    ) -> rusqlite::Result<SessionBaselineSnapshotRecord> {
+        let review_target_snapshot_json: String = row.get(4)?;
+        let allowed_scopes_json: String = row.get(5)?;
+        let policy_epoch_refs_json: String = row.get(9)?;
+        let degraded_flags_json: String = row.get(10)?;
+        let review_target_snapshot =
+            serde_json::from_str(&review_target_snapshot_json).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(err))
+            })?;
+        let allowed_scopes = serde_json::from_str(&allowed_scopes_json).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(5, Type::Text, Box::new(err))
+        })?;
+        let policy_epoch_refs = serde_json::from_str(&policy_epoch_refs_json).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(9, Type::Text, Box::new(err))
+        })?;
+        let degraded_flags = serde_json::from_str(&degraded_flags_json).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(10, Type::Text, Box::new(err))
+        })?;
+        Ok(SessionBaselineSnapshotRecord {
+            id: row.get(0)?,
+            review_session_id: row.get(1)?,
+            review_run_id: row.get(2)?,
+            baseline_generation: row.get(3)?,
+            review_target_snapshot,
+            allowed_scopes,
+            default_query_mode: row.get(6)?,
+            candidate_visibility_policy: row.get(7)?,
+            prompt_strategy: row.get(8)?,
+            policy_epoch_refs,
+            degraded_flags,
+            created_at: row.get(11)?,
+        })
+    }
+
     fn ensure_migration_journal_table(&self) -> Result<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS migration_journal (
@@ -6285,6 +6457,16 @@ impl RogerStore {
                     params![time::now_ts()],
                 )?;
                 self.conn.pragma_update(None, "user_version", 16)?;
+            }
+
+            if version < 17 {
+                self.conn.execute_batch(MIGRATION_0017)?;
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at)
+                    VALUES (17, 'session_baseline_snapshots', ?1)",
+                    params![time::now_ts()],
+                )?;
+                self.conn.pragma_update(None, "user_version", 17)?;
             }
 
             if migration_class.requires_sidecar_invalidation() {
