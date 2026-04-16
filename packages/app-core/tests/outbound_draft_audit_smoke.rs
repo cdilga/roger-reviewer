@@ -94,6 +94,8 @@ fn linkage_validation_reports_scope_target_payload_and_finding_issues() {
     assert!(reason_codes.contains("batch_mismatch"));
     assert!(reason_codes.contains("target_mismatch"));
     assert!(reason_codes.contains("payload_digest_mismatch"));
+    assert!(reason_codes.contains("missing_target_locator"));
+    assert!(reason_codes.contains("missing_postable_body"));
     assert!(reason_codes.contains("missing_finding_link"));
 }
 
@@ -366,7 +368,45 @@ fn explicit_posting_fails_closed_when_local_draft_state_is_missing() {
 
     assert_eq!(adapter.calls.get(), 0);
     assert_eq!(result.outcome, ExplicitPostingOutcome::Blocked);
-    assert_eq!(result.reason_code.as_deref(), Some("batch_linkage_invalid"));
+    assert_eq!(
+        result.reason_code.as_deref(),
+        Some("approval_invalidated:missing_local_state")
+    );
+    assert!(result.posted_action.is_none());
+}
+
+#[test]
+fn explicit_posting_fails_closed_when_local_draft_state_drifts() {
+    let fixture = load_fixture();
+    let batch = fixture.valid_batch;
+    let mut approval = fixture.valid_approval;
+    approval.target_tuple_json = outbound_target_tuple_json(&batch);
+    let mut drifted_draft = fixture.valid_draft;
+    drifted_draft.payload_digest = "sha256:payload-other".to_owned();
+    let drafts = vec![drifted_draft];
+
+    let adapter = StubPostingAdapter::succeeds(Vec::new());
+
+    let result = execute_explicit_posting_flow(
+        ExplicitPostingInput {
+            action_id: "posted-action-local-state-drift",
+            provider: "github",
+            target: &sample_target(),
+            batch: &batch,
+            drafts: &drafts,
+            approval: &approval,
+            refresh_signals: &[],
+            reconfirmed_finding_ids: &HashSet::new(),
+        },
+        &adapter,
+    );
+
+    assert_eq!(adapter.calls.get(), 0);
+    assert_eq!(result.outcome, ExplicitPostingOutcome::Blocked);
+    assert_eq!(
+        result.reason_code.as_deref(),
+        Some("approval_invalidated:local_state_drift")
+    );
     assert!(result.posted_action.is_none());
 }
 

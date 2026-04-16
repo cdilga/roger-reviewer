@@ -23,6 +23,8 @@
     "payload_digest": "payload-aaa",
     "approval_state": "Approved",
     "anchor_digest": "anchor-1",
+    "target_locator": "github:owner/repo#42/files#thread-1",
+    "body": "Please re-check the canonical outbound payload binding.",
     "row_version": 1
   },
   "invalid_draft": {
@@ -36,6 +38,8 @@
     "payload_digest": "payload-bbb",
     "approval_state": "Drafted",
     "anchor_digest": "anchor-bad",
+    "target_locator": "",
+    "body": "",
     "row_version": 1
   },
   "valid_approval": {

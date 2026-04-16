@@ -47,13 +47,12 @@ fn resolve_pr_target_not_found_returns_error() {
     let adapter = StubGitHubAdapter::new();
     let result = adapter.resolve_pr("acme", "widgets", 999);
     assert!(result.is_err());
-    match result.unwrap_err() {
-        GitHubAdapterError::TargetNotFound { owner, repo, pr } => {
-            assert_eq!(owner, "acme");
-            assert_eq!(repo, "widgets");
-            assert_eq!(pr, 999);
-        }
-        other => panic!("expected TargetNotFound, got: {other}"),
+    let err = result.err().expect("unknown PR should return TargetNotFound");
+    assert!(matches!(err, GitHubAdapterError::TargetNotFound { .. }));
+    if let GitHubAdapterError::TargetNotFound { owner, repo, pr } = err {
+        assert_eq!(owner, "acme");
+        assert_eq!(repo, "widgets");
+        assert_eq!(pr, 999);
     }
 }
 
@@ -134,9 +133,9 @@ fn check_gh_available_stub() {
 }
 
 #[test]
-fn mutation_blocked_error_is_explicit() {
-    let err = GitHubAdapterError::MutationBlocked;
+fn unsupported_posting_target_error_is_explicit() {
+    let err = GitHubAdapterError::UnsupportedPostingTarget("github:bogus".to_owned());
     let msg = err.to_string();
-    assert!(msg.contains("read-safe"));
-    assert!(msg.contains("write"));
+    assert!(msg.contains("unsupported posting target locator"));
+    assert!(msg.contains("github:bogus"));
 }

@@ -270,6 +270,8 @@ fn e2e_core_review_happy_path_exercises_real_repo_suite_flow() {
         payload_digest: batch.payload_digest.clone(),
         approval_state: ApprovalState::Approved,
         anchor_digest: "anchor-e2e-core-1".to_owned(),
+        target_locator: "github:owner/repo#42/files#thread-e2e-1".to_owned(),
+        body: "Please re-check the invalidation guard on explicit posting.".to_owned(),
         row_version: 1,
     };
     let approval = OutboundApprovalToken {
