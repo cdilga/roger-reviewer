@@ -216,6 +216,47 @@ fn seed_prior_schema_store(
         ],
     )?;
 
+    if legacy_schema_version >= 13 {
+        conn.execute(
+            "INSERT INTO outbound_draft_batches(
+                id, review_session_id, review_run_id, repo_id, remote_review_target_id,
+                payload_digest, approval_state, approved_at, invalidated_at,
+                invalidation_reason_code, row_version, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, 0, ?9, ?9)",
+            params![
+                "batch-legacy",
+                "session-legacy",
+                "run-legacy",
+                "owner/repo",
+                "pr-42",
+                "sha256:payload-legacy",
+                "Approved",
+                1_710_000_105_i64,
+                1_710_000_105_i64,
+            ],
+        )?;
+        conn.execute(
+            "INSERT INTO outbound_draft_items(
+                id, review_session_id, review_run_id, finding_id, draft_batch_id, repo_id,
+                remote_review_target_id, payload_digest, approval_state, anchor_digest,
+                row_version, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?11)",
+            params![
+                "draft-legacy",
+                "session-legacy",
+                "run-legacy",
+                "finding-legacy",
+                "batch-legacy",
+                "owner/repo",
+                "pr-42",
+                "sha256:payload-legacy",
+                "Approved",
+                "anchor-legacy",
+                1_710_000_105_i64,
+            ],
+        )?;
+    }
+
     conn.execute(
         "INSERT INTO session_launch_bindings(
             id, session_id, surface, launch_profile_id, cwd, worktree_root,
@@ -415,6 +456,17 @@ fn release_migration_gate_rehearses_prior_schema_store_upgrade() -> Result<()> {
         .approval_for_draft("draft-legacy")?
         .expect("approval record preserved");
     assert_eq!(approval.payload_digest, "sha256:payload-legacy");
+    let canonical_draft = store
+        .outbound_draft_item("draft-legacy")?
+        .expect("canonical draft preserved");
+    assert_eq!(
+        canonical_draft.target_locator,
+        "github:owner/repo#42/files#thread-1"
+    );
+    assert_eq!(
+        canonical_draft.body,
+        "Please double-check the migration gate."
+    );
 
     let index_state = store
         .index_state("repo:owner/repo")?
@@ -513,10 +565,9 @@ fn release_migration_gate_records_failed_pre_commit_journal_state() -> Result<()
     )?;
     drop(conn);
 
-    let err = match RogerStore::open(&root) {
-        Ok(_) => panic!("migration should fail before commit"),
-        Err(err) => err,
-    };
+    let result = RogerStore::open(&root);
+    assert!(result.is_err(), "migration should fail before commit");
+    let err = result.err().expect("migration should fail before commit");
     assert!(
         err.to_string().contains("forced schema migration failure"),
         "unexpected migration failure: {err}"
@@ -659,10 +710,14 @@ fn release_migration_gate_fails_closed_for_unsupported_class_d_schema_gap() -> R
         "test precondition requires Class D migration gap"
     );
 
-    let err = match RogerStore::open(&root) {
-        Ok(_) => panic!("unsupported migration class should fail closed"),
-        Err(err) => err,
-    };
+    let result = RogerStore::open(&root);
+    assert!(
+        result.is_err(),
+        "unsupported migration class should fail closed"
+    );
+    let err = result
+        .err()
+        .expect("unsupported migration class should fail closed");
     assert!(
         err.to_string()
             .contains("unsupported automatic migration class class_d"),

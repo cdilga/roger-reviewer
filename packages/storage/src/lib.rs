@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 
 pub use semantic_embedder::{SemanticEmbedderStatus, semantic_embedder_status};
 
-const CURRENT_SCHEMA_VERSION: i64 = 13;
+const CURRENT_SCHEMA_VERSION: i64 = 14;
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_session_ledger.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_launch_binding_context.sql");
@@ -34,6 +34,7 @@ const MIGRATION_0011: &str = include_str!("../migrations/0011_launch_attempts.sq
 const MIGRATION_0012: &str =
     include_str!("../migrations/0012_prompt_invocation_worker_lineage.sql");
 const MIGRATION_0013: &str = include_str!("../migrations/0013_outbound_batch_storage.sql");
+const MIGRATION_0014: &str = include_str!("../migrations/0014_outbound_postable_payload.sql");
 
 const MIGRATION_TERMINAL_STARTED: &str = "started";
 const MIGRATION_TERMINAL_COMMITTED: &str = "committed";
@@ -211,6 +212,10 @@ fn ensure_outbound_draft_identity(
         Some("payload_digest_mismatch")
     } else if existing.anchor_digest != candidate.anchor_digest {
         Some("anchor_digest_mismatch")
+    } else if existing.target_locator != candidate.target_locator {
+        Some("target_locator_mismatch")
+    } else if existing.body != candidate.body {
+        Some("body_mismatch")
     } else {
         None
     };
@@ -866,6 +871,20 @@ pub struct FinalizeReviewLaunchAttempt<'a> {
     pub launch_binding: CreateSessionLaunchBinding<'a>,
 }
 
+#[derive(Debug, Clone)]
+pub struct FinalizeExistingSessionLaunchAttempt<'a> {
+    pub attempt_id: &'a str,
+    pub terminal_state: LaunchAttemptState,
+    pub provider_session_id: &'a str,
+    pub verified_locator: &'a SessionLocator,
+    pub review_session_id: &'a str,
+    pub expected_session_row_version: i64,
+    pub continuity_state: &'a str,
+    pub attention_state: &'a str,
+    pub review_run: CreateReviewRun<'a>,
+    pub launch_binding: CreateSessionLaunchBinding<'a>,
+}
+
 #[derive(Debug)]
 pub enum ReviewLaunchFinalizationError {
     SessionBinding(StorageError),
@@ -888,6 +907,34 @@ impl From<ReviewLaunchFinalizationError> for StorageError {
         match value {
             ReviewLaunchFinalizationError::SessionBinding(err)
             | ReviewLaunchFinalizationError::Commit(err) => err,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ExistingSessionLaunchFinalizationError {
+    SessionBinding(StorageError),
+    Commit(StorageError),
+}
+
+impl Display for ExistingSessionLaunchFinalizationError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SessionBinding(err) => {
+                write!(f, "existing-session launch session binding failed: {err}")
+            }
+            Self::Commit(err) => write!(f, "existing-session launch commit failed: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for ExistingSessionLaunchFinalizationError {}
+
+impl From<ExistingSessionLaunchFinalizationError> for StorageError {
+    fn from(value: ExistingSessionLaunchFinalizationError) -> Self {
+        match value {
+            ExistingSessionLaunchFinalizationError::SessionBinding(err)
+            | ExistingSessionLaunchFinalizationError::Commit(err) => err,
         }
     }
 }
@@ -1770,6 +1817,198 @@ impl RogerStore {
             .map_err(ReviewLaunchFinalizationError::Commit)?
             .ok_or_else(|| {
                 ReviewLaunchFinalizationError::Commit(StorageError::NotFound {
+                    entity: "launch_attempt",
+                    id: input.attempt_id.to_owned(),
+                })
+            })
+    }
+
+    pub fn finalize_existing_session_launch_attempt(
+        &self,
+        input: FinalizeExistingSessionLaunchAttempt<'_>,
+    ) -> std::result::Result<LaunchAttemptRecord, ExistingSessionLaunchFinalizationError> {
+        let now = time::now_ts();
+        let verified_locator_json = serde_json::to_string(input.verified_locator)
+            .map_err(StorageError::from)
+            .map_err(ExistingSessionLaunchFinalizationError::Commit)?;
+        let binding_review_target_json = input
+            .launch_binding
+            .review_target
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(StorageError::from)
+            .map_err(ExistingSessionLaunchFinalizationError::SessionBinding)?;
+
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(StorageError::from)
+            .map_err(ExistingSessionLaunchFinalizationError::Commit)?;
+
+        let committed = tx
+            .execute(
+                "UPDATE launch_attempts
+             SET state = ?1, row_version = row_version + 1, updated_at = ?2
+             WHERE id = ?3",
+                params![
+                    LaunchAttemptState::Committing.as_str(),
+                    now,
+                    input.attempt_id
+                ],
+            )
+            .map_err(StorageError::from)
+            .map_err(ExistingSessionLaunchFinalizationError::Commit)?;
+        if committed == 0 {
+            return Err(ExistingSessionLaunchFinalizationError::Commit(
+                StorageError::NotFound {
+                    entity: "launch_attempt",
+                    id: input.attempt_id.to_owned(),
+                },
+            ));
+        }
+
+        let updated_session = tx
+            .execute(
+                "UPDATE review_sessions
+             SET session_locator = ?1,
+                 continuity_state = ?2,
+                 attention_state = ?3,
+                 row_version = row_version + 1,
+                 updated_at = ?4
+             WHERE id = ?5 AND row_version = ?6",
+                params![
+                    verified_locator_json,
+                    input.continuity_state,
+                    input.attention_state,
+                    now,
+                    input.review_session_id,
+                    input.expected_session_row_version,
+                ],
+            )
+            .map_err(StorageError::from)
+            .map_err(ExistingSessionLaunchFinalizationError::SessionBinding)?;
+        if updated_session == 0 {
+            let exists = tx
+                .query_row(
+                    "SELECT 1 FROM review_sessions WHERE id = ?1",
+                    params![input.review_session_id],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(StorageError::from)
+                .map_err(ExistingSessionLaunchFinalizationError::SessionBinding)?;
+
+            return match exists {
+                Some(_) => Err(ExistingSessionLaunchFinalizationError::SessionBinding(
+                    StorageError::Conflict {
+                        entity: "review_session",
+                        id: input.review_session_id.to_owned(),
+                    },
+                )),
+                None => Err(ExistingSessionLaunchFinalizationError::SessionBinding(
+                    StorageError::NotFound {
+                        entity: "review_session",
+                        id: input.review_session_id.to_owned(),
+                    },
+                )),
+            };
+        }
+
+        tx.execute(
+            "INSERT INTO session_launch_bindings (
+                id, session_id, repo_locator, review_target, surface, launch_profile_id,
+                ui_target, instance_preference, cwd, worktree_root,
+                row_version, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?11)
+            ON CONFLICT(id) DO UPDATE SET
+                session_id = excluded.session_id,
+                repo_locator = excluded.repo_locator,
+                review_target = excluded.review_target,
+                surface = excluded.surface,
+                launch_profile_id = excluded.launch_profile_id,
+                ui_target = excluded.ui_target,
+                instance_preference = excluded.instance_preference,
+                cwd = excluded.cwd,
+                worktree_root = excluded.worktree_root,
+                row_version = session_launch_bindings.row_version + 1,
+                updated_at = excluded.updated_at",
+            params![
+                input.launch_binding.id,
+                input.launch_binding.session_id,
+                input.launch_binding.repo_locator,
+                binding_review_target_json,
+                input.launch_binding.surface.as_str(),
+                input.launch_binding.launch_profile_id,
+                input.launch_binding.ui_target,
+                input.launch_binding.instance_preference,
+                input.launch_binding.cwd,
+                input.launch_binding.worktree_root,
+                now,
+            ],
+        )
+        .map_err(StorageError::from)
+        .map_err(ExistingSessionLaunchFinalizationError::SessionBinding)?;
+
+        tx.execute(
+            "INSERT INTO review_runs (
+                id, session_id, run_kind, repo_snapshot,
+                continuity_quality, session_locator_artifact_id, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                input.review_run.id,
+                input.review_run.session_id,
+                input.review_run.run_kind,
+                input.review_run.repo_snapshot,
+                input.review_run.continuity_quality,
+                input.review_run.session_locator_artifact_id,
+                now,
+            ],
+        )
+        .map_err(StorageError::from)
+        .map_err(ExistingSessionLaunchFinalizationError::Commit)?;
+
+        let finalized = tx
+            .execute(
+                "UPDATE launch_attempts
+             SET final_session_id = ?1,
+                 launch_binding_id = ?2,
+                 state = ?3,
+                 provider_session_id = ?4,
+                 verified_locator = ?5,
+                 failure_reason = NULL,
+                 row_version = row_version + 1,
+                 updated_at = ?6,
+                 finalized_at = ?6
+             WHERE id = ?7",
+                params![
+                    input.review_session_id,
+                    input.launch_binding.id,
+                    input.terminal_state.as_str(),
+                    input.provider_session_id,
+                    verified_locator_json,
+                    now,
+                    input.attempt_id,
+                ],
+            )
+            .map_err(StorageError::from)
+            .map_err(ExistingSessionLaunchFinalizationError::Commit)?;
+        if finalized == 0 {
+            return Err(ExistingSessionLaunchFinalizationError::Commit(
+                StorageError::NotFound {
+                    entity: "launch_attempt",
+                    id: input.attempt_id.to_owned(),
+                },
+            ));
+        }
+
+        tx.commit()
+            .map_err(StorageError::from)
+            .map_err(ExistingSessionLaunchFinalizationError::Commit)?;
+
+        self.launch_attempt(input.attempt_id)
+            .map_err(ExistingSessionLaunchFinalizationError::Commit)?
+            .ok_or_else(|| {
+                ExistingSessionLaunchFinalizationError::Commit(StorageError::NotFound {
                     entity: "launch_attempt",
                     id: input.attempt_id.to_owned(),
                 })
@@ -2758,11 +2997,11 @@ impl RogerStore {
             "INSERT INTO outbound_draft_items (
                 id, review_session_id, review_run_id, finding_id, draft_batch_id, repo_id,
                 remote_review_target_id, payload_digest, approval_state, anchor_digest,
-                row_version, created_at, updated_at
+                target_locator, body, row_version, created_at, updated_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6,
                 ?7, ?8, ?9, ?10,
-                ?11, ?12, ?12
+                ?11, ?12, ?13, ?14, ?14
             )
             ON CONFLICT(id) DO UPDATE SET
                 approval_state = excluded.approval_state,
@@ -2779,6 +3018,8 @@ impl RogerStore {
                 draft.payload_digest.as_str(),
                 approval_state_str(&draft.approval_state),
                 draft.anchor_digest.as_str(),
+                draft.target_locator.as_str(),
+                draft.body.as_str(),
                 draft.row_version,
                 now
             ],
@@ -2790,7 +3031,8 @@ impl RogerStore {
         self.conn
             .query_row(
                 "SELECT id, review_session_id, review_run_id, finding_id, draft_batch_id, repo_id,
-                    remote_review_target_id, payload_digest, approval_state, anchor_digest, row_version
+                    remote_review_target_id, payload_digest, approval_state, anchor_digest,
+                    target_locator, body, row_version
                  FROM outbound_draft_items
                  WHERE id = ?1",
                 params![draft_id],
@@ -2805,10 +3047,13 @@ impl RogerStore {
                         repo_id: row.get(5)?,
                         remote_review_target_id: row.get(6)?,
                         payload_digest: row.get(7)?,
-                        approval_state: parse_approval_state(&approval_state)
-                            .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?,
+                        approval_state: parse_approval_state(&approval_state).map_err(|err| {
+                            rusqlite::Error::ToSqlConversionFailure(Box::new(err))
+                        })?,
                         anchor_digest: row.get(9)?,
-                        row_version: row.get(10)?,
+                        target_locator: row.get(10)?,
+                        body: row.get(11)?,
+                        row_version: row.get(12)?,
                     })
                 },
             )
@@ -2819,7 +3064,8 @@ impl RogerStore {
     pub fn outbound_draft_items_for_batch(&self, batch_id: &str) -> Result<Vec<OutboundDraft>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, review_session_id, review_run_id, finding_id, draft_batch_id, repo_id,
-                remote_review_target_id, payload_digest, approval_state, anchor_digest, row_version
+                remote_review_target_id, payload_digest, approval_state, anchor_digest,
+                target_locator, body, row_version
              FROM outbound_draft_items
              WHERE draft_batch_id = ?1
              ORDER BY rowid ASC",
@@ -2838,7 +3084,9 @@ impl RogerStore {
                 approval_state: parse_approval_state(&approval_state)
                     .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?,
                 anchor_digest: row.get(9)?,
-                row_version: row.get(10)?,
+                target_locator: row.get(10)?,
+                body: row.get(11)?,
+                row_version: row.get(12)?,
             })
         })?;
 
@@ -3861,14 +4109,17 @@ impl RogerStore {
 
         let run_count = count_for_session(&self.conn, "review_runs", session_id)?;
         let finding_count = count_for_session(&self.conn, "findings", session_id)?;
-        let legacy_draft_count = count_for_session(&self.conn, "outbound_drafts", session_id)?;
-        let canonical_draft_count = self.conn.query_row(
-            "SELECT COUNT(*) FROM outbound_draft_items
-            WHERE review_session_id = ?1",
+        let draft_count = self.conn.query_row(
+            "SELECT COUNT(*) FROM (
+                SELECT id FROM outbound_drafts
+                WHERE session_id = ?1
+                UNION
+                SELECT id FROM outbound_draft_items
+                WHERE review_session_id = ?1
+            )",
             params![session_id],
             |row| row.get::<_, i64>(0),
         )?;
-        let draft_count = legacy_draft_count + canonical_draft_count;
         let legacy_approval_count = self.conn.query_row(
             "SELECT COUNT(*) FROM outbound_approval_tokens oat
             JOIN outbound_drafts od ON od.id = oat.draft_id
@@ -4516,8 +4767,7 @@ impl RogerStore {
                         approval_id,
                         posted_action_id: row.get(3)?,
                         posted_action_status,
-                        invalidation_reason_code: revoked_at
-                            .map(|_| "legacy_revoked".to_owned()),
+                        invalidation_reason_code: revoked_at.map(|_| "legacy_revoked".to_owned()),
                         mutation_elevated: is_mutation_elevated_surface_state(&state),
                     })
                 },
@@ -4531,7 +4781,8 @@ impl RogerStore {
         finding_id: &str,
         fallback_outbound_state: &str,
     ) -> Result<OutboundSurfaceProjection> {
-        if let Some(projection) = self.canonical_outbound_surface_projection_for_finding(finding_id)?
+        if let Some(projection) =
+            self.canonical_outbound_surface_projection_for_finding(finding_id)?
         {
             return Ok(projection);
         }
@@ -5347,6 +5598,16 @@ impl RogerStore {
                     params![time::now_ts()],
                 )?;
                 self.conn.pragma_update(None, "user_version", 13)?;
+            }
+
+            if version < 14 {
+                self.conn.execute_batch(MIGRATION_0014)?;
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at)
+                    VALUES (14, 'outbound_postable_payload', ?1)",
+                    params![time::now_ts()],
+                )?;
+                self.conn.pragma_update(None, "user_version", 14)?;
             }
 
             if migration_class.requires_sidecar_invalidation() {

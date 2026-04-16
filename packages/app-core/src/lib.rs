@@ -2933,6 +2933,8 @@ pub struct OutboundDraft {
     pub payload_digest: String,
     pub approval_state: ApprovalState,
     pub anchor_digest: String,
+    pub target_locator: String,
+    pub body: String,
     pub row_version: i64,
 }
 
@@ -3092,6 +3094,18 @@ pub fn validate_outbound_draft_batch_linkage(
                 reason_code: "payload_digest_mismatch".to_owned(),
             });
         }
+        if draft.target_locator.trim().is_empty() {
+            issues.push(OutboundDraftBatchIssue {
+                draft_id: Some(draft.id.clone()),
+                reason_code: "missing_target_locator".to_owned(),
+            });
+        }
+        if draft.body.trim().is_empty() {
+            issues.push(OutboundDraftBatchIssue {
+                draft_id: Some(draft.id.clone()),
+                reason_code: "missing_postable_body".to_owned(),
+            });
+        }
         if draft.finding_id.is_none() {
             issues.push(OutboundDraftBatchIssue {
                 draft_id: Some(draft.id.clone()),
@@ -3106,11 +3120,29 @@ pub fn validate_outbound_draft_batch_linkage(
     }
 }
 
+fn approval_invalidation_reason_for_linkage_issues(
+    validation: &OutboundDraftBatchValidation,
+) -> &'static str {
+    if validation.issues.iter().any(|issue| {
+        matches!(
+            issue.reason_code.as_str(),
+            "empty_batch" | "missing_finding_link"
+        )
+    }) {
+        "missing_local_state"
+    } else {
+        "local_state_drift"
+    }
+}
+
 pub fn evaluate_outbound_post_gate(input: OutboundPostGateInput<'_>) -> OutboundPostGateDecision {
     let validation = validate_outbound_draft_batch_linkage(input.batch, input.drafts);
     if !validation.valid {
         return OutboundPostGateDecision::Blocked {
-            reason_code: "batch_linkage_invalid".to_owned(),
+            reason_code: format!(
+                "approval_invalidated:{}",
+                approval_invalidation_reason_for_linkage_issues(&validation)
+            ),
         };
     }
 
@@ -3610,9 +3642,15 @@ mod tests {
             plan.trust_floor,
             SearchTrustFloor::CandidateInspectionAllowed
         );
-        assert_eq!(plan.session_baseline, SearchSessionBaseline::AnchorScopedContext);
+        assert_eq!(
+            plan.session_baseline,
+            SearchSessionBaseline::AnchorScopedContext
+        );
         assert_eq!(plan.semantic_posture, SearchSemanticPosture::LexicalOnly);
-        assert_eq!(plan.strategy.primary_lane, SearchRetrievalLane::CandidateAudit);
+        assert_eq!(
+            plan.strategy.primary_lane,
+            SearchRetrievalLane::CandidateAudit
+        );
         assert!(plan.strategy.candidate_audit);
         assert!(!plan.strategy.semantic);
         assert!(plan.includes_tentative_candidates());
@@ -3636,16 +3674,16 @@ mod tests {
             SearchSessionBaseline::AmbientSessionOptional
         );
         assert_eq!(plan.anchor_set, SearchAnchorSet::None);
-        assert_eq!(
-            plan.trust_floor,
-            SearchTrustFloor::PromotedAndEvidenceOnly
-        );
+        assert_eq!(plan.trust_floor, SearchTrustFloor::PromotedAndEvidenceOnly);
         assert_eq!(plan.candidate_visibility, SearchCandidateVisibility::Hidden);
         assert_eq!(
             plan.semantic_posture,
             SearchSemanticPosture::DegradedSemanticVisible
         );
-        assert_eq!(plan.strategy.primary_lane, SearchRetrievalLane::LexicalRecall);
+        assert_eq!(
+            plan.strategy.primary_lane,
+            SearchRetrievalLane::LexicalRecall
+        );
         assert!(plan.strategy.lexical);
         assert!(plan.strategy.prior_review);
         assert!(plan.strategy.semantic);
