@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -43,6 +43,7 @@ const MIGRATION_0014: &str = include_str!("../migrations/0014_outbound_postable_
 const MIGRATION_0015: &str = include_str!("../migrations/0015_worker_audit_trail.sql");
 const MIGRATION_0016: &str = include_str!("../migrations/0016_posted_action_items.sql");
 const MIGRATION_0017: &str = include_str!("../migrations/0017_session_baseline_snapshots.sql");
+const PRIOR_REVIEW_BULK_HYDRATION_CHUNK_SIZE: usize = 64;
 
 const MIGRATION_TERMINAL_STARTED: &str = "started";
 const MIGRATION_TERMINAL_COMMITTED: &str = "committed";
@@ -4502,110 +4503,110 @@ impl RogerStore {
             Vec::new()
         };
 
-        if semantic_operational {
-            let (evidence_semantic_scores, memory_semantic_scores) =
-                semantic_scores_by_target(&query.semantic_candidates);
-
-            for (finding_id, semantic_score_milli) in &evidence_semantic_scores {
-                let exists = evidence_hits
-                    .iter()
-                    .any(|hit| hit.finding_id == *finding_id);
-                if exists {
-                    continue;
-                }
-                if let Some(mut hit) = self.evidence_hit_by_id(query.repository, finding_id)? {
-                    hit.semantic_score_milli = *semantic_score_milli;
-                    hit.fused_score = fused_score(hit.lexical_score, hit.semantic_score_milli);
-                    evidence_hits.push(hit);
-                }
-            }
-
-            for (memory_id, semantic_score_milli) in &memory_semantic_scores {
-                let in_promoted = promoted_memory
-                    .iter()
-                    .any(|hit| hit.memory_id == *memory_id);
-                let in_tentative = tentative_candidates
-                    .iter()
-                    .any(|hit| hit.memory_id == *memory_id);
-                if in_promoted || in_tentative {
-                    continue;
-                }
-                let Some(mut hit) = self.memory_hit_by_id(query.scope_key, memory_id)? else {
-                    continue;
-                };
-
-                hit.semantic_score_milli = *semantic_score_milli;
-                hit.fused_score = fused_score(hit.lexical_score, hit.semantic_score_milli);
-
-                if hit.state == "candidate" && query.include_tentative_candidates {
-                    tentative_candidates.push(hit);
-                } else if hit.state == "established" || hit.state == "proven" {
-                    promoted_memory.push(hit);
-                }
-            }
-
-            for hit in &mut evidence_hits {
-                hit.semantic_score_milli = *evidence_semantic_scores
-                    .get(hit.finding_id.as_str())
-                    .unwrap_or(&0);
-                hit.fused_score = fused_score(hit.lexical_score, hit.semantic_score_milli);
-            }
-            for hit in &mut promoted_memory {
-                hit.semantic_score_milli = *memory_semantic_scores
-                    .get(hit.memory_id.as_str())
-                    .unwrap_or(&0);
-                hit.fused_score = fused_score(hit.lexical_score, hit.semantic_score_milli);
-            }
-            for hit in &mut tentative_candidates {
-                hit.semantic_score_milli = *memory_semantic_scores
-                    .get(hit.memory_id.as_str())
-                    .unwrap_or(&0);
-                hit.fused_score = fused_score(hit.lexical_score, hit.semantic_score_milli);
-            }
-
-            evidence_hits.sort_unstable_by(|left, right| {
-                right
-                    .fused_score
-                    .cmp(&left.fused_score)
-                    .then_with(|| right.lexical_score.cmp(&left.lexical_score))
-                    .then_with(|| left.finding_id.cmp(&right.finding_id))
+        if !semantic_operational {
+            return Ok(PriorReviewLookupResult {
+                scope_bucket,
+                mode: if lexical_recovery_scan {
+                    PriorReviewRetrievalMode::RecoveryScan
+                } else {
+                    PriorReviewRetrievalMode::LexicalOnly
+                },
+                degraded_reasons,
+                evidence_hits,
+                promoted_memory,
+                tentative_candidates,
             });
-            promoted_memory.sort_unstable_by(|left, right| {
-                right
-                    .fused_score
-                    .cmp(&left.fused_score)
-                    .then_with(|| right.lexical_score.cmp(&left.lexical_score))
-                    .then_with(|| left.memory_id.cmp(&right.memory_id))
-            });
-            tentative_candidates.sort_unstable_by(|left, right| {
-                right
-                    .fused_score
-                    .cmp(&left.fused_score)
-                    .then_with(|| right.lexical_score.cmp(&left.lexical_score))
-                    .then_with(|| left.memory_id.cmp(&right.memory_id))
-            });
-        } else {
-            for hit in &mut evidence_hits {
-                hit.semantic_score_milli = 0;
-                hit.fused_score = fused_score(hit.lexical_score, 0);
-            }
-            for hit in &mut promoted_memory {
-                hit.semantic_score_milli = 0;
-                hit.fused_score = fused_score(hit.lexical_score, 0);
-            }
-            for hit in &mut tentative_candidates {
-                hit.semantic_score_milli = 0;
-                hit.fused_score = fused_score(hit.lexical_score, 0);
+        }
+
+        let (evidence_semantic_scores, memory_semantic_scores) =
+            semantic_scores_by_target(&query.semantic_candidates);
+
+        let existing_evidence_ids = evidence_hits
+            .iter()
+            .map(|hit| hit.finding_id.as_str())
+            .collect::<HashSet<_>>();
+        let missing_evidence_ids = evidence_semantic_scores
+            .keys()
+            .copied()
+            .filter(|finding_id| !existing_evidence_ids.contains(finding_id))
+            .collect::<Vec<_>>();
+        for mut hit in self.evidence_hits_by_ids(query.repository, &missing_evidence_ids)? {
+            hit.semantic_score_milli = *evidence_semantic_scores
+                .get(hit.finding_id.as_str())
+                .unwrap_or(&0);
+            hit.fused_score = fused_score(hit.lexical_score, hit.semantic_score_milli);
+            evidence_hits.push(hit);
+        }
+
+        let existing_memory_ids = promoted_memory
+            .iter()
+            .chain(tentative_candidates.iter())
+            .map(|hit| hit.memory_id.as_str())
+            .collect::<HashSet<_>>();
+        let missing_memory_ids = memory_semantic_scores
+            .keys()
+            .copied()
+            .filter(|memory_id| !existing_memory_ids.contains(memory_id))
+            .collect::<Vec<_>>();
+        for mut hit in self.memory_hits_by_ids(query.scope_key, &missing_memory_ids)? {
+            hit.semantic_score_milli = *memory_semantic_scores
+                .get(hit.memory_id.as_str())
+                .unwrap_or(&0);
+            hit.fused_score = fused_score(hit.lexical_score, hit.semantic_score_milli);
+
+            if hit.state == "candidate" && query.include_tentative_candidates {
+                tentative_candidates.push(hit);
+            } else if hit.state == "established" || hit.state == "proven" {
+                promoted_memory.push(hit);
             }
         }
 
-        if semantic_operational {
-            degraded_reasons.retain(|reason| {
-                !reason.contains("semantic assets")
-                    && !reason.contains("semantic sidecar generation")
-                    && !reason.contains("semantic candidates")
-            });
+        for hit in &mut evidence_hits {
+            hit.semantic_score_milli = *evidence_semantic_scores
+                .get(hit.finding_id.as_str())
+                .unwrap_or(&0);
+            hit.fused_score = fused_score(hit.lexical_score, hit.semantic_score_milli);
         }
+        for hit in &mut promoted_memory {
+            hit.semantic_score_milli = *memory_semantic_scores
+                .get(hit.memory_id.as_str())
+                .unwrap_or(&0);
+            hit.fused_score = fused_score(hit.lexical_score, hit.semantic_score_milli);
+        }
+        for hit in &mut tentative_candidates {
+            hit.semantic_score_milli = *memory_semantic_scores
+                .get(hit.memory_id.as_str())
+                .unwrap_or(&0);
+            hit.fused_score = fused_score(hit.lexical_score, hit.semantic_score_milli);
+        }
+
+        evidence_hits.sort_unstable_by(|left, right| {
+            right
+                .fused_score
+                .cmp(&left.fused_score)
+                .then_with(|| right.lexical_score.cmp(&left.lexical_score))
+                .then_with(|| left.finding_id.cmp(&right.finding_id))
+        });
+        promoted_memory.sort_unstable_by(|left, right| {
+            right
+                .fused_score
+                .cmp(&left.fused_score)
+                .then_with(|| right.lexical_score.cmp(&left.lexical_score))
+                .then_with(|| left.memory_id.cmp(&right.memory_id))
+        });
+        tentative_candidates.sort_unstable_by(|left, right| {
+            right
+                .fused_score
+                .cmp(&left.fused_score)
+                .then_with(|| right.lexical_score.cmp(&left.lexical_score))
+                .then_with(|| left.memory_id.cmp(&right.memory_id))
+        });
+
+        degraded_reasons.retain(|reason| {
+            !reason.contains("semantic assets")
+                && !reason.contains("semantic sidecar generation")
+                && !reason.contains("semantic candidates")
+        });
 
         Ok(PriorReviewLookupResult {
             scope_bucket,
@@ -5809,82 +5810,128 @@ impl RogerStore {
         Ok(hits)
     }
 
-    fn evidence_hit_by_id(
+    fn evidence_hits_by_ids(
         &self,
         repository: &str,
-        finding_id: &str,
-    ) -> Result<Option<PriorReviewEvidenceHit>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT
-                f.id,
-                f.session_id,
-                COALESCE(f.last_seen_run_id, f.first_run_id) AS review_run_id,
-                json_extract(rs.review_target, '$.repository') AS repository,
-                CAST(json_extract(rs.review_target, '$.pull_request_number') AS INTEGER) AS pull_request_number,
-                f.fingerprint,
-                f.title,
-                f.normalized_summary,
-                f.severity,
-                f.confidence,
-                f.triage_state,
-                f.outbound_state
-            FROM findings f
-            JOIN review_sessions rs ON rs.id = f.session_id
-            WHERE f.id = ?1
-              AND json_extract(rs.review_target, '$.repository') = ?2",
-        )?;
-        stmt.query_row(params![finding_id, repository], |row| {
-            Ok(PriorReviewEvidenceHit {
-                finding_id: row.get(0)?,
-                session_id: row.get(1)?,
-                review_run_id: row.get(2)?,
-                repository: row.get(3)?,
-                pull_request_number: row.get::<_, i64>(4).unwrap_or_default().max(0) as u64,
-                fingerprint: row.get(5)?,
-                title: row.get(6)?,
-                normalized_summary: row.get(7)?,
-                severity: row.get(8)?,
-                confidence: row.get(9)?,
-                triage_state: row.get(10)?,
-                outbound_state: row.get(11)?,
-                lexical_score: 0,
-                semantic_score_milli: 0,
-                fused_score: 0,
-            })
-        })
-        .optional()
-        .map_err(StorageError::from)
+        finding_ids: &[&str],
+    ) -> Result<Vec<PriorReviewEvidenceHit>> {
+        let mut hits = Vec::new();
+        for chunk in finding_ids.chunks(PRIOR_REVIEW_BULK_HYDRATION_CHUNK_SIZE) {
+            if chunk.is_empty() {
+                continue;
+            }
+
+            let mut values = Vec::<Value>::with_capacity(chunk.len() + 1);
+            values.push(Value::Text(repository.to_owned()));
+
+            let mut id_placeholders = Vec::with_capacity(chunk.len());
+            for finding_id in chunk {
+                values.push(Value::Text((*finding_id).to_owned()));
+                id_placeholders.push(format!("?{}", values.len()));
+            }
+
+            let sql = format!(
+                "SELECT
+                    f.id,
+                    f.session_id,
+                    COALESCE(f.last_seen_run_id, f.first_run_id) AS review_run_id,
+                    json_extract(rs.review_target, '$.repository') AS repository,
+                    CAST(json_extract(rs.review_target, '$.pull_request_number') AS INTEGER) AS pull_request_number,
+                    f.fingerprint,
+                    f.title,
+                    f.normalized_summary,
+                    f.severity,
+                    f.confidence,
+                    f.triage_state,
+                    f.outbound_state
+                FROM findings f
+                JOIN review_sessions rs ON rs.id = f.session_id
+                WHERE json_extract(rs.review_target, '$.repository') = ?1
+                  AND f.id IN ({})",
+                id_placeholders.join(", ")
+            );
+
+            let mut stmt = self.conn.prepare_cached(&sql)?;
+            let rows = stmt.query_map(params_from_iter(values), |row| {
+                Ok(PriorReviewEvidenceHit {
+                    finding_id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    review_run_id: row.get(2)?,
+                    repository: row.get(3)?,
+                    pull_request_number: row.get::<_, i64>(4).unwrap_or_default().max(0) as u64,
+                    fingerprint: row.get(5)?,
+                    title: row.get(6)?,
+                    normalized_summary: row.get(7)?,
+                    severity: row.get(8)?,
+                    confidence: row.get(9)?,
+                    triage_state: row.get(10)?,
+                    outbound_state: row.get(11)?,
+                    lexical_score: 0,
+                    semantic_score_milli: 0,
+                    fused_score: 0,
+                })
+            })?;
+
+            for row in rows {
+                hits.push(row?);
+            }
+        }
+
+        Ok(hits)
     }
 
-    fn memory_hit_by_id(
+    fn memory_hits_by_ids(
         &self,
         scope_key: &str,
-        memory_id: &str,
-    ) -> Result<Option<PriorReviewMemoryHit>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT id, scope_key, memory_class, state, statement, normalized_key,
-                anchor_digest, source_kind
-            FROM memory_items
-            WHERE id = ?1
-              AND scope_key = ?2",
-        )?;
-        stmt.query_row(params![memory_id, scope_key], |row| {
-            Ok(PriorReviewMemoryHit {
-                memory_id: row.get(0)?,
-                scope_key: row.get(1)?,
-                memory_class: row.get(2)?,
-                state: row.get(3)?,
-                statement: row.get(4)?,
-                normalized_key: row.get(5)?,
-                anchor_digest: row.get(6)?,
-                source_kind: row.get(7)?,
-                lexical_score: 0,
-                semantic_score_milli: 0,
-                fused_score: 0,
-            })
-        })
-        .optional()
-        .map_err(StorageError::from)
+        memory_ids: &[&str],
+    ) -> Result<Vec<PriorReviewMemoryHit>> {
+        let mut hits = Vec::new();
+        for chunk in memory_ids.chunks(PRIOR_REVIEW_BULK_HYDRATION_CHUNK_SIZE) {
+            if chunk.is_empty() {
+                continue;
+            }
+
+            let mut values = Vec::<Value>::with_capacity(chunk.len() + 1);
+            values.push(Value::Text(scope_key.to_owned()));
+
+            let mut id_placeholders = Vec::with_capacity(chunk.len());
+            for memory_id in chunk {
+                values.push(Value::Text((*memory_id).to_owned()));
+                id_placeholders.push(format!("?{}", values.len()));
+            }
+
+            let sql = format!(
+                "SELECT id, scope_key, memory_class, state, statement, normalized_key,
+                    anchor_digest, source_kind
+                FROM memory_items
+                WHERE scope_key = ?1
+                  AND id IN ({})",
+                id_placeholders.join(", ")
+            );
+
+            let mut stmt = self.conn.prepare_cached(&sql)?;
+            let rows = stmt.query_map(params_from_iter(values), |row| {
+                Ok(PriorReviewMemoryHit {
+                    memory_id: row.get(0)?,
+                    scope_key: row.get(1)?,
+                    memory_class: row.get(2)?,
+                    state: row.get(3)?,
+                    statement: row.get(4)?,
+                    normalized_key: row.get(5)?,
+                    anchor_digest: row.get(6)?,
+                    source_kind: row.get(7)?,
+                    lexical_score: 0,
+                    semantic_score_milli: 0,
+                    fused_score: 0,
+                })
+            })?;
+
+            for row in rows {
+                hits.push(row?);
+            }
+        }
+
+        Ok(hits)
     }
 
     pub fn store_artifact(

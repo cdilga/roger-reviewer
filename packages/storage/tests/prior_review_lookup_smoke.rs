@@ -244,6 +244,19 @@ fn prior_review_lookup_fuses_semantic_candidates_when_assets_and_sidecars_are_re
         triage_state: "accepted",
         outbound_state: "drafted",
     })?;
+    store.upsert_materialized_finding(CreateMaterializedFinding {
+        id: "finding-semantic-only",
+        session_id: "session-owner",
+        review_run_id: "run-owner",
+        stage: "deep_review",
+        fingerprint: "fp:anchor-shift",
+        title: "Anchor drift needs operator review",
+        normalized_summary: "stale findings need semantic review after anchor drift",
+        severity: "medium",
+        confidence: "medium",
+        triage_state: "accepted",
+        outbound_state: "drafted",
+    })?;
 
     store.upsert_memory_item(UpsertMemoryItem {
         id: "mem-proven",
@@ -254,6 +267,16 @@ fn prior_review_lookup_fuses_semantic_candidates_when_assets_and_sidecars_are_re
         normalized_key: "reconfirm approved drafts on refresh signal",
         anchor_digest: Some("anchor:refresh"),
         source_kind: "manual",
+    })?;
+    store.upsert_memory_item(UpsertMemoryItem {
+        id: "mem-proven-semantic",
+        scope_key: "repo:owner/repo",
+        memory_class: "procedural",
+        state: "proven",
+        statement: "Semantic-only reconciliation note for stale findings",
+        normalized_key: "semantic reconciliation stale findings",
+        anchor_digest: Some("anchor:stale"),
+        source_kind: "derived",
     })?;
     store.upsert_memory_item(UpsertMemoryItem {
         id: "mem-candidate",
@@ -295,14 +318,25 @@ fn prior_review_lookup_fuses_semantic_candidates_when_assets_and_sidecars_are_re
                 score: 0.91,
             },
             SemanticLookupCandidate {
+                target_kind: SemanticLookupTargetKind::EvidenceFinding,
+                target_id: "finding-semantic-only".to_owned(),
+                score: 0.72,
+            },
+            SemanticLookupCandidate {
                 target_kind: SemanticLookupTargetKind::MemoryItem,
                 target_id: "mem-candidate".to_owned(),
                 score: 0.88,
+            },
+            SemanticLookupCandidate {
+                target_kind: SemanticLookupTargetKind::MemoryItem,
+                target_id: "mem-proven-semantic".to_owned(),
+                score: 0.81,
             },
         ],
     })?;
 
     assert_eq!(result.mode, PriorReviewRetrievalMode::Hybrid);
+    assert!(result.degraded_reasons.is_empty());
 
     let evidence = result
         .evidence_hits
@@ -320,8 +354,26 @@ fn prior_review_lookup_fuses_semantic_candidates_when_assets_and_sidecars_are_re
     assert_eq!(tentative.semantic_score_milli, 880);
     assert!(tentative.fused_score > tentative.lexical_score);
 
-    assert_eq!(result.promoted_memory.len(), 1);
-    assert_eq!(result.promoted_memory[0].memory_id, "mem-proven");
+    let evidence_ids = result
+        .evidence_hits
+        .iter()
+        .map(|hit| hit.finding_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(evidence_ids, vec!["finding-owner", "finding-semantic-only"]);
+
+    let promoted_ids = result
+        .promoted_memory
+        .iter()
+        .map(|hit| hit.memory_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(promoted_ids, vec!["mem-proven", "mem-proven-semantic"]);
+
+    let candidate_ids = result
+        .tentative_candidates
+        .iter()
+        .map(|hit| hit.memory_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(candidate_ids, vec!["mem-candidate"]);
 
     Ok(())
 }
