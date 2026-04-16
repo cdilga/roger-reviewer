@@ -283,10 +283,7 @@ fn draft_robot_materializes_grouped_local_batch_and_queryable_outbound_state() {
         assert_eq!(stored.draft_batch_id, batch_id);
         assert_eq!(stored.repo_id, "owner/repo");
         assert_eq!(stored.remote_review_target_id, "pr-42");
-        assert_eq!(
-            stored.target_locator,
-            format!("github:owner/repo#42:finding/{finding_id}")
-        );
+        assert_eq!(stored.target_locator, "github:issue-comment:owner/repo#42");
         assert!(
             stored.body.contains(title),
             "draft body should include title"
