@@ -5083,7 +5083,11 @@ fn checksums_entry_for_archive(checksums_text: &str, archive_name: &str) -> Resu
             continue;
         }
         let candidate_name = parts[parts.len() - 1].trim_start_matches('*');
-        if candidate_name == archive_name {
+        let candidate_basename = candidate_name
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(candidate_name);
+        if candidate_name == archive_name || candidate_basename == archive_name {
             matches.push(parts[0].to_ascii_lowercase());
         }
     }

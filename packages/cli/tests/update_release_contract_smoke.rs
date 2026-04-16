@@ -37,6 +37,33 @@ fn write_latest_release_pointer(api_root: &Path, tag: &str) {
     write_json(&releases_dir.join("latest"), &json!({ "tag_name": tag }));
 }
 
+fn host_update_target() -> &'static str {
+    let target = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("macos", "x86_64") => "x86_64-apple-darwin",
+        ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
+        _ => "",
+    };
+    assert!(
+        !target.is_empty(),
+        "unsupported host target for update_release_contract_smoke: {:?}",
+        (std::env::consts::OS, std::env::consts::ARCH)
+    );
+    target
+}
+
+fn alternate_release_target(exclude: &str) -> &'static str {
+    [
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+    ]
+    .into_iter()
+    .find(|candidate| *candidate != exclude)
+    .expect("alternate release target distinct from host")
+}
+
 #[derive(Debug)]
 struct ReleaseFixture {
     tag: String,
@@ -179,7 +206,7 @@ fn installed_binary_update_dry_run_handles_legacy_checksums_and_emits_release_ba
     fs::create_dir_all(&download_root_fs).expect("create download root");
 
     let rr_bin = PathBuf::from(env!("CARGO_BIN_EXE_rr"));
-    let target = "x86_64-unknown-linux-gnu";
+    let target = host_update_target();
     let legacy_checksums_name = format!("roger-reviewer-{current_version}-checksums.txt");
     let current_release = create_release_fixture(
         &download_root_fs,
@@ -317,8 +344,8 @@ fn installed_binary_update_dry_run_preserves_explicit_target_override_truth() {
     fs::create_dir_all(&download_root_fs).expect("create download root");
 
     let rr_bin = PathBuf::from(env!("CARGO_BIN_EXE_rr"));
-    let install_target = "x86_64-unknown-linux-gnu";
-    let explicit_target = "aarch64-unknown-linux-gnu";
+    let install_target = host_update_target();
+    let explicit_target = alternate_release_target(install_target);
     let current_release = create_release_fixture(
         &download_root_fs,
         current_version,
@@ -417,7 +444,7 @@ fn installed_binary_update_dry_run_honors_explicit_rc_channel_request() {
     fs::create_dir_all(&download_root_fs).expect("create download root");
 
     let rr_bin = PathBuf::from(env!("CARGO_BIN_EXE_rr"));
-    let target = "x86_64-unknown-linux-gnu";
+    let target = host_update_target();
     create_release_fixture(
         &download_root_fs,
         current_version,
@@ -521,7 +548,7 @@ fn installed_binary_update_blocks_renamed_binary_with_release_backed_guidance() 
     fs::create_dir_all(&download_root_fs).expect("create download root");
 
     let rr_bin = PathBuf::from(env!("CARGO_BIN_EXE_rr"));
-    let target = "x86_64-unknown-linux-gnu";
+    let target = host_update_target();
     create_release_fixture(
         &download_root_fs,
         current_version,
