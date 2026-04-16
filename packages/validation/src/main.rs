@@ -1,14 +1,15 @@
 use roger_test_harness::{BudgetStatus, ValidationLane};
 use roger_validation::calver::{CalVerDerivationInput, derive_calver_release};
 use roger_validation::{
-    budget_report, build_plan, failure_artifact_paths, persona_recovery_report,
+    budget_report, build_plan, failure_artifact_paths, persona_ownership_report,
+    persona_recovery_report,
 };
 use std::env;
 use std::process::ExitCode;
 
 fn print_usage() {
     eprintln!(
-        "usage:\n  roger-validation plan <fast-local|pr|gated|nightly|release> [metadata_dir] [artifact_root]\n  roger-validation guard-e2e-budget [metadata_dir] [budget_json]\n  roger-validation guard-persona-recovery [metadata_dir] [issues_jsonl]\n  roger-validation failure-paths <suite_id>... [--metadata-dir DIR] [--artifact-root DIR]\n  roger-validation derive-calver [--git-ref REF] [--sha SHA] [--run-number N] [--run-attempt N] [--date-utc YYYY-MM-DD]"
+        "usage:\n  roger-validation plan <fast-local|pr|gated|nightly|release> [metadata_dir] [artifact_root]\n  roger-validation guard-e2e-budget [metadata_dir] [budget_json]\n  roger-validation guard-persona-ownership [metadata_dir] [issues_jsonl]\n  roger-validation guard-persona-recovery [metadata_dir] [issues_jsonl]\n  roger-validation failure-paths <suite_id>... [--metadata-dir DIR] [--artifact-root DIR]\n  roger-validation derive-calver [--git-ref REF] [--sha SHA] [--run-number N] [--run-attempt N] [--date-utc YYYY-MM-DD]"
     );
 }
 
@@ -92,6 +93,50 @@ fn main() -> ExitCode {
                         BudgetStatus::Ok => ExitCode::SUCCESS,
                         BudgetStatus::Warn => ExitCode::from(2),
                         BudgetStatus::Fail => ExitCode::FAILURE,
+                    }
+                }
+                Err(err) => {
+                    eprintln!("{err}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "guard-persona-ownership" => {
+            let metadata_dir = args.get(2).map(String::as_str).unwrap_or("tests/suites");
+            let issues_jsonl = args
+                .get(3)
+                .map(String::as_str)
+                .unwrap_or(".beads/issues.jsonl");
+
+            match persona_ownership_report(metadata_dir, issues_jsonl) {
+                Ok(report) => {
+                    println!("scenarios_checked={}", report.scenarios.len());
+                    for scenario in &report.scenarios {
+                        if scenario.ok() {
+                            println!("scenario={} status=ok", scenario.scenario_id);
+                            continue;
+                        }
+                        println!("scenario={} status=missing", scenario.scenario_id);
+                        for suite_id in &scenario.missing_suite_ids {
+                            println!("missing_suite={}:{}", scenario.scenario_id, suite_id);
+                        }
+                        for suite_id in &scenario.missing_persona_suite_ids {
+                            println!("missing_persona_link={}:{}", scenario.scenario_id, suite_id);
+                        }
+                        for invariant_id in &scenario.missing_invariant_ids {
+                            println!(
+                                "missing_invariant={}:{}",
+                                scenario.scenario_id, invariant_id
+                            );
+                        }
+                        for bead_id in &scenario.missing_bead_ids {
+                            println!("missing_bead={}:{}", scenario.scenario_id, bead_id);
+                        }
+                    }
+                    if report.ok() {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::FAILURE
                     }
                 }
                 Err(err) => {

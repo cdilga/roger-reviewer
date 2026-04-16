@@ -450,12 +450,13 @@ beads because the remaining executable and hardening gaps already have explicit
 owners in `rr-6iah.1`, `rr-6iah.2`, `rr-6iah.4`, `rr-8isd.5.1`,
 `rr-8isd.5.2`, `rr-8isd.5.3`, `rr-b58q.4.4`, and `rr-x51h.3.2.1`.
 
-Machine-checkable follow-on:
+Machine-checkable guard:
 
-- `rr-6iah.10` now owns the missing Roger-side guard so `PJ-01` through
-  `PJ-03` ownership does not remain prose-only. Do not imply that
-  `guard-persona-recovery` covers these non-recovery persona families until
-  that follow-on lands.
+- `cargo run -q -p roger-validation -- guard-persona-ownership tests/suites .beads/issues.jsonl`
+  must stay green so the `PJ-01` through `PJ-03` scenario-to-suite and
+  scenario-to-bead mapping does not drift back into prose-only ownership
+- `guard-persona-recovery` remains the recovery-only guard for `PJ-04` through
+  `PJ-06`; do not use it as proof for these non-recovery persona families
 
 Shared browser-entry rule:
 

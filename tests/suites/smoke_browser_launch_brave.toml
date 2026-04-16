@@ -3,7 +3,7 @@ budget_id = "SMOKE-BRIDGE-BRAVE-01"
 family = "smoke"
 flow_ids = ["F02", "F10", "F14"]
 invariant_ids = ["INV-BRIDGE-001", "INV-BRIDGE-002"]
-persona_ids = ["PJ-06A"]
+persona_ids = ["PJ-01A", "PJ-01B", "PJ-01C", "PJ-06A"]
 fixture_families = [
   "fixture_bridge_launch_only_no_status",
   "fixture_bridge_transcripts",

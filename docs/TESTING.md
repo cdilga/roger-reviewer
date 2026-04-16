@@ -107,10 +107,33 @@ Current ownership map:
 | `E2E-05` | `PJ-01A`, `PJ-01B`, `PJ-01C` | `INV-BRIDGE-001`, `INV-BRIDGE-002`, `INV-SESSION-001` | none | `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, `smoke_browser_launch_edge`, `int_bridge_launch_only_no_status` | `rr-6iah.4` |
 | `E2E-06` | `PJ-03C`, `PJ-04A`, `PJ-04B` | `INV-SESSION-002`, `INV-CONTEXT-001` | none | `accept_opencode_dropout_return`, `accept_opencode_resume`, `smoke_opencode_continuity`, `int_storage_opencode_dropout_return` | `rr-6iah.5` |
 
+Official browser-lane posture for `E2E-05`:
+
+- the executable automation owner should be a deterministic extension-loaded
+  Chromium harness that proves setup, identity discovery, host registration,
+  truthful doctor output, and first PR-page launch without depending on real
+  GitHub mutation
+- supported-browser `Chrome`/`Brave`/`Edge` runs remain named smoke or
+  operator-stability evidence for public support claims
+- a live sacrificial-PR rehearsal is still desirable, but it belongs in a
+  later operator-stability or release-candidate lane rather than in the base
+  deterministic E2E closeout
+
 The detailed scenario contract lives in
 [`docs/RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md), and the
 machine-readable budget source of truth lives in
 [`docs/AUTOMATED_E2E_BUDGET.json`](docs/AUTOMATED_E2E_BUDGET.json).
+
+Entry, browser-resume, and local-first ownership for `PJ-01` through `PJ-03`
+now has a dedicated guard:
+
+- `cargo run -q -p roger-validation -- guard-persona-ownership tests/suites .beads/issues.jsonl`
+- the guard checks that these non-recovery scenario cuts still point at both
+  live suite metadata and explicit bead owners, so browser setup, browser
+  resume, and terminal-first continuity truth do not drift back into prose-only
+  matrices
+- `guard-persona-recovery` remains the recovery-only guard for `PJ-04` through
+  `PJ-06`
 
 Recovery ownership for `PJ-04` through `PJ-06` now has a dedicated guard:
 

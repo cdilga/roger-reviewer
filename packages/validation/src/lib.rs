@@ -57,7 +57,7 @@ pub fn failure_artifact_paths(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PersonaRecoveryExpectation {
+struct PersonaGuardExpectation {
     id: &'static str,
     invariant_ids: &'static [&'static str],
     suite_ids: &'static [&'static str],
@@ -65,7 +65,7 @@ struct PersonaRecoveryExpectation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PersonaRecoveryScenarioReport {
+pub struct PersonaGuardScenarioReport {
     pub scenario_id: String,
     pub missing_suite_ids: Vec<String>,
     pub missing_persona_suite_ids: Vec<String>,
@@ -73,7 +73,7 @@ pub struct PersonaRecoveryScenarioReport {
     pub missing_bead_ids: Vec<String>,
 }
 
-impl PersonaRecoveryScenarioReport {
+impl PersonaGuardScenarioReport {
     pub fn ok(&self) -> bool {
         self.missing_suite_ids.is_empty()
             && self.missing_persona_suite_ids.is_empty()
@@ -83,24 +83,166 @@ impl PersonaRecoveryScenarioReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PersonaRecoveryReport {
-    pub scenarios: Vec<PersonaRecoveryScenarioReport>,
+pub struct PersonaGuardReport {
+    pub scenarios: Vec<PersonaGuardScenarioReport>,
 }
 
-impl PersonaRecoveryReport {
+impl PersonaGuardReport {
     pub fn ok(&self) -> bool {
-        self.scenarios.iter().all(PersonaRecoveryScenarioReport::ok)
+        self.scenarios.iter().all(PersonaGuardScenarioReport::ok)
     }
 }
 
-const PERSONA_RECOVERY_EXPECTATIONS: &[PersonaRecoveryExpectation] = &[
-    PersonaRecoveryExpectation {
+const PERSONA_OWNERSHIP_EXPECTATIONS: &[PersonaGuardExpectation] = &[
+    PersonaGuardExpectation {
+        id: "PJ-01A",
+        invariant_ids: &["INV-BRIDGE-001", "INV-BRIDGE-002"],
+        suite_ids: &[
+            "int_bridge_launch_only_no_status",
+            "smoke_browser_launch_chrome",
+            "smoke_browser_launch_brave",
+            "smoke_browser_launch_edge",
+        ],
+        bead_ids: &[
+            "rr-021",
+            "rr-022",
+            "rr-8isd.5.1",
+            "rr-8isd.5.2",
+            "rr-6iah.4",
+            "rr-8isd.5.3",
+            "rr-b58q.4.4",
+        ],
+    },
+    PersonaGuardExpectation {
+        id: "PJ-01B",
+        invariant_ids: &["INV-BRIDGE-001", "INV-BRIDGE-002"],
+        suite_ids: &[
+            "int_bridge_launch_only_no_status",
+            "smoke_browser_launch_chrome",
+            "smoke_browser_launch_brave",
+            "smoke_browser_launch_edge",
+        ],
+        bead_ids: &[
+            "rr-021",
+            "rr-8isd.5.1",
+            "rr-8isd.5.2",
+            "rr-6iah.4",
+            "rr-8isd.5.3",
+            "rr-b58q.4.4",
+        ],
+    },
+    PersonaGuardExpectation {
+        id: "PJ-01C",
+        invariant_ids: &["INV-BRIDGE-001", "INV-BRIDGE-002"],
+        suite_ids: &[
+            "int_bridge_launch_only_no_status",
+            "smoke_browser_launch_chrome",
+            "smoke_browser_launch_brave",
+            "smoke_browser_launch_edge",
+        ],
+        bead_ids: &[
+            "rr-021",
+            "rr-022",
+            "rr-8isd.5.2",
+            "rr-6iah.4",
+            "rr-b58q.4.4",
+        ],
+    },
+    PersonaGuardExpectation {
+        id: "PJ-01D",
+        invariant_ids: &["INV-BRIDGE-001", "INV-BRIDGE-002"],
+        suite_ids: &["int_bridge_launch_only_no_status"],
+        bead_ids: &["rr-021", "rr-8isd.5.2", "rr-8isd.5.3", "rr-b58q.4.4"],
+    },
+    PersonaGuardExpectation {
+        id: "PJ-02A",
+        invariant_ids: &["INV-SESSION-001", "INV-SESSION-002"],
+        suite_ids: &[
+            "int_cli_session_aware",
+            "int_cli_session_reentry_same_pr_routing",
+            "accept_opencode_resume",
+        ],
+        bead_ids: &["rr-005.2", "rr-018", "rr-022", "rr-6iah.1"],
+    },
+    PersonaGuardExpectation {
+        id: "PJ-02B",
+        invariant_ids: &["INV-SESSION-001"],
+        suite_ids: &[
+            "int_cli_sessions_global_finder",
+            "int_cli_session_reentry_same_pr_routing",
+        ],
+        bead_ids: &["rr-005.2", "rr-005.2.1", "rr-009.1", "rr-6iah.1"],
+    },
+    PersonaGuardExpectation {
+        id: "PJ-02C",
+        invariant_ids: &["INV-BRIDGE-001", "INV-BRIDGE-002", "INV-SESSION-002"],
+        suite_ids: &[
+            "int_bridge_launch_only_no_status",
+            "int_cli_session_aware",
+            "accept_opencode_resume",
+        ],
+        bead_ids: &["rr-021", "rr-018", "rr-022", "rr-6iah.1"],
+    },
+    PersonaGuardExpectation {
+        id: "PJ-02D",
+        invariant_ids: &[
+            "INV-SESSION-002",
+            "INV-POST-002",
+            "INV-POST-003",
+            "INV-HARNESS-003",
+        ],
+        suite_ids: &[
+            "prop_refresh_identity_lifecycle",
+            "int_cli_session_aware",
+            "int_github_posting_safety_recovery",
+        ],
+        bead_ids: &["rr-005.2", "rr-x51h.3.2.1", "rr-6iah.1", "rr-6iah.3"],
+    },
+    PersonaGuardExpectation {
+        id: "PJ-03A",
+        invariant_ids: &["INV-HARNESS-002", "INV-POST-001"],
+        suite_ids: &["e2e_core_review_happy_path"],
+        bead_ids: &["rr-018", "rr-019", "rr-6iah.2"],
+    },
+    PersonaGuardExpectation {
+        id: "PJ-03B",
+        invariant_ids: &["INV-SESSION-001", "INV-SESSION-002"],
+        suite_ids: &[
+            "int_cli_session_aware",
+            "int_cli_session_reentry_same_pr_routing",
+        ],
+        bead_ids: &["rr-005.2", "rr-018"],
+    },
+    PersonaGuardExpectation {
+        id: "PJ-03C",
+        invariant_ids: &["INV-SESSION-002"],
+        suite_ids: &[
+            "accept_opencode_resume",
+            "int_harness_opencode_resume",
+            "int_cli_session_aware",
+        ],
+        bead_ids: &["rr-003.3", "rr-018", "rr-6iah.2", "rr-6iah.5"],
+    },
+    PersonaGuardExpectation {
+        id: "PJ-03D",
+        invariant_ids: &["INV-SESSION-001", "INV-SESSION-002"],
+        suite_ids: &[
+            "int_cli_sessions_global_finder",
+            "int_cli_session_reentry_same_pr_routing",
+            "int_cli_session_aware",
+        ],
+        bead_ids: &["rr-005.2", "rr-005.2.1", "rr-018", "rr-6iah.1"],
+    },
+];
+
+const PERSONA_RECOVERY_EXPECTATIONS: &[PersonaGuardExpectation] = &[
+    PersonaGuardExpectation {
         id: "PJ-04A",
         invariant_ids: &["INV-SESSION-002"],
         suite_ids: &["int_cli_session_aware", "accept_opencode_resume"],
         bead_ids: &["rr-003.3", "rr-x51h.3.2", "rr-6iah.1", "rr-6iah.5"],
     },
-    PersonaRecoveryExpectation {
+    PersonaGuardExpectation {
         id: "PJ-04B",
         invariant_ids: &["INV-SESSION-002", "INV-CONTEXT-001"],
         suite_ids: &[
@@ -111,13 +253,13 @@ const PERSONA_RECOVERY_EXPECTATIONS: &[PersonaRecoveryExpectation] = &[
         ],
         bead_ids: &["rr-003.4", "rr-x51h.3.2", "rr-6iah.1", "rr-6iah.5"],
     },
-    PersonaRecoveryExpectation {
+    PersonaGuardExpectation {
         id: "PJ-04C",
         invariant_ids: &["INV-HARNESS-002"],
         suite_ids: &["int_tui_findings_degraded_modes"],
         bead_ids: &["rr-011.3", "rr-x51h.8.2"],
     },
-    PersonaRecoveryExpectation {
+    PersonaGuardExpectation {
         id: "PJ-04D",
         invariant_ids: &["INV-POST-002", "INV-HARNESS-003"],
         suite_ids: &[
@@ -126,7 +268,7 @@ const PERSONA_RECOVERY_EXPECTATIONS: &[PersonaRecoveryExpectation] = &[
         ],
         bead_ids: &["rr-011.2", "rr-x51h.3.2.1", "rr-6iah.3"],
     },
-    PersonaRecoveryExpectation {
+    PersonaGuardExpectation {
         id: "PJ-05B",
         invariant_ids: &["INV-POST-002"],
         suite_ids: &[
@@ -135,7 +277,7 @@ const PERSONA_RECOVERY_EXPECTATIONS: &[PersonaRecoveryExpectation] = &[
         ],
         bead_ids: &["rr-ph77.1", "rr-x51h.5.2", "rr-6iah.3"],
     },
-    PersonaRecoveryExpectation {
+    PersonaGuardExpectation {
         id: "PJ-05C",
         invariant_ids: &["INV-POST-003"],
         suite_ids: &[
@@ -144,7 +286,7 @@ const PERSONA_RECOVERY_EXPECTATIONS: &[PersonaRecoveryExpectation] = &[
         ],
         bead_ids: &["rr-ph77.5", "rr-x51h.5.2", "rr-x51h.8.4"],
     },
-    PersonaRecoveryExpectation {
+    PersonaGuardExpectation {
         id: "PJ-05D",
         invariant_ids: &["INV-POST-003"],
         suite_ids: &[
@@ -153,7 +295,7 @@ const PERSONA_RECOVERY_EXPECTATIONS: &[PersonaRecoveryExpectation] = &[
         ],
         bead_ids: &["rr-ph77.5", "rr-x51h.8.4"],
     },
-    PersonaRecoveryExpectation {
+    PersonaGuardExpectation {
         id: "PJ-06A",
         invariant_ids: &["INV-BRIDGE-001", "INV-BRIDGE-002"],
         suite_ids: &[
@@ -164,7 +306,7 @@ const PERSONA_RECOVERY_EXPECTATIONS: &[PersonaRecoveryExpectation] = &[
         ],
         bead_ids: &["rr-8isd.5.1", "rr-8isd.5.2", "rr-6iah.4"],
     },
-    PersonaRecoveryExpectation {
+    PersonaGuardExpectation {
         id: "PJ-06B",
         invariant_ids: &["INV-SESSION-001"],
         suite_ids: &[
@@ -173,13 +315,13 @@ const PERSONA_RECOVERY_EXPECTATIONS: &[PersonaRecoveryExpectation] = &[
         ],
         bead_ids: &["rr-005.2.1", "rr-011.6"],
     },
-    PersonaRecoveryExpectation {
+    PersonaGuardExpectation {
         id: "PJ-06C",
         invariant_ids: &["INV-STORE-001"],
         suite_ids: &["int_storage_release_migration_gate"],
         bead_ids: &["rr-1xhg.5", "rr-8isd.5.2"],
     },
-    PersonaRecoveryExpectation {
+    PersonaGuardExpectation {
         id: "PJ-06D",
         invariant_ids: &["INV-STORE-001"],
         suite_ids: &["int_storage_release_migration_gate"],
@@ -187,12 +329,20 @@ const PERSONA_RECOVERY_EXPECTATIONS: &[PersonaRecoveryExpectation] = &[
     },
 ];
 
-pub fn persona_recovery_expected_bead_ids() -> BTreeSet<String> {
-    PERSONA_RECOVERY_EXPECTATIONS
+fn persona_expected_bead_ids(expectations: &[PersonaGuardExpectation]) -> BTreeSet<String> {
+    expectations
         .iter()
         .flat_map(|expectation| expectation.bead_ids.iter().copied())
         .map(str::to_owned)
         .collect()
+}
+
+pub fn persona_ownership_expected_bead_ids() -> BTreeSet<String> {
+    persona_expected_bead_ids(PERSONA_OWNERSHIP_EXPECTATIONS)
+}
+
+pub fn persona_recovery_expected_bead_ids() -> BTreeSet<String> {
+    persona_expected_bead_ids(PERSONA_RECOVERY_EXPECTATIONS)
 }
 
 fn load_bead_ids(path: impl AsRef<Path>) -> Result<BTreeSet<String>, String> {
@@ -213,10 +363,11 @@ fn load_bead_ids(path: impl AsRef<Path>) -> Result<BTreeSet<String>, String> {
     Ok(ids)
 }
 
-pub fn persona_recovery_report(
+fn persona_guard_report(
+    expectations: &[PersonaGuardExpectation],
     metadata_dir: impl AsRef<Path>,
     issues_jsonl: impl AsRef<Path>,
-) -> Result<PersonaRecoveryReport, String> {
+) -> Result<PersonaGuardReport, String> {
     let suites = discover_suite_metadata(metadata_dir)?;
     let suite_by_id: BTreeMap<&str, &SuiteMetadata> = suites
         .iter()
@@ -224,7 +375,7 @@ pub fn persona_recovery_report(
         .collect();
     let bead_ids = load_bead_ids(issues_jsonl)?;
 
-    let scenarios = PERSONA_RECOVERY_EXPECTATIONS
+    let scenarios = expectations
         .iter()
         .map(|expectation| {
             let mut present_invariants = BTreeSet::new();
@@ -257,7 +408,7 @@ pub fn persona_recovery_report(
                 .map(|id| (*id).to_owned())
                 .collect();
 
-            PersonaRecoveryScenarioReport {
+            PersonaGuardScenarioReport {
                 scenario_id: expectation.id.to_owned(),
                 missing_suite_ids,
                 missing_persona_suite_ids,
@@ -267,7 +418,21 @@ pub fn persona_recovery_report(
         })
         .collect();
 
-    Ok(PersonaRecoveryReport { scenarios })
+    Ok(PersonaGuardReport { scenarios })
+}
+
+pub fn persona_ownership_report(
+    metadata_dir: impl AsRef<Path>,
+    issues_jsonl: impl AsRef<Path>,
+) -> Result<PersonaGuardReport, String> {
+    persona_guard_report(PERSONA_OWNERSHIP_EXPECTATIONS, metadata_dir, issues_jsonl)
+}
+
+pub fn persona_recovery_report(
+    metadata_dir: impl AsRef<Path>,
+    issues_jsonl: impl AsRef<Path>,
+) -> Result<PersonaGuardReport, String> {
+    persona_guard_report(PERSONA_RECOVERY_EXPECTATIONS, metadata_dir, issues_jsonl)
 }
 
 #[cfg(test)]
