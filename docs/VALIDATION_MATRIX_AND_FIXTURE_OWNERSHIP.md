@@ -129,13 +129,13 @@ Each fixture family must be small, named by purpose, and reusable across suites.
 | `F09.2` candidate audit and memory review during review | `unit_*`, `int_search_*`, `int_worker_*`, `int_tui_*`, and targeted manual smoke | `rr-024`, later agent-access beads |
 | `F10`, `F14` bridge recovery and honest no-status mode | `int_bridge_*`, `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, `smoke_browser_launch_edge`, supported-browser `smoke_*` | `rr-011.4` |
 | `F12` same-PR multi-instance selection and routing | `prop_*`, `int_cli_*`, `int_bridge_*`, `smoke_*` | `rr-011.6` |
-| `F17`, `F17.1` harness dropout and return | `accept_opencode_*`, targeted `smoke_*`, and approved `E2E-06` when implemented | `rr-011.5` |
+| `F17`, `F17.1` harness dropout and return | `accept_opencode_*`, `int_cli_opencode_transactional_*`, targeted `smoke_*`, and approved `E2E-06` when implemented | `rr-011.5` |
 
 ## Support-Claim Ownership
 
 | Claim | Minimum defending coverage |
 |-------|----------------------------|
-| OpenCode direct resume, stale-locator reseed, dropout, and `rr return` | `accept_opencode_*` plus release-lane `smoke_*` |
+| OpenCode direct resume, stale-locator reseed, dropout, and `rr return` | `accept_opencode_*`, `int_cli_opencode_transactional_*`, plus release-lane `smoke_*` |
 | Bounded live-CLI provider Tier A support | `accept_bounded_provider_*`; no deeper continuity claim without new acceptance |
 | Native Messaging is the serious v1 bridge | `int_bridge_*` plus supported-browser `smoke_*` |
 | Chrome/Brave/Edge browser launch support is explicit and bounded | `int_bridge_*`, `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, `smoke_browser_launch_edge`, `fixture_bridge_transcripts` |

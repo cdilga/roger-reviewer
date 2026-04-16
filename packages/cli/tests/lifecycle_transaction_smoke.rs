@@ -409,6 +409,118 @@ fn return_records_verified_launch_attempt_and_single_committed_update() {
 }
 
 #[test]
+fn return_reseed_records_verified_launch_attempt_and_updates_locator() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_ok_stub_dir, ok_bin) = write_stub_binary(false);
+    let (_fail_stub_dir, fail_bin) = write_stub_binary(true);
+
+    let stable_runtime = CliRuntime {
+        cwd: repo.clone(),
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: ok_bin.to_string_lossy().to_string(),
+    };
+
+    let review = run_rr(&["review", "--pr", "42", "--robot"], &stable_runtime);
+    assert_eq!(review.exit_code, 0, "{}", review.stderr);
+    let review_payload = parse_robot_payload(&review.stdout);
+    let session_id = review_payload["data"]["session_id"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+
+    let store = RogerStore::open(&stable_runtime.store_root).expect("open store");
+    let original_session = store
+        .review_session(&session_id)
+        .expect("read review session")
+        .expect("session record");
+    let original_locator = original_session
+        .session_locator
+        .as_ref()
+        .expect("original locator")
+        .session_id
+        .clone();
+    let original_binding_id = store
+        .launch_bindings_for_session(&session_id)
+        .expect("launch bindings")
+        .into_iter()
+        .next()
+        .expect("launch binding")
+        .id;
+    drop(store);
+
+    let stale_runtime = CliRuntime {
+        cwd: repo,
+        store_root: stable_runtime.store_root.clone(),
+        opencode_bin: fail_bin.to_string_lossy().to_string(),
+    };
+
+    let ret = run_rr(&["return", "--pr", "42", "--robot"], &stale_runtime);
+    assert_eq!(ret.exit_code, 5, "{}", ret.stderr);
+    let payload = parse_robot_payload(&ret.stdout);
+    assert_eq!(payload["outcome"], "degraded");
+    assert_eq!(payload["data"]["return_path"], "reseeded_session");
+    let attempt_id = payload["data"]["launch_attempt_id"]
+        .as_str()
+        .expect("launch attempt id")
+        .to_owned();
+
+    let store = RogerStore::open(&stale_runtime.store_root).expect("reopen store");
+    let attempt = store
+        .launch_attempt(&attempt_id)
+        .expect("read launch attempt")
+        .expect("launch attempt");
+    assert_eq!(attempt.state, LaunchAttemptState::VerifiedReseeded);
+    assert_eq!(
+        attempt.requested_session_id.as_deref(),
+        Some(session_id.as_str())
+    );
+    assert_eq!(
+        attempt.final_session_id.as_deref(),
+        Some(session_id.as_str())
+    );
+    assert_eq!(
+        attempt.launch_binding_id.as_deref(),
+        Some(original_binding_id.as_str())
+    );
+
+    let session = store
+        .review_session(&session_id)
+        .expect("updated session lookup")
+        .expect("updated session");
+    let updated_locator = session
+        .session_locator
+        .as_ref()
+        .expect("updated locator")
+        .session_id
+        .clone();
+    assert_ne!(updated_locator, original_locator);
+    assert!(updated_locator.starts_with("oc-reseed-"));
+    assert_eq!(session.attention_state, "returned_to_roger");
+    assert_eq!(session.continuity_state, "return:degraded");
+    assert!(session.row_version > original_session.row_version);
+    assert_eq!(
+        attempt.provider_session_id.as_deref(),
+        Some(updated_locator.as_str())
+    );
+    assert_eq!(
+        attempt
+            .verified_locator
+            .as_ref()
+            .expect("verified locator")
+            .session_id,
+        updated_locator
+    );
+
+    let run = store
+        .latest_review_run(&session_id)
+        .expect("latest review run")
+        .expect("return run");
+    assert_eq!(run.run_kind, "return");
+    assert_eq!(run.continuity_quality, "degraded");
+}
+
+#[test]
 fn stale_readback_surfaces_report_persisted_state_with_reentry_guidance() {
     let temp = tempdir().expect("tempdir");
     let repo = init_repo(&temp);
