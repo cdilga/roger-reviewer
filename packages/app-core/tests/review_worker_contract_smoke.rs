@@ -443,6 +443,144 @@ fn worker_operation_contract_authorizes_read_and_proposal_lanes() {
 }
 
 #[test]
+fn worker_search_response_keeps_recovery_scan_and_candidate_posture_explicit() {
+    let task = sample_task();
+    let capability = sample_capability_profile();
+
+    let mut search_request = sample_operation_request("worker.search_memory");
+    search_request.requested_scopes = vec!["repo".to_owned()];
+    search_request.payload = Some(
+        serde_json::to_value(WorkerSearchMemoryRequest {
+            query_text: "approval refresh".to_owned(),
+            query_mode: "candidate_audit".to_owned(),
+            requested_retrieval_classes: vec![
+                "promoted_memory".to_owned(),
+                "tentative_candidates".to_owned(),
+            ],
+            anchor_hints: vec!["finding-1".to_owned()],
+        })
+        .expect("serialize search payload"),
+    );
+
+    let search_auth = task
+        .validate_operation_request(&search_request, &capability)
+        .expect("search request should authorize");
+    let degraded_reason =
+        "lexical sidecar unavailable or stale; using canonical DB lexical scan".to_owned();
+    let response = WorkerOperationResponseEnvelope::success(
+        &search_request,
+        search_auth,
+        Some(
+            serde_json::to_value(WorkerSearchMemoryResponse {
+                requested_query_mode: "candidate_audit".to_owned(),
+                resolved_query_mode: "candidate_audit".to_owned(),
+                retrieval_mode: "recovery_scan".to_owned(),
+                degraded_flags: vec![degraded_reason.clone()],
+                promoted_memory: vec![WorkerRecallEnvelope {
+                    item_kind: "promoted_memory".to_owned(),
+                    item_id: "memory-1".to_owned(),
+                    requested_query_mode: "candidate_audit".to_owned(),
+                    resolved_query_mode: "candidate_audit".to_owned(),
+                    retrieval_mode: "recovery_scan".to_owned(),
+                    scope_bucket: "repository".to_owned(),
+                    memory_lane: "promoted_memory".to_owned(),
+                    trust_state: Some("proven".to_owned()),
+                    source_refs: vec![
+                        RecallSourceRef {
+                            kind: "memory".to_owned(),
+                            id: "memory-1".to_owned(),
+                        },
+                        RecallSourceRef {
+                            kind: "scope".to_owned(),
+                            id: "repo:owner/repo".to_owned(),
+                        },
+                    ],
+                    locator: json!({
+                        "scope_key": "repo:owner/repo",
+                        "memory_class": "procedural",
+                        "state": "proven"
+                    }),
+                    snippet_or_summary: "approval refresh should reconfirm posting safety"
+                        .to_owned(),
+                    anchor_overlap_summary: "1 anchor hint(s) supplied; overlap scoring is unavailable for this record".to_owned(),
+                    degraded_flags: vec![degraded_reason.clone()],
+                    explain_summary: "promoted_memory surfaced from promoted_memory in repository with requested query_mode candidate_audit, resolved query_mode candidate_audit, retrieval_mode recovery_scan, posture cite_allowed/ordinary; degraded flags: lexical sidecar unavailable or stale; using canonical DB lexical scan".to_owned(),
+                    citation_posture: "cite_allowed".to_owned(),
+                    surface_posture: "ordinary".to_owned(),
+                }],
+                tentative_candidates: vec![WorkerRecallEnvelope {
+                    item_kind: "candidate_memory".to_owned(),
+                    item_id: "memory-candidate-1".to_owned(),
+                    requested_query_mode: "candidate_audit".to_owned(),
+                    resolved_query_mode: "candidate_audit".to_owned(),
+                    retrieval_mode: "recovery_scan".to_owned(),
+                    scope_bucket: "repository".to_owned(),
+                    memory_lane: "tentative_candidates".to_owned(),
+                    trust_state: Some("candidate".to_owned()),
+                    source_refs: vec![
+                        RecallSourceRef {
+                            kind: "memory".to_owned(),
+                            id: "memory-candidate-1".to_owned(),
+                        },
+                        RecallSourceRef {
+                            kind: "scope".to_owned(),
+                            id: "repo:owner/repo".to_owned(),
+                        },
+                    ],
+                    locator: json!({
+                        "scope_key": "repo:owner/repo",
+                        "memory_class": "semantic",
+                        "state": "candidate"
+                    }),
+                    snippet_or_summary:
+                        "approval token stale refresh might need operator triage".to_owned(),
+                    anchor_overlap_summary:
+                        "1 anchor hint(s) supplied; overlap scoring is unavailable for this record"
+                            .to_owned(),
+                    degraded_flags: vec![degraded_reason.clone()],
+                    explain_summary: "candidate_memory surfaced from tentative_candidates in repository with requested query_mode candidate_audit, resolved query_mode candidate_audit, retrieval_mode recovery_scan, posture inspect_only/candidate_review; degraded flags: lexical sidecar unavailable or stale; using canonical DB lexical scan".to_owned(),
+                    citation_posture: "inspect_only".to_owned(),
+                    surface_posture: "candidate_review".to_owned(),
+                }],
+                evidence_hits: Vec::new(),
+            })
+            .expect("serialize search response"),
+        ),
+    );
+
+    let search_payload: WorkerSearchMemoryResponse =
+        serde_json::from_value(response.payload.clone().expect("response payload"))
+            .expect("deserialize search response");
+    assert_eq!(search_payload.requested_query_mode, "candidate_audit");
+    assert_eq!(search_payload.resolved_query_mode, "candidate_audit");
+    assert_eq!(search_payload.retrieval_mode, "recovery_scan");
+    assert_eq!(search_payload.degraded_flags, vec![degraded_reason]);
+    assert_eq!(search_payload.promoted_memory.len(), 1);
+    assert_eq!(search_payload.tentative_candidates.len(), 1);
+    assert_eq!(
+        search_payload.promoted_memory[0].citation_posture,
+        "cite_allowed"
+    );
+    assert_eq!(
+        search_payload.tentative_candidates[0].citation_posture,
+        "inspect_only"
+    );
+    assert_eq!(
+        search_payload.tentative_candidates[0].surface_posture,
+        "candidate_review"
+    );
+    assert_eq!(
+        search_payload.tentative_candidates[0].memory_lane,
+        "tentative_candidates"
+    );
+    assert!(
+        search_payload.tentative_candidates[0]
+            .explain_summary
+            .contains("retrieval_mode recovery_scan")
+    );
+}
+
+#[test]
 fn worker_read_contract_payloads_round_trip_as_roger_owned_types() {
     let finding = WorkerFindingSummary {
         finding_id: "finding-1".to_owned(),
