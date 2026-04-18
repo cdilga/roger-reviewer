@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use roger_app_core::cli_config;
 use roger_app_core::time;
 use roger_app_core::{
@@ -24,11 +25,14 @@ use roger_app_core::{
 use roger_bridge::{
     NativeHostManifest, SupportedBrowser, SupportedOs, native_host_install_path_for,
 };
-use roger_config::cli_defaults::{DEFAULT_OPENCODE_BIN, ENV_OPENCODE_BIN, ENV_STORE_ROOT};
+use roger_config::cli_defaults::{
+    DEFAULT_OPENCODE_BIN, ENV_COPILOT_BIN, ENV_OPENCODE_BIN, ENV_STORE_ROOT,
+};
 use roger_config::{ResolvedProviderCapability, ResolvedRoutineSurfaceBaseline};
 use roger_github_adapter::GhCliAdapter;
 use roger_session_claude::{ClaudeAdapter, ClaudeSessionPath};
 use roger_session_codex::{CodexAdapter, CodexSessionPath};
+use roger_session_copilot as session_copilot;
 use roger_session_gemini::{GeminiAdapter, GeminiSessionPath};
 use roger_session_opencode::{
     OpenCodeAdapter, OpenCodeReturnPath, OpenCodeSessionPath, rr_return_to_roger_session,
@@ -40,9 +44,9 @@ use roger_storage::{
     PriorReviewRetrievalMode, ResolveSessionLaunchBinding, ResolveSessionLocalRoot,
     ResolveSessionReentry, ReviewLaunchFinalizationError, RogerStore, SessionBindingResolution,
     SessionFinderEntry, SessionFinderQuery, SessionLaunchBindingRecord, SessionReentryResolution,
-    StorageLayout, UpdateLaunchAttempt,
+    StorageError, StorageLayout, UpdateLaunchAttempt,
 };
-use rusqlite::Connection as SqliteConnection;
+use rusqlite::{Connection as SqliteConnection, OpenFlags};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -60,8 +64,10 @@ use toon_format::encode_default as encode_toon_default;
 
 static ID_SEQ: AtomicU64 = AtomicU64::new(1);
 const SUPPORTED_REVIEW_PROVIDERS: [&str; 4] = ["opencode", "codex", "gemini", "claude"];
-const PLANNED_REVIEW_PROVIDERS: [&str; 1] = ["copilot"];
+const PLANNED_REVIEW_PROVIDERS: [&str; 1] = [session_copilot::PROVIDER_ID];
 const NOT_LIVE_REVIEW_PROVIDERS: [&str; 1] = ["pi-agent"];
+const BRIDGE_UNINSTALL_REPAIR_ALIAS_WARNING: &str =
+    "rr bridge uninstall is a repair alias; prefer rr extension uninstall";
 
 #[derive(Clone, Debug)]
 pub struct CliRuntime {
@@ -106,6 +112,8 @@ pub struct HarnessCommandInvocation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CommandKind {
     Agent,
+    Init,
+    Doctor,
     Review,
     Resume,
     Return,
@@ -126,6 +134,8 @@ impl CommandKind {
     fn as_rr_command(self, dry_run: bool) -> &'static str {
         match (self, dry_run) {
             (Self::Agent, _) => "rr agent",
+            (Self::Init, _) => "rr init",
+            (Self::Doctor, _) => "rr doctor",
             (Self::Review, true) => "rr review --dry-run",
             (Self::Resume, true) => "rr resume --dry-run",
             (Self::Review, false) => "rr review",
@@ -148,6 +158,8 @@ impl CommandKind {
     fn schema_id(self) -> &'static str {
         match self {
             Self::Agent => "rr.agent.transport.v1",
+            Self::Init => "rr.robot.init.v1",
+            Self::Doctor => "rr.robot.doctor.v1",
             Self::Review => "rr.robot.review.v1",
             Self::Resume => "rr.robot.resume.v1",
             Self::Return => "rr.robot.return.v1",
@@ -179,6 +191,7 @@ enum BridgeCommandKind {
 enum ExtensionCommandKind {
     Setup,
     Doctor,
+    Uninstall,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -548,6 +561,8 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
 
     let command = match argv[0].as_str() {
         "agent" => CommandKind::Agent,
+        "init" => CommandKind::Init,
+        "doctor" => CommandKind::Doctor,
         "review" => CommandKind::Review,
         "resume" => CommandKind::Resume,
         "return" => CommandKind::Return,
@@ -772,7 +787,7 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
                 let value = argv
                     .get(i + 1)
                     .ok_or_else(|| "--provider requires a value".to_owned())?;
-                parsed.provider = value.clone();
+                parsed.provider = canonicalize_provider_arg(value);
                 i += 2;
             }
             "--extension-id" => {
@@ -856,6 +871,7 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
                         parsed.extension_command = match positional {
                             "setup" => Some(ExtensionCommandKind::Setup),
                             "doctor" => Some(ExtensionCommandKind::Doctor),
+                            "uninstall" => Some(ExtensionCommandKind::Uninstall),
                             other => {
                                 return Err(format!("unknown extension subcommand: {other}"));
                             }
@@ -914,7 +930,7 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
     }
 
     if parsed.command == CommandKind::Extension && parsed.extension_command.is_none() {
-        return Err("rr extension requires a subcommand: setup or doctor".to_owned());
+        return Err("rr extension requires a subcommand: setup, doctor, or uninstall".to_owned());
     }
 
     if parsed.command != CommandKind::Search && parsed.query_mode.is_some() {
@@ -1142,12 +1158,99 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         }
     }
 
+    if parsed.command == CommandKind::Init {
+        if parsed.dry_run {
+            return Err("rr init does not support --dry-run in this slice".to_owned());
+        }
+        if parsed.repo.is_some()
+            || parsed.pr.is_some()
+            || parsed.session_id.is_some()
+            || !parsed.attention_states.is_empty()
+            || parsed.limit.is_some()
+            || parsed.query_text.is_some()
+            || parsed.query_mode.is_some()
+            || parsed.robot_docs_topic.is_some()
+            || parsed.provider != "opencode"
+            || parsed.bridge_command.is_some()
+            || parsed.extension_command.is_some()
+            || parsed.extension_browser.is_some()
+            || parsed.bridge_extension_id.is_some()
+            || parsed.bridge_binary_path.is_some()
+            || parsed.bridge_install_root.is_some()
+            || parsed.bridge_output_dir.is_some()
+            || parsed.update_channel != "stable"
+            || parsed.update_version.is_some()
+            || parsed.update_api_root.is_some()
+            || parsed.update_download_root.is_some()
+            || parsed.update_target.is_some()
+            || parsed.update_yes
+            || parsed.draft_all_findings
+            || !parsed.draft_finding_ids.is_empty()
+            || parsed.batch_id.is_some()
+            || parsed.agent_operation.is_some()
+            || parsed.agent_task_file.is_some()
+            || parsed.agent_request_file.is_some()
+            || parsed.agent_context_file.is_some()
+            || parsed.agent_capability_file.is_some()
+        {
+            return Err("rr init only supports --robot".to_owned());
+        }
+    }
+
+    if parsed.command == CommandKind::Doctor {
+        if parsed.dry_run {
+            return Err("rr doctor does not support --dry-run in this slice".to_owned());
+        }
+        if parsed.repo.is_some()
+            || parsed.pr.is_some()
+            || parsed.session_id.is_some()
+            || !parsed.attention_states.is_empty()
+            || parsed.limit.is_some()
+            || parsed.query_text.is_some()
+            || parsed.query_mode.is_some()
+            || parsed.robot_docs_topic.is_some()
+            || parsed.bridge_command.is_some()
+            || parsed.extension_command.is_some()
+            || parsed.extension_browser.is_some()
+            || parsed.bridge_extension_id.is_some()
+            || parsed.bridge_binary_path.is_some()
+            || parsed.bridge_install_root.is_some()
+            || parsed.bridge_output_dir.is_some()
+            || parsed.update_channel != "stable"
+            || parsed.update_version.is_some()
+            || parsed.update_api_root.is_some()
+            || parsed.update_download_root.is_some()
+            || parsed.update_target.is_some()
+            || parsed.update_yes
+            || parsed.draft_all_findings
+            || !parsed.draft_finding_ids.is_empty()
+            || parsed.batch_id.is_some()
+            || parsed.agent_operation.is_some()
+            || parsed.agent_task_file.is_some()
+            || parsed.agent_request_file.is_some()
+            || parsed.agent_context_file.is_some()
+            || parsed.agent_capability_file.is_some()
+        {
+            return Err("rr doctor only supports --provider and --robot".to_owned());
+        }
+    }
+
     Ok(parsed)
+}
+
+fn canonicalize_provider_arg(value: &str) -> String {
+    if let Some(provider) = session_copilot::parse_provider_identifier(value) {
+        return provider.to_owned();
+    }
+
+    value.trim().to_ascii_lowercase()
 }
 
 fn execute_command(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     match parsed.command {
         CommandKind::Agent => handle_agent(parsed, runtime),
+        CommandKind::Init => handle_init(runtime),
+        CommandKind::Doctor => handle_doctor(parsed, runtime),
         CommandKind::Review => handle_review(parsed, runtime),
         CommandKind::Resume => handle_resume(parsed, runtime),
         CommandKind::Return => handle_return(parsed, runtime),
@@ -1159,7 +1262,7 @@ fn execute_command(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
         CommandKind::Update => handle_update(parsed, runtime),
         CommandKind::Bridge => handle_bridge(parsed, runtime),
         CommandKind::Extension => handle_extension(parsed, runtime),
-        CommandKind::RobotDocs => handle_robot_docs(parsed),
+        CommandKind::RobotDocs => handle_robot_docs(parsed, runtime),
         CommandKind::Findings => handle_findings(parsed, runtime),
         CommandKind::Status => handle_status(parsed, runtime),
     }
@@ -1980,6 +2083,78 @@ fn extension_id_registry_path(store_root: &Path) -> PathBuf {
     store_root.join("bridge/extension-id")
 }
 
+fn init_metadata_marker_path(store_root: &Path) -> PathBuf {
+    store_root.join("bootstrap/init-marker.v1.json")
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LegacyOpencodeConfigIssue {
+    legacy_path: PathBuf,
+    canonical_path: PathBuf,
+}
+
+fn runtime_targets_opencode_binary(binary_path: &str) -> bool {
+    if binary_path.eq_ignore_ascii_case(DEFAULT_OPENCODE_BIN) {
+        return true;
+    }
+
+    Path::new(binary_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.eq_ignore_ascii_case(DEFAULT_OPENCODE_BIN))
+        .unwrap_or(false)
+}
+
+fn detect_legacy_opencode_config_issue(binary_path: &str) -> Option<LegacyOpencodeConfigIssue> {
+    if !runtime_targets_opencode_binary(binary_path) {
+        return None;
+    }
+
+    let home_dir = std::env::var_os("HOME").map(PathBuf::from)?;
+    let legacy_path = home_dir.join(".opencode/opencode.json");
+    let canonical_path = home_dir.join(".config/opencode/config.json");
+    let payload: Value = serde_json::from_str(&fs::read_to_string(&legacy_path).ok()?).ok()?;
+    if !payload
+        .as_object()
+        .map(|object| object.contains_key("mcpServers"))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    Some(LegacyOpencodeConfigIssue {
+        legacy_path,
+        canonical_path,
+    })
+}
+
+fn opencode_legacy_config_warning(issue: &LegacyOpencodeConfigIssue) -> String {
+    format!(
+        "legacy OpenCode config detected at {}; opencode expects the current top-level 'mcp' schema and may otherwise emit 'Unrecognized key: mcpServers' during Roger-driven reopen/return flows",
+        issue.legacy_path.display()
+    )
+}
+
+fn opencode_legacy_config_repair_actions(issue: &LegacyOpencodeConfigIssue) -> Vec<String> {
+    vec![
+        format!(
+            "move {} aside or migrate its top-level 'mcpServers' entries into {} under the current 'mcp' key",
+            issue.legacy_path.display(),
+            issue.canonical_path.display()
+        ),
+        "re-run rr doctor --provider opencode --robot after cleaning the legacy OpenCode config"
+            .to_owned(),
+    ]
+}
+
+fn opencode_legacy_config_guidance(binary_path: &str) -> Option<(String, Vec<String>)> {
+    let issue = detect_legacy_opencode_config_issue(binary_path)?;
+    Some((
+        opencode_legacy_config_warning(&issue),
+        opencode_legacy_config_repair_actions(&issue),
+    ))
+}
+
 fn normalize_extension_id(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -1989,18 +2164,15 @@ fn normalize_extension_id(value: &str) -> Option<String> {
     }
 }
 
-fn discover_extension_id(
-    parsed: &ParsedArgs,
-    runtime: &CliRuntime,
-) -> Option<(String, &'static str)> {
-    if let Some(value) = parsed
+fn discover_explicit_extension_id(parsed: &ParsedArgs) -> Option<(String, &'static str)> {
+    parsed
         .bridge_extension_id
         .as_deref()
         .and_then(normalize_extension_id)
-    {
-        return Some((value, "explicit_flag"));
-    }
+        .map(|value| (value, "explicit_flag"))
+}
 
+fn discover_stored_or_env_extension_id(runtime: &CliRuntime) -> Option<(String, &'static str)> {
     let registry_path = extension_id_registry_path(&runtime.store_root);
     if let Ok(contents) = fs::read_to_string(&registry_path) {
         if let Some(value) = normalize_extension_id(&contents) {
@@ -2017,8 +2189,754 @@ fn discover_extension_id(
     None
 }
 
+fn discover_extension_id(
+    parsed: &ParsedArgs,
+    runtime: &CliRuntime,
+) -> Option<(String, &'static str)> {
+    discover_explicit_extension_id(parsed).or_else(|| discover_stored_or_env_extension_id(runtime))
+}
+
 fn extension_id_looks_valid(value: &str) -> bool {
     value.len() == 32 && value.chars().all(|ch| ch.is_ascii_lowercase())
+}
+
+fn verify_directory_write_access(path: &Path, label: &str) -> Result<Value, String> {
+    let metadata = fs::metadata(path)
+        .map_err(|err| format!("failed to stat {} at {}: {err}", label, path.display()))?;
+    let read_only = metadata.permissions().readonly();
+    if read_only {
+        return Err(format!("{label} at {} is read-only", path.display()));
+    }
+
+    let probe_path = path.join(format!(
+        ".rr-init-write-probe-{}-{}",
+        std::process::id(),
+        next_id("probe")
+    ));
+    fs::write(&probe_path, b"roger-init-write-probe").map_err(|err| {
+        format!(
+            "failed to write {} probe at {}: {err}",
+            label,
+            probe_path.display()
+        )
+    })?;
+    fs::remove_file(&probe_path).map_err(|err| {
+        format!(
+            "failed to remove {} probe at {}: {err}",
+            label,
+            probe_path.display()
+        )
+    })?;
+
+    Ok(json!({
+        "label": label,
+        "path": path.to_string_lossy(),
+        "read_only": read_only,
+        "write_probe": "ok",
+    }))
+}
+
+fn handle_init(runtime: &CliRuntime) -> CommandResponse {
+    let layout = StorageLayout::under(&runtime.store_root);
+    let marker_path = init_metadata_marker_path(&runtime.store_root);
+    let marker_parent = match marker_path.parent() {
+        Some(parent) => parent.to_path_buf(),
+        None => {
+            return error_response(format!(
+                "failed to resolve init marker parent path for {}",
+                marker_path.display()
+            ));
+        }
+    };
+
+    let path_specs = [
+        ("store_root", layout.root.clone()),
+        ("db_path", layout.db_path.clone()),
+        ("artifact_root", layout.artifact_root.clone()),
+        ("sidecar_root", layout.sidecar_root.clone()),
+        ("bootstrap_root", marker_parent.clone()),
+        ("metadata_marker", marker_path.clone()),
+    ];
+    let existed_before: HashMap<String, bool> = path_specs
+        .iter()
+        .map(|(label, path)| (label.to_string(), path.exists()))
+        .collect();
+
+    let store = match open_store_or_response(runtime, "rr init") {
+        Ok(store) => store,
+        Err(response) => return response,
+    };
+    let schema_version = match store.schema_version() {
+        Ok(version) => version,
+        Err(err) => return error_response(format!("failed to read store schema version: {err}")),
+    };
+
+    if let Err(err) = fs::create_dir_all(&marker_parent) {
+        return error_response(format!(
+            "failed to create bootstrap marker directory at {}: {err}",
+            marker_parent.display()
+        ));
+    }
+
+    let first_initialized_at = fs::read_to_string(&marker_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|value| value.get("first_initialized_at").and_then(Value::as_i64))
+        .unwrap_or_else(time::now_ts);
+    let initialized_at = time::now_ts();
+
+    let write_checks = match [
+        ("store_root", layout.root.as_path()),
+        ("artifact_root", layout.artifact_root.as_path()),
+        ("sidecar_root", layout.sidecar_root.as_path()),
+        ("bootstrap_root", marker_parent.as_path()),
+    ]
+    .iter()
+    .map(|(label, path)| verify_directory_write_access(path, label))
+    .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(checks) => checks,
+        Err(err) => {
+            return blocked_response(
+                format!("rr init blocked while verifying local write permissions: {err}"),
+                vec![
+                    "fix local filesystem permissions for the Roger store root, then rerun rr init"
+                        .to_owned(),
+                    "if filesystem drift persists, run rr doctor for bounded preflight guidance"
+                        .to_owned(),
+                ],
+                json!({
+                    "reason_code": "store_permissions_unverified",
+                    "store_root": layout.root.to_string_lossy(),
+                    "error": err,
+                }),
+            );
+        }
+    };
+
+    let marker_payload = json!({
+        "schema": "rr.init.marker.v1",
+        "first_initialized_at": first_initialized_at,
+        "last_initialized_at": initialized_at,
+        "release_version": option_env!("ROGER_RELEASE_VERSION").unwrap_or("local-unpublished"),
+        "package_version": env!("CARGO_PKG_VERSION"),
+        "store_layout": {
+            "root": layout.root.to_string_lossy(),
+            "db_path": layout.db_path.to_string_lossy(),
+            "artifact_root": layout.artifact_root.to_string_lossy(),
+            "sidecar_root": layout.sidecar_root.to_string_lossy(),
+        },
+        "schema_version": schema_version,
+    });
+    let marker_bytes = match serde_json::to_vec_pretty(&marker_payload) {
+        Ok(bytes) => bytes,
+        Err(err) => return error_response(format!("failed to encode init metadata marker: {err}")),
+    };
+    if let Err(err) = fs::write(&marker_path, marker_bytes) {
+        return error_response(format!(
+            "failed to write init metadata marker at {}: {err}",
+            marker_path.display()
+        ));
+    }
+
+    let mut created_paths = Vec::new();
+    let mut existing_paths = Vec::new();
+    for (label, path) in path_specs {
+        let existed = existed_before.get(label).copied().unwrap_or(false);
+        let entry = json!({
+            "label": label,
+            "path": path.to_string_lossy(),
+        });
+        if existed {
+            existing_paths.push(entry);
+        } else {
+            created_paths.push(entry);
+        }
+    }
+
+    let already_initialized = existed_before.get("db_path").copied().unwrap_or(false);
+    CommandResponse {
+        outcome: OutcomeKind::Complete,
+        data: json!({
+            "store_root": layout.root.to_string_lossy(),
+            "already_initialized": already_initialized,
+            "schema_version": schema_version,
+            "created_paths": created_paths,
+            "existing_paths": existing_paths,
+            "write_checks": write_checks,
+            "metadata_marker": {
+                "path": marker_path.to_string_lossy(),
+                "schema": "rr.init.marker.v1",
+                "first_initialized_at": first_initialized_at,
+                "last_initialized_at": initialized_at,
+                "release_version": option_env!("ROGER_RELEASE_VERSION").unwrap_or("local-unpublished"),
+                "package_version": env!("CARGO_PKG_VERSION"),
+            },
+            "provider_follow_up": {
+                "status": "not_checked_by_init",
+                "doctor_surface_status": "available",
+                "auth_or_install_verified": false,
+                "live_review_providers": runtime_supported_review_providers(runtime),
+                "planned_not_live_providers": runtime_planned_not_live_review_providers(runtime),
+                "guidance": [
+                    "rr init only bootstraps Roger-owned local state; provider auth/install is not verified here",
+                    "run rr doctor --provider <name> for local and provider preflight checks",
+                    "run rr review/rr resume to perform provider launch verification and follow surfaced repair guidance on failure",
+                ],
+            },
+        }),
+        warnings: Vec::new(),
+        repair_actions: Vec::new(),
+        message: if already_initialized {
+            "rr init verified existing Roger local bootstrap state".to_owned()
+        } else {
+            "rr init created Roger local bootstrap state".to_owned()
+        },
+    }
+}
+
+fn resolve_provider_binary_path(configured_binary_path: &str) -> Option<PathBuf> {
+    let configured = PathBuf::from(configured_binary_path);
+    if configured.components().count() > 1 || configured_binary_path.contains('\\') {
+        if configured.is_file() {
+            return Some(configured);
+        }
+        if cfg!(windows) && configured.extension().is_none() {
+            let with_exe = configured.with_extension("exe");
+            if with_exe.is_file() {
+                return Some(with_exe);
+            }
+        }
+        return None;
+    }
+
+    let mut binary_names = vec![configured_binary_path.to_owned()];
+    if cfg!(windows)
+        && !configured_binary_path
+            .to_ascii_lowercase()
+            .ends_with(".exe")
+    {
+        binary_names.push(format!("{configured_binary_path}.exe"));
+    }
+
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        for binary_name in &binary_names {
+            let candidate = dir.join(binary_name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn handle_doctor(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
+    let resolved = cli_config::resolved_cli_config(&runtime.cwd);
+    let baseline = match resolved.routine_surface_baseline(Some(parsed.provider.as_str())) {
+        Ok(baseline) => baseline,
+        Err(err) => {
+            return blocked_response(
+                format!("rr doctor cannot resolve provider '{}': {}", parsed.provider, err.message),
+                vec![
+                    "rerun rr doctor with one of: opencode, codex, gemini, claude, copilot, pi-agent"
+                        .to_owned(),
+                ],
+                json!({
+                    "reason_code": err.reason_code,
+                    "provider": parsed.provider,
+                    "supported_providers": ["opencode", "codex", "gemini", "claude", "copilot", "pi-agent"],
+                }),
+            );
+        }
+    };
+
+    let provider = baseline.provider.clone();
+    let provider_capability = runtime_provider_capability(runtime, parsed.provider.as_str());
+    let routine_surface =
+        runtime_routine_surface_projection(runtime, parsed.provider.as_str(), None).unwrap_or_else(
+            || {
+                routine_surface_with_worktree_root(
+                    routine_surface_baseline_projection(&baseline),
+                    &runtime.cwd,
+                    None,
+                )
+            },
+        );
+    let provider_status = provider_capability["status"]
+        .as_str()
+        .unwrap_or(provider.status.as_str());
+    let provider_support_tier = provider_capability["support_tier"]
+        .as_str()
+        .unwrap_or(provider.support_tier.as_str());
+    let provider_supports_doctor = provider_capability["supports"]["doctor"]
+        .as_bool()
+        .unwrap_or(provider.supports.doctor);
+    let layout = StorageLayout::under(&runtime.store_root);
+    let workspace_root = find_workspace_root(&runtime.cwd).unwrap_or_else(|| runtime.cwd.clone());
+    let mut checks: Vec<Value> = Vec::new();
+    let mut repair_actions: BTreeMap<String, ()> = BTreeMap::new();
+
+    let mut push_check =
+        |id: &str, label: &str, status: &str, reason_code: Option<&str>, details: Value| {
+            checks.push(json!({
+                "id": id,
+                "label": label,
+                "status": status,
+                "verified": status == "verified",
+                "deferred": status == "deferred",
+                "reason_code": reason_code,
+                "details": details,
+            }));
+        };
+
+    if layout.root.is_dir() {
+        push_check(
+            "store_root_present",
+            "Roger store root exists",
+            "verified",
+            None,
+            json!({"path": layout.root.to_string_lossy()}),
+        );
+    } else {
+        push_check(
+            "store_root_present",
+            "Roger store root exists",
+            "blocked",
+            Some("store_root_missing"),
+            json!({"path": layout.root.to_string_lossy()}),
+        );
+        repair_actions.insert(
+            "run rr init to bootstrap local Roger storage".to_owned(),
+            (),
+        );
+    }
+
+    let mut schema_version: Option<i64> = None;
+    if layout.db_path.is_file() {
+        match SqliteConnection::open_with_flags(&layout.db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            Ok(conn) => {
+                match conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)) {
+                    Ok(version) => {
+                        schema_version = Some(version);
+                        push_check(
+                            "store_db_readable",
+                            "Roger store database is readable",
+                            "verified",
+                            None,
+                            json!({
+                                "path": layout.db_path.to_string_lossy(),
+                                "schema_version": version,
+                            }),
+                        );
+                    }
+                    Err(err) => {
+                        push_check(
+                            "store_db_readable",
+                            "Roger store database is readable",
+                            "blocked",
+                            Some("store_db_schema_probe_failed"),
+                            json!({
+                                "path": layout.db_path.to_string_lossy(),
+                                "error": err.to_string(),
+                            }),
+                        );
+                        repair_actions.insert(
+                            "run rr init to repair or regenerate local Roger storage".to_owned(),
+                            (),
+                        );
+                    }
+                }
+            }
+            Err(err) => {
+                push_check(
+                    "store_db_readable",
+                    "Roger store database is readable",
+                    "blocked",
+                    Some("store_db_open_failed"),
+                    json!({
+                        "path": layout.db_path.to_string_lossy(),
+                        "error": err.to_string(),
+                    }),
+                );
+                repair_actions.insert(
+                    "run rr init to repair or regenerate local Roger storage".to_owned(),
+                    (),
+                );
+            }
+        }
+    } else {
+        push_check(
+            "store_db_readable",
+            "Roger store database is readable",
+            "blocked",
+            Some("store_db_missing"),
+            json!({"path": layout.db_path.to_string_lossy()}),
+        );
+        repair_actions.insert(
+            "run rr init to create the Roger store database".to_owned(),
+            (),
+        );
+    }
+
+    for (id, label, path) in [
+        (
+            "artifact_root_present",
+            "Roger artifact directory exists",
+            layout.artifact_root.as_path(),
+        ),
+        (
+            "sidecar_root_present",
+            "Roger sidecar directory exists",
+            layout.sidecar_root.as_path(),
+        ),
+    ] {
+        if path.is_dir() {
+            push_check(
+                id,
+                label,
+                "verified",
+                None,
+                json!({"path": path.to_string_lossy()}),
+            );
+        } else {
+            push_check(
+                id,
+                label,
+                "blocked",
+                Some("store_layout_incomplete"),
+                json!({"path": path.to_string_lossy()}),
+            );
+            repair_actions.insert(
+                "run rr init to repair local Roger directory layout".to_owned(),
+                (),
+            );
+        }
+    }
+
+    if let Some(worktree_root) = infer_git_worktree_root(&runtime.cwd) {
+        push_check(
+            "git_worktree_context",
+            "current cwd is inside a git worktree",
+            "verified",
+            None,
+            json!({
+                "cwd": runtime.cwd.to_string_lossy(),
+                "worktree_root": worktree_root,
+            }),
+        );
+    } else {
+        push_check(
+            "git_worktree_context",
+            "current cwd is inside a git worktree",
+            "blocked",
+            Some("not_in_git_worktree"),
+            json!({
+                "cwd": runtime.cwd.to_string_lossy(),
+            }),
+        );
+        repair_actions.insert(
+            "run rr doctor from inside the target repository or worktree checkout".to_owned(),
+            (),
+        );
+    }
+
+    if !provider_supports_doctor {
+        push_check(
+            "provider_doctor_support",
+            "provider has doctor support in this slice",
+            "blocked",
+            Some("provider_doctor_not_supported"),
+            json!({
+                "provider": provider.provider,
+                "status": provider_status,
+            }),
+        );
+        repair_actions.insert(
+            "rerun rr doctor with one of: opencode, codex, gemini, claude, copilot".to_owned(),
+            (),
+        );
+    } else {
+        push_check(
+            "provider_doctor_support",
+            "provider has doctor support in this slice",
+            "verified",
+            None,
+            json!({
+                "provider": provider.provider,
+                "status": provider_status,
+                "support_tier": provider_support_tier,
+            }),
+        );
+    }
+
+    if provider_status == "planned_not_live" {
+        push_check(
+            "provider_admission_state",
+            "provider is admitted as a live review lane",
+            "blocked",
+            Some("provider_not_live"),
+            json!({
+                "provider": provider.provider,
+                "status": provider_status,
+                "policy_profile_id": provider.policy_profile.id,
+            }),
+        );
+        repair_actions.insert(
+            "use a live lane for review work: rr review --provider opencode|codex|gemini|claude --pr <number>"
+                .to_owned(),
+            (),
+        );
+    } else if provider_status == "not_supported" {
+        push_check(
+            "provider_admission_state",
+            "provider is admitted as a live review lane",
+            "blocked",
+            Some("provider_not_supported"),
+            json!({
+                "provider": provider.provider,
+                "status": provider_status,
+            }),
+        );
+        repair_actions.insert(
+            "rerun rr doctor with one of: opencode, codex, gemini, claude, copilot".to_owned(),
+            (),
+        );
+    } else {
+        push_check(
+            "provider_admission_state",
+            "provider is admitted as a live review lane",
+            "verified",
+            None,
+            json!({
+                "provider": provider.provider,
+                "status": provider_status,
+                "support_tier": provider_support_tier,
+            }),
+        );
+    }
+
+    let binary_path_configured = provider.binary_path.value.clone();
+    if let Some(resolved_binary) = resolve_provider_binary_path(&binary_path_configured) {
+        push_check(
+            "provider_binary_present",
+            "provider binary is discoverable",
+            "verified",
+            None,
+            json!({
+                "provider": provider.provider,
+                "configured_binary": binary_path_configured,
+                "resolved_binary": resolved_binary.to_string_lossy(),
+                "provenance": provider.binary_path.provenance,
+            }),
+        );
+    } else {
+        push_check(
+            "provider_binary_present",
+            "provider binary is discoverable",
+            "blocked",
+            Some("provider_binary_missing"),
+            json!({
+                "provider": provider.provider,
+                "configured_binary": binary_path_configured,
+                "provenance": provider.binary_path.provenance,
+            }),
+        );
+        match provider.provider.as_str() {
+            "opencode" => {
+                repair_actions.insert(
+                    "install opencode and ensure it is available on PATH, or set RR_OPENCODE_BIN=/absolute/path/to/opencode".to_owned(),
+                    (),
+                );
+            }
+            "copilot" => {
+                repair_actions.insert(
+                    format!(
+                        "install the GitHub Copilot CLI binary and ensure it is discoverable, or set {}=/absolute/path/to/copilot",
+                        ENV_COPILOT_BIN
+                    ),
+                    (),
+                );
+            }
+            "codex" | "gemini" | "claude" => {
+                repair_actions.insert(
+                    format!(
+                        "install the '{}' CLI binary and ensure it is discoverable on PATH",
+                        provider.provider
+                    ),
+                    (),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    if provider.provider == "copilot" {
+        let copilot_instructions = workspace_root.join(".github/copilot-instructions.md");
+        if copilot_instructions.is_file() {
+            push_check(
+                "copilot_instructions_present",
+                "copilot instruction file is present",
+                "verified",
+                None,
+                json!({"path": copilot_instructions.to_string_lossy()}),
+            );
+        } else {
+            push_check(
+                "copilot_instructions_present",
+                "copilot instruction file is present",
+                "blocked",
+                Some("copilot_instruction_missing"),
+                json!({"path": copilot_instructions.to_string_lossy()}),
+            );
+            repair_actions.insert(
+                "add .github/copilot-instructions.md before relying on Copilot admission flows"
+                    .to_owned(),
+                (),
+            );
+        }
+
+        let copilot_instructions_dir = workspace_root.join(".github/instructions");
+        let has_instruction_assets = fs::read_dir(&copilot_instructions_dir)
+            .ok()
+            .map(|entries| entries.flatten().any(|entry| entry.path().is_file()))
+            .unwrap_or(false);
+        if has_instruction_assets {
+            push_check(
+                "copilot_instruction_assets_present",
+                "copilot instruction asset directory is populated",
+                "verified",
+                None,
+                json!({"path": copilot_instructions_dir.to_string_lossy()}),
+            );
+        } else {
+            push_check(
+                "copilot_instruction_assets_present",
+                "copilot instruction asset directory is populated",
+                "blocked",
+                Some("copilot_instruction_assets_missing"),
+                json!({"path": copilot_instructions_dir.to_string_lossy()}),
+            );
+            repair_actions.insert(
+                "add Copilot instruction assets under .github/instructions/ before admission"
+                    .to_owned(),
+                (),
+            );
+        }
+
+        let copilot_hooks_dir = workspace_root.join(".github/hooks");
+        let has_hook_assets = fs::read_dir(&copilot_hooks_dir)
+            .ok()
+            .map(|entries| entries.flatten().any(|entry| entry.path().is_file()))
+            .unwrap_or(false);
+        if has_hook_assets {
+            push_check(
+                "copilot_hook_assets_present",
+                "copilot hook assets are present",
+                "verified",
+                None,
+                json!({"path": copilot_hooks_dir.to_string_lossy()}),
+            );
+        } else {
+            push_check(
+                "copilot_hook_assets_present",
+                "copilot hook assets are present",
+                "blocked",
+                Some("copilot_hook_assets_missing"),
+                json!({"path": copilot_hooks_dir.to_string_lossy()}),
+            );
+            repair_actions.insert(
+                "add Roger Copilot hook assets under .github/hooks/ before admission".to_owned(),
+                (),
+            );
+        }
+    }
+
+    push_check(
+        "provider_auth_preflight",
+        "provider auth is preflight-verified",
+        "deferred",
+        Some("auth_not_preflight_verified"),
+        json!({
+            "provider": provider.provider,
+            "deferred_to": "first_launch",
+            "guidance": format!(
+                "run rr review --provider {} --pr <number> to verify auth/path fail-closed behavior on first launch",
+                provider.provider
+            ),
+        }),
+    );
+
+    let blocked_count = checks
+        .iter()
+        .filter(|check| check["status"] == "blocked")
+        .count();
+    let deferred_count = checks
+        .iter()
+        .filter(|check| check["status"] == "deferred")
+        .count();
+    let verified_count = checks
+        .iter()
+        .filter(|check| check["status"] == "verified")
+        .count();
+    let mut warnings = Vec::new();
+    if deferred_count > 0 {
+        warnings.push(
+            "doctor defers auth verification to first launch and does not claim preflight auth truth"
+                .to_owned(),
+        );
+    }
+    if provider.provider == "opencode"
+        && let Some((warning, actions)) = opencode_legacy_config_guidance(&runtime.opencode_bin)
+    {
+        warnings.push(warning);
+        for action in actions {
+            repair_actions.insert(action, ());
+        }
+    }
+    let outcome = if blocked_count > 0 {
+        OutcomeKind::Blocked
+    } else {
+        OutcomeKind::Complete
+    };
+
+    CommandResponse {
+        outcome,
+        data: json!({
+            "subcommand": "doctor",
+            "provider": provider.provider,
+            "provider_capability": provider_capability,
+            "routine_surface": routine_surface,
+            "store_layout": {
+                "root": layout.root.to_string_lossy(),
+                "db_path": layout.db_path.to_string_lossy(),
+                "artifact_root": layout.artifact_root.to_string_lossy(),
+                "sidecar_root": layout.sidecar_root.to_string_lossy(),
+                "schema_version": schema_version,
+            },
+            "checks": checks,
+            "summary": {
+                "status": if blocked_count > 0 { "blocked" } else { "complete" },
+                "verified_count": verified_count,
+                "deferred_count": deferred_count,
+                "blocked_count": blocked_count,
+                "auth_preflight": "deferred_to_first_launch",
+            },
+        }),
+        warnings,
+        repair_actions: repair_actions.into_keys().collect(),
+        message: if blocked_count > 0 {
+            format!(
+                "rr doctor found {} blocked checks for provider {}",
+                blocked_count, parsed.provider
+            )
+        } else {
+            format!(
+                "rr doctor completed with {} verified checks for provider {}",
+                verified_count, parsed.provider
+            )
+        },
+    }
 }
 
 fn extension_guided_profile_root(runtime: &CliRuntime, browser: &SupportedBrowser) -> PathBuf {
@@ -2038,9 +2956,32 @@ fn extension_setup_registration_wait_ms() -> u64 {
         .unwrap_or(DEFAULT_EXTENSION_SETUP_REGISTRATION_WAIT_MS)
 }
 
+fn default_extension_install_root() -> Option<PathBuf> {
+    std::env::var("HOME").ok().map(PathBuf::from)
+}
+
+fn custom_extension_install_root_warning(
+    parsed: &ParsedArgs,
+    browser: &SupportedBrowser,
+    install_root: &Path,
+) -> Option<String> {
+    let explicit_root = parsed.bridge_install_root.as_ref()?;
+    let default_root = default_extension_install_root()?;
+    let explicit_root = PathBuf::from(explicit_root);
+    if normalize_path_for_compare(&explicit_root) == normalize_path_for_compare(&default_root) {
+        return None;
+    }
+
+    Some(format!(
+        "custom --install-root {} only writes the Native Messaging host manifest under that synthetic home root; live {} reads its real platform host path instead. Omit --install-root for real browser/operator-stability runs.",
+        install_root.display(),
+        supported_browser_label(browser.clone())
+    ))
+}
+
 fn extension_default_profile_root(browser: &SupportedBrowser) -> Option<PathBuf> {
     let host_os = SupportedOs::current()?;
-    let home = std::env::var("HOME").ok().map(PathBuf::from);
+    let home = default_extension_install_root();
     let local_app_data = std::env::var("LOCALAPPDATA").ok().map(PathBuf::from);
     match (host_os, browser) {
         (SupportedOs::Macos, SupportedBrowser::Chrome) => {
@@ -2079,7 +3020,8 @@ fn extension_profile_roots_for_discovery(
 ) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Ok(path) = std::env::var("RR_EXTENSION_PROFILE_ROOT") {
-        if let Some(trimmed) = normalize_extension_id(&path) {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
             roots.push(PathBuf::from(trimmed));
         }
     }
@@ -2192,9 +3134,10 @@ fn discover_extension_id_for_extension_setup(
     browser: &SupportedBrowser,
     package_dir: &Path,
 ) -> Option<(String, &'static str)> {
-    if let Some(discovered) = discover_extension_id(parsed, runtime) {
+    if let Some(discovered) = discover_explicit_extension_id(parsed) {
         return Some(discovered);
     }
+
     discover_extension_id_from_browser_profiles(browser, runtime, package_dir)
         .map(|value| (value, "browser_profile_preferences"))
 }
@@ -2231,7 +3174,8 @@ fn discover_extension_id_for_extension_setup_with_wait(
         }
     }
 
-    None
+    discover_extension_id_from_packaged_manifest(package_dir)
+        .map(|(extension_id, source)| (extension_id, source, false))
 }
 
 fn extension_profile_launch_hint(
@@ -2293,6 +3237,105 @@ fn read_extension_manifest_template(manifest_template_path: &Path) -> Result<Val
     })?;
     serde_json::from_str(&manifest_template)
         .map_err(|err| format!("failed to parse extension manifest template: {err}"))
+}
+
+fn extension_id_from_hash_prefix(hash_prefix: &[u8]) -> String {
+    let mut extension_id = String::with_capacity(hash_prefix.len() * 2);
+    for byte in hash_prefix {
+        for nibble in [byte >> 4, byte & 0x0f] {
+            extension_id.push((b'a' + nibble) as char);
+        }
+    }
+    extension_id
+}
+
+fn derive_extension_id_from_manifest_key(manifest_key: &str) -> Option<String> {
+    let decoded = BASE64_STANDARD.decode(manifest_key.trim()).ok()?;
+    if decoded.is_empty() {
+        return None;
+    }
+    let digest = Sha256::digest(&decoded);
+    Some(extension_id_from_hash_prefix(&digest[..16]))
+}
+
+fn discover_extension_id_from_manifest_json(
+    manifest_json: &Value,
+) -> Option<(String, &'static str)> {
+    let manifest_key = manifest_json.get("key")?.as_str()?;
+    let extension_id = derive_extension_id_from_manifest_key(manifest_key)?;
+    Some((extension_id, "packaged_manifest_key"))
+}
+
+fn discover_extension_id_from_packaged_manifest(
+    package_dir: &Path,
+) -> Option<(String, &'static str)> {
+    let manifest_path = package_dir.join("manifest.json");
+    let contents = fs::read_to_string(manifest_path).ok()?;
+    let manifest_json: Value = serde_json::from_str(&contents).ok()?;
+    discover_extension_id_from_manifest_json(&manifest_json)
+}
+
+fn collect_manifest_icon_paths(manifest_json: &Value) -> Vec<String> {
+    let mut paths = Vec::new();
+
+    if let Some(icons) = manifest_json.get("icons").and_then(Value::as_object) {
+        for value in icons.values() {
+            if let Some(path) = value.as_str() {
+                if !path.trim().is_empty() {
+                    paths.push(path.to_owned());
+                }
+            }
+        }
+    }
+
+    if let Some(default_icon) = manifest_json
+        .get("action")
+        .and_then(|value| value.get("default_icon"))
+    {
+        match default_icon {
+            Value::String(path) if !path.trim().is_empty() => {
+                paths.push(path.to_owned());
+            }
+            Value::Object(icons) => {
+                for value in icons.values() {
+                    if let Some(path) = value.as_str() {
+                        if !path.trim().is_empty() {
+                            paths.push(path.to_owned());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn validate_packaged_manifest_icon_paths(
+    package_dir: &Path,
+    manifest_json: &Value,
+) -> Result<(), String> {
+    // Repro note (2026-04-17): both Chrome and Edge reject unpacked loads when
+    // manifest icon assets (for example assets/icon-16.png) are missing.
+    let icon_paths = collect_manifest_icon_paths(manifest_json);
+    let mut missing = Vec::new();
+    for icon_path in icon_paths {
+        if !package_dir.join(&icon_path).exists() {
+            missing.push(icon_path);
+        }
+    }
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "packaged extension is missing manifest-declared icon assets: {} (observed Chrome/Edge sideload failure: Could not load icon assets/icon-16.png)",
+            missing.join(", ")
+        ))
+    }
 }
 
 fn normalize_extension_manifest_version(base_version: &str) -> String {
@@ -2447,7 +3490,32 @@ fn handle_extension(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRespons
     match subcommand {
         ExtensionCommandKind::Setup => handle_extension_setup(parsed, runtime, &workspace_root),
         ExtensionCommandKind::Doctor => handle_extension_doctor(parsed, runtime, &workspace_root),
+        ExtensionCommandKind::Uninstall => handle_extension_uninstall(parsed, runtime),
     }
+}
+
+fn handle_extension_uninstall(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
+    let mut bridge_parsed = parsed.clone();
+    bridge_parsed.command = CommandKind::Bridge;
+    bridge_parsed.bridge_command = Some(BridgeCommandKind::Uninstall);
+    bridge_parsed.extension_command = None;
+    bridge_parsed.extension_browser = None;
+
+    let mut uninstall = handle_bridge(&bridge_parsed, runtime);
+    if uninstall.outcome == OutcomeKind::Complete {
+        uninstall
+            .warnings
+            .retain(|warning| warning != BRIDGE_UNINSTALL_REPAIR_ALIAS_WARNING);
+        if let Some(data) = uninstall.data.as_object_mut() {
+            data.insert("surface".to_owned(), json!("extension"));
+            data.insert(
+                "bridge_alias_command".to_owned(),
+                json!("rr bridge uninstall"),
+            );
+        }
+        uninstall.message = "extension uninstall completed".to_owned();
+    }
+    uninstall
 }
 
 fn handle_extension_setup(
@@ -2555,7 +3623,7 @@ fn handle_extension_setup(
     let install_root = parsed
         .bridge_install_root
         .clone()
-        .or_else(|| std::env::var("HOME").ok().map(PathBuf::from));
+        .or_else(default_extension_install_root);
     let Some(install_root) = install_root else {
         return blocked_response(
             "failed to determine install root; HOME is missing".to_owned(),
@@ -2563,6 +3631,8 @@ fn handle_extension_setup(
             json!({"reason_code": "install_root_missing"}),
         );
     };
+    let custom_install_root_warning =
+        custom_extension_install_root_warning(parsed, &browser, &install_root);
 
     let bridge_binary = match std::env::current_exe() {
         Ok(path) => path,
@@ -2626,6 +3696,25 @@ fn handle_extension_setup(
         };
     }
 
+    let mut warnings = Vec::new();
+    if let Some(custom_install_root_warning) = custom_install_root_warning {
+        warnings.push(custom_install_root_warning);
+    }
+    if extension_id_source == "packaged_manifest_key" {
+        warnings.push(
+            "Roger derived a deterministic extension id from the packaged manifest key; load or reload the unpacked extension in the target browser profile before the first live PR-page launch."
+                .to_owned(),
+        );
+    }
+
+    let mut repair_actions = vec![format!(
+        "rerun rr extension doctor --browser {} after browser or install changes",
+        supported_browser_label(browser.clone())
+    )];
+    if extension_id_source == "packaged_manifest_key" {
+        repair_actions.insert(0, load_step.clone());
+    }
+
     CommandResponse {
         outcome: OutcomeKind::Complete,
         data: json!({
@@ -2636,16 +3725,14 @@ fn handle_extension_setup(
             "extension_id_source": extension_id_source,
             "registration_wait_budget_ms": registration_wait_budget_ms,
             "registration_observed_during_setup_wait": observed_during_setup_wait,
+            "manual_browser_step": load_step,
             "install_root": install_root.to_string_lossy().to_string(),
             "host_binary": bridge_binary.to_string_lossy().to_string(),
             "native_manifest_path": manifest_path.to_string_lossy().to_string(),
             "doctor": doctor.data,
         }),
-        warnings: Vec::new(),
-        repair_actions: vec![format!(
-            "rerun rr extension doctor --browser {} after browser or install changes",
-            supported_browser_label(browser)
-        )],
+        warnings,
+        repair_actions,
         message: "extension setup completed".to_owned(),
     }
 }
@@ -2665,10 +3752,12 @@ fn handle_extension_doctor(
         Ok(path) => path,
         Err(err) => return error_response(err),
     };
-    let discovered_identity = discover_extension_id(parsed, runtime).or_else(|| {
-        discover_extension_id_from_browser_profiles(&browser, runtime, &package_dir)
-            .map(|value| (value, "browser_profile_preferences"))
-    });
+    let discovered_identity = discover_explicit_extension_id(parsed)
+        .or_else(|| {
+            discover_extension_id_from_browser_profiles(&browser, runtime, &package_dir)
+                .map(|value| (value, "browser_profile_preferences"))
+        })
+        .or_else(|| discover_extension_id_from_packaged_manifest(&package_dir));
     let extension_id = discovered_identity
         .as_ref()
         .map(|(value, _source)| value.clone());
@@ -2683,7 +3772,7 @@ fn handle_extension_doctor(
     let install_root = parsed
         .bridge_install_root
         .clone()
-        .or_else(|| std::env::var("HOME").ok().map(PathBuf::from));
+        .or_else(default_extension_install_root);
     let Some(install_root) = install_root else {
         return blocked_response(
             "failed to determine install root; HOME is missing".to_owned(),
@@ -2691,6 +3780,8 @@ fn handle_extension_doctor(
             json!({"reason_code": "install_root_missing"}),
         );
     };
+    let custom_install_root_warning =
+        custom_extension_install_root_warning(parsed, &browser, &install_root);
 
     let manifest_path = native_host_install_path_for(&browser, host_os, &install_root);
     let mut checks: Vec<Value> = Vec::new();
@@ -2804,6 +3895,11 @@ fn handle_extension_doctor(
             )
         };
 
+        let mut warnings = vec![warning];
+        if let Some(custom_warning) = custom_install_root_warning {
+            warnings.push(custom_warning);
+        }
+
         return CommandResponse {
             outcome: OutcomeKind::Blocked,
             data: json!({
@@ -2814,7 +3910,7 @@ fn handle_extension_doctor(
                 "install_root": install_root.to_string_lossy().to_string(),
                 "checks": checks,
             }),
-            warnings: vec![warning],
+            warnings,
             repair_actions,
             message: "extension doctor failed closed".to_owned(),
         };
@@ -2827,9 +3923,17 @@ fn handle_extension_doctor(
             "browser": browser_label,
             "package_dir": package_dir.to_string_lossy().to_string(),
             "install_root": install_root.to_string_lossy().to_string(),
+            "extension_id": extension_id,
+            "extension_id_source": extension_id_source,
             "checks": checks,
         }),
-        warnings: Vec::new(),
+        warnings: custom_install_root_warning
+            .into_iter()
+            .chain((extension_id_source == Some("packaged_manifest_key")).then_some(
+                "doctor is relying on the packaged manifest key for extension identity; if the unpacked extension is not yet active in the target browser profile, load or reload it once before the first live launch."
+                    .to_owned(),
+            ))
+            .collect(),
         repair_actions: Vec::new(),
         message: "extension doctor checks passed".to_owned(),
     }
@@ -2996,6 +4100,7 @@ fn handle_bridge(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
 
             let src_root = extension_root.join("src");
             let static_root = extension_root.join("static");
+            let assets_root = extension_root.join("assets");
             if let Err(err) = copy_dir_recursive(&src_root, &package_dir.join("src")) {
                 return error_response(format!("failed to copy extension src tree: {err}"));
             }
@@ -3003,6 +4108,14 @@ fn handle_bridge(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 if let Err(err) = copy_dir_recursive(&static_root, &package_dir.join("static")) {
                     return error_response(format!("failed to copy extension static tree: {err}"));
                 }
+            }
+            if assets_root.exists() {
+                if let Err(err) = copy_dir_recursive(&assets_root, &package_dir.join("assets")) {
+                    return error_response(format!("failed to copy extension assets tree: {err}"));
+                }
+            }
+            if let Err(err) = validate_packaged_manifest_icon_paths(&package_dir, &manifest_json) {
+                return error_response(err);
             }
 
             let mut files = match collect_relative_files(&package_dir) {
@@ -3306,15 +4419,19 @@ fn handle_bridge(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 outcome: OutcomeKind::Complete,
                 data: json!({
                     "subcommand": "uninstall",
+                    "surface": "bridge",
+                    "preferred_surface": "rr extension uninstall",
                     "platform": host_os.as_str(),
                     "install_root": install_root.to_string_lossy().to_string(),
                     "removed": removed,
                     "missing": missing,
                     "installs_browser_extension": false,
                 }),
-                warnings: Vec::new(),
-                repair_actions: Vec::new(),
-                message: "bridge registration assets removed".to_owned(),
+                warnings: vec![BRIDGE_UNINSTALL_REPAIR_ALIAS_WARNING.to_owned()],
+                repair_actions: vec![
+                    "prefer rr extension uninstall for operator workflows".to_owned(),
+                ],
+                message: "bridge registration assets removed (repair alias path)".to_owned(),
             }
         }
     }
@@ -3365,25 +4482,828 @@ fn verified_provider_session_id<'a>(
     }
 }
 
+const COPILOT_FEATURE_GATED_STATUS: &str = "feature_gated_bounded_live";
+const COPILOT_FEATURE_GATED_TIER: &str = "tier_b_feature_gated";
+const COPILOT_FEATURE_GATED_SURFACE_CLASS: &str = "review_bounded";
+const COPILOT_FEATURE_GATED_STATUS_REASON: &str =
+    "feature_gate_enabled_tier_b_reopen_return_with_reseed_fallback";
+const COPILOT_FEATURE_GATED_NOTES: &str = "feature-gated bounded tier-b continuity path: verified start, locator/session-id reopen, rr return, and honest ResumeBundle reseed fallback; no default public live claim";
+
+#[derive(Debug)]
+struct CopilotLaunchError {
+    state: LaunchAttemptState,
+    reason_code: &'static str,
+    detail: String,
+    repair_actions: Vec<String>,
+    extra_data: Value,
+}
+
+#[derive(Debug)]
+struct CopilotReviewLaunchOutcome {
+    locator: SessionLocator,
+    session_path: String,
+    continuity_quality: ContinuityQuality,
+    artifact_refs: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CopilotInvocationContext {
+    mode: &'static str,
+    binary_path: String,
+    launch_root: String,
+    review_target: ReviewTarget,
+    launch_profile_id: String,
+    verification_source: &'static str,
+    session_start_artifact_path: String,
+    launch_capture_path: String,
+    stdout_preview: Vec<String>,
+    stderr_preview: Vec<String>,
+    artifact_refs: Vec<String>,
+    policy_profile_digest_sha256: String,
+    hook_profile_digest_sha256: String,
+    custom_instructions_digest_sha256: String,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+struct CopilotSessionStartPayload {
+    provider: String,
+    session_id: String,
+    #[serde(default)]
+    worktree_root: Option<String>,
+    #[serde(default)]
+    launch_profile_id: Option<String>,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum CopilotSessionStartArtifact {
+    Envelope {
+        hook: String,
+        payload: CopilotSessionStartPayload,
+    },
+    Payload(CopilotSessionStartPayload),
+}
+
+fn copilot_admission_gate_enabled() -> bool {
+    session_copilot::copilot_admission_gate_enabled_from_value(
+        std::env::var(session_copilot::ENV_COPILOT_ADMISSION_GATE)
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn copilot_feature_gated_launch_enabled(provider: &str) -> bool {
+    provider == session_copilot::PROVIDER_ID && copilot_admission_gate_enabled()
+}
+
+fn copilot_session_start_artifact_path(store_root: &Path, attempt_id: &str) -> PathBuf {
+    store_root
+        .join("provider/copilot/launch-attempts")
+        .join(attempt_id)
+        .join("session-start.json")
+}
+
+fn copilot_launch_capture_path(store_root: &Path, attempt_id: &str) -> PathBuf {
+    store_root
+        .join("provider/copilot/launch-attempts")
+        .join(attempt_id)
+        .join("launch-capture.json")
+}
+
+fn copilot_projected_provider_capability(runtime: &CliRuntime) -> Value {
+    let mut capability =
+        match resolved_routine_surface_baseline(runtime, session_copilot::PROVIDER_ID) {
+            Ok(baseline) => provider_capability_projection(
+                &baseline.provider,
+                baseline.status_reason.as_deref(),
+            ),
+            Err(_) => provider_capability(session_copilot::PROVIDER_ID),
+        };
+
+    if let Some(provider_obj) = capability.as_object_mut() {
+        provider_obj.insert(
+            "status".to_owned(),
+            Value::String(COPILOT_FEATURE_GATED_STATUS.to_owned()),
+        );
+        provider_obj.insert(
+            "tier".to_owned(),
+            Value::String(COPILOT_FEATURE_GATED_TIER.to_owned()),
+        );
+        provider_obj.insert(
+            "support_tier".to_owned(),
+            Value::String(COPILOT_FEATURE_GATED_TIER.to_owned()),
+        );
+        provider_obj.insert(
+            "surface_class".to_owned(),
+            Value::String(COPILOT_FEATURE_GATED_SURFACE_CLASS.to_owned()),
+        );
+        provider_obj.insert(
+            "status_reason".to_owned(),
+            Value::String(COPILOT_FEATURE_GATED_STATUS_REASON.to_owned()),
+        );
+        provider_obj.insert(
+            "notes".to_owned(),
+            Value::String(COPILOT_FEATURE_GATED_NOTES.to_owned()),
+        );
+        provider_obj.insert(
+            "supports".to_owned(),
+            json!({
+                "review_start": true,
+                "resume_reseed": true,
+                "resume_reopen": true,
+                "return": true,
+                "status": true,
+                "findings": true,
+                "sessions": true,
+                "doctor": true,
+            }),
+        );
+    }
+
+    capability
+}
+
+fn copilot_projected_routine_surface(
+    runtime: &CliRuntime,
+    worktree_root_override: Option<&str>,
+) -> Option<Value> {
+    resolved_routine_surface_baseline(runtime, session_copilot::PROVIDER_ID)
+        .ok()
+        .map(|baseline| {
+            let mut projection = routine_surface_with_worktree_root(
+                routine_surface_baseline_projection(&baseline),
+                &runtime.cwd,
+                worktree_root_override,
+            );
+            if let Some(surface_obj) = projection.as_object_mut() {
+                surface_obj.insert(
+                    "status_reason".to_owned(),
+                    Value::String(COPILOT_FEATURE_GATED_STATUS_REASON.to_owned()),
+                );
+                surface_obj.insert(
+                    "provider".to_owned(),
+                    copilot_projected_provider_capability(runtime),
+                );
+            }
+            projection
+        })
+}
+
+fn copilot_launch_root(binding_context: &LaunchBindingContext, runtime: &CliRuntime) -> PathBuf {
+    binding_context
+        .worktree_root
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| runtime.cwd.clone())
+}
+
+fn read_copilot_session_start_payload(
+    path: &Path,
+) -> std::result::Result<CopilotSessionStartPayload, String> {
+    let raw = fs::read(path).map_err(|err| {
+        format!(
+            "failed to read session-start artifact {}: {err}",
+            path.display()
+        )
+    })?;
+    let artifact: CopilotSessionStartArtifact = serde_json::from_slice(&raw).map_err(|err| {
+        format!(
+            "failed to parse session-start artifact {}: {err}",
+            path.display()
+        )
+    })?;
+
+    match artifact {
+        CopilotSessionStartArtifact::Envelope { hook, payload } => {
+            if hook != "session-start" {
+                return Err(format!(
+                    "unexpected Copilot hook artifact kind '{hook}' in {}",
+                    path.display()
+                ));
+            }
+            Ok(payload)
+        }
+        CopilotSessionStartArtifact::Payload(payload) => Ok(payload),
+    }
+}
+
+fn preview_output_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(12)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+#[derive(Debug, Serialize)]
+struct CopilotLaunchCaptureRecord {
+    schema_id: &'static str,
+    mode: &'static str,
+    binary_path: String,
+    launch_root: String,
+    exit_status: Option<i32>,
+    stdout: String,
+    stderr: String,
+    session_start_artifact_path: String,
+    artifact_refs: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_start_payload: Option<CopilotSessionStartPayload>,
+}
+
+fn persist_copilot_launch_capture(
+    path: &Path,
+    record: &CopilotLaunchCaptureRecord,
+) -> std::result::Result<(), String> {
+    let Some(parent) = path.parent() else {
+        return Err(format!(
+            "failed to resolve Copilot launch-capture directory for {}",
+            path.display()
+        ));
+    };
+    fs::create_dir_all(parent).map_err(|err| {
+        format!(
+            "failed to create Copilot launch-capture directory {}: {err}",
+            parent.display()
+        )
+    })?;
+    let payload = serde_json::to_vec_pretty(record)
+        .map_err(|err| format!("failed to encode Copilot launch capture: {err}"))?;
+    fs::write(path, payload).map_err(|err| {
+        format!(
+            "failed to write Copilot launch capture {}: {err}",
+            path.display()
+        )
+    })
+}
+
+fn merge_copilot_artifact_refs(
+    session_start_artifact: &Path,
+    launch_capture_path: &Path,
+    payload_artifact_refs: &[String],
+) -> Vec<String> {
+    let mut refs = vec![
+        session_start_artifact.to_string_lossy().into_owned(),
+        launch_capture_path.to_string_lossy().into_owned(),
+    ];
+    for artifact_ref in payload_artifact_refs {
+        if !refs.iter().any(|existing| existing == artifact_ref) {
+            refs.push(artifact_ref.clone());
+        }
+    }
+    refs
+}
+
+fn normalized_path_string(path: &Path) -> String {
+    fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn launch_copilot_session(
+    runtime: &CliRuntime,
+    target: &ReviewTarget,
+    attempt_id: &str,
+    binding_context: &LaunchBindingContext,
+    mode: &'static str,
+    command: &[String],
+    session_path: &str,
+    continuity_quality: ContinuityQuality,
+    expected_session_id: Option<&str>,
+) -> std::result::Result<CopilotReviewLaunchOutcome, CopilotLaunchError> {
+    let launch_root = copilot_launch_root(binding_context, runtime);
+    let launch_root_string = normalized_path_string(&launch_root);
+    let session_start_artifact =
+        copilot_session_start_artifact_path(&runtime.store_root, attempt_id);
+    let launch_capture_path = copilot_launch_capture_path(&runtime.store_root, attempt_id);
+    let Some(artifact_parent) = session_start_artifact.parent() else {
+        return Err(CopilotLaunchError {
+            state: LaunchAttemptState::FailedSpawn,
+            reason_code: "session_start_artifact_path_invalid",
+            detail: format!(
+                "failed to resolve session-start artifact directory for {}",
+                session_start_artifact.display()
+            ),
+            repair_actions: vec![
+                "re-run rr review after repairing the Roger store root".to_owned(),
+            ],
+            extra_data: json!({}),
+        });
+    };
+    fs::create_dir_all(artifact_parent).map_err(|err| CopilotLaunchError {
+        state: LaunchAttemptState::FailedSpawn,
+        reason_code: "session_start_artifact_directory_unwritable",
+        detail: format!(
+            "failed to create session-start artifact directory {}: {err}",
+            artifact_parent.display()
+        ),
+        repair_actions: vec![
+            "re-run rr review after repairing filesystem permissions for the Roger store root"
+                .to_owned(),
+        ],
+        extra_data: json!({
+            "session_start_artifact_path": session_start_artifact.to_string_lossy(),
+        }),
+    })?;
+
+    let provider_capability = copilot_projected_provider_capability(runtime);
+    let policy_profile_digest_sha256 = provider_capability["policy_profile_digest_sha256"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let hook_profile_digest_sha256 = provider_capability["hook_profile_digest_sha256"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let custom_instructions_digest_sha256 =
+        provider_capability["custom_instructions_digest_sha256"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+
+    let copilot_binary_path =
+        resolved_routine_surface_baseline(runtime, session_copilot::PROVIDER_ID)
+            .map(|baseline| baseline.provider.binary_path.value)
+            .unwrap_or_else(|_| {
+                std::env::var(ENV_COPILOT_BIN)
+                    .unwrap_or_else(|_| session_copilot::DEFAULT_COPILOT_BIN.to_owned())
+            });
+
+    let output = ProcessCommand::new(&copilot_binary_path)
+        .args(command.iter().skip(1))
+        .current_dir(&launch_root)
+        .env(
+            session_copilot::ENV_COPILOT_SESSION_START_ARTIFACT,
+            &session_start_artifact,
+        )
+        .env(session_copilot::ENV_COPILOT_ATTEMPT_ID, attempt_id)
+        .env(session_copilot::ENV_COPILOT_REPOSITORY, &target.repository)
+        .env(
+            session_copilot::ENV_COPILOT_PULL_REQUEST,
+            target.pull_request_number.to_string(),
+        )
+        .env(
+            session_copilot::ENV_COPILOT_WORKTREE_ROOT,
+            &launch_root_string,
+        )
+        .env(
+            session_copilot::ENV_COPILOT_POLICY_PROFILE_DIGEST,
+            &policy_profile_digest_sha256,
+        )
+        .env(
+            session_copilot::ENV_COPILOT_HOOK_PROFILE_DIGEST,
+            &hook_profile_digest_sha256,
+        )
+        .env(
+            session_copilot::ENV_COPILOT_CUSTOM_INSTRUCTIONS_DIGEST,
+            &custom_instructions_digest_sha256,
+        )
+        .output()
+        .map_err(|err| CopilotLaunchError {
+            state: LaunchAttemptState::FailedSpawn,
+            reason_code: "copilot_start_failed",
+            detail: format!(
+                "failed to invoke Copilot binary '{}': {err}",
+                copilot_binary_path
+            ),
+            repair_actions: vec![format!(
+                "install the GitHub Copilot CLI binary or set {}=/absolute/path/to/copilot",
+                ENV_COPILOT_BIN
+            )],
+            extra_data: json!({
+                "binary_path": copilot_binary_path,
+                "launch_root": launch_root_string,
+            }),
+        })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let base_capture = CopilotLaunchCaptureRecord {
+        schema_id: "rr.copilot.launch_capture.v1",
+        mode,
+        binary_path: copilot_binary_path.clone(),
+        launch_root: launch_root_string.clone(),
+        exit_status: output.status.code(),
+        stdout: stdout.clone(),
+        stderr: stderr.clone(),
+        session_start_artifact_path: session_start_artifact.to_string_lossy().into_owned(),
+        artifact_refs: Vec::new(),
+        session_start_payload: None,
+    };
+    persist_copilot_launch_capture(&launch_capture_path, &base_capture).map_err(|detail| {
+        CopilotLaunchError {
+            state: LaunchAttemptState::FailedSessionBinding,
+            reason_code: "copilot_launch_capture_unwritable",
+            detail,
+            repair_actions: vec![
+                "re-run the Copilot launch after repairing Roger store write permissions"
+                    .to_owned(),
+            ],
+            extra_data: json!({
+                "launch_capture_path": launch_capture_path.to_string_lossy(),
+                "session_start_artifact_path": session_start_artifact.to_string_lossy(),
+            }),
+        }
+    })?;
+
+    if !output.status.success() {
+        let detail = if stderr.trim().is_empty() {
+            format!(
+                "Copilot exited with status {} before Roger observed a verified session-start hook",
+                output.status
+            )
+        } else {
+            format!(
+                "Copilot exited with status {} before Roger observed a verified session-start hook: {}",
+                output.status,
+                stderr.trim()
+            )
+        };
+        return Err(CopilotLaunchError {
+            state: LaunchAttemptState::FailedSpawn,
+            reason_code: "provider_process_crash",
+            detail,
+            repair_actions: vec![
+                "re-run rr review after verifying Copilot login and hook installation".to_owned(),
+            ],
+            extra_data: json!({
+                "binary_path": copilot_binary_path,
+                "launch_root": launch_root_string,
+                "exit_status": output.status.code(),
+                "stdout_preview": preview_output_lines(&stdout),
+                "stderr_preview": preview_output_lines(&stderr),
+                "session_start_artifact_path": session_start_artifact.to_string_lossy(),
+                "launch_capture_path": launch_capture_path.to_string_lossy(),
+            }),
+        });
+    }
+
+    if !session_start_artifact.is_file() {
+        return Err(CopilotLaunchError {
+            state: LaunchAttemptState::FailedProviderVerification,
+            reason_code: "session_start_hook_missing",
+            detail: format!(
+                "Copilot launch completed without a Roger-readable session-start hook artifact at {}",
+                session_start_artifact.display()
+            ),
+            repair_actions: vec![
+                "install Roger Copilot hook assets and retry the launch".to_owned(),
+            ],
+            extra_data: json!({
+                "binary_path": copilot_binary_path,
+                "launch_root": launch_root_string,
+                "stdout_preview": preview_output_lines(&stdout),
+                "stderr_preview": preview_output_lines(&stderr),
+                "session_start_artifact_path": session_start_artifact.to_string_lossy(),
+                "launch_capture_path": launch_capture_path.to_string_lossy(),
+            }),
+        });
+    }
+
+    let payload =
+        read_copilot_session_start_payload(&session_start_artifact).map_err(|detail| {
+            CopilotLaunchError {
+                state: LaunchAttemptState::FailedProviderVerification,
+                reason_code: "hook_payload_schema_invalid",
+                repair_actions: vec![
+                    "repair the Roger Copilot session-start hook payload schema and retry"
+                        .to_owned(),
+                ],
+                extra_data: json!({
+                    "session_start_artifact_path": session_start_artifact.to_string_lossy(),
+                    "launch_capture_path": launch_capture_path.to_string_lossy(),
+                }),
+                detail,
+            }
+        })?;
+
+    if payload.provider != session_copilot::PROVIDER_ID {
+        return Err(CopilotLaunchError {
+            state: LaunchAttemptState::FailedProviderVerification,
+            reason_code: "provider_verification_mismatch",
+            detail: format!(
+                "Copilot session-start hook reported provider '{}' instead of '{}'",
+                payload.provider,
+                session_copilot::PROVIDER_ID
+            ),
+            repair_actions: vec![
+                "repair the Roger Copilot session-start hook provider metadata and retry"
+                    .to_owned(),
+            ],
+            extra_data: json!({
+                "session_start_artifact_path": session_start_artifact.to_string_lossy(),
+            }),
+        });
+    }
+
+    let verified_session_id = payload.session_id.trim();
+    if verified_session_id.is_empty() {
+        return Err(CopilotLaunchError {
+            state: LaunchAttemptState::FailedProviderVerification,
+            reason_code: "missing_verified_session_id",
+            detail: format!(
+                "Copilot session-start hook at {} omitted a non-empty session_id",
+                session_start_artifact.display()
+            ),
+            repair_actions: vec![
+                "repair the Roger Copilot session-start hook so it emits a real session_id"
+                    .to_owned(),
+            ],
+            extra_data: json!({
+                "session_start_artifact_path": session_start_artifact.to_string_lossy(),
+                "stdout_preview": preview_output_lines(&stdout),
+            }),
+        });
+    }
+
+    if let Some(expected_session_id) = expected_session_id
+        && verified_session_id != expected_session_id
+    {
+        return Err(CopilotLaunchError {
+            state: LaunchAttemptState::FailedProviderVerification,
+            reason_code: "reopened_session_id_mismatch",
+            detail: format!(
+                "Copilot reopen expected session_id '{}' but the Roger hook verified '{}'",
+                expected_session_id, verified_session_id
+            ),
+            repair_actions: vec![
+                "re-run rr resume to reseed from the stored ResumeBundle if the prior Copilot session was discarded"
+                    .to_owned(),
+            ],
+            extra_data: json!({
+                "expected_session_id": expected_session_id,
+                "verified_session_id": verified_session_id,
+                "session_start_artifact_path": session_start_artifact.to_string_lossy(),
+                "launch_capture_path": launch_capture_path.to_string_lossy(),
+            }),
+        });
+    }
+
+    if let Some(payload_root) = payload.worktree_root.as_deref() {
+        let normalized_payload_root = normalized_path_string(Path::new(payload_root));
+        if normalized_payload_root != launch_root_string {
+            return Err(CopilotLaunchError {
+                state: LaunchAttemptState::FailedProviderVerification,
+                reason_code: "worktree_root_mismatch",
+                detail: format!(
+                    "Copilot session-start hook reported worktree_root '{}' but Roger launched from '{}'",
+                    normalized_payload_root, launch_root_string
+                ),
+                repair_actions: vec![
+                    "re-run rr review from the intended repo/worktree root after repairing hook launch scope"
+                        .to_owned(),
+                ],
+                extra_data: json!({
+                    "launch_root": launch_root_string,
+                    "reported_worktree_root": normalized_payload_root,
+                    "session_start_artifact_path": session_start_artifact.to_string_lossy(),
+                }),
+            });
+        }
+    }
+
+    if let Some(launch_profile_id) = payload.launch_profile_id.as_deref()
+        && launch_profile_id != cli_config::PROFILE_ID
+    {
+        return Err(CopilotLaunchError {
+            state: LaunchAttemptState::FailedProviderVerification,
+            reason_code: "launch_profile_mismatch",
+            detail: format!(
+                "Copilot session-start hook reported launch_profile_id '{}' instead of '{}'",
+                launch_profile_id,
+                cli_config::PROFILE_ID
+            ),
+            repair_actions: vec![
+                "repair the Roger Copilot hook profile metadata and retry the launch".to_owned(),
+            ],
+            extra_data: json!({
+                "session_start_artifact_path": session_start_artifact.to_string_lossy(),
+                "launch_capture_path": launch_capture_path.to_string_lossy(),
+            }),
+        });
+    }
+
+    let artifact_refs = merge_copilot_artifact_refs(
+        &session_start_artifact,
+        &launch_capture_path,
+        &payload.artifact_refs,
+    );
+    let updated_capture = CopilotLaunchCaptureRecord {
+        artifact_refs: artifact_refs.clone(),
+        session_start_payload: Some(payload.clone()),
+        ..base_capture
+    };
+    persist_copilot_launch_capture(&launch_capture_path, &updated_capture).map_err(|detail| {
+        CopilotLaunchError {
+            state: LaunchAttemptState::FailedSessionBinding,
+            reason_code: "copilot_launch_capture_unwritable",
+            detail,
+            repair_actions: vec![
+                "re-run the Copilot launch after repairing Roger store write permissions"
+                    .to_owned(),
+            ],
+            extra_data: json!({
+                "launch_capture_path": launch_capture_path.to_string_lossy(),
+                "session_start_artifact_path": session_start_artifact.to_string_lossy(),
+            }),
+        }
+    })?;
+
+    let invocation_context_json = serde_json::to_string(&CopilotInvocationContext {
+        mode,
+        binary_path: copilot_binary_path,
+        launch_root: launch_root_string,
+        review_target: target.clone(),
+        launch_profile_id: cli_config::PROFILE_ID.to_owned(),
+        verification_source: "session_start_hook_artifact",
+        session_start_artifact_path: session_start_artifact.to_string_lossy().into_owned(),
+        launch_capture_path: launch_capture_path.to_string_lossy().into_owned(),
+        stdout_preview: preview_output_lines(&stdout),
+        stderr_preview: preview_output_lines(&stderr),
+        artifact_refs: artifact_refs.clone(),
+        policy_profile_digest_sha256,
+        hook_profile_digest_sha256,
+        custom_instructions_digest_sha256,
+    })
+    .map_err(|err| CopilotLaunchError {
+        state: LaunchAttemptState::FailedSessionBinding,
+        reason_code: "copilot_invocation_context_encode_failed",
+        detail: format!("failed to encode Copilot invocation context: {err}"),
+        repair_actions: vec![
+            "re-run rr review after repairing the Copilot invocation context serializer".to_owned(),
+        ],
+        extra_data: json!({
+            "session_start_artifact_path": session_start_artifact.to_string_lossy(),
+            "launch_capture_path": launch_capture_path.to_string_lossy(),
+        }),
+    })?;
+
+    Ok(CopilotReviewLaunchOutcome {
+        locator: SessionLocator {
+            provider: session_copilot::PROVIDER_ID.to_owned(),
+            session_id: verified_session_id.to_owned(),
+            invocation_context_json,
+            captured_at: time::now_ts(),
+            last_tested_at: Some(time::now_ts()),
+        },
+        session_path: session_path.to_owned(),
+        continuity_quality,
+        artifact_refs,
+    })
+}
+
+fn launch_copilot_review_session(
+    runtime: &CliRuntime,
+    target: &ReviewTarget,
+    attempt_id: &str,
+    binding_context: &LaunchBindingContext,
+) -> std::result::Result<CopilotReviewLaunchOutcome, CopilotLaunchError> {
+    let seed_prompt = format!(
+        "Roger review start for {} PR #{} in review-only posture. Keep all findings local to Roger; do not post to GitHub and do not modify repository files.",
+        target.repository, target.pull_request_number
+    );
+    launch_copilot_session(
+        runtime,
+        target,
+        attempt_id,
+        binding_context,
+        "start",
+        &session_copilot::build_start_review_command(&seed_prompt),
+        "hook_verified_start",
+        ContinuityQuality::Degraded,
+        None,
+    )
+}
+
+#[derive(Debug)]
+struct CopilotContinuityLaunchOutcome {
+    linkage: CopilotReviewLaunchOutcome,
+    terminal_state: LaunchAttemptState,
+    decision_reason: String,
+}
+
+fn copilot_resume_error_requires_reseed(err: &CopilotLaunchError) -> bool {
+    if err.reason_code != "provider_process_crash" {
+        return false;
+    }
+
+    let detail = err.detail.to_ascii_lowercase();
+    [
+        "not found",
+        "no such session",
+        "unknown session",
+        "missing session",
+        "missing state",
+        "stale",
+        "discarded",
+        "expired",
+    ]
+    .iter()
+    .any(|needle| detail.contains(needle))
+}
+
+fn launch_copilot_resume_or_return_session(
+    runtime: &CliRuntime,
+    target: &ReviewTarget,
+    attempt_id: &str,
+    binding_context: &LaunchBindingContext,
+    session_locator: Option<&SessionLocator>,
+    resume_bundle: Option<&ResumeBundle>,
+) -> std::result::Result<CopilotContinuityLaunchOutcome, CopilotLaunchError> {
+    if let Some(locator) = session_locator {
+        match launch_copilot_session(
+            runtime,
+            target,
+            attempt_id,
+            binding_context,
+            "resume",
+            &session_copilot::build_resume_command(&locator.session_id),
+            "reopened_by_locator",
+            ContinuityQuality::Usable,
+            Some(&locator.session_id),
+        ) {
+            Ok(linkage) => {
+                return Ok(CopilotContinuityLaunchOutcome {
+                    linkage,
+                    terminal_state: LaunchAttemptState::VerifiedReopened,
+                    decision_reason: "copilot_reopened_by_locator".to_owned(),
+                });
+            }
+            Err(err) if copilot_resume_error_requires_reseed(&err) => {}
+            Err(err) => return Err(err),
+        }
+    }
+
+    let Some(resume_bundle) = resume_bundle else {
+        return Err(CopilotLaunchError {
+            state: LaunchAttemptState::FailedSessionBinding,
+            reason_code: "resume_bundle_missing_or_invalid",
+            detail: "Copilot continuity fallback requires a stored ResumeBundle once locator reopen is unavailable".to_owned(),
+            repair_actions: vec![
+                "re-run rr review --provider copilot to regenerate a ResumeBundle".to_owned(),
+            ],
+            extra_data: json!({}),
+        });
+    };
+
+    let reseed_prompt = format!(
+        "Roger resume reseed for {} PR #{} in review-only posture. Use the stored ResumeBundle summary '{}' only as Roger continuity guidance. Keep all findings local to Roger; do not post to GitHub and do not modify repository files.",
+        target.repository, target.pull_request_number, resume_bundle.stage_summary,
+    );
+    let linkage = launch_copilot_session(
+        runtime,
+        target,
+        attempt_id,
+        binding_context,
+        "resume_reseed",
+        &session_copilot::build_start_review_command(&reseed_prompt),
+        "reseeded_from_bundle",
+        ContinuityQuality::Degraded,
+        None,
+    )?;
+
+    Ok(CopilotContinuityLaunchOutcome {
+        linkage,
+        terminal_state: LaunchAttemptState::VerifiedReseeded,
+        decision_reason: if session_locator.is_some() {
+            "copilot_reseeded_after_stale_or_unusable_locator".to_owned()
+        } else {
+            "copilot_reseeded_from_bundle".to_owned()
+        },
+    })
+}
+
 fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
-    if !SUPPORTED_REVIEW_PROVIDERS.contains(&parsed.provider.as_str()) {
+    let supported_providers = runtime_supported_review_providers(runtime);
+    let planned_not_live_providers = runtime_planned_not_live_review_providers(runtime);
+    if !supported_providers.contains(&parsed.provider.as_str()) {
+        let mut repair_actions = vec![
+            "use --provider opencode for tier-b CLI continuity in 0.1.0".to_owned(),
+            "use --provider codex for bounded tier-a start/reseed support".to_owned(),
+            "use --provider gemini for bounded tier-a start/reseed support".to_owned(),
+            "use --provider claude for bounded tier-a start/reseed support".to_owned(),
+        ];
+        if copilot_feature_gated_launch_enabled(session_copilot::PROVIDER_ID) {
+            repair_actions.push(
+                "use --provider copilot for feature-gated bounded tier-b continuity support"
+                    .to_owned(),
+            );
+        }
         return blocked_response(
             format!(
                 "provider '{}' is not supported for rr review in this slice",
                 parsed.provider
             ),
-            vec![
-                "use --provider opencode for tier-b CLI continuity in 0.1.0".to_owned(),
-                "use --provider codex for bounded tier-a start/reseed support".to_owned(),
-                "use --provider gemini for bounded tier-a start/reseed support".to_owned(),
-                "use --provider claude for bounded tier-a start/reseed support".to_owned(),
-            ],
+            repair_actions,
             json!({
                 "provider": parsed.provider,
-                "supported_providers": SUPPORTED_REVIEW_PROVIDERS,
-                "planned_not_live_providers": PLANNED_REVIEW_PROVIDERS,
+                "supported_providers": supported_providers,
+                "planned_not_live_providers": planned_not_live_providers,
                 "not_supported_providers": NOT_LIVE_REVIEW_PROVIDERS,
-                "live_review_provider_support": review_provider_support_matrix(),
+                "live_review_provider_support": runtime_review_provider_support_matrix(runtime),
             }),
         );
     }
@@ -3415,7 +5335,12 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 "repository": repository,
                 "pull_request": pr,
                 "launch_profile_id": cli_config::PROFILE_ID,
-                "provider_capability": provider_capability(&parsed.provider),
+                "provider_capability": runtime_provider_capability(runtime, &parsed.provider),
+                "routine_surface": runtime_routine_surface_projection(
+                    runtime,
+                    &parsed.provider,
+                    None,
+                ),
             }),
             warnings: provider_support_warning(&parsed.provider, "rr review")
                 .into_iter()
@@ -3425,9 +5350,9 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         };
     }
 
-    let store = match RogerStore::open(&runtime.store_root) {
+    let store = match open_store_or_response(runtime, "rr review") {
         Ok(store) => store,
-        Err(err) => return error_response(format!("failed to open Roger store: {err}")),
+        Err(response) => return response,
     };
 
     let attempt_id = next_id("attempt");
@@ -3470,7 +5395,7 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             Some(reason),
         )
     };
-    let (session_locator, session_path, continuity_quality, warnings) =
+    let (session_locator, session_path, continuity_quality, warnings, bundle_artifact_refs) =
         match parsed.provider.as_str() {
             "opencode" => {
                 let adapter = OpenCodeAdapter::with_binary(runtime.opencode_bin.clone());
@@ -3497,6 +5422,7 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                     linkage.locator,
                     session_path_label(&linkage.path).to_owned(),
                     linkage.continuity_quality,
+                    Vec::new(),
                     Vec::new(),
                 )
             }
@@ -3528,6 +5454,7 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                     provider_support_warning("codex", "rr review")
                         .into_iter()
                         .collect(),
+                    Vec::new(),
                 )
             }
             "claude" => {
@@ -3558,6 +5485,7 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                     provider_support_warning("claude", "rr review")
                         .into_iter()
                         .collect(),
+                    Vec::new(),
                 )
             }
             "gemini" => {
@@ -3588,6 +5516,65 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                     provider_support_warning("gemini", "rr review")
                         .into_iter()
                         .collect(),
+                    Vec::new(),
+                )
+            }
+            "copilot" => {
+                let linkage = match launch_copilot_review_session(
+                    runtime,
+                    &target,
+                    &attempt_id,
+                    &binding_context,
+                ) {
+                    Ok(linkage) => linkage,
+                    Err(err) => {
+                        if let Err(update_err) = persist_launch_attempt_state(
+                            &store,
+                            &attempt_id,
+                            err.state,
+                            None,
+                            None,
+                            None,
+                            None,
+                            Some(&err.detail),
+                        ) {
+                            return error_response(update_err);
+                        }
+                        return blocked_response(
+                            format!("failed to start Copilot session: {}", err.detail),
+                            err.repair_actions,
+                            {
+                                let mut data = serde_json::Map::new();
+                                data.insert(
+                                    "reason_code".to_owned(),
+                                    Value::String(err.reason_code.to_owned()),
+                                );
+                                data.insert(
+                                    "launch_attempt_id".to_owned(),
+                                    Value::String(attempt_id.clone()),
+                                );
+                                data.insert(
+                                    "provider".to_owned(),
+                                    Value::String(session_copilot::PROVIDER_ID.to_owned()),
+                                );
+                                if let Some(extra) = err.extra_data.as_object() {
+                                    for (key, value) in extra {
+                                        data.insert(key.clone(), value.clone());
+                                    }
+                                }
+                                Value::Object(data)
+                            },
+                        );
+                    }
+                };
+                (
+                    linkage.locator,
+                    linkage.session_path,
+                    linkage.continuity_quality,
+                    provider_support_warning("copilot", "rr review")
+                        .into_iter()
+                        .collect(),
+                    linkage.artifact_refs,
                 )
             }
             _ => unreachable!("provider validated above"),
@@ -3646,6 +5633,7 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         parsed.provider.clone(),
         continuity_quality.clone(),
         "review launched via rr review",
+        bundle_artifact_refs,
     );
 
     let bundle_payload = match serde_json::to_vec(&bundle) {
@@ -3828,6 +5816,12 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             "provider": parsed.provider,
             "session_path": session_path,
             "continuity_quality": continuity_state_label(&continuity_quality),
+            "provider_capability": runtime_provider_capability(runtime, &parsed.provider),
+            "routine_surface": runtime_routine_surface_projection(
+                runtime,
+                &parsed.provider,
+                binding_context.worktree_root.as_deref(),
+            ),
         }),
         warnings,
         repair_actions: Vec::new(),
@@ -3983,9 +5977,9 @@ fn infer_strongest_reentry_selection(
 }
 
 fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
-    let store = match RogerStore::open(&runtime.store_root) {
+    let store = match open_store_or_response(runtime, "rr resume") {
         Ok(store) => store,
-        Err(err) => return error_response(format!("failed to open Roger store: {err}")),
+        Err(response) => return response,
     };
 
     let binding_context = LaunchBindingContext::for_cwd(&runtime.cwd);
@@ -4050,36 +6044,64 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         }
     };
 
-    if !SUPPORTED_REVIEW_PROVIDERS.contains(&session.provider.as_str()) {
+    let supported_providers = runtime_supported_review_providers(runtime);
+    let planned_not_live_providers = runtime_planned_not_live_review_providers(runtime);
+    if !supported_providers.contains(&session.provider.as_str()) {
+        let mut repair_actions = vec![
+            "resume is currently available for opencode, codex, gemini, and claude sessions"
+                .to_owned(),
+        ];
+        if copilot_feature_gated_launch_enabled(session_copilot::PROVIDER_ID) {
+            repair_actions.push(
+                "enable RR_ENABLE_COPILOT_PROVIDER=1 to resume Copilot sessions through the feature-gated tier-b continuity path"
+                    .to_owned(),
+            );
+        }
         return blocked_response(
             format!(
                 "session {} uses provider '{}' which cannot be resumed by this CLI slice",
                 session.id, session.provider
             ),
-            vec![
-                "resume is currently available for opencode, codex, gemini, and claude sessions"
-                    .to_owned(),
-            ],
+            repair_actions,
             json!({
                 "session_id": session.id,
                 "provider": session.provider,
-                "supported_providers": SUPPORTED_REVIEW_PROVIDERS,
-                "planned_not_live_providers": PLANNED_REVIEW_PROVIDERS,
+                "supported_providers": supported_providers,
+                "planned_not_live_providers": planned_not_live_providers,
                 "not_supported_providers": NOT_LIVE_REVIEW_PROVIDERS,
-                "live_review_provider_support": review_provider_support_matrix(),
+                "live_review_provider_support": runtime_review_provider_support_matrix(runtime),
             }),
         );
     }
 
     let command_name = "rr resume";
+    let provider_capability = runtime_provider_capability(runtime, &session.provider);
+    let routine_surface = runtime_routine_surface_projection(
+        runtime,
+        &session.provider,
+        binding
+            .as_ref()
+            .and_then(|entry| entry.worktree_root.as_deref()),
+    );
 
     if parsed.robot {
         let continuity_state = session.continuity_state.to_ascii_lowercase();
-        let provider_is_bounded = session.provider != "opencode";
-        let degraded = provider_is_bounded
+        let provider_support_tier = provider_capability["support_tier"]
+            .as_str()
+            .unwrap_or_default();
+        let provider_is_tier_b = matches!(provider_support_tier, "tier_b" | "tier_b_feature_gated");
+        let degraded = !provider_is_tier_b
             || continuity_state.contains("degraded")
             || continuity_state.contains("reseed")
             || continuity_state.contains("unusable");
+        let has_locator = session.session_locator.is_some();
+        let has_resume_bundle = session.resume_bundle_artifact_id.is_some();
+        let provider_supports_reopen = provider_capability["supports"]["resume_reopen"]
+            .as_bool()
+            .unwrap_or(false);
+        let provider_supports_reseed = provider_capability["supports"]["resume_reseed"]
+            .as_bool()
+            .unwrap_or(false);
         let continuity_quality = if continuity_state.contains("unusable") {
             "unusable"
         } else if degraded {
@@ -4087,11 +6109,12 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         } else {
             "usable"
         };
-        let inferred_resume_path = if session.provider == "codex"
-            || session.provider == "claude"
-            || session.provider == "gemini"
-            || continuity_state.contains("reseed")
+        let inferred_resume_path = if continuity_state.contains("reseed") {
+            "reseeded_from_bundle"
+        } else if has_locator && provider_supports_reopen && !continuity_state.contains("unusable")
         {
+            "reopened_by_locator"
+        } else if has_resume_bundle || (provider_supports_reseed && !provider_supports_reopen) {
             "reseeded_from_bundle"
         } else if continuity_state.contains("reopen") {
             "reopened_by_locator"
@@ -4116,7 +6139,8 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 "resume_path": inferred_resume_path,
                 "continuity_quality": continuity_quality,
                 "continuity_state_snapshot": session.continuity_state,
-                "provider_capability": provider_capability(&session.provider),
+                "provider_capability": provider_capability.clone(),
+                "routine_surface": routine_surface.clone(),
             }),
             warnings: {
                 let mut warnings: Vec<String> =
@@ -4139,7 +6163,8 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 "pull_request": session.review_target.pull_request_number,
                 "command": "resume",
                 "provider": session.provider,
-                "provider_capability": provider_capability(&session.provider),
+                "provider_capability": provider_capability.clone(),
+                "routine_surface": routine_surface.clone(),
             }),
             warnings: {
                 let mut warnings: Vec<String> =
@@ -4442,10 +6467,79 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                     .collect(),
             )
         }
+        "copilot" => {
+            let continuity = match launch_copilot_resume_or_return_session(
+                runtime,
+                &session.review_target,
+                &attempt_id,
+                &binding_context,
+                session.session_locator.as_ref(),
+                resume_bundle.as_ref(),
+            ) {
+                Ok(linkage) => linkage,
+                Err(err) => {
+                    if let Err(update_err) = persist_launch_attempt_state(
+                        &store,
+                        &attempt_id,
+                        err.state,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(&err.detail),
+                    ) {
+                        return error_response(update_err);
+                    }
+                    return blocked_response(
+                        format!("resume failed: {}", err.detail),
+                        err.repair_actions,
+                        {
+                            let mut data = serde_json::Map::new();
+                            data.insert(
+                                "reason_code".to_owned(),
+                                Value::String(err.reason_code.to_owned()),
+                            );
+                            data.insert(
+                                "launch_attempt_id".to_owned(),
+                                Value::String(attempt_id.clone()),
+                            );
+                            data.insert(
+                                "provider".to_owned(),
+                                Value::String(session_copilot::PROVIDER_ID.to_owned()),
+                            );
+                            data.insert("session_id".to_owned(), Value::String(session.id.clone()));
+                            if let Some(extra) = err.extra_data.as_object() {
+                                for (key, value) in extra {
+                                    data.insert(key.clone(), value.clone());
+                                }
+                            }
+                            Value::Object(data)
+                        },
+                    );
+                }
+            };
+            (
+                continuity.linkage.locator,
+                continuity.linkage.session_path,
+                continuity.terminal_state,
+                continuity.linkage.continuity_quality,
+                continuity.decision_reason,
+                provider_support_warning(&session.provider, "rr resume")
+                    .into_iter()
+                    .collect(),
+            )
+        }
         _ => unreachable!("provider validated above"),
     };
     if let Some(warning) = inferred_selection_warning {
         warnings.insert(0, warning);
+    }
+    let mut repair_actions = Vec::new();
+    if session.provider == "opencode"
+        && let Some((warning, actions)) = opencode_legacy_config_guidance(&runtime.opencode_bin)
+    {
+        warnings.push(warning);
+        repair_actions.extend(actions);
     }
 
     let provider_session_id =
@@ -4575,17 +6669,19 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             "resume_path": resume_path,
             "continuity_quality": continuity_state_label(&continuity_quality),
             "decision_reason": decision_reason,
+            "provider_capability": provider_capability.clone(),
+            "routine_surface": routine_surface.clone(),
         }),
         warnings,
-        repair_actions: Vec::new(),
+        repair_actions,
         message: format!("{run_kind} completed"),
     }
 }
 
 fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
-    let store = match RogerStore::open(&runtime.store_root) {
+    let store = match open_store_or_response(runtime, "rr return") {
         Ok(store) => store,
-        Err(err) => return error_response(format!("failed to open Roger store: {err}")),
+        Err(response) => return response,
     };
 
     let binding_context = LaunchBindingContext::for_cwd(&runtime.cwd);
@@ -4614,8 +6710,12 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         }
     };
 
-    if session.provider != "opencode" {
-        let mut capability = provider_capability(&session.provider);
+    let provider_capability = runtime_provider_capability(runtime, &session.provider);
+    if session.provider != "opencode"
+        && !(session.provider == session_copilot::PROVIDER_ID
+            && copilot_feature_gated_launch_enabled(&session.provider))
+    {
+        let mut capability = provider_capability.clone();
         capability["required_tier_for_return"] = json!("tier_b");
         capability["supports_rr_return"] = json!(false);
         return blocked_response(
@@ -4623,7 +6723,10 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 "rr return is unsupported for provider '{}' in 0.1.0",
                 session.provider
             ),
-            vec!["rr return is only blessed on OpenCode tier-b sessions".to_owned()],
+            vec![
+                "rr return is only blessed on OpenCode and feature-gated Copilot tier-b sessions"
+                    .to_owned(),
+            ],
             json!({
                 "session_id": session.id,
                 "provider": session.provider,
@@ -4658,55 +6761,178 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         return error_response(err);
     }
 
-    let adapter = OpenCodeAdapter::with_binary(runtime.opencode_bin.clone());
-    let reopen_outcome = classify_reopen_outcome_for_return(
-        &adapter,
-        &session.review_target,
-        session.session_locator.as_ref(),
-    );
-
-    let outcome = match rr_return_to_roger_session(
-        &adapter,
-        &store,
-        ResolveSessionLaunchBinding {
-            explicit_session_id: Some(&session.id),
-            surface: LaunchSurface::Cli,
-            repo_locator: &session.review_target.repository,
-            review_target: Some(&session.review_target),
-            ui_target: Some(cli_config::UI_TARGET),
-            instance_preference: Some(cli_config::INSTANCE_PREFERENCE),
-        },
-        reopen_outcome,
-    ) {
-        Ok(outcome) => outcome,
-        Err(err) => {
-            let detail = format!("rr return failed: {err}");
-            if let Err(update_err) = persist_launch_attempt_state(
-                &store,
-                &attempt_id,
-                LaunchAttemptState::FailedSpawn,
-                None,
-                None,
-                None,
-                None,
-                Some(&detail),
-            ) {
-                return error_response(update_err);
-            }
-            return blocked_response(
-                detail,
-                vec!["ensure a valid binding and ResumeBundle exist for this repo".to_owned()],
-                json!({
-                    "reason_code": "rr_return_failed",
-                    "session_id": session.id,
-                    "launch_attempt_id": attempt_id,
-                }),
-            );
+    let resume_bundle = if session.provider == session_copilot::PROVIDER_ID {
+        match session.resume_bundle_artifact_id.as_deref() {
+            Some(id) => match store.load_resume_bundle(id) {
+                Ok(bundle) => Some(bundle),
+                Err(err) => {
+                    let detail = format!("resume bundle could not be loaded: {err}");
+                    if let Err(update_err) = persist_launch_attempt_state(
+                        &store,
+                        &attempt_id,
+                        LaunchAttemptState::FailedSessionBinding,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(&detail),
+                    ) {
+                        return error_response(update_err);
+                    }
+                    return blocked_response(
+                        detail,
+                        vec!["re-run rr review to regenerate ResumeBundle".to_owned()],
+                        json!({
+                            "reason_code": "resume_bundle_missing_or_invalid",
+                            "session_id": session.id,
+                            "launch_attempt_id": attempt_id,
+                        }),
+                    );
+                }
+            },
+            None => None,
         }
+    } else {
+        None
+    };
+
+    let (
+        provider_session_locator,
+        return_path,
+        terminal_state,
+        continuity_quality,
+        decision_reason,
+    ) = match session.provider.as_str() {
+        "opencode" => {
+            let adapter = OpenCodeAdapter::with_binary(runtime.opencode_bin.clone());
+            let reopen_outcome = classify_reopen_outcome_for_return(
+                &adapter,
+                &session.review_target,
+                session.session_locator.as_ref(),
+            );
+
+            let outcome = match rr_return_to_roger_session(
+                &adapter,
+                &store,
+                ResolveSessionLaunchBinding {
+                    explicit_session_id: Some(&session.id),
+                    surface: LaunchSurface::Cli,
+                    repo_locator: &session.review_target.repository,
+                    review_target: Some(&session.review_target),
+                    ui_target: Some(cli_config::UI_TARGET),
+                    instance_preference: Some(cli_config::INSTANCE_PREFERENCE),
+                },
+                reopen_outcome,
+            ) {
+                Ok(outcome) => outcome,
+                Err(err) => {
+                    let detail = format!("rr return failed: {err}");
+                    if let Err(update_err) = persist_launch_attempt_state(
+                        &store,
+                        &attempt_id,
+                        LaunchAttemptState::FailedSpawn,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(&detail),
+                    ) {
+                        return error_response(update_err);
+                    }
+                    return blocked_response(
+                        detail,
+                        vec![
+                            "ensure a valid binding and ResumeBundle exist for this repo"
+                                .to_owned(),
+                        ],
+                        json!({
+                            "reason_code": "rr_return_failed",
+                            "session_id": session.id,
+                            "launch_attempt_id": attempt_id,
+                        }),
+                    );
+                }
+            };
+
+            let return_path = return_path_label(outcome.path).to_owned();
+            let terminal_state = if return_path == "reseeded_session" {
+                LaunchAttemptState::VerifiedReseeded
+            } else {
+                LaunchAttemptState::VerifiedReopened
+            };
+            (
+                outcome.locator,
+                return_path,
+                terminal_state,
+                outcome.continuity_quality,
+                format!("{:?}", outcome.decision.reason_code),
+            )
+        }
+        "copilot" => {
+            let continuity = match launch_copilot_resume_or_return_session(
+                runtime,
+                &session.review_target,
+                &attempt_id,
+                &binding_context,
+                session.session_locator.as_ref(),
+                resume_bundle.as_ref(),
+            ) {
+                Ok(linkage) => linkage,
+                Err(err) => {
+                    if let Err(update_err) = persist_launch_attempt_state(
+                        &store,
+                        &attempt_id,
+                        err.state,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(&err.detail),
+                    ) {
+                        return error_response(update_err);
+                    }
+                    return blocked_response(
+                        format!("rr return failed: {}", err.detail),
+                        err.repair_actions,
+                        {
+                            let mut data = serde_json::Map::new();
+                            data.insert(
+                                "reason_code".to_owned(),
+                                Value::String(err.reason_code.to_owned()),
+                            );
+                            data.insert(
+                                "launch_attempt_id".to_owned(),
+                                Value::String(attempt_id.clone()),
+                            );
+                            data.insert(
+                                "provider".to_owned(),
+                                Value::String(session_copilot::PROVIDER_ID.to_owned()),
+                            );
+                            data.insert("session_id".to_owned(), Value::String(session.id.clone()));
+                            if let Some(extra) = err.extra_data.as_object() {
+                                for (key, value) in extra {
+                                    data.insert(key.clone(), value.clone());
+                                }
+                            }
+                            Value::Object(data)
+                        },
+                    );
+                }
+            };
+
+            (
+                continuity.linkage.locator,
+                continuity.linkage.session_path,
+                continuity.terminal_state,
+                continuity.linkage.continuity_quality,
+                continuity.decision_reason,
+            )
+        }
+        _ => unreachable!("provider return support validated above"),
     };
 
     let provider_session_id =
-        match verified_provider_session_id(&session.provider, &outcome.locator) {
+        match verified_provider_session_id(&session.provider, &provider_session_locator) {
             Ok(session_id) => session_id.to_owned(),
             Err(detail) => {
                 if let Err(update_err) = persist_launch_attempt_state(
@@ -4716,7 +6942,7 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                     None,
                     None,
                     None,
-                    Some(&outcome.locator),
+                    Some(&provider_session_locator),
                     Some(&detail),
                 ) {
                     return error_response(update_err);
@@ -4741,7 +6967,7 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         None,
         None,
         Some(&provider_session_id),
-        Some(&outcome.locator),
+        Some(&provider_session_locator),
         None,
     ) {
         return error_response(err);
@@ -4752,20 +6978,13 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         .map(|record| record.id.clone())
         .unwrap_or_else(|| next_id("binding"));
     let run_id = next_id("run");
-    let continuity_state = format!(
-        "return:{}",
-        continuity_state_label(&outcome.continuity_quality)
-    );
-    let terminal_state = match outcome.path {
-        OpenCodeReturnPath::ReboundExistingSession => LaunchAttemptState::VerifiedReopened,
-        OpenCodeReturnPath::ReseededSession => LaunchAttemptState::VerifiedReseeded,
-    };
+    let continuity_state = format!("return:{}", continuity_state_label(&continuity_quality));
     if let Err(err) =
         store.finalize_existing_session_launch_attempt(FinalizeExistingSessionLaunchAttempt {
             attempt_id: &attempt_id,
             terminal_state,
             provider_session_id: &provider_session_id,
-            verified_locator: &outcome.locator,
+            verified_locator: &provider_session_locator,
             review_session_id: &session.id,
             expected_session_row_version: session.row_version,
             continuity_state: &continuity_state,
@@ -4778,7 +6997,7 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                     "{}#{}",
                     session.review_target.repository, session.review_target.pull_request_number
                 ),
-                continuity_quality: continuity_state_label(&outcome.continuity_quality),
+                continuity_quality: continuity_state_label(&continuity_quality),
                 session_locator_artifact_id: None,
             },
             launch_binding: CreateSessionLaunchBinding {
@@ -4811,7 +7030,7 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             None,
             None,
             Some(&provider_session_id),
-            Some(&outcome.locator),
+            Some(&provider_session_locator),
             Some(&detail),
         ) {
             return error_response(update_err);
@@ -4819,8 +7038,17 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         return error_response(detail);
     }
 
-    let degraded = !matches!(outcome.continuity_quality, ContinuityQuality::Usable)
-        || matches!(outcome.path, OpenCodeReturnPath::ReseededSession);
+    let degraded = !matches!(continuity_quality, ContinuityQuality::Usable)
+        || return_path == "reseeded_from_bundle"
+        || return_path == "reseeded_session";
+    let mut warnings = Vec::new();
+    let mut repair_actions = Vec::new();
+    if session.provider == "opencode"
+        && let Some((warning, actions)) = opencode_legacy_config_guidance(&runtime.opencode_bin)
+    {
+        warnings.push(warning);
+        repair_actions.extend(actions);
+    }
 
     CommandResponse {
         outcome: if degraded {
@@ -4829,29 +7057,29 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             OutcomeKind::Complete
         },
         data: {
-            let mut capability = provider_capability(&session.provider);
+            let mut capability = provider_capability.clone();
             capability["supports_rr_return"] = json!(true);
             capability["required_tier_for_return"] = json!("tier_b");
             json!({
                 "launch_attempt_id": attempt_id,
-                "session_id": outcome.session_id,
+                "session_id": session.id,
                 "review_run_id": run_id,
                 "provider_capability": capability,
-                "return_path": return_path_label(outcome.path),
-                "continuity_quality": continuity_state_label(&outcome.continuity_quality),
-                "decision_reason": format!("{:?}", outcome.decision.reason_code),
+                "return_path": return_path,
+                "continuity_quality": continuity_state_label(&continuity_quality),
+                "decision_reason": decision_reason,
             })
         },
-        warnings: Vec::new(),
-        repair_actions: Vec::new(),
+        warnings,
+        repair_actions,
         message: "rr return completed".to_owned(),
     }
 }
 
 fn handle_sessions(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
-    let store = match RogerStore::open(&runtime.store_root) {
+    let store = match open_store_or_response(runtime, "rr sessions") {
         Ok(store) => store,
-        Err(err) => return error_response(format!("failed to open Roger store: {err}")),
+        Err(response) => return response,
     };
 
     let limit = parsed.limit.unwrap_or(25).min(250);
@@ -4955,9 +7183,9 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         );
     };
 
-    let store = match RogerStore::open(&runtime.store_root) {
+    let store = match open_store_or_response(runtime, "rr search") {
         Ok(store) => store,
-        Err(err) => return error_response(format!("failed to open Roger store: {err}")),
+        Err(response) => return response,
     };
 
     let limit = parsed.limit.unwrap_or(10).min(100);
@@ -6711,13 +8939,15 @@ fn handle_update(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     }
 }
 
-fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
+fn handle_robot_docs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let topic = parsed.robot_docs_topic.as_deref().unwrap_or("guide");
 
     let (items, version) = match topic {
         "guide" => (
             vec![
                 json!({"command": "rr status --robot", "purpose": "session attention snapshot"}),
+                json!({"command": "rr init --robot", "purpose": "bootstrap Roger-owned local store and marker state; provider auth/install preflight remains a separate follow-up surface"}),
+                json!({"command": "rr doctor --provider <name> --robot", "purpose": "provider-aware preflight for local bootstrap, binary presence, policy/profile resolution, and deferred first-launch checks"}),
                 json!({"command": "rr sessions --robot", "purpose": "global session finder"}),
                 json!({"command": "rr findings --robot", "purpose": "structured findings list"}),
                 json!({"command": "rr search --query <text> --query-mode recall --robot", "purpose": "prior-review lookup"}),
@@ -6727,9 +8957,9 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                 json!({
                     "kind": "provider_support",
                     "command": "rr review --provider <name>",
-                    "summary": "OpenCode is the only live tier-b continuity path in 0.1.0. Codex, Gemini, and Claude Code are exposed as bounded tier-a start/reseed/raw-capture providers only. Copilot is planned but not yet live, and Pi-Agent remains out of scope for 0.1.0.",
-                    "live_review_providers": review_provider_support_matrix(),
-                    "planned_not_live_providers": PLANNED_REVIEW_PROVIDERS,
+                    "summary": runtime_review_provider_support_summary(runtime),
+                    "live_review_providers": runtime_review_provider_support_matrix(runtime),
+                    "planned_not_live_providers": runtime_planned_not_live_review_providers(runtime),
                     "not_supported_providers": NOT_LIVE_REVIEW_PROVIDERS,
                 }),
                 json!({"command": "rr update --channel stable --dry-run --robot", "purpose": "update metadata preflight (non-mutating)"}),
@@ -6738,8 +8968,9 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                 json!({"command": "rr bridge pack-extension --robot", "purpose": "assemble unpacked browser sideload artifact"}),
                 json!({"command": "rr extension setup --browser <edge|chrome|brave> --robot", "purpose": "guided package/setup flow with fail-closed identity + host checks"}),
                 json!({"command": "rr extension doctor --browser <edge|chrome|brave> --robot", "purpose": "verify package, identity, native host registration, and bridge reachability"}),
+                json!({"command": "rr extension uninstall --robot", "purpose": "guided operator uninstall path for bridge host-registration assets"}),
                 json!({"command": "rr bridge install [--extension-id <id>] --robot", "purpose": "repair/dev host registration override when guided setup cannot discover identity"}),
-                json!({"command": "rr bridge uninstall --robot", "purpose": "remove bridge registration assets"}),
+                json!({"command": "rr bridge uninstall --robot", "purpose": "repair alias for host-registration asset removal when extension uninstall is unavailable"}),
                 json!({"command": "rr robot-docs schemas --robot", "purpose": "schema inventory"}),
                 json!({
                     "kind": "reconciliation_contract",
@@ -6838,6 +9069,8 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
         "commands" => (
             vec![
                 json!({"command": "rr status", "required_formats": ["json"], "optional_formats": ["compact"]}),
+                json!({"command": "rr init", "required_formats": ["json"], "optional_formats": []}),
+                json!({"command": "rr doctor", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr sessions", "required_formats": ["json"], "optional_formats": ["compact"]}),
                 json!({"command": "rr findings", "required_formats": ["json"], "optional_formats": ["compact"]}),
                 json!({"command": "rr search", "required_formats": ["json"], "optional_formats": ["compact"]}),
@@ -6849,8 +9082,8 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                     "command": "rr review --dry-run",
                     "required_formats": ["json"],
                     "optional_formats": [],
-                    "supported_providers": SUPPORTED_REVIEW_PROVIDERS,
-                    "planned_not_live_providers": PLANNED_REVIEW_PROVIDERS,
+                    "supported_providers": runtime_supported_review_providers(runtime),
+                    "planned_not_live_providers": runtime_planned_not_live_review_providers(runtime),
                     "not_supported_providers": NOT_LIVE_REVIEW_PROVIDERS,
                 }),
                 json!({"command": "rr resume --dry-run", "required_formats": ["json"], "optional_formats": []}),
@@ -6859,6 +9092,7 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
                 json!({"command": "rr bridge pack-extension", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr extension setup", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr extension doctor", "required_formats": ["json"], "optional_formats": []}),
+                json!({"command": "rr extension uninstall", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr bridge install", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr bridge uninstall", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr robot-docs guide", "required_formats": ["json"], "optional_formats": ["compact"]}),
@@ -6871,6 +9105,8 @@ fn handle_robot_docs(parsed: &ParsedArgs) -> CommandResponse {
         "schemas" => (
             vec![
                 json!({"command": "rr review", "schema_id": "rr.robot.review.v1"}),
+                json!({"command": "rr init", "schema_id": "rr.robot.init.v1"}),
+                json!({"command": "rr doctor", "schema_id": "rr.robot.doctor.v1"}),
                 json!({"command": "rr resume", "schema_id": "rr.robot.resume.v1"}),
                 json!({"command": "rr return", "schema_id": "rr.robot.return.v1"}),
                 json!({"command": "rr sessions", "schema_id": "rr.robot.sessions.v1"}),
@@ -6944,9 +9180,9 @@ fn handle_draft(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         body: String,
     }
 
-    let store = match RogerStore::open(&runtime.store_root) {
+    let store = match open_store_or_response(runtime, "rr draft") {
         Ok(store) => store,
-        Err(err) => return error_response(format!("failed to open Roger store: {err}")),
+        Err(response) => return response,
     };
 
     let binding_context = LaunchBindingContext::for_cwd(&runtime.cwd);
@@ -6966,7 +9202,7 @@ fn handle_draft(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         Err(err) => return error_response(format!("failed to resolve draft context: {err}")),
     };
 
-    let (session, _binding) = match resolution {
+    let (session, binding) = match resolution {
         SessionReentryResolution::Resolved { session, binding } => (session, binding),
         SessionReentryResolution::PickerRequired { reason, candidates } => {
             return blocked_picker_response(reason, candidates);
@@ -7270,7 +9506,13 @@ fn handle_draft(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         }
     };
 
-    let routine_surface = runtime_routine_surface_projection(runtime, &session.provider);
+    let routine_surface = runtime_routine_surface_projection(
+        runtime,
+        &session.provider,
+        binding
+            .as_ref()
+            .and_then(|entry| entry.worktree_root.as_deref()),
+    );
     let provider_capability = runtime_provider_capability(runtime, &session.provider);
     let warnings = match session.provider.as_str() {
         "opencode" => Vec::new(),
@@ -7442,9 +9684,9 @@ fn approved_batch_ids_for_run(
 }
 
 fn handle_approve(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
-    let store = match RogerStore::open(&runtime.store_root) {
+    let store = match open_store_or_response(runtime, "rr approve") {
         Ok(store) => store,
-        Err(err) => return error_response(format!("failed to open Roger store: {err}")),
+        Err(response) => return response,
     };
 
     let binding_context = LaunchBindingContext::for_cwd(&runtime.cwd);
@@ -7464,7 +9706,7 @@ fn handle_approve(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse 
         Err(err) => return error_response(format!("failed to resolve approval context: {err}")),
     };
 
-    let (session, _binding) = match resolution {
+    let (session, binding) = match resolution {
         SessionReentryResolution::Resolved { session, binding } => (session, binding),
         SessionReentryResolution::PickerRequired { reason, candidates } => {
             return blocked_picker_response(reason, candidates);
@@ -7945,7 +10187,13 @@ fn handle_approve(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse 
         }
     };
 
-    let routine_surface = runtime_routine_surface_projection(runtime, &session.provider);
+    let routine_surface = runtime_routine_surface_projection(
+        runtime,
+        &session.provider,
+        binding
+            .as_ref()
+            .and_then(|entry| entry.worktree_root.as_deref()),
+    );
     let provider_capability = runtime_provider_capability(runtime, &session.provider);
     let warnings: Vec<String> = provider_support_warning(&session.provider, "rr approve")
         .into_iter()
@@ -8022,9 +10270,9 @@ fn handle_approve(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse 
 }
 
 fn handle_post(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
-    let store = match RogerStore::open(&runtime.store_root) {
+    let store = match open_store_or_response(runtime, "rr post") {
         Ok(store) => store,
-        Err(err) => return error_response(format!("failed to open Roger store: {err}")),
+        Err(response) => return response,
     };
 
     let binding_context = LaunchBindingContext::for_cwd(&runtime.cwd);
@@ -8044,7 +10292,7 @@ fn handle_post(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         Err(err) => return error_response(format!("failed to resolve posting context: {err}")),
     };
 
-    let (session, _binding) = match resolution {
+    let (session, binding) = match resolution {
         SessionReentryResolution::Resolved { session, binding } => (session, binding),
         SessionReentryResolution::PickerRequired { reason, candidates } => {
             return blocked_picker_response(reason, candidates);
@@ -8518,7 +10766,13 @@ fn handle_post(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         }
     };
 
-    let routine_surface = runtime_routine_surface_projection(runtime, &session.provider);
+    let routine_surface = runtime_routine_surface_projection(
+        runtime,
+        &session.provider,
+        binding
+            .as_ref()
+            .and_then(|entry| entry.worktree_root.as_deref()),
+    );
     let provider_capability = runtime_provider_capability(runtime, &session.provider);
     let warnings: Vec<String> = provider_support_warning(&session.provider, "rr post")
         .into_iter()
@@ -8673,9 +10927,9 @@ fn outbound_recovery_summary(
 }
 
 fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
-    let store = match RogerStore::open(&runtime.store_root) {
+    let store = match open_store_or_response(runtime, "rr status") {
         Ok(store) => store,
-        Err(err) => return error_response(format!("failed to open Roger store: {err}")),
+        Err(response) => return response,
     };
 
     let binding_context = LaunchBindingContext::for_cwd(&runtime.cwd);
@@ -8695,7 +10949,7 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         Err(err) => return error_response(format!("failed to resolve status context: {err}")),
     };
 
-    let (session, _binding) = match resolution {
+    let (session, binding) = match resolution {
         SessionReentryResolution::Resolved { session, binding } => (session, binding),
         SessionReentryResolution::PickerRequired { reason, candidates } => {
             if candidates.is_empty() {
@@ -8785,7 +11039,15 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     };
 
     let branch = infer_git_branch(&runtime.cwd);
-    let provider_tier = provider_tier(&session.provider);
+    let provider_tier = runtime_provider_tier(runtime, &session.provider);
+    let provider_capability = runtime_provider_capability(runtime, &session.provider);
+    let routine_surface = runtime_routine_surface_projection(
+        runtime,
+        &session.provider,
+        binding
+            .as_ref()
+            .and_then(|entry| entry.worktree_root.as_deref()),
+    );
     let mut warnings: Vec<String> = provider_support_warning(&session.provider, "rr status")
         .into_iter()
         .collect();
@@ -8857,7 +11119,8 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 "resume_locator_present": session.session_locator.is_some(),
                 "state": session.continuity_state,
             },
-            "provider_capability": provider_capability(&session.provider)
+            "provider_capability": provider_capability,
+            "routine_surface": routine_surface,
         }),
         warnings,
         repair_actions,
@@ -8866,9 +11129,9 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
 }
 
 fn handle_findings(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
-    let store = match RogerStore::open(&runtime.store_root) {
+    let store = match open_store_or_response(runtime, "rr findings") {
         Ok(store) => store,
-        Err(err) => return error_response(format!("failed to open Roger store: {err}")),
+        Err(response) => return response,
     };
 
     let binding_context = LaunchBindingContext::for_cwd(&runtime.cwd);
@@ -8888,12 +11151,20 @@ fn handle_findings(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
         Err(err) => return error_response(format!("failed to resolve findings context: {err}")),
     };
 
-    let (session, _binding) = match resolution {
+    let (session, binding) = match resolution {
         SessionReentryResolution::Resolved { session, binding } => (session, binding),
         SessionReentryResolution::PickerRequired { reason, candidates } => {
             return blocked_picker_response(reason, candidates);
         }
     };
+    let provider_capability = runtime_provider_capability(runtime, &session.provider);
+    let routine_surface = runtime_routine_surface_projection(
+        runtime,
+        &session.provider,
+        binding
+            .as_ref()
+            .and_then(|entry| entry.worktree_root.as_deref()),
+    );
 
     let Some(run) = (match store.latest_review_run(&session.id) {
         Ok(run) => run,
@@ -8908,7 +11179,9 @@ fn handle_findings(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
                 "filters_applied": {
                     "repository": session.review_target.repository,
                     "pull_request": session.review_target.pull_request_number,
-                }
+                },
+                "provider_capability": provider_capability.clone(),
+                "routine_surface": routine_surface.clone(),
             }),
             warnings: Vec::new(),
             repair_actions: Vec::new(),
@@ -9006,7 +11279,8 @@ fn handle_findings(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
                 "pull_request": session.review_target.pull_request_number,
             },
             "reconciliation": reconciliation,
-            "provider_capability": provider_capability(&session.provider),
+            "provider_capability": provider_capability,
+            "routine_surface": routine_surface,
         }),
         warnings,
         repair_actions,
@@ -9108,7 +11382,9 @@ fn render_output(parsed: &ParsedArgs, mut response: CommandResponse) -> CliRunRe
 
     if matches!(
         parsed.command,
-        CommandKind::Status
+        CommandKind::Init
+            | CommandKind::Doctor
+            | CommandKind::Status
             | CommandKind::Findings
             | CommandKind::Sessions
             | CommandKind::Search
@@ -9138,8 +11414,16 @@ fn render_output(parsed: &ParsedArgs, mut response: CommandResponse) -> CliRunRe
         }
     }
 
+    let exit_code = if response.outcome == OutcomeKind::Degraded
+        && matches!(parsed.command, CommandKind::Review | CommandKind::Resume)
+    {
+        0
+    } else {
+        response.outcome.exit_code()
+    };
+
     CliRunResult {
-        exit_code: response.outcome.exit_code(),
+        exit_code,
         stdout,
         stderr,
     }
@@ -9318,6 +11602,7 @@ fn build_resume_bundle(
     provider: String,
     continuity_quality: ContinuityQuality,
     stage_summary: &str,
+    artifact_refs: Vec<String>,
 ) -> ResumeBundle {
     ResumeBundle {
         schema_version: 1,
@@ -9330,7 +11615,7 @@ fn build_resume_bundle(
         unresolved_finding_ids: Vec::new(),
         outbound_draft_ids: Vec::new(),
         attention_summary: "awaiting_user_input".to_owned(),
-        artifact_refs: Vec::new(),
+        artifact_refs,
     }
 }
 
@@ -9386,6 +11671,14 @@ fn provider_tier(provider: &str) -> &'static str {
     }
 }
 
+fn runtime_provider_tier(_runtime: &CliRuntime, provider: &str) -> &'static str {
+    if copilot_feature_gated_launch_enabled(provider) {
+        COPILOT_FEATURE_GATED_TIER
+    } else {
+        provider_tier(provider)
+    }
+}
+
 fn provider_support_status(provider: &str) -> &'static str {
     match provider {
         "opencode" => "first_class_live",
@@ -9425,6 +11718,10 @@ fn provider_capability(provider: &str) -> Value {
         "display_name": provider_display_name(provider),
         "status": provider_support_status(provider),
         "tier": provider_tier(provider),
+        "support_tier": provider_tier(provider),
+        "denied_capabilities": [],
+        "audit_artifact_classes": [],
+        "notes": provider_live_support_notes(provider),
         "supports": {
             "review_start": SUPPORTED_REVIEW_PROVIDERS.contains(&provider),
             "resume_reseed": SUPPORTED_REVIEW_PROVIDERS.contains(&provider),
@@ -9464,10 +11761,92 @@ fn provider_supports_json(provider: &ResolvedProviderCapability) -> Value {
     })
 }
 
+fn stable_digest_payload(payload: &Value) -> String {
+    sha256_prefixed_json(payload)
+        .unwrap_or_else(|_| format!("sha256:{}", sha256_hex(payload.to_string().as_bytes())))
+}
+
+fn mcp_posture_projection(provider: &ResolvedProviderCapability) -> Value {
+    let builtin_denied = provider
+        .denied_capabilities
+        .iter()
+        .any(|capability| capability == "builtin_github_mcp");
+    let broad_denied = provider
+        .denied_capabilities
+        .iter()
+        .any(|capability| capability == "broad_mcp_access");
+    let posture = if builtin_denied || broad_denied {
+        "restricted"
+    } else {
+        "not_declared"
+    };
+
+    json!({
+        "posture": posture,
+        "source": "provider.policy_profile.denied_capabilities",
+        "builtin_github_mcp": {
+            "state": if builtin_denied { "denied" } else { "not_denied" },
+            "denied": builtin_denied,
+        },
+        "broad_mcp_access": {
+            "state": if broad_denied { "denied" } else { "not_denied" },
+            "denied": broad_denied,
+        },
+    })
+}
+
+fn routine_surface_with_worktree_root(
+    mut routine_surface: Value,
+    cwd: &Path,
+    worktree_root_override: Option<&str>,
+) -> Value {
+    let worktree_root = worktree_root_override
+        .map(ToOwned::to_owned)
+        .or_else(|| infer_git_worktree_root(cwd));
+    if let Some(surface_obj) = routine_surface.as_object_mut() {
+        surface_obj.insert(
+            "worktree_root".to_owned(),
+            worktree_root.map(Value::String).unwrap_or(Value::Null),
+        );
+    }
+    routine_surface
+}
+
 fn provider_capability_projection(
     provider: &ResolvedProviderCapability,
     status_reason: Option<&str>,
 ) -> Value {
+    let policy_profile = json!({
+        "id": provider.policy_profile.id.clone(),
+        "summary": provider.policy_profile.summary.clone(),
+        "mutation_posture": provider.policy_profile.mutation_posture.clone(),
+        "continuity_mode": provider.policy_profile.continuity_mode.clone(),
+    });
+    let policy_profile_digest_sha256 = stable_digest_payload(&json!({
+        "provider": provider.provider.clone(),
+        "policy_profile": policy_profile.clone(),
+    }));
+    let hook_profile = json!({
+        "id": format!("{}.hooks", provider.policy_profile.id),
+        "contract_version": provider.hook_contract_version.value.clone(),
+        "contract_provenance": provider.hook_contract_version.provenance.clone(),
+    });
+    let hook_profile_digest_sha256 = stable_digest_payload(&json!({
+        "provider": provider.provider.clone(),
+        "policy_profile_id": provider.policy_profile.id.clone(),
+        "hook_profile": hook_profile.clone(),
+    }));
+    let custom_instructions = json!({
+        "id": format!("{}.instructions", provider.policy_profile.id),
+        "contract_version": provider.instruction_contract_version.value.clone(),
+        "contract_provenance": provider.instruction_contract_version.provenance.clone(),
+    });
+    let custom_instructions_digest_sha256 = stable_digest_payload(&json!({
+        "provider": provider.provider.clone(),
+        "policy_profile_id": provider.policy_profile.id.clone(),
+        "custom_instructions": custom_instructions.clone(),
+    }));
+
     json!({
         "provider": provider.provider,
         "display_name": provider.display_name,
@@ -9475,12 +11854,16 @@ fn provider_capability_projection(
         "tier": provider.support_tier,
         "support_tier": provider.support_tier,
         "surface_class": provider.surface_class,
-        "policy_profile": {
-            "id": provider.policy_profile.id,
-            "summary": provider.policy_profile.summary,
-            "mutation_posture": provider.policy_profile.mutation_posture,
-            "continuity_mode": provider.policy_profile.continuity_mode,
-        },
+        "capability_provenance": provider.capability_provenance,
+        "policy_profile": policy_profile,
+        "policy_profile_digest_sha256": policy_profile_digest_sha256,
+        "hook_profile": hook_profile,
+        "hook_profile_digest_sha256": hook_profile_digest_sha256,
+        "custom_instructions": custom_instructions,
+        "custom_instructions_digest_sha256": custom_instructions_digest_sha256,
+        "mcp_posture": mcp_posture_projection(provider),
+        "denied_capabilities": provider.denied_capabilities,
+        "audit_artifact_classes": provider.audit_artifact_classes,
         "status_reason": status_reason,
         "supports": provider_supports_json(provider),
         "notes": provider.notes,
@@ -9488,14 +11871,37 @@ fn provider_capability_projection(
 }
 
 fn routine_surface_baseline_projection(baseline: &ResolvedRoutineSurfaceBaseline) -> Value {
+    let launch_profile_id = baseline.launch_profile_id.value.clone();
+    let launch_profile_provenance = baseline.launch_profile_id.provenance.clone();
+    let ui_target = baseline.ui_target.value.clone();
+    let ui_target_provenance = baseline.ui_target.provenance.clone();
+    let instance_preference = baseline.instance_preference.value.clone();
+    let instance_preference_provenance = baseline.instance_preference.provenance.clone();
+    let isolation_mode = baseline.isolation_mode.value.clone();
+    let isolation_mode_provenance = baseline.isolation_mode.provenance.clone();
+    let named_instance_on_collision = baseline.named_instance_on_collision.value;
+    let named_instance_on_collision_provenance =
+        baseline.named_instance_on_collision.provenance.clone();
+
     json!({
         "surface": baseline.surface,
-        "launch_profile_id": baseline.launch_profile_id.value,
+        "launch_profile_id": launch_profile_id.clone(),
+        "launch_profile": {
+            "id": launch_profile_id,
+            "provenance": launch_profile_provenance.clone(),
+        },
         "provider": provider_capability_projection(&baseline.provider, baseline.status_reason.as_deref()),
-        "ui_target": baseline.ui_target.value,
-        "instance_preference": baseline.instance_preference.value,
-        "isolation_mode": baseline.isolation_mode.value,
-        "named_instance_on_collision": baseline.named_instance_on_collision.value,
+        "ui_target": ui_target.clone(),
+        "instance_preference": instance_preference.clone(),
+        "isolation_mode": isolation_mode.clone(),
+        "named_instance_on_collision": named_instance_on_collision,
+        "provenance": {
+            "launch_profile_id": launch_profile_provenance,
+            "ui_target": ui_target_provenance,
+            "instance_preference": instance_preference_provenance,
+            "isolation_mode": isolation_mode_provenance,
+            "named_instance_on_collision": named_instance_on_collision_provenance,
+        },
         "repair_overrides_active": baseline.repair_overrides_active,
         "active_repair_override_keys": baseline.active_repair_override_keys,
         "status_reason": baseline.status_reason,
@@ -9503,6 +11909,10 @@ fn routine_surface_baseline_projection(baseline: &ResolvedRoutineSurfaceBaseline
 }
 
 fn runtime_provider_capability(runtime: &CliRuntime, provider: &str) -> Value {
+    if copilot_feature_gated_launch_enabled(provider) {
+        return copilot_projected_provider_capability(runtime);
+    }
+
     match resolved_routine_surface_baseline(runtime, provider) {
         Ok(baseline) => {
             provider_capability_projection(&baseline.provider, baseline.status_reason.as_deref())
@@ -9511,25 +11921,64 @@ fn runtime_provider_capability(runtime: &CliRuntime, provider: &str) -> Value {
     }
 }
 
-fn runtime_routine_surface_projection(runtime: &CliRuntime, provider: &str) -> Option<Value> {
+fn runtime_routine_surface_projection(
+    runtime: &CliRuntime,
+    provider: &str,
+    worktree_root_override: Option<&str>,
+) -> Option<Value> {
+    if copilot_feature_gated_launch_enabled(provider) {
+        return copilot_projected_routine_surface(runtime, worktree_root_override);
+    }
+
     resolved_routine_surface_baseline(runtime, provider)
         .ok()
-        .map(|baseline| routine_surface_baseline_projection(&baseline))
+        .map(|baseline| {
+            routine_surface_with_worktree_root(
+                routine_surface_baseline_projection(&baseline),
+                &runtime.cwd,
+                worktree_root_override,
+            )
+        })
 }
 
-fn review_provider_support_matrix() -> Vec<Value> {
-    SUPPORTED_REVIEW_PROVIDERS
-        .iter()
+fn runtime_supported_review_providers(_runtime: &CliRuntime) -> Vec<&'static str> {
+    let mut providers = SUPPORTED_REVIEW_PROVIDERS.to_vec();
+    if copilot_feature_gated_launch_enabled(session_copilot::PROVIDER_ID) {
+        providers.push(session_copilot::PROVIDER_ID);
+    }
+    providers
+}
+
+fn runtime_planned_not_live_review_providers(_runtime: &CliRuntime) -> Vec<&'static str> {
+    if copilot_feature_gated_launch_enabled(session_copilot::PROVIDER_ID) {
+        Vec::new()
+    } else {
+        PLANNED_REVIEW_PROVIDERS.to_vec()
+    }
+}
+
+fn runtime_review_provider_support_summary(_runtime: &CliRuntime) -> String {
+    if copilot_feature_gated_launch_enabled(session_copilot::PROVIDER_ID) {
+        "OpenCode is the only default live tier-b continuity path in 0.1.0. Codex, Gemini, and Claude Code are exposed as bounded tier-a start/reseed/raw-capture providers only. GitHub Copilot CLI is feature-gated as a bounded tier-b continuity path with verified start, locator/session-id reopen, rr return, and ResumeBundle reseed fallback, but Roger still withholds a default public live claim for Copilot. Pi-Agent remains out of scope for 0.1.0."
+            .to_owned()
+    } else {
+        "OpenCode is the only live tier-b continuity path in 0.1.0. Codex, Gemini, and Claude Code are exposed as bounded tier-a start/reseed/raw-capture providers only. Copilot is planned but not yet live, and Pi-Agent remains out of scope for 0.1.0."
+            .to_owned()
+    }
+}
+
+fn runtime_review_provider_support_matrix(runtime: &CliRuntime) -> Vec<Value> {
+    runtime_supported_review_providers(runtime)
+        .into_iter()
         .map(|provider| {
-            let provider = *provider;
-            let capability = provider_capability(provider);
+            let capability = runtime_provider_capability(runtime, provider);
             json!({
                 "provider": provider,
-                "display_name": provider_display_name(provider),
-                "tier": provider_tier(provider),
-                "status": provider_support_status(provider),
+                "display_name": capability["display_name"].clone(),
+                "tier": capability["support_tier"].clone(),
+                "status": capability["status"].clone(),
                 "supports": capability["supports"].clone(),
-                "notes": provider_live_support_notes(provider),
+                "notes": capability["notes"].clone(),
             })
         })
         .collect()
@@ -9538,6 +11987,11 @@ fn review_provider_support_matrix() -> Vec<Value> {
 fn provider_support_warning(provider: &str, command: &str) -> Option<String> {
     if provider == "opencode" {
         None
+    } else if copilot_feature_gated_launch_enabled(provider) {
+        Some(format!(
+            "provider '{}' is feature-gated as a bounded tier-b path; '{}' supports verified start, locator/session-id reopen, rr return, and ResumeBundle reseed fallback, but Roger still withholds a default public live claim",
+            provider, command
+        ))
     } else if provider == "codex" || provider == "gemini" || provider == "claude" {
         Some(format!(
             "provider '{}' has bounded support (tier-a start/reseed/raw-capture only); '{}' does not support locator reopen or rr return",
@@ -9683,6 +12137,38 @@ fn error_response(message: String) -> CommandResponse {
         warnings: Vec::new(),
         repair_actions: Vec::new(),
         message,
+    }
+}
+
+fn store_migration_blocked_response(command_name: &str, blocked_reason: &str) -> CommandResponse {
+    blocked_response(
+        format!("{command_name} blocked by store migration posture: {blocked_reason}"),
+        vec![
+            "run rr update --dry-run --robot to inspect migration posture details".to_owned(),
+            "back up or export the local Roger store before any repair or reinstall step"
+                .to_owned(),
+            "if this is a local/unpublished build, install a published Roger release before relying on rr update"
+                .to_owned(),
+        ],
+        json!({
+            "reason_code": "store_migration_blocked",
+            "command": command_name,
+            "blocked_reason": blocked_reason,
+            "migration": migration_policy_payload(),
+        }),
+    )
+}
+
+fn open_store_or_response(
+    runtime: &CliRuntime,
+    command_name: &str,
+) -> std::result::Result<RogerStore, CommandResponse> {
+    match RogerStore::open(&runtime.store_root) {
+        Ok(store) => Ok(store),
+        Err(StorageError::Conflict { entity, id }) if entity == "store_migration_policy" => {
+            Err(store_migration_blocked_response(command_name, &id))
+        }
+        Err(err) => Err(error_response(format!("failed to open Roger store: {err}"))),
     }
 }
 
@@ -9946,7 +12432,7 @@ fn next_id(prefix: &str) -> String {
 }
 
 fn usage_text() -> &'static str {
-    "Usage:\n  rr agent <operation> --task-file <path> [--request-file <path>] [--context-file <path>] [--capability-file <path>]\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--query-mode auto|exact_lookup|recall|related_context|candidate_audit|promotion_review] [--repo owner/repo] [--limit <n>] [--robot]\n  rr draft [--repo owner/repo] [--pr <number>] [--session <id>] (--finding <id>... | --all-findings) [--robot]\n  rr approve [--repo owner/repo] [--pr <number>] [--session <id>] --batch <draft-batch-id> [--robot]\n  rr post [--repo owner/repo] [--pr <number>] [--session <id>] --batch <draft-batch-id> [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--yes|-y] [--dry-run] [--robot]\n  rr bridge export-contracts [--robot]\n  rr bridge verify-contracts [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge install [--extension-id <id>] [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr extension setup [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr extension doctor [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n\nAgent transport:\n  - rr agent is the dedicated in-session worker transport; it is separate from --robot\n  - current live rr agent operations cover context/status/search/finding/artifact reads, advisory clarification or follow-up proposals, and worker.submit_stage_result\n  - rr agent emits rr.agent.response.v1 envelopes over the canonical worker operation response payload instead of reusing the --robot surface\n\nProvider support in 0.1.0:\n  - opencode is the first-class tier-b continuity path; rr resume can reopen and rr return is supported\n  - codex, gemini, and claude are bounded tier-a providers; start/reseed/raw-capture only, no locator reopen or rr return\n  - copilot is planned but not yet a live --provider value\n  - pi-agent is not part of the 0.1.0 live CLI surface\n\nOutbound notes:\n  - rr draft materializes Roger-owned local draft batches only; it does not approve or post to GitHub\n  - rr approve records a local approval token for one exact stored batch payload and target tuple; it does not post to GitHub\n  - rr post executes only one exact Roger-approved stored batch on the bound target and returns a truthful success/partial/failure envelope\n  - draft selection is explicit in this slice: pass one or more --finding ids or --all-findings, then approve with --batch\n  - stale persisted review state fails closed before Roger derives or approves outbound payloads\n\nUpdate notes:\n  - default rr update apply prompts for confirmation on interactive TTY\n  - pass --yes|-y for non-interactive apply confirmation; --robot apply requires --yes|-y\n  - --dry-run and --robot without --yes are non-mutating metadata checks\n  - local/unpublished builds fail closed; migration-capable updates are deferred in 0.1.x"
+    "Usage:\n  rr agent <operation> --task-file <path> [--request-file <path>] [--context-file <path>] [--capability-file <path>]\n  rr init [--robot]\n  rr doctor [--provider opencode|codex|gemini|claude|copilot|pi-agent] [--robot]\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude|copilot] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--query-mode auto|exact_lookup|recall|related_context|candidate_audit|promotion_review] [--repo owner/repo] [--limit <n>] [--robot]\n  rr draft [--repo owner/repo] [--pr <number>] [--session <id>] (--finding <id>... | --all-findings) [--robot]\n  rr approve [--repo owner/repo] [--pr <number>] [--session <id>] --batch <draft-batch-id> [--robot]\n  rr post [--repo owner/repo] [--pr <number>] [--session <id>] --batch <draft-batch-id> [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--yes|-y] [--dry-run] [--robot]\n  rr bridge export-contracts [--robot]\n  rr bridge verify-contracts [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge install [--extension-id <id>] [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr extension setup [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr extension doctor [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr extension uninstall [--install-root <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n\nAgent transport:\n  - rr agent is the dedicated in-session worker transport; it is separate from --robot\n  - current live rr agent operations cover context/status/search/finding/artifact reads, advisory clarification or follow-up proposals, and worker.submit_stage_result\n  - rr agent emits rr.agent.response.v1 envelopes over the canonical worker operation response payload instead of reusing the --robot surface\n\nProvider support in 0.1.0:\n  - opencode is the first-class tier-b continuity path; rr resume can reopen and rr return is supported\n  - codex, gemini, and claude are bounded tier-a providers; start/reseed/raw-capture only, no locator reopen or rr return\n  - copilot is feature-gated bounded tier-b support; enable with RR_ENABLE_COPILOT_PROVIDER=1 for verified start, locator/session-id reopen, rr return, and honest ResumeBundle reseed fallback\n  - pi-agent is not part of the 0.1.0 live CLI surface\n\nBootstrap notes:\n  - rr init bootstraps Roger-owned local store state only and records a local init marker\n  - rr init does not verify provider auth/install readiness\n  - rr doctor verifies local bootstrap and provider prerequisites but defers auth proof to first launch\n\nOutbound notes:\n  - rr draft materializes Roger-owned local draft batches only; it does not approve or post to GitHub\n  - rr approve records a local approval token for one exact stored batch payload and target tuple; it does not post to GitHub\n  - rr post executes only one exact Roger-approved stored batch on the bound target and returns a truthful success/partial/failure envelope\n  - draft selection is explicit in this slice: pass one or more --finding ids or --all-findings, then approve with --batch\n  - stale persisted review state fails closed before Roger derives or approves outbound payloads\n\nUpdate notes:\n  - default rr update apply prompts for confirmation on interactive TTY\n  - pass --yes|-y for non-interactive apply confirmation; --robot apply requires --yes|-y\n  - --dry-run and --robot without --yes are non-mutating metadata checks\n  - local/unpublished builds fail closed; migration-capable updates are deferred in 0.1.x"
 }
 
 #[cfg(test)]
@@ -9956,6 +12442,9 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use tempfile::tempdir;
+
+    const TEST_EXTENSION_MANIFEST_KEY: &str = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2FDtjF8sDdzic557+0PBHZDHc0NoxOFpmh3YFtXyvMxDRqF4TeujY6y4SC5JjqUjnpbUYjMm7lNJFvd2kiauFYFBcAyJLeGGKUSzfgrr6LhpP8SRvd7+lZO6KsjsIkrJxOr8aL8uMmkwAIaC7owRO7CRjKgqaRcEublt6Xk3WfW/UKSxVry286T2DKlH+2zhz5xbnpldnWgnPEo1tdO/7Z1RfYYWZCZ47bFudhBc5Q54diUeIWtYgeSmsPmWu2gxHcaji2gIGRwtgsoTR+Fsnm1wB0XX7PsmR8iF17YgJIXeit464GQbzLt6o5tYFFXxzuU4Mrbyla0Dw76shE4eEQIDAQAB";
+    const TEST_EXTENSION_MANIFEST_ID: &str = "djbjigobohmlljboggckmhhnoeldinlp";
 
     fn run_git(repo: &Path, args: &[&str]) {
         let output = Command::new("git")
@@ -10043,38 +12532,55 @@ mod tests {
         let content = extension_src.join("content/main.js");
         let manifest_template = root.join("apps/extension/manifest.template.json");
         let static_root = root.join("apps/extension/static");
+        let assets_root = root.join("apps/extension/assets");
         let bridge_src = root.join("packages/bridge/src/lib.rs");
         fs::create_dir_all(generated.parent().expect("generated parent")).expect("mkdir generated");
         fs::create_dir_all(background.parent().expect("background parent"))
             .expect("mkdir background");
         fs::create_dir_all(content.parent().expect("content parent")).expect("mkdir content");
         fs::create_dir_all(&static_root).expect("mkdir static");
+        fs::create_dir_all(&assets_root).expect("mkdir assets");
         fs::create_dir_all(bridge_src.parent().expect("bridge src parent"))
             .expect("mkdir bridge src");
         fs::write(&bridge_src, "// bridge marker\n").expect("write bridge marker");
         fs::write(&generated, bridge_contract_snapshot()).expect("write generated bridge contract");
         fs::write(&background, "export const background = true;\n").expect("write background");
         fs::write(&content, "export const content = true;\n").expect("write content");
+        fs::write(assets_root.join("icon-16.png"), b"icon16").expect("write icon16");
+        fs::write(assets_root.join("icon-32.png"), b"icon32").expect("write icon32");
+        let manifest_template_json = json!({
+            "manifest_version": 3,
+            "name": "Roger Reviewer",
+            "version": "0.1.0",
+            "description": "Launch local Roger review flows from GitHub PR pages.",
+            "key": TEST_EXTENSION_MANIFEST_KEY,
+            "icons": {
+                "16": "assets/icon-16.png",
+                "32": "assets/icon-32.png",
+            },
+            "permissions": ["nativeMessaging"],
+            "background": {
+                "service_worker": "src/background/main.js",
+                "type": "module",
+            },
+            "content_scripts": [
+                {
+                    "matches": ["https://github.com/*/*/pull/*"],
+                    "js": ["src/content/main.js"],
+                }
+            ],
+            "action": {
+                "default_icon": {
+                    "16": "assets/icon-16.png",
+                    "32": "assets/icon-32.png",
+                }
+            }
+        });
         fs::write(
             &manifest_template,
-            r#"{
-  "manifest_version": 3,
-  "name": "Roger Reviewer",
-  "version": "0.1.0",
-  "description": "Launch local Roger review flows from GitHub PR pages.",
-  "permissions": ["nativeMessaging"],
-  "background": {
-    "service_worker": "src/background/main.js",
-    "type": "module"
-  },
-  "content_scripts": [
-    {
-      "matches": ["https://github.com/*/*/pull/*"],
-      "js": ["src/content/main.js"]
-    }
-  ]
-}
-"#,
+            serde_json::to_string_pretty(&manifest_template_json)
+                .expect("serialize manifest template")
+                + "\n",
         )
         .expect("write manifest template");
         fs::write(static_root.join(".gitkeep"), "").expect("write static marker");
@@ -10486,8 +12992,16 @@ mod tests {
         assert!(package_dir.exists());
         assert!(package_dir.join("manifest.json").exists());
         assert!(package_dir.join("src/background/main.js").exists());
+        assert!(package_dir.join("assets/icon-16.png").exists());
+        assert!(package_dir.join("assets/icon-32.png").exists());
         assert!(package_dir.join("SHA256SUMS").exists());
         assert!(package_dir.join("asset-manifest.json").exists());
+        for icon_path in collect_manifest_icon_paths(&manifest) {
+            assert!(
+                package_dir.join(&icon_path).exists(),
+                "missing packaged manifest icon path: {icon_path}"
+            );
+        }
 
         let asset_manifest: Value = serde_json::from_str(
             &fs::read_to_string(package_dir.join("asset-manifest.json"))
@@ -10496,6 +13010,39 @@ mod tests {
         .expect("parse asset manifest");
         assert_eq!(asset_manifest["version"], "0.1.0.0");
         assert_eq!(asset_manifest["version_name"], "0.1.0-dev.0+nogit");
+    }
+
+    #[test]
+    fn bridge_pack_extension_fails_when_manifest_icon_asset_is_missing() {
+        let (_tmp, runtime, _generated) = setup_bridge_workspace();
+        let missing_icon = runtime.cwd.join("apps/extension/assets/icon-16.png");
+        fs::remove_file(&missing_icon).expect("remove icon-16 to reproduce load failure");
+
+        let result = run(
+            &[
+                "bridge".to_owned(),
+                "pack-extension".to_owned(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_ne!(
+            result.exit_code, 0,
+            "pack-extension should fail when manifest icon assets are missing"
+        );
+        let payload = parse_robot(&result.stdout);
+        assert_eq!(payload["outcome"], "error");
+        let reason = payload["data"]["reason"]
+            .as_str()
+            .expect("error payload should include a reason");
+        assert!(
+            reason.contains("assets/icon-16.png"),
+            "reason should include missing icon path: {reason}"
+        );
+        assert!(
+            reason.contains("Chrome/Edge"),
+            "reason should preserve cross-browser repro context: {reason}"
+        );
     }
 
     #[test]
@@ -10647,7 +13194,7 @@ mod tests {
         }
         let uninstall = run(
             &[
-                "bridge".to_owned(),
+                "extension".to_owned(),
                 "uninstall".to_owned(),
                 "--install-root".to_owned(),
                 install_root.to_string_lossy().to_string(),
@@ -10659,10 +13206,39 @@ mod tests {
         let uninstall_payload = parse_robot(&uninstall.stdout);
         assert_eq!(uninstall_payload["outcome"], "complete");
         assert_eq!(uninstall_payload["data"]["subcommand"], "uninstall");
+        assert_eq!(uninstall_payload["data"]["surface"], "extension");
         let removed = uninstall_payload["data"]["removed"]
             .as_array()
             .expect("removed list");
         assert!(removed.len() >= 3);
+
+        let second_uninstall = run(
+            &[
+                "extension".to_owned(),
+                "uninstall".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(second_uninstall.exit_code, 0, "{}", second_uninstall.stderr);
+        let second_uninstall_payload = parse_robot(&second_uninstall.stdout);
+        assert_eq!(second_uninstall_payload["outcome"], "complete");
+        assert_eq!(
+            second_uninstall_payload["data"]["removed"]
+                .as_array()
+                .expect("removed list on second uninstall")
+                .len(),
+            0
+        );
+        assert!(
+            second_uninstall_payload["data"]["missing"]
+                .as_array()
+                .expect("missing list on second uninstall")
+                .len()
+                >= 3
+        );
 
         for browser in [
             SupportedBrowser::Chrome,
@@ -10676,10 +13252,81 @@ mod tests {
                 manifest_path.display()
             );
         }
+
+        let reinstall = run(
+            &[
+                "bridge".to_owned(),
+                "install".to_owned(),
+                "--extension-id".to_owned(),
+                "abcdefghijklmnopabcdefghijklmnop".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(reinstall.exit_code, 0, "{}", reinstall.stderr);
+        let reinstall_payload = parse_robot(&reinstall.stdout);
+        assert_eq!(reinstall_payload["outcome"], "complete");
+        assert_eq!(reinstall_payload["data"]["subcommand"], "install");
+        assert!(
+            reinstall_payload["data"]["assets"]
+                .as_array()
+                .expect("reinstall assets")
+                .len()
+                >= 3
+        );
     }
 
     #[test]
-    fn extension_setup_blocks_without_discovered_identity() {
+    fn bridge_uninstall_is_demoted_to_repair_alias() {
+        let (tmp, runtime, _generated) = setup_bridge_workspace();
+        let install_root = tmp.path().join("install-root");
+
+        let install = run(
+            &[
+                "bridge".to_owned(),
+                "install".to_owned(),
+                "--extension-id".to_owned(),
+                "abcdefghijklmnopabcdefghijklmnop".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(install.exit_code, 0, "{}", install.stderr);
+
+        let uninstall = run(
+            &[
+                "bridge".to_owned(),
+                "uninstall".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(uninstall.exit_code, 0, "{}", uninstall.stderr);
+        let uninstall_payload = parse_robot(&uninstall.stdout);
+        assert_eq!(uninstall_payload["outcome"], "complete");
+        assert_eq!(uninstall_payload["data"]["surface"], "bridge");
+        assert_eq!(
+            uninstall_payload["data"]["preferred_surface"],
+            "rr extension uninstall"
+        );
+        let warnings = uninstall_payload["warnings"]
+            .as_array()
+            .expect("bridge uninstall warnings");
+        assert!(warnings.iter().any(|warning| {
+            warning
+                .as_str()
+                .is_some_and(|text| text.contains("prefer rr extension uninstall"))
+        }));
+    }
+
+    #[test]
+    fn extension_setup_uses_packaged_manifest_key_before_browser_registration() {
         let (tmp, runtime, _generated) = setup_bridge_workspace();
         let install_root = tmp.path().join("install-root");
         let result = run(
@@ -10694,15 +13341,31 @@ mod tests {
             ],
             &runtime,
         );
-        assert_eq!(result.exit_code, 3, "{}", result.stderr);
+        assert_eq!(result.exit_code, 0, "{}", result.stderr);
         let payload = parse_robot(&result.stdout);
-        assert_eq!(payload["outcome"], "blocked");
+        assert_eq!(payload["outcome"], "complete");
         assert_eq!(payload["data"]["subcommand"], "setup");
+        assert_eq!(payload["data"]["extension_id"], TEST_EXTENSION_MANIFEST_ID);
         assert_eq!(
-            payload["data"]["reason_code"],
-            "extension_registration_missing"
+            payload["data"]["extension_id_source"],
+            "packaged_manifest_key"
         );
         assert_eq!(payload["data"]["browser"], "edge");
+        assert!(
+            payload["data"]["manual_browser_step"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("open edge://extensions")
+        );
+        let warnings = payload["warnings"]
+            .as_array()
+            .expect("warnings should be an array");
+        assert!(warnings.iter().any(|warning| {
+            warning
+                .as_str()
+                .unwrap_or_default()
+                .contains("deterministic extension id")
+        }));
         let repair_actions = payload["repair_actions"]
             .as_array()
             .expect("repair actions should be an array");
@@ -10713,12 +13376,6 @@ mod tests {
                 .unwrap_or_default()
                 .contains("open edge://extensions")
         );
-        assert!(repair_actions.iter().any(|action| {
-            action
-                .as_str()
-                .unwrap_or_default()
-                .contains("RR_BRIDGE_EXTENSION_ID")
-        }));
     }
 
     #[test]
@@ -10793,26 +13450,6 @@ mod tests {
         let install_root = tmp.path().join("install-root");
         let extension_id = "abcdefghijklmnopabcdefghijklmnop";
 
-        let blocked_setup = run(
-            &[
-                "extension".to_owned(),
-                "setup".to_owned(),
-                "--browser".to_owned(),
-                "edge".to_owned(),
-                "--install-root".to_owned(),
-                install_root.to_string_lossy().to_string(),
-                "--robot".to_owned(),
-            ],
-            &runtime,
-        );
-        assert_eq!(blocked_setup.exit_code, 3, "{}", blocked_setup.stderr);
-        let blocked_payload = parse_robot(&blocked_setup.stdout);
-        assert_eq!(blocked_payload["outcome"], "blocked");
-        assert_eq!(
-            blocked_payload["data"]["reason_code"],
-            "extension_registration_missing"
-        );
-
         register_extension_identity_via_bridge(&runtime, "edge", extension_id);
 
         let setup = run(
@@ -10830,10 +13467,13 @@ mod tests {
         assert_eq!(setup.exit_code, 0, "{}", setup.stderr);
         let setup_payload = parse_robot(&setup.stdout);
         assert_eq!(setup_payload["outcome"], "complete");
-        assert_eq!(setup_payload["data"]["extension_id"], extension_id);
+        assert_eq!(
+            setup_payload["data"]["extension_id"],
+            TEST_EXTENSION_MANIFEST_ID
+        );
         assert_eq!(
             setup_payload["data"]["extension_id_source"],
-            "store_registry"
+            "packaged_manifest_key"
         );
 
         let doctor = run(
@@ -10851,6 +13491,183 @@ mod tests {
         assert_eq!(doctor.exit_code, 0, "{}", doctor.stderr);
         let doctor_payload = parse_robot(&doctor.stdout);
         assert_eq!(doctor_payload["outcome"], "complete");
+        assert_eq!(
+            doctor_payload["data"]["extension_id"],
+            TEST_EXTENSION_MANIFEST_ID
+        );
+        assert_eq!(
+            doctor_payload["data"]["extension_id_source"],
+            "packaged_manifest_key"
+        );
+        assert!(
+            doctor_payload["data"]["checks"]
+                .as_array()
+                .expect("doctor checks")
+                .iter()
+                .all(|entry| entry["ok"].as_bool().unwrap_or(false))
+        );
+    }
+
+    #[test]
+    fn extension_setup_prefers_browser_profile_identity_over_stale_store_registry() {
+        let (tmp, runtime, _generated) = setup_bridge_workspace();
+        let install_root = tmp.path().join("install-root");
+        let stale_store_id = "abcdefghijklmnopabcdefghijklmnop";
+        let profile_id = "bcdefghijklmnopabcdefghijklmnopa";
+        write_extension_identity_state(&runtime, stale_store_id);
+        write_extension_profile_discovery_state(&runtime, SupportedBrowser::Edge, profile_id);
+
+        let setup = run(
+            &[
+                "extension".to_owned(),
+                "setup".to_owned(),
+                "--browser".to_owned(),
+                "edge".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(setup.exit_code, 0, "{}", setup.stderr);
+        let setup_payload = parse_robot(&setup.stdout);
+        assert_eq!(setup_payload["outcome"], "complete");
+        assert_eq!(setup_payload["data"]["extension_id"], profile_id);
+        assert_eq!(
+            setup_payload["data"]["extension_id_source"],
+            "browser_profile_preferences"
+        );
+
+        let manifest_path = PathBuf::from(
+            setup_payload["data"]["native_manifest_path"]
+                .as_str()
+                .expect("setup manifest path"),
+        );
+        let manifest: Value =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).expect("read setup manifest"))
+                .expect("parse setup manifest");
+        assert_eq!(
+            manifest["allowed_origins"][0],
+            format!("chrome-extension://{profile_id}/")
+        );
+
+        let persisted = fs::read_to_string(extension_id_registry_path(&runtime.store_root))
+            .expect("persisted extension identity should exist");
+        assert_eq!(persisted.trim(), profile_id);
+    }
+
+    #[test]
+    fn extension_setup_and_doctor_ignore_store_registry_without_browser_registration() {
+        let (tmp, runtime, _generated) = setup_bridge_workspace();
+        let install_root = tmp.path().join("install-root");
+        write_extension_identity_state(&runtime, "abcdefghijklmnopabcdefghijklmnop");
+
+        let setup = run(
+            &[
+                "extension".to_owned(),
+                "setup".to_owned(),
+                "--browser".to_owned(),
+                "chrome".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(setup.exit_code, 0, "{}", setup.stderr);
+        let setup_payload = parse_robot(&setup.stdout);
+        assert_eq!(setup_payload["outcome"], "complete");
+        assert_eq!(
+            setup_payload["data"]["extension_id"],
+            TEST_EXTENSION_MANIFEST_ID
+        );
+        assert_eq!(
+            setup_payload["data"]["extension_id_source"],
+            "packaged_manifest_key"
+        );
+        assert_eq!(
+            setup_payload["data"]["doctor"]["extension_id_source"],
+            "packaged_manifest_key"
+        );
+
+        let doctor = run(
+            &[
+                "extension".to_owned(),
+                "doctor".to_owned(),
+                "--browser".to_owned(),
+                "chrome".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(doctor.exit_code, 0, "{}", doctor.stderr);
+        let doctor_payload = parse_robot(&doctor.stdout);
+        assert_eq!(doctor_payload["outcome"], "complete");
+        assert_eq!(
+            doctor_payload["data"]["extension_id"],
+            TEST_EXTENSION_MANIFEST_ID
+        );
+        assert_eq!(
+            doctor_payload["data"]["extension_id_source"],
+            "packaged_manifest_key"
+        );
+    }
+
+    #[test]
+    fn extension_doctor_prefers_browser_profile_identity_over_stale_store_registry() {
+        let (tmp, runtime, _generated) = setup_bridge_workspace();
+        let install_root = tmp.path().join("install-root");
+        let stale_store_id = "abcdefghijklmnopabcdefghijklmnop";
+        let profile_id = "bcdefghijklmnopabcdefghijklmnopa";
+        write_extension_identity_state(&runtime, stale_store_id);
+        write_extension_profile_discovery_state(&runtime, SupportedBrowser::Chrome, profile_id);
+
+        let pack = run(
+            &[
+                "bridge".to_owned(),
+                "pack-extension".to_owned(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(pack.exit_code, 0, "{}", pack.stderr);
+
+        let install = run(
+            &[
+                "bridge".to_owned(),
+                "install".to_owned(),
+                "--extension-id".to_owned(),
+                profile_id.to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(install.exit_code, 0, "{}", install.stderr);
+
+        let doctor = run(
+            &[
+                "extension".to_owned(),
+                "doctor".to_owned(),
+                "--browser".to_owned(),
+                "chrome".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(doctor.exit_code, 0, "{}", doctor.stderr);
+        let doctor_payload = parse_robot(&doctor.stdout);
+        assert_eq!(doctor_payload["outcome"], "complete");
+        assert_eq!(doctor_payload["data"]["extension_id"], profile_id);
+        assert_eq!(
+            doctor_payload["data"]["extension_id_source"],
+            "browser_profile_preferences"
+        );
         assert!(
             doctor_payload["data"]["checks"]
                 .as_array()
@@ -11067,7 +13884,9 @@ mod tests {
             usage_text()
         );
         assert!(
-            usage_text().contains("copilot is planned but not yet a live --provider value"),
+            usage_text().contains(
+                "copilot is feature-gated bounded tier-b support; enable with RR_ENABLE_COPILOT_PROVIDER=1"
+            ),
             "{}",
             usage_text()
         );
@@ -11185,6 +14004,29 @@ mod tests {
     }
 
     #[test]
+    fn parse_args_canonicalizes_copilot_provider_aliases() {
+        let parsed_alias = parse_args(&[
+            "review".to_owned(),
+            "--pr".to_owned(),
+            "42".to_owned(),
+            "--provider".to_owned(),
+            "GitHub-Copilot".to_owned(),
+        ])
+        .expect("parse review alias");
+        assert_eq!(parsed_alias.provider, "copilot");
+
+        let parsed_mixed_case = parse_args(&[
+            "review".to_owned(),
+            "--pr".to_owned(),
+            "42".to_owned(),
+            "--provider".to_owned(),
+            "CoPiLoT".to_owned(),
+        ])
+        .expect("parse review mixed case");
+        assert_eq!(parsed_mixed_case.provider, "copilot");
+    }
+
+    #[test]
     fn confirmation_parser_accepts_yes_and_rejects_cancel_variants() {
         assert!(confirmation_response_is_affirmative("y"));
         assert!(confirmation_response_is_affirmative("Y"));
@@ -11295,6 +14137,120 @@ mod tests {
             preflight.blocked_reason.as_deref(),
             Some("target_release_declares_unsupported_migration_policy")
         );
+    }
+
+    fn seed_unsupported_store_schema(root: &Path, schema_version: i64) {
+        let layout = StorageLayout::under(root);
+        fs::create_dir_all(&layout.root).expect("create store root");
+        let conn = SqliteConnection::open(&layout.db_path).expect("open sqlite db");
+        conn.pragma_update(None, "user_version", schema_version)
+            .expect("set user_version");
+    }
+
+    #[test]
+    fn sessions_fail_closed_with_store_migration_guidance() {
+        let temp = tempdir().expect("tempdir");
+        seed_unsupported_store_schema(temp.path(), 9);
+        let runtime = CliRuntime {
+            cwd: PathBuf::from("."),
+            store_root: temp.path().to_path_buf(),
+            opencode_bin: "opencode".to_owned(),
+        };
+
+        let result = run(&["sessions".to_owned(), "--robot".to_owned()], &runtime);
+        assert_eq!(result.exit_code, 3, "{}", result.stderr);
+        let payload = parse_robot(&result.stdout);
+        assert_eq!(payload["outcome"], "blocked");
+        assert_eq!(payload["data"]["reason_code"], "store_migration_blocked");
+        assert_eq!(payload["data"]["command"], "rr sessions");
+        assert!(
+            payload["data"]["blocked_reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("unsupported automatic migration class class_d from schema v9 to v17")
+        );
+        assert!(
+            payload["repair_actions"]
+                .as_array()
+                .expect("repair actions")
+                .iter()
+                .any(|value| value
+                    .as_str()
+                    .is_some_and(|text| text.contains("rr update --dry-run --robot")))
+        );
+    }
+
+    #[test]
+    fn review_resume_and_status_fail_closed_with_store_migration_guidance() {
+        let temp = tempdir().expect("tempdir");
+        seed_unsupported_store_schema(temp.path(), 9);
+        let runtime = CliRuntime {
+            cwd: PathBuf::from("."),
+            store_root: temp.path().to_path_buf(),
+            opencode_bin: "opencode".to_owned(),
+        };
+
+        let review = run(
+            &[
+                "review".to_owned(),
+                "--repo".to_owned(),
+                "owner/repo".to_owned(),
+                "--pr".to_owned(),
+                "42".to_owned(),
+                "--provider".to_owned(),
+                "opencode".to_owned(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(review.exit_code, 3, "{}", review.stderr);
+        let review_payload = parse_robot(&review.stdout);
+        assert_eq!(review_payload["outcome"], "blocked");
+        assert_eq!(
+            review_payload["data"]["reason_code"],
+            "store_migration_blocked"
+        );
+        assert_eq!(review_payload["data"]["command"], "rr review");
+
+        let resume = run(
+            &[
+                "resume".to_owned(),
+                "--repo".to_owned(),
+                "owner/repo".to_owned(),
+                "--pr".to_owned(),
+                "42".to_owned(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(resume.exit_code, 3, "{}", resume.stderr);
+        let resume_payload = parse_robot(&resume.stdout);
+        assert_eq!(resume_payload["outcome"], "blocked");
+        assert_eq!(
+            resume_payload["data"]["reason_code"],
+            "store_migration_blocked"
+        );
+        assert_eq!(resume_payload["data"]["command"], "rr resume");
+
+        let status = run(
+            &[
+                "status".to_owned(),
+                "--repo".to_owned(),
+                "owner/repo".to_owned(),
+                "--pr".to_owned(),
+                "42".to_owned(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(status.exit_code, 3, "{}", status.stderr);
+        let status_payload = parse_robot(&status.stdout);
+        assert_eq!(status_payload["outcome"], "blocked");
+        assert_eq!(
+            status_payload["data"]["reason_code"],
+            "store_migration_blocked"
+        );
+        assert_eq!(status_payload["data"]["command"], "rr status");
     }
 
     fn write_test_binary(path: &Path, body: &str) {

@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BridgeError {
@@ -71,6 +72,25 @@ pub struct BridgeLaunchIntent {
 
 /// Response sent back to the extension via Native Messaging.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgeStatusSnapshot {
+    pub schema_id: String,
+    pub outcome: String,
+    pub generated_at: String,
+    pub session_id: String,
+    pub attention_state: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BridgeFailureKind {
+    PreflightFailed,
+    CliSpawnFailed,
+    RobotSchemaMismatch,
+    MissingSessionId,
+    CliOutcomeNotSafe,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgeResponse {
     pub ok: bool,
     pub action: String,
@@ -79,6 +99,21 @@ pub struct BridgeResponse {
     pub session_id: Option<String>,
     /// If the launch failed, structured guidance for the user.
     pub guidance: Option<String>,
+    /// Canonical Roger attention-state mirror derived from `rr status --robot`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_state: Option<String>,
+    /// Timestamp from the canonical `rr status --robot` envelope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_at: Option<String>,
+    /// Bounded status snapshot used for truthful extension-side mirroring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<BridgeStatusSnapshot>,
+    /// Launch command outcome when the bridge reached a canonical robot envelope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_outcome: Option<String>,
+    /// Bounded bridge failure vocabulary for extension-side launch handling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<BridgeFailureKind>,
 }
 
 impl BridgeResponse {
@@ -89,16 +124,58 @@ impl BridgeResponse {
             message: message.to_owned(),
             session_id,
             guidance: None,
+            attention_state: None,
+            generated_at: None,
+            status: None,
+            launch_outcome: None,
+            failure_kind: None,
+        }
+    }
+
+    pub fn success_with_status(
+        action: &str,
+        message: &str,
+        session_id: String,
+        status: BridgeStatusSnapshot,
+        guidance: Option<String>,
+        launch_outcome: Option<&str>,
+    ) -> Self {
+        Self {
+            ok: true,
+            action: action.to_owned(),
+            message: message.to_owned(),
+            attention_state: Some(status.attention_state.clone()),
+            generated_at: Some(status.generated_at.clone()),
+            session_id: Some(session_id),
+            guidance,
+            status: Some(status),
+            launch_outcome: launch_outcome.map(str::to_owned),
+            failure_kind: None,
         }
     }
 
     pub fn failure(action: &str, message: &str, guidance: &str) -> Self {
+        Self::failure_with_kind(action, message, guidance, None, None)
+    }
+
+    pub fn failure_with_kind(
+        action: &str,
+        message: &str,
+        guidance: &str,
+        failure_kind: impl Into<Option<BridgeFailureKind>>,
+        launch_outcome: Option<&str>,
+    ) -> Self {
         Self {
             ok: false,
             action: action.to_owned(),
             message: message.to_owned(),
             session_id: None,
             guidance: Some(guidance.to_owned()),
+            attention_state: None,
+            generated_at: None,
+            status: None,
+            launch_outcome: launch_outcome.map(str::to_owned),
+            failure_kind: failure_kind.into(),
         }
     }
 }
@@ -348,6 +425,239 @@ impl BridgePreflight {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct RobotEnvelope {
+    schema_id: String,
+    outcome: String,
+    generated_at: String,
+    exit_code: i32,
+    #[serde(default)]
+    warnings: Vec<String>,
+    #[serde(default)]
+    repair_actions: Vec<String>,
+    data: Value,
+}
+
+struct BridgeDispatchSpec {
+    command_name: &'static str,
+    argv: Vec<String>,
+    allowed_outcomes: &'static [&'static str],
+}
+
+fn bridge_dispatch_spec(intent: &BridgeLaunchIntent) -> Option<BridgeDispatchSpec> {
+    let repo_locator = format!("{}/{}", intent.owner, intent.repo);
+    let pr_number = intent.pr_number.to_string();
+
+    let (command_name, mut argv, allowed_outcomes) = match intent.action.as_str() {
+        "start_review" => (
+            "rr review",
+            vec!["review".to_owned()],
+            &["complete", "degraded"][..],
+        ),
+        "resume_review" => (
+            "rr resume",
+            vec!["resume".to_owned()],
+            &["complete", "degraded"][..],
+        ),
+        "show_findings" => (
+            "rr findings",
+            vec!["findings".to_owned()],
+            &["complete", "empty"][..],
+        ),
+        _ => return None,
+    };
+
+    argv.push("--repo".to_owned());
+    argv.push(repo_locator);
+    argv.push("--pr".to_owned());
+    argv.push(pr_number);
+    argv.push("--robot".to_owned());
+    argv.push("--robot-format".to_owned());
+    argv.push("json".to_owned());
+
+    Some(BridgeDispatchSpec {
+        command_name,
+        argv,
+        allowed_outcomes,
+    })
+}
+
+fn bridge_guidance_from_robot_envelope(
+    command_name: &str,
+    rerun_command: &str,
+    envelope: &RobotEnvelope,
+    stderr: &str,
+) -> String {
+    let mut lines = Vec::new();
+
+    if let Some(reason_code) = envelope.data.get("reason_code").and_then(Value::as_str) {
+        lines.push(format!(
+            "{command_name} reported outcome '{}' with reason_code={reason_code}.",
+            envelope.outcome
+        ));
+    }
+    if !envelope.repair_actions.is_empty() {
+        lines.push(format!(
+            "Repair actions: {}",
+            envelope.repair_actions.join("; ")
+        ));
+    }
+    if !envelope.warnings.is_empty() {
+        lines.push(format!("Warnings: {}", envelope.warnings.join("; ")));
+    }
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        lines.push(format!("Diagnostics: {stderr}"));
+    }
+    if lines.is_empty() {
+        lines.push(format!(
+            "Open Roger locally and rerun `{rerun_command}` for authoritative details."
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn format_rr_command(argv: &[String]) -> String {
+    let mut parts = Vec::with_capacity(argv.len() + 1);
+    parts.push("rr".to_owned());
+    parts.extend(argv.iter().cloned());
+    parts.join(" ")
+}
+
+fn execute_rr_robot_command(
+    action: &str,
+    roger_binary_path: &Path,
+    command_name: &str,
+    argv: &[String],
+    allowed_outcomes: &[&str],
+) -> std::result::Result<RobotEnvelope, BridgeResponse> {
+    let rerun_command = format_rr_command(argv);
+    let output = match Command::new(roger_binary_path).args(argv).output() {
+        Ok(output) => output,
+        Err(err) => {
+            return Err(BridgeResponse::failure_with_kind(
+                action,
+                &format!("Failed to invoke {command_name} through Roger bridge."),
+                &format!(
+                    "{command_name} could not be executed via {}: {err}\nRun `rr doctor` to inspect local setup, then retry `{rerun_command}`.",
+                    roger_binary_path.display(),
+                ),
+                BridgeFailureKind::CliSpawnFailed,
+                None,
+            ));
+        }
+    };
+
+    let envelope: RobotEnvelope = match serde_json::from_slice(&output.stdout) {
+        Ok(envelope) => envelope,
+        Err(err) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(BridgeResponse::failure_with_kind(
+                action,
+                &format!("{command_name} returned a non-canonical --robot payload."),
+                &format!(
+                    "Expected machine-readable JSON from {command_name}: {err}\nOpen Roger locally and rerun `{rerun_command}` for authoritative details.\nstdout: {}\nstderr: {}",
+                    stdout.trim(),
+                    stderr.trim(),
+                ),
+                BridgeFailureKind::RobotSchemaMismatch,
+                None,
+            ));
+        }
+    };
+
+    let process_exit = output.status.code().unwrap_or(1);
+    if process_exit != envelope.exit_code {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(BridgeResponse::failure_with_kind(
+            action,
+            &format!("{command_name} returned a non-canonical exit/result pairing."),
+            &format!(
+                "{command_name} exited with {process_exit}, but the robot payload declared {}.\n{}",
+                envelope.exit_code,
+                bridge_guidance_from_robot_envelope(
+                    command_name,
+                    &rerun_command,
+                    &envelope,
+                    &stderr
+                )
+            ),
+            BridgeFailureKind::RobotSchemaMismatch,
+            None,
+        ));
+    }
+
+    if !allowed_outcomes.contains(&envelope.outcome.as_str()) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(BridgeResponse::failure_with_kind(
+            action,
+            &format!(
+                "{command_name} reported bridge-unsafe outcome '{}'.",
+                envelope.outcome
+            ),
+            &bridge_guidance_from_robot_envelope(command_name, &rerun_command, &envelope, &stderr),
+            BridgeFailureKind::CliOutcomeNotSafe,
+            Some(envelope.outcome.as_str()),
+        ));
+    }
+
+    Ok(envelope)
+}
+
+fn envelope_session_id(envelope: &RobotEnvelope) -> Option<&str> {
+    envelope.data.get("session_id").and_then(Value::as_str)
+}
+
+fn build_bridge_status_snapshot(
+    envelope: RobotEnvelope,
+    expected_session_id: &str,
+) -> std::result::Result<BridgeStatusSnapshot, String> {
+    let session_id = envelope
+        .data
+        .get("session")
+        .and_then(|session| session.get("id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "rr status payload is missing data.session.id".to_owned())?;
+    if session_id != expected_session_id {
+        return Err(format!(
+            "rr status returned session '{session_id}', expected '{expected_session_id}'"
+        ));
+    }
+
+    let attention_state = envelope
+        .data
+        .get("attention")
+        .and_then(|attention| attention.get("state"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "rr status payload is missing data.attention.state".to_owned())?;
+
+    Ok(BridgeStatusSnapshot {
+        schema_id: envelope.schema_id,
+        outcome: envelope.outcome,
+        generated_at: envelope.generated_at,
+        session_id: session_id.to_owned(),
+        attention_state: attention_state.to_owned(),
+    })
+}
+
+fn bridge_success_guidance_from_status_envelope(envelope: &RobotEnvelope) -> Option<String> {
+    if envelope.repair_actions.is_empty() {
+        return None;
+    }
+
+    let mut details = Vec::new();
+    if !envelope.warnings.is_empty() {
+        details.push(envelope.warnings.join(" "));
+    }
+    details.push(format!(
+        "Repair actions: {}",
+        envelope.repair_actions.join("; ")
+    ));
+    Some(details.join(" "))
+}
+
 /// Process a bridge launch intent and return a response.
 ///
 /// This is the main bridge host handler. It validates the intent,
@@ -366,26 +676,115 @@ pub fn handle_bridge_intent(
         let guidance = preflight
             .guidance(roger_binary_path)
             .unwrap_or_else(|| "Unknown setup issue".to_owned());
-        return BridgeResponse::failure(&intent.action, "Roger is not ready", &guidance);
+        return BridgeResponse::failure_with_kind(
+            &intent.action,
+            "Roger bridge preflight failed.",
+            &guidance,
+            BridgeFailureKind::PreflightFailed,
+            None,
+        );
     }
 
-    match intent.action.as_str() {
-        "start_review" | "resume_review" | "show_findings" => {
-            BridgeResponse::success(
-                &intent.action,
-                &format!(
-                    "Dispatching {} for {}/{}#{}",
-                    intent.action, intent.owner, intent.repo, intent.pr_number
-                ),
-                None, // Session ID would be filled by actual rr invocation.
-            )
-        }
-        other => BridgeResponse::failure(
-            other,
-            &format!("Unknown bridge action: {other}"),
+    let Some(dispatch) = bridge_dispatch_spec(intent) else {
+        return BridgeResponse::failure(
+            &intent.action,
+            &format!("Unknown bridge action: {}", intent.action),
             "Supported actions: start_review, resume_review, show_findings",
-        ),
-    }
+        );
+    };
+
+    let launch_envelope = match execute_rr_robot_command(
+        &intent.action,
+        roger_binary_path,
+        dispatch.command_name,
+        &dispatch.argv,
+        dispatch.allowed_outcomes,
+    ) {
+        Ok(envelope) => envelope,
+        Err(response) => return response,
+    };
+
+    let launch_command = format_rr_command(&dispatch.argv);
+    let Some(session_id) = envelope_session_id(&launch_envelope).map(str::to_owned) else {
+        return BridgeResponse::failure_with_kind(
+            &intent.action,
+            &format!(
+                "{} completed without a canonical Roger session id.",
+                dispatch.command_name
+            ),
+            &format!(
+                "{} returned outcome '{}' but omitted data.session_id. Open Roger locally and rerun `{launch_command}` for authoritative recovery.",
+                dispatch.command_name, launch_envelope.outcome,
+            ),
+            BridgeFailureKind::MissingSessionId,
+            None,
+        );
+    };
+
+    let status_argv = vec![
+        "status".to_owned(),
+        "--session".to_owned(),
+        session_id.clone(),
+        "--robot".to_owned(),
+        "--robot-format".to_owned(),
+        "json".to_owned(),
+    ];
+    let status_envelope = match execute_rr_robot_command(
+        &intent.action,
+        roger_binary_path,
+        "rr status",
+        &status_argv,
+        &["complete"],
+    ) {
+        Ok(envelope) => envelope,
+        Err(response) => return response,
+    };
+    let success_guidance = bridge_success_guidance_from_status_envelope(&status_envelope);
+
+    let status = match build_bridge_status_snapshot(status_envelope, &session_id) {
+        Ok(status) => status,
+        Err(detail) => {
+            return BridgeResponse::failure_with_kind(
+                &intent.action,
+                "Roger bridge status readback was incomplete.",
+                &format!(
+                    "rr status succeeded for session '{session_id}' but returned a non-canonical payload: {detail}\nOpen Roger locally and rerun `{}` for authoritative detail.",
+                    format_rr_command(&status_argv)
+                ),
+                BridgeFailureKind::RobotSchemaMismatch,
+                Some(launch_envelope.outcome.as_str()),
+            );
+        }
+    };
+
+    let launch_outcome = match launch_envelope.outcome.as_str() {
+        "degraded" => Some("degraded"),
+        _ => None,
+    };
+    let message = if launch_outcome == Some("degraded") {
+        format!(
+            "{} completed in degraded mode for {}/{}#{}. Open Roger locally with `{}` for authoritative detail.",
+            dispatch.command_name,
+            intent.owner,
+            intent.repo,
+            intent.pr_number,
+            format_rr_command(&status_argv)
+        )
+    } else {
+        format!(
+            "{} completed for {}/{}#{}",
+            dispatch.command_name, intent.owner, intent.repo, intent.pr_number
+        )
+    };
+
+    BridgeResponse::success_with_status(
+        &intent.action,
+        &message,
+        session_id,
+        status,
+        success_guidance,
+        launch_outcome,
+    )
 }
 
 fn normalize_extension_id(value: &str) -> Option<String> {
@@ -469,6 +868,8 @@ fn handle_extension_registration_intent(intent: &BridgeLaunchIntent) -> BridgeRe
 mod tests {
     use super::*;
     use std::io::Cursor;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::{Mutex, OnceLock};
 
     fn sample_intent() -> BridgeLaunchIntent {
@@ -482,6 +883,45 @@ mod tests {
             extension_id: None,
             browser: None,
         }
+    }
+
+    #[cfg(unix)]
+    fn write_stub_roger_binary(
+        primary_command: &str,
+        primary_payload: &str,
+        primary_exit: i32,
+        status_payload: &str,
+        status_exit: i32,
+    ) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rr-stub");
+        let script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  {primary_command})
+    cat <<'EOF'
+{primary_payload}
+EOF
+    exit {primary_exit}
+    ;;
+  status)
+    cat <<'EOF'
+{status_payload}
+EOF
+    exit {status_exit}
+    ;;
+  *)
+    echo "unexpected args: $@" >&2
+    exit 64
+    ;;
+esac
+"#
+        );
+        fs::write(&path, script).expect("write rr stub");
+        let mut perms = fs::metadata(&path).expect("rr stub metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("chmod rr stub");
+        (dir, path)
     }
 
     #[test]
@@ -626,17 +1066,108 @@ mod tests {
         assert!(resp.guidance.unwrap().contains("not found"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn handle_bridge_intent_success() {
+        let (_stub_dir, stub_rr) = write_stub_roger_binary(
+            "review",
+            &serde_json::to_string_pretty(&serde_json::json!({
+                "schema_id": "rr.robot.review.v1",
+                "command": "rr review",
+                "robot_format": "json",
+                "outcome": "complete",
+                "generated_at": "2026-04-15T00:00:00Z",
+                "exit_code": 0,
+                "warnings": [],
+                "repair_actions": [],
+                "data": {
+                    "session_id": "session-bridge-1",
+                    "launch_attempt_id": "attempt-1"
+                }
+            }))
+            .expect("serialize review envelope"),
+            0,
+            &serde_json::to_string_pretty(&serde_json::json!({
+                "schema_id": "rr.robot.status.v1",
+                "command": "rr status",
+                "robot_format": "json",
+                "outcome": "complete",
+                "generated_at": "2026-04-15T00:00:01Z",
+                "exit_code": 0,
+                "warnings": [],
+                "repair_actions": [],
+                "data": {
+                    "session": {"id": "session-bridge-1"},
+                    "attention": {"state": "review_launched"}
+                }
+            }))
+            .expect("serialize status envelope"),
+            0,
+        );
         let preflight = BridgePreflight {
             roger_binary_found: true,
             roger_data_dir_exists: true,
             gh_available: true,
         };
         let intent = sample_intent();
-        let resp = handle_bridge_intent(&intent, &preflight, Path::new("/usr/local/bin/rr"));
+        let resp = handle_bridge_intent(&intent, &preflight, &stub_rr);
         assert!(resp.ok);
-        assert!(resp.message.contains("start_review"));
+        assert_eq!(resp.session_id.as_deref(), Some("session-bridge-1"));
+        assert_eq!(resp.attention_state.as_deref(), Some("review_launched"));
+        assert_eq!(
+            resp.status.as_ref().map(|status| status.schema_id.as_str()),
+            Some("rr.robot.status.v1")
+        );
+        assert!(resp.message.contains("rr review"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_bridge_intent_fails_when_dispatch_omits_session_identity() {
+        let (_stub_dir, stub_rr) = write_stub_roger_binary(
+            "review",
+            &serde_json::to_string_pretty(&serde_json::json!({
+                "schema_id": "rr.robot.review.v1",
+                "command": "rr review",
+                "robot_format": "json",
+                "outcome": "complete",
+                "generated_at": "2026-04-15T00:00:00Z",
+                "exit_code": 0,
+                "warnings": [],
+                "repair_actions": [],
+                "data": {
+                    "launch_attempt_id": "attempt-1"
+                }
+            }))
+            .expect("serialize review envelope"),
+            0,
+            &serde_json::to_string_pretty(&serde_json::json!({
+                "schema_id": "rr.robot.status.v1",
+                "command": "rr status",
+                "robot_format": "json",
+                "outcome": "complete",
+                "generated_at": "2026-04-15T00:00:01Z",
+                "exit_code": 0,
+                "warnings": [],
+                "repair_actions": [],
+                "data": {
+                    "session": {"id": "session-bridge-1"},
+                    "attention": {"state": "review_launched"}
+                }
+            }))
+            .expect("serialize status envelope"),
+            0,
+        );
+        let preflight = BridgePreflight {
+            roger_binary_found: true,
+            roger_data_dir_exists: true,
+            gh_available: true,
+        };
+        let intent = sample_intent();
+        let resp = handle_bridge_intent(&intent, &preflight, &stub_rr);
+        assert!(!resp.ok);
+        assert_eq!(resp.failure_kind, Some(BridgeFailureKind::MissingSessionId));
+        assert!(resp.message.contains("canonical Roger session id"));
     }
 
     #[test]

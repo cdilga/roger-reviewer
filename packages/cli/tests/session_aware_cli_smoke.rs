@@ -21,6 +21,7 @@ use roger_storage::{
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -30,6 +31,8 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use tempfile::{TempDir, tempdir};
+
+const PACKAGED_MANIFEST_KEY_EXTENSION_ID: &str = "djbjigobohmlljboggckmhhnoeldinlp";
 
 fn sample_target(pr_number: u64) -> ReviewTarget {
     ReviewTarget {
@@ -328,6 +331,63 @@ fn run_rr_process(args: &[&str], runtime: &CliRuntime) -> std::process::Output {
     cmd.output().expect("run rr process via cargo run fallback")
 }
 
+fn run_with_env_overrides<T>(
+    overrides: &[(&str, Option<&str>)],
+    run_block: impl FnOnce() -> T,
+) -> T {
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("env lock");
+
+    let previous: Vec<(String, Option<OsString>)> = overrides
+        .iter()
+        .map(|(key, _)| ((*key).to_owned(), std::env::var_os(key)))
+        .collect();
+
+    for (key, value) in overrides {
+        match value {
+            Some(value) => {
+                // SAFETY: tests serialize environment mutation via ENV_LOCK and restore before return.
+                unsafe {
+                    std::env::set_var(key, value);
+                }
+            }
+            None => {
+                // SAFETY: tests serialize environment mutation via ENV_LOCK and restore before return.
+                unsafe {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+    }
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run_block));
+
+    for (key, value) in previous {
+        match value {
+            Some(value) => {
+                // SAFETY: tests serialize environment mutation via ENV_LOCK and restore before return.
+                unsafe {
+                    std::env::set_var(&key, value);
+                }
+            }
+            None => {
+                // SAFETY: tests serialize environment mutation via ENV_LOCK and restore before return.
+                unsafe {
+                    std::env::remove_var(&key);
+                }
+            }
+        }
+    }
+
+    match result {
+        Ok(value) => value,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
 fn run_rr_process_with_stdin(
     args: &[&str],
     runtime: &CliRuntime,
@@ -408,6 +468,16 @@ fn parse_toon_payload(stdout: &str) -> Value {
     toon_format::decode_default(stdout).expect("robot payload toon")
 }
 
+fn assert_sha256_prefixed(value: &Value, label: &str) {
+    let digest = value
+        .as_str()
+        .unwrap_or_else(|| panic!("{label} must be a string digest"));
+    assert!(
+        digest.starts_with("sha256:"),
+        "{label} must start with sha256:, got {digest}"
+    );
+}
+
 fn encode_native_intent(intent: &BridgeLaunchIntent) -> Vec<u8> {
     let json = serde_json::to_vec(intent).expect("serialize native intent");
     let len = json.len() as u32;
@@ -465,11 +535,15 @@ fn extension_pack_test_lock() -> &'static Mutex<()> {
 
 fn write_guided_profile_discovery_state(runtime: &CliRuntime, browser: &str, extension_id: &str) {
     let package_dir = workspace_root().join("target/bridge/extension/roger-extension-unpacked");
-    let preferences_path = runtime
+    let profile_root = runtime
         .store_root
         .join("bridge/browser-profiles")
-        .join(browser)
-        .join("Default/Secure Preferences");
+        .join(browser);
+    write_profile_discovery_state(&profile_root, &package_dir, extension_id);
+}
+
+fn write_profile_discovery_state(profile_root: &Path, package_dir: &Path, extension_id: &str) {
+    let preferences_path = profile_root.join("Default/Secure Preferences");
     fs::create_dir_all(
         preferences_path
             .parent()
@@ -1477,6 +1551,56 @@ fn codex_review_and_resume_are_truthful_tier_a_degraded_paths() {
     assert_eq!(review_payload["data"]["provider"], "codex");
     assert_eq!(review_payload["data"]["session_path"], "started_fresh");
     assert_eq!(review_payload["data"]["continuity_quality"], "degraded");
+    assert_eq!(
+        review_payload["data"]["provider_capability"]["support_tier"],
+        "tier_a"
+    );
+    assert_eq!(
+        review_payload["data"]["provider_capability"]["surface_class"],
+        "review_bounded"
+    );
+    assert_eq!(
+        review_payload["data"]["provider_capability"]["policy_profile"]["id"],
+        "review_safe_tier_a_reseed_only"
+    );
+    assert_eq!(
+        review_payload["data"]["provider_capability"]["status_reason"],
+        "tier_a_reseed_only_no_locator_reopen_or_return"
+    );
+    assert_eq!(
+        review_payload["data"]["provider_capability"]["hook_profile"]["contract_version"],
+        "none"
+    );
+    assert_eq!(
+        review_payload["data"]["provider_capability"]["custom_instructions"]["contract_version"],
+        "prompt_preset_contract.v1"
+    );
+    assert_eq!(
+        review_payload["data"]["provider_capability"]["mcp_posture"]["posture"],
+        "not_declared"
+    );
+    assert!(
+        review_payload["data"]["provider_capability"]["hook_profile_digest_sha256"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("sha256:")
+    );
+    assert!(
+        review_payload["data"]["provider_capability"]["custom_instructions_digest_sha256"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("sha256:")
+    );
+    assert_eq!(review_payload["data"]["routine_surface"]["surface"], "cli");
+    assert_eq!(
+        review_payload["data"]["routine_surface"]["provider"]["provider"],
+        "codex"
+    );
+    assert_eq!(
+        review_payload["data"]["routine_surface"]["provider"]["status_reason"],
+        "tier_a_reseed_only_no_locator_reopen_or_return"
+    );
+    assert!(review_payload["data"]["routine_surface"]["worktree_root"].is_string());
     assert!(
         review_payload["warnings"]
             .as_array()
@@ -1496,6 +1620,44 @@ fn codex_review_and_resume_are_truthful_tier_a_degraded_paths() {
         "reseeded_from_bundle"
     );
     assert_eq!(resume_payload["data"]["continuity_quality"], "degraded");
+    assert_eq!(
+        resume_payload["data"]["provider_capability"]["support_tier"],
+        "tier_a"
+    );
+    assert_eq!(
+        resume_payload["data"]["provider_capability"]["surface_class"],
+        "review_bounded"
+    );
+    assert_eq!(
+        resume_payload["data"]["provider_capability"]["policy_profile"]["id"],
+        "review_safe_tier_a_reseed_only"
+    );
+    assert_eq!(
+        resume_payload["data"]["provider_capability"]["status_reason"],
+        "tier_a_reseed_only_no_locator_reopen_or_return"
+    );
+    assert_eq!(
+        resume_payload["data"]["provider_capability"]["hook_profile"]["contract_version"],
+        "none"
+    );
+    assert_eq!(
+        resume_payload["data"]["provider_capability"]["custom_instructions"]["contract_version"],
+        "prompt_preset_contract.v1"
+    );
+    assert_eq!(
+        resume_payload["data"]["provider_capability"]["mcp_posture"]["posture"],
+        "not_declared"
+    );
+    assert_eq!(resume_payload["data"]["routine_surface"]["surface"], "cli");
+    assert_eq!(
+        resume_payload["data"]["routine_surface"]["provider"]["provider"],
+        "codex"
+    );
+    assert_eq!(
+        resume_payload["data"]["routine_surface"]["provider"]["status_reason"],
+        "tier_a_reseed_only_no_locator_reopen_or_return"
+    );
+    assert!(resume_payload["data"]["routine_surface"]["worktree_root"].is_string());
 }
 
 #[test]
@@ -1543,6 +1705,77 @@ fn bounded_provider_outputs_are_truthful_for_claude_and_gemini() {
             status_payload["data"]["provider_capability"]["tier"],
             "tier_a"
         );
+        assert_eq!(
+            status_payload["data"]["provider_capability"]["support_tier"],
+            "tier_a"
+        );
+        assert_eq!(
+            status_payload["data"]["provider_capability"]["surface_class"],
+            "review_bounded"
+        );
+        assert_eq!(
+            status_payload["data"]["provider_capability"]["policy_profile"]["id"],
+            "review_safe_tier_a_reseed_only"
+        );
+        assert_eq!(
+            status_payload["data"]["provider_capability"]["capability_provenance"]["source"],
+            format!("providers.{provider}.support_matrix")
+        );
+        assert_sha256_prefixed(
+            &status_payload["data"]["provider_capability"]["policy_profile_digest_sha256"],
+            "status policy profile digest",
+        );
+        assert_eq!(
+            status_payload["data"]["provider_capability"]["status_reason"],
+            "tier_a_reseed_only_no_locator_reopen_or_return"
+        );
+        assert_eq!(
+            status_payload["data"]["provider_capability"]["hook_profile"]["contract_version"],
+            "none"
+        );
+        assert_eq!(
+            status_payload["data"]["provider_capability"]["hook_profile"]["contract_provenance"]["source"],
+            format!("providers.{provider}.hook_contract_version")
+        );
+        assert_sha256_prefixed(
+            &status_payload["data"]["provider_capability"]["hook_profile_digest_sha256"],
+            "status hook profile digest",
+        );
+        assert_eq!(
+            status_payload["data"]["provider_capability"]["custom_instructions"]["contract_version"],
+            "prompt_preset_contract.v1"
+        );
+        assert_eq!(
+            status_payload["data"]["provider_capability"]["custom_instructions"]["contract_provenance"]
+                ["source"],
+            format!("providers.{provider}.instruction_contract_version")
+        );
+        assert_sha256_prefixed(
+            &status_payload["data"]["provider_capability"]["custom_instructions_digest_sha256"],
+            "status custom instructions digest",
+        );
+        assert_eq!(
+            status_payload["data"]["provider_capability"]["mcp_posture"]["posture"],
+            "not_declared"
+        );
+        assert_eq!(
+            status_payload["data"]["provider_capability"]["mcp_posture"]["builtin_github_mcp"]["denied"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            status_payload["data"]["provider_capability"]["mcp_posture"]["broad_mcp_access"]["denied"],
+            serde_json::json!(false)
+        );
+        assert_eq!(status_payload["data"]["routine_surface"]["surface"], "cli");
+        assert_eq!(
+            status_payload["data"]["routine_surface"]["provider"]["provider"],
+            provider
+        );
+        assert_eq!(
+            status_payload["data"]["routine_surface"]["provider"]["status_reason"],
+            "tier_a_reseed_only_no_locator_reopen_or_return"
+        );
+        assert!(status_payload["data"]["routine_surface"]["worktree_root"].is_string());
         assert_eq!(
             status_payload["data"]["provider_capability"]["supports"]["status"],
             serde_json::json!(true)
@@ -1595,6 +1828,56 @@ fn bounded_provider_outputs_are_truthful_for_claude_and_gemini() {
             resume_payload["data"]["provider_capability"]["tier"],
             "tier_a"
         );
+        assert_eq!(
+            resume_payload["data"]["provider_capability"]["support_tier"],
+            "tier_a"
+        );
+        assert_eq!(
+            resume_payload["data"]["provider_capability"]["surface_class"],
+            "review_bounded"
+        );
+        assert_eq!(
+            resume_payload["data"]["provider_capability"]["policy_profile"]["id"],
+            "review_safe_tier_a_reseed_only"
+        );
+        assert_sha256_prefixed(
+            &resume_payload["data"]["provider_capability"]["policy_profile_digest_sha256"],
+            "resume policy profile digest",
+        );
+        assert_eq!(
+            resume_payload["data"]["provider_capability"]["status_reason"],
+            "tier_a_reseed_only_no_locator_reopen_or_return"
+        );
+        assert_eq!(
+            resume_payload["data"]["provider_capability"]["hook_profile"]["contract_version"],
+            "none"
+        );
+        assert_sha256_prefixed(
+            &resume_payload["data"]["provider_capability"]["hook_profile_digest_sha256"],
+            "resume hook profile digest",
+        );
+        assert_eq!(
+            resume_payload["data"]["provider_capability"]["custom_instructions"]["contract_version"],
+            "prompt_preset_contract.v1"
+        );
+        assert_sha256_prefixed(
+            &resume_payload["data"]["provider_capability"]["custom_instructions_digest_sha256"],
+            "resume custom instructions digest",
+        );
+        assert_eq!(
+            resume_payload["data"]["provider_capability"]["mcp_posture"]["posture"],
+            "not_declared"
+        );
+        assert_eq!(resume_payload["data"]["routine_surface"]["surface"], "cli");
+        assert_eq!(
+            resume_payload["data"]["routine_surface"]["provider"]["provider"],
+            provider
+        );
+        assert_eq!(
+            resume_payload["data"]["routine_surface"]["provider"]["status_reason"],
+            "tier_a_reseed_only_no_locator_reopen_or_return"
+        );
+        assert!(resume_payload["data"]["routine_surface"]["worktree_root"].is_string());
         assert_eq!(
             resume_payload["data"]["provider_capability"]["supports"]["resume_reseed"],
             serde_json::json!(true)
@@ -1975,10 +2258,83 @@ fn status_and_findings_surface_outbound_approval_states_truthfully() {
         status_payload["data"]["outbound"]["posting_gate"]["visibly_elevated"],
         serde_json::json!(true)
     );
+    assert_eq!(
+        status_payload["data"]["provider_capability"]["support_tier"],
+        "tier_b"
+    );
+    assert_eq!(
+        status_payload["data"]["provider_capability"]["surface_class"],
+        "review_primary"
+    );
+    assert_eq!(
+        status_payload["data"]["provider_capability"]["policy_profile"]["id"],
+        "review_safe_tier_b_continuity"
+    );
+    assert_eq!(
+        status_payload["data"]["provider_capability"]["status_reason"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        status_payload["data"]["provider_capability"]["hook_profile"]["contract_version"],
+        "none"
+    );
+    assert_eq!(
+        status_payload["data"]["provider_capability"]["custom_instructions"]["contract_version"],
+        "prompt_preset_contract.v1"
+    );
+    assert_eq!(
+        status_payload["data"]["provider_capability"]["mcp_posture"]["posture"],
+        "not_declared"
+    );
+    assert!(
+        status_payload["data"]["provider_capability"]["policy_profile_digest_sha256"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("sha256:")
+    );
+    assert_eq!(status_payload["data"]["routine_surface"]["surface"], "cli");
+    assert_eq!(
+        status_payload["data"]["routine_surface"]["provider"]["provider"],
+        "opencode"
+    );
+    assert_eq!(
+        status_payload["data"]["routine_surface"]["provider"]["status_reason"],
+        serde_json::Value::Null
+    );
+    assert!(status_payload["data"]["routine_surface"]["worktree_root"].is_string());
 
     let findings = run_rr(&["findings", "--session", &session_id, "--robot"], &runtime);
     assert_eq!(findings.exit_code, 0, "{}", findings.stderr);
     let findings_payload = parse_robot_payload(&findings.stdout);
+    assert_eq!(
+        findings_payload["data"]["provider_capability"]["support_tier"],
+        "tier_b"
+    );
+    assert_eq!(
+        findings_payload["data"]["provider_capability"]["surface_class"],
+        "review_primary"
+    );
+    assert_eq!(
+        findings_payload["data"]["provider_capability"]["policy_profile"]["id"],
+        "review_safe_tier_b_continuity"
+    );
+    assert_eq!(
+        findings_payload["data"]["provider_capability"]["hook_profile"]["contract_version"],
+        "none"
+    );
+    assert_eq!(
+        findings_payload["data"]["provider_capability"]["custom_instructions"]["contract_version"],
+        "prompt_preset_contract.v1"
+    );
+    assert_eq!(
+        findings_payload["data"]["provider_capability"]["mcp_posture"]["posture"],
+        "not_declared"
+    );
+    assert_eq!(
+        findings_payload["data"]["routine_surface"]["provider"]["provider"],
+        "opencode"
+    );
+    assert!(findings_payload["data"]["routine_surface"]["worktree_root"].is_string());
     let items = findings_payload["data"]["items"]
         .as_array()
         .expect("findings items");
@@ -2384,6 +2740,114 @@ fn return_reports_truthful_rebind_path_after_dropout_style_state() {
     let payload = parse_robot_payload(&ret.stdout);
     assert_eq!(payload["outcome"], "complete");
     assert_eq!(payload["data"]["return_path"], "rebound_existing_session");
+}
+
+#[test]
+fn return_surfaces_roger_guidance_for_legacy_opencode_config_without_raw_warning_line() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let opencode_bin = temp.path().join("opencode");
+    fs::write(
+        &opencode_bin,
+        r#"#!/bin/sh
+if [ "$1" = "--session" ]; then
+  echo "Unrecognized key: mcpServers" >&2
+  exit 0
+fi
+if [ "$1" = "export" ]; then
+  echo "{}"
+  exit 0
+fi
+exit 0
+"#,
+    )
+    .expect("write stub binary");
+    let mut perms = fs::metadata(&opencode_bin).expect("metadata").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&opencode_bin, perms).expect("chmod stub binary");
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let target = sample_target(42);
+    let adapter = OpenCodeAdapter::with_binary(runtime.opencode_bin.clone());
+    let locator = adapter
+        .start_session(&target, &sample_launch_intent(LaunchAction::StartReview))
+        .expect("start locator");
+    let binding_cwd = runtime.cwd.to_string_lossy().to_string();
+
+    let store = RogerStore::open(&runtime.store_root).expect("open store");
+    store
+        .store_resume_bundle("bundle-dropout-legacy", &dropout_bundle(target.clone()))
+        .expect("store bundle");
+    store
+        .create_review_session(CreateReviewSession {
+            id: "session-dropout-legacy",
+            review_target: &target,
+            provider: "opencode",
+            session_locator: Some(&locator),
+            resume_bundle_artifact_id: Some("bundle-dropout-legacy"),
+            continuity_state: "awaiting_return",
+            attention_state: "awaiting_return",
+            launch_profile_id: Some("profile-open-pr"),
+        })
+        .expect("create session");
+    store
+        .put_session_launch_binding(CreateSessionLaunchBinding {
+            id: "binding-dropout-legacy",
+            session_id: "session-dropout-legacy",
+            repo_locator: &target.repository,
+            review_target: Some(&target),
+            surface: LaunchSurface::Cli,
+            launch_profile_id: Some("profile-open-pr"),
+            ui_target: Some("cli"),
+            instance_preference: Some("reuse_if_possible"),
+            cwd: Some(&binding_cwd),
+            worktree_root: None,
+        })
+        .expect("create binding");
+
+    let legacy_home = temp.path().join("home");
+    let legacy_dir = legacy_home.join(".opencode");
+    fs::create_dir_all(&legacy_dir).expect("create legacy opencode dir");
+    fs::write(
+        legacy_dir.join("opencode.json"),
+        r#"{
+  "mcpServers": {
+    "mcp-agent-mail": {
+      "type": "remote",
+      "url": "http://127.0.0.1:8765/mcp/"
+    }
+  }
+}
+"#,
+    )
+    .expect("write legacy opencode config");
+    let home = legacy_home.to_string_lossy().to_string();
+
+    let ret = run_with_env_overrides(&[("HOME", Some(home.as_str()))], || {
+        run_rr(&["return", "--pr", "42", "--robot"], &runtime)
+    });
+    assert_eq!(ret.exit_code, 0, "{}", ret.stderr);
+
+    let payload = parse_robot_payload(&ret.stdout);
+    assert_eq!(payload["outcome"], "complete");
+    assert_eq!(payload["data"]["return_path"], "rebound_existing_session");
+    assert!(
+        ret.stderr.contains("legacy OpenCode config detected"),
+        "{}",
+        ret.stderr
+    );
+    assert!(
+        ret.stderr
+            .lines()
+            .all(|line| line != "Unrecognized key: mcpServers"),
+        "{}",
+        ret.stderr
+    );
 }
 
 #[test]
@@ -3360,7 +3824,7 @@ fn provider_support_claim_guard_keeps_help_robot_and_docs_in_lockstep() {
     );
     assert_normalized_contains(
         &help.stdout,
-        "copilot is planned but not yet a live --provider value",
+        "copilot is feature-gated bounded tier-b support; enable with RR_ENABLE_COPILOT_PROVIDER=1",
         "rr --help",
     );
     assert_normalized_contains(
@@ -3372,7 +3836,7 @@ fn provider_support_claim_guard_keeps_help_robot_and_docs_in_lockstep() {
     let readme = read_workspace_file("README.md");
     assert_normalized_contains(
         &readme,
-        "`rr review --provider` currently supports `opencode`, `codex`, `gemini`, and `claude`.",
+        "`rr review --provider` currently supports `opencode`, `codex`, `gemini`, and `claude` by default, and exposes `copilot` when `RR_ENABLE_COPILOT_PROVIDER=1` is set.",
         "README.md",
     );
     assert_normalized_contains(
@@ -3382,14 +3846,14 @@ fn provider_support_claim_guard_keeps_help_robot_and_docs_in_lockstep() {
     );
     assert_normalized_contains(
         &readme,
-        "GitHub Copilot CLI is still planned rather than live",
+        "GitHub Copilot CLI is feature-gated as a bounded Tier B continuity path: Roger can start a review, reopen by locator or session id, return with `rr return`, and fall back to honest `ResumeBundle` reseed when reopen is stale or unusable, but Copilot remains outside the default public live claim.",
         "README.md",
     );
 
     let release_matrix = read_workspace_file("docs/RELEASE_AND_TEST_MATRIX.md");
     assert_normalized_contains(
         &release_matrix,
-        "| GitHub Copilot CLI | Golden-path first-class provider target, not yet live | Do not claim live support until verified launch, policy, worker boundary, and continuity coverage are real |",
+        "| GitHub Copilot CLI | Feature-gated bounded Tier B | Exposed only with `RR_ENABLE_COPILOT_PROVIDER=1`; verified start, locator/session-id reopen, `rr return`, and honest `ResumeBundle` reseed fallback, but still withheld from the default public live claim |",
         "docs/RELEASE_AND_TEST_MATRIX.md",
     );
     assert_normalized_contains(
@@ -4175,6 +4639,13 @@ fn bridge_pack_extension_emits_checksum_artifacts_in_smoke() {
             .as_str()
             .expect("package_dir should be present"),
     );
+    assert!(
+        package_dir.join("assets/icon-16.png").exists(),
+        "missing manifest icon asset assets/icon-16.png; reproduced Chrome/Edge unpacked-load failure"
+    );
+    assert!(package_dir.join("assets/icon-32.png").exists());
+    assert!(package_dir.join("assets/icon-48.png").exists());
+    assert!(package_dir.join("assets/icon-128.png").exists());
     assert!(package_dir.join("SHA256SUMS").exists());
     assert!(package_dir.join("asset-manifest.json").exists());
     let manifest = fs::read_to_string(package_dir.join("manifest.json")).expect("read manifest");
@@ -4187,7 +4658,7 @@ fn bridge_pack_extension_emits_checksum_artifacts_in_smoke() {
 }
 
 #[test]
-fn extension_setup_blocks_without_discovered_identity_in_smoke() {
+fn extension_setup_uses_packaged_manifest_key_before_registration_in_smoke() {
     let _lock = extension_pack_test_lock()
         .lock()
         .expect("acquire extension pack smoke lock");
@@ -4211,14 +4682,18 @@ fn extension_setup_blocks_without_discovered_identity_in_smoke() {
         ],
         &runtime,
     );
-    assert_eq!(setup.exit_code, 3, "{}", setup.stderr);
+    assert_eq!(setup.exit_code, 0, "{}", setup.stderr);
     let payload = parse_robot_payload(&setup.stdout);
     assert_eq!(payload["schema_id"], "rr.robot.extension.v1");
-    assert_eq!(payload["outcome"], "blocked");
+    assert_eq!(payload["outcome"], "complete");
     assert_eq!(payload["data"]["subcommand"], "setup");
     assert_eq!(
-        payload["data"]["reason_code"],
-        "extension_registration_missing"
+        payload["data"]["extension_id"],
+        PACKAGED_MANIFEST_KEY_EXTENSION_ID
+    );
+    assert_eq!(
+        payload["data"]["extension_id_source"],
+        "packaged_manifest_key"
     );
     assert_eq!(payload["data"]["browser"], "chrome");
     assert!(
@@ -4226,6 +4701,16 @@ fn extension_setup_blocks_without_discovered_identity_in_smoke() {
             .as_str()
             .expect("manual browser step")
             .contains("chrome://extensions")
+    );
+    assert!(
+        payload["warnings"]
+            .as_array()
+            .expect("setup warnings")
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .is_some_and(|text| { text.contains("deterministic extension id") })),
+        "setup should disclose packaged-manifest-key fallback"
     );
 }
 
@@ -4272,6 +4757,17 @@ fn extension_setup_and_doctor_emit_complete_envelopes_in_smoke() {
         "setup should embed doctor result envelope"
     );
     assert!(
+        setup_payload["warnings"]
+            .as_array()
+            .expect("setup warnings")
+            .iter()
+            .any(|warning| warning.as_str().is_some_and(|text| {
+                text.contains("custom --install-root")
+                    && text.contains("Omit --install-root for real browser/operator-stability runs")
+            })),
+        "setup should warn that custom --install-root is a synthetic home-root path"
+    );
+    assert!(
         setup_payload["data"]["doctor"]["checks"]
             .as_array()
             .expect("setup doctor checks")
@@ -4298,6 +4794,17 @@ fn extension_setup_and_doctor_emit_complete_envelopes_in_smoke() {
     assert_eq!(doctor_payload["data"]["subcommand"], "doctor");
     assert_eq!(doctor_payload["data"]["browser"], "edge");
     assert!(
+        doctor_payload["warnings"]
+            .as_array()
+            .expect("doctor warnings")
+            .iter()
+            .any(|warning| warning.as_str().is_some_and(|text| {
+                text.contains("custom --install-root")
+                    && text.contains("Omit --install-root for real browser/operator-stability runs")
+            })),
+        "doctor should warn that custom --install-root is a synthetic home-root path"
+    );
+    assert!(
         doctor_payload["data"]["checks"]
             .as_array()
             .expect("doctor checks")
@@ -4320,26 +4827,6 @@ fn extension_setup_and_doctor_succeed_after_bridge_registration_event_in_smoke()
     let install_root = temp.path().join("install-root");
     let extension_id = "abcdefghijklmnopabcdefghijklmnop";
 
-    let blocked = run(
-        &[
-            "extension".to_owned(),
-            "setup".to_owned(),
-            "--browser".to_owned(),
-            "brave".to_owned(),
-            "--install-root".to_owned(),
-            install_root.to_string_lossy().to_string(),
-            "--robot".to_owned(),
-        ],
-        &runtime,
-    );
-    assert_eq!(blocked.exit_code, 3, "{}", blocked.stderr);
-    let blocked_payload = parse_robot_payload(&blocked.stdout);
-    assert_eq!(blocked_payload["outcome"], "blocked");
-    assert_eq!(
-        blocked_payload["data"]["reason_code"],
-        "extension_registration_missing"
-    );
-
     register_extension_identity_via_bridge(&runtime, "brave", extension_id);
 
     let setup = run(
@@ -4358,10 +4845,13 @@ fn extension_setup_and_doctor_succeed_after_bridge_registration_event_in_smoke()
     let setup_payload = parse_robot_payload(&setup.stdout);
     assert_eq!(setup_payload["outcome"], "complete");
     assert_eq!(setup_payload["data"]["browser"], "brave");
-    assert_eq!(setup_payload["data"]["extension_id"], extension_id);
+    assert_eq!(
+        setup_payload["data"]["extension_id"],
+        PACKAGED_MANIFEST_KEY_EXTENSION_ID
+    );
     assert_eq!(
         setup_payload["data"]["extension_id_source"],
-        "store_registry"
+        "packaged_manifest_key"
     );
 
     let doctor = run(
@@ -4379,6 +4869,14 @@ fn extension_setup_and_doctor_succeed_after_bridge_registration_event_in_smoke()
     assert_eq!(doctor.exit_code, 0, "{}", doctor.stderr);
     let doctor_payload = parse_robot_payload(&doctor.stdout);
     assert_eq!(doctor_payload["outcome"], "complete");
+    assert_eq!(
+        doctor_payload["data"]["extension_id"],
+        PACKAGED_MANIFEST_KEY_EXTENSION_ID
+    );
+    assert_eq!(
+        doctor_payload["data"]["extension_id_source"],
+        "packaged_manifest_key"
+    );
     assert!(
         doctor_payload["data"]["checks"]
             .as_array()
@@ -4488,6 +4986,150 @@ fn extension_setup_discovers_identity_from_guided_profile_preferences_in_smoke()
     let registry_path = runtime.store_root.join("bridge/extension-id");
     let persisted = fs::read_to_string(registry_path).expect("persisted extension id");
     assert_eq!(persisted.trim(), extension_id);
+}
+
+#[test]
+fn extension_setup_prefers_rr_extension_profile_root_over_stale_store_registry() {
+    let _lock = extension_pack_test_lock()
+        .lock()
+        .expect("acquire extension pack smoke lock");
+    let temp = tempdir().expect("tempdir");
+    let runtime = CliRuntime {
+        cwd: workspace_root(),
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: "opencode".to_owned(),
+    };
+    let install_root = temp.path().join("install-root");
+    let browser_profile_extension_id = "abcdefghijklmnopabcdefghijklmnop";
+    let stale_store_extension_id = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
+    let custom_profile_root = temp.path().join("edge-profile");
+    let package_dir = workspace_root().join("target/bridge/extension/roger-extension-unpacked");
+    let registry_path = runtime.store_root.join("bridge/extension-id");
+    fs::create_dir_all(registry_path.parent().expect("registry parent"))
+        .expect("create registry parent");
+    fs::write(&registry_path, format!("{stale_store_extension_id}\n"))
+        .expect("write stale store registry");
+    write_profile_discovery_state(
+        &custom_profile_root,
+        &package_dir,
+        browser_profile_extension_id,
+    );
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _env_guard = ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("env lock");
+    let previous_profile_root = std::env::var_os("RR_EXTENSION_PROFILE_ROOT");
+    // SAFETY: tests serialize RR_EXTENSION_PROFILE_ROOT mutation via ENV_LOCK and restore it before return.
+    unsafe {
+        std::env::set_var("RR_EXTENSION_PROFILE_ROOT", &custom_profile_root);
+    }
+
+    let setup = run(
+        &[
+            "extension".to_owned(),
+            "setup".to_owned(),
+            "--browser".to_owned(),
+            "edge".to_owned(),
+            "--install-root".to_owned(),
+            install_root.to_string_lossy().to_string(),
+            "--robot".to_owned(),
+        ],
+        &runtime,
+    );
+
+    // SAFETY: ENV_LOCK serializes process-global mutation and we restore the prior value immediately.
+    unsafe {
+        if let Some(value) = previous_profile_root {
+            std::env::set_var("RR_EXTENSION_PROFILE_ROOT", value);
+        } else {
+            std::env::remove_var("RR_EXTENSION_PROFILE_ROOT");
+        }
+    }
+
+    assert_eq!(setup.exit_code, 0, "{}", setup.stderr);
+    let setup_payload = parse_robot_payload(&setup.stdout);
+    assert_eq!(setup_payload["outcome"], "complete");
+    assert_eq!(
+        setup_payload["data"]["extension_id"],
+        browser_profile_extension_id
+    );
+    assert_eq!(
+        setup_payload["data"]["extension_id_source"],
+        "browser_profile_preferences"
+    );
+}
+
+#[test]
+fn extension_setup_and_doctor_ignore_store_registry_without_browser_registration_in_smoke() {
+    let _lock = extension_pack_test_lock()
+        .lock()
+        .expect("acquire extension pack smoke lock");
+    let temp = tempdir().expect("tempdir");
+    let runtime = CliRuntime {
+        cwd: workspace_root(),
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: "opencode".to_owned(),
+    };
+    let install_root = temp.path().join("install-root");
+    let registry_path = runtime.store_root.join("bridge/extension-id");
+    fs::create_dir_all(registry_path.parent().expect("registry parent"))
+        .expect("create registry parent");
+    fs::write(&registry_path, "abcdefghijklmnopabcdefghijklmnop\n")
+        .expect("write stale store registry");
+
+    let setup = run(
+        &[
+            "extension".to_owned(),
+            "setup".to_owned(),
+            "--browser".to_owned(),
+            "chrome".to_owned(),
+            "--install-root".to_owned(),
+            install_root.to_string_lossy().to_string(),
+            "--robot".to_owned(),
+        ],
+        &runtime,
+    );
+    assert_eq!(setup.exit_code, 0, "{}", setup.stderr);
+    let setup_payload = parse_robot_payload(&setup.stdout);
+    assert_eq!(setup_payload["outcome"], "complete");
+    assert_eq!(
+        setup_payload["data"]["extension_id"],
+        PACKAGED_MANIFEST_KEY_EXTENSION_ID
+    );
+    assert_eq!(
+        setup_payload["data"]["extension_id_source"],
+        "packaged_manifest_key"
+    );
+    assert_eq!(
+        setup_payload["data"]["doctor"]["extension_id_source"],
+        "packaged_manifest_key"
+    );
+
+    let doctor = run(
+        &[
+            "extension".to_owned(),
+            "doctor".to_owned(),
+            "--browser".to_owned(),
+            "chrome".to_owned(),
+            "--install-root".to_owned(),
+            install_root.to_string_lossy().to_string(),
+            "--robot".to_owned(),
+        ],
+        &runtime,
+    );
+    assert_eq!(doctor.exit_code, 0, "{}", doctor.stderr);
+    let doctor_payload = parse_robot_payload(&doctor.stdout);
+    assert_eq!(doctor_payload["outcome"], "complete");
+    assert_eq!(
+        doctor_payload["data"]["extension_id"],
+        PACKAGED_MANIFEST_KEY_EXTENSION_ID
+    );
+    assert_eq!(
+        doctor_payload["data"]["extension_id_source"],
+        "packaged_manifest_key"
+    );
 }
 
 #[test]

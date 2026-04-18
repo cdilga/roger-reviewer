@@ -1,0 +1,17 @@
+# Metadata contract for executable E2E-05.
+# The suite implementation lives at:
+# packages/cli/tests/e2e_browser_setup_first_launch.rs
+id = "e2e_browser_setup_first_launch"
+budget_id = "E2E-05"
+family = "e2e"
+flow_ids = ["F02", "F02.1", "F10", "F14"]
+invariant_ids = ["INV-BRIDGE-001", "INV-BRIDGE-002", "INV-SESSION-001"]
+persona_ids = ["PJ-01A", "PJ-01B", "PJ-01C"]
+fixture_families = ["fixture_bridge_launch_only_no_status", "fixture_bridge_transcripts"]
+support_tier = "deterministic_chromium_harness"
+support_status = "blessed"
+degraded = false
+bounded = true
+tier = "e2e"
+preserve_failure_artifacts = true
+artifact_retention = "always"

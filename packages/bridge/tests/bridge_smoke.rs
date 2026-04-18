@@ -1,13 +1,17 @@
 //! Integration smoke tests for the browser launch bridge.
 
 use std::io::Cursor;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use roger_bridge::{
-    BridgeLaunchIntent, BridgeLaunchPath, BridgePreflight, BridgeResponse, NativeHostManifest,
-    SupportedBrowser, choose_launch_path, handle_bridge_intent, read_native_message,
-    required_launch_artifacts, write_native_message,
+    BridgeFailureKind, BridgeLaunchIntent, BridgeLaunchPath, BridgePreflight, BridgeResponse,
+    NativeHostManifest, SupportedBrowser, choose_launch_path, handle_bridge_intent,
+    read_native_message, required_launch_artifacts, write_native_message,
 };
+#[cfg(unix)]
+use tempfile::tempdir;
 
 #[test]
 fn native_messaging_end_to_end() {
@@ -111,6 +115,7 @@ fn fail_closed_when_roger_not_installed() {
     };
     let resp = handle_bridge_intent(&intent, &preflight, Path::new("/missing/rr"));
     assert!(!resp.ok);
+    assert_eq!(resp.failure_kind, Some(BridgeFailureKind::PreflightFailed));
     let guidance = resp.guidance.unwrap();
     assert!(guidance.contains("Roger binary not found"));
     assert!(guidance.contains("data directory"));
@@ -136,6 +141,44 @@ fn manifest_covers_all_supported_browsers() {
         NativeHostManifest::for_roger(Path::new("/usr/local/bin/rr"), "test-extension-id");
     assert_eq!(manifest.host_type, "stdio");
     assert!(manifest.allowed_origins[0].contains("test-extension-id"));
+}
+
+#[cfg(unix)]
+fn write_stub_roger_binary(
+    review_payload: &str,
+    review_exit: i32,
+    status_payload: &str,
+    status_exit: i32,
+) -> tempfile::TempDir {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("rr-stub");
+    let script = format!(
+        r#"#!/bin/sh
+case "$1" in
+  review|resume|findings)
+    cat <<'EOF'
+{review_payload}
+EOF
+    exit {review_exit}
+    ;;
+  status)
+    cat <<'EOF'
+{status_payload}
+EOF
+    exit {status_exit}
+    ;;
+  *)
+    echo "unexpected args: $@" >&2
+    exit 64
+    ;;
+esac
+"#
+    );
+    std::fs::write(&path, script).expect("write rr stub");
+    let mut perms = std::fs::metadata(&path).expect("metadata").permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).expect("chmod rr stub");
+    dir
 }
 
 #[test]
@@ -183,8 +226,142 @@ fn refresh_review_action_is_rejected() {
     assert!(resp.guidance.unwrap().contains("Supported actions"));
 }
 
+#[cfg(unix)]
 #[test]
-fn bridge_launch_response_stays_launch_only_without_posting_readiness_signals() {
+fn bridge_launch_response_returns_verified_session_and_status_snapshot() {
+    let intent = BridgeLaunchIntent {
+        action: "start_review".to_owned(),
+        owner: "acme".to_owned(),
+        repo: "widgets".to_owned(),
+        pr_number: 12,
+        head_ref: None,
+        instance: None,
+        extension_id: None,
+        browser: None,
+    };
+    let preflight = BridgePreflight {
+        roger_binary_found: true,
+        roger_data_dir_exists: true,
+        gh_available: true,
+    };
+    let review_payload = serde_json::to_string_pretty(&serde_json::json!({
+        "schema_id": "rr.robot.review.v1",
+        "command": "rr review",
+        "robot_format": "json",
+        "outcome": "complete",
+        "generated_at": "2026-04-15T00:00:00Z",
+        "exit_code": 0,
+        "warnings": [],
+        "repair_actions": [],
+        "data": {
+            "session_id": "session-bridge-42",
+            "launch_attempt_id": "attempt-bridge-42",
+        }
+    }))
+    .expect("serialize review payload");
+    let status_payload = serde_json::to_string_pretty(&serde_json::json!({
+        "schema_id": "rr.robot.status.v1",
+        "command": "rr status",
+        "robot_format": "json",
+        "outcome": "complete",
+        "generated_at": "2026-04-15T00:00:01Z",
+        "exit_code": 0,
+        "warnings": [],
+        "repair_actions": [],
+        "data": {
+            "session": {"id": "session-bridge-42"},
+            "attention": {"state": "review_launched"}
+        }
+    }))
+    .expect("serialize status payload");
+    let stub_dir = write_stub_roger_binary(&review_payload, 0, &status_payload, 0);
+    let stub_rr = stub_dir.path().join("rr-stub");
+
+    let resp = handle_bridge_intent(&intent, &preflight, &stub_rr);
+    assert!(resp.ok);
+    assert_eq!(resp.session_id.as_deref(), Some("session-bridge-42"));
+    assert_eq!(resp.attention_state.as_deref(), Some("review_launched"));
+    assert_eq!(resp.guidance, None);
+    assert_eq!(
+        resp.status.as_ref().map(|status| status.schema_id.as_str()),
+        Some("rr.robot.status.v1")
+    );
+    assert_eq!(resp.launch_outcome, None);
+
+    let message = resp.message.to_ascii_lowercase();
+    assert!(message.contains("completed"));
+    assert!(!message.contains("approval"));
+    assert!(!message.contains("ready to post"));
+}
+
+#[cfg(unix)]
+#[test]
+fn bridge_launch_success_carries_repair_guidance_for_refresh_recommended_status() {
+    let intent = BridgeLaunchIntent {
+        action: "resume_review".to_owned(),
+        owner: "acme".to_owned(),
+        repo: "widgets".to_owned(),
+        pr_number: 12,
+        head_ref: None,
+        instance: None,
+        extension_id: None,
+        browser: None,
+    };
+    let preflight = BridgePreflight {
+        roger_binary_found: true,
+        roger_data_dir_exists: true,
+        gh_available: true,
+    };
+    let review_payload = serde_json::to_string_pretty(&serde_json::json!({
+        "schema_id": "rr.robot.resume.v1",
+        "command": "rr resume",
+        "robot_format": "json",
+        "outcome": "complete",
+        "generated_at": "2026-04-15T00:00:00Z",
+        "exit_code": 0,
+        "warnings": [],
+        "repair_actions": [],
+        "data": {
+            "session_id": "session-bridge-99",
+            "launch_attempt_id": "attempt-bridge-99",
+        }
+    }))
+    .expect("serialize resume payload");
+    let status_payload = serde_json::to_string_pretty(&serde_json::json!({
+        "schema_id": "rr.robot.status.v1",
+        "command": "rr status",
+        "robot_format": "json",
+        "outcome": "complete",
+        "generated_at": "2026-04-15T00:00:01Z",
+        "exit_code": 0,
+        "warnings": [
+            "Roger preserved the last persisted review state because this readback path cannot safely reconcile target drift automatically. Re-enter Roger locally to run or inspect the next truthful pass."
+        ],
+        "repair_actions": [
+            "run rr resume --session session-bridge-99 to reopen the Roger session locally",
+            "run rr review --repo acme/widgets --pr 12 to start a fresh pass if target drift invalidated the older review"
+        ],
+        "data": {
+            "session": {"id": "session-bridge-99"},
+            "attention": {"state": "refresh_recommended"}
+        }
+    }))
+    .expect("serialize status payload");
+    let stub_dir = write_stub_roger_binary(&review_payload, 0, &status_payload, 0);
+    let stub_rr = stub_dir.path().join("rr-stub");
+
+    let resp = handle_bridge_intent(&intent, &preflight, &stub_rr);
+    assert!(resp.ok);
+    assert_eq!(resp.attention_state.as_deref(), Some("refresh_recommended"));
+    let guidance = resp.guidance.expect("repair guidance");
+    assert!(guidance.contains("persisted review state"), "{guidance}");
+    assert!(guidance.contains("rr resume --session session-bridge-99"));
+    assert!(guidance.contains("rr review --repo acme/widgets --pr 12"));
+}
+
+#[cfg(unix)]
+#[test]
+fn bridge_launch_failure_reports_cli_spawn_failure() {
     let intent = BridgeLaunchIntent {
         action: "start_review".to_owned(),
         owner: "acme".to_owned(),
@@ -201,15 +378,314 @@ fn bridge_launch_response_stays_launch_only_without_posting_readiness_signals() 
         gh_available: true,
     };
 
-    let resp = handle_bridge_intent(&intent, &preflight, Path::new("/usr/local/bin/rr"));
-    assert!(resp.ok);
-    assert_eq!(resp.session_id, None);
-    assert_eq!(resp.guidance, None);
+    let resp = handle_bridge_intent(&intent, &preflight, Path::new("/missing/rr"));
+    assert!(!resp.ok);
+    assert_eq!(resp.failure_kind, Some(BridgeFailureKind::CliSpawnFailed));
+    assert!(
+        resp.guidance
+            .as_deref()
+            .is_some_and(|guidance| guidance.contains("rr doctor"))
+    );
+}
 
-    let message = resp.message.to_ascii_lowercase();
-    assert!(message.contains("dispatching"));
-    assert!(!message.contains("approval"));
-    assert!(!message.contains("ready to post"));
+#[cfg(unix)]
+#[test]
+fn bridge_launch_failure_reports_robot_schema_mismatch_for_invalid_payload() {
+    let intent = BridgeLaunchIntent {
+        action: "start_review".to_owned(),
+        owner: "acme".to_owned(),
+        repo: "widgets".to_owned(),
+        pr_number: 12,
+        head_ref: None,
+        instance: None,
+        extension_id: None,
+        browser: None,
+    };
+    let preflight = BridgePreflight {
+        roger_binary_found: true,
+        roger_data_dir_exists: true,
+        gh_available: true,
+    };
+    let status_payload = serde_json::to_string_pretty(&serde_json::json!({
+        "schema_id": "rr.robot.status.v1",
+        "command": "rr status",
+        "robot_format": "json",
+        "outcome": "complete",
+        "generated_at": "2026-04-15T00:00:01Z",
+        "exit_code": 0,
+        "warnings": [],
+        "repair_actions": [],
+        "data": {
+            "session": {"id": "session-bridge-42"},
+            "attention": {"state": "review_launched"}
+        }
+    }))
+    .expect("serialize status payload");
+    let stub_dir = write_stub_roger_binary("not-json", 0, &status_payload, 0);
+    let stub_rr = stub_dir.path().join("rr-stub");
+
+    let resp = handle_bridge_intent(&intent, &preflight, &stub_rr);
+    assert!(!resp.ok);
+    assert_eq!(
+        resp.failure_kind,
+        Some(BridgeFailureKind::RobotSchemaMismatch)
+    );
+    assert!(
+        resp.guidance
+            .as_deref()
+            .is_some_and(|guidance| guidance.contains("rr review"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bridge_launch_failure_reports_missing_session_id_distinctly() {
+    let intent = BridgeLaunchIntent {
+        action: "start_review".to_owned(),
+        owner: "acme".to_owned(),
+        repo: "widgets".to_owned(),
+        pr_number: 12,
+        head_ref: None,
+        instance: None,
+        extension_id: None,
+        browser: None,
+    };
+    let preflight = BridgePreflight {
+        roger_binary_found: true,
+        roger_data_dir_exists: true,
+        gh_available: true,
+    };
+    let review_payload = serde_json::to_string_pretty(&serde_json::json!({
+        "schema_id": "rr.robot.review.v1",
+        "command": "rr review",
+        "robot_format": "json",
+        "outcome": "complete",
+        "generated_at": "2026-04-15T00:00:00Z",
+        "exit_code": 0,
+        "warnings": [],
+        "repair_actions": [],
+        "data": {
+            "launch_attempt_id": "attempt-bridge-42"
+        }
+    }))
+    .expect("serialize review payload");
+    let status_payload = serde_json::to_string_pretty(&serde_json::json!({
+        "schema_id": "rr.robot.status.v1",
+        "command": "rr status",
+        "robot_format": "json",
+        "outcome": "complete",
+        "generated_at": "2026-04-15T00:00:01Z",
+        "exit_code": 0,
+        "warnings": [],
+        "repair_actions": [],
+        "data": {
+            "session": {"id": "session-bridge-42"},
+            "attention": {"state": "review_launched"}
+        }
+    }))
+    .expect("serialize status payload");
+    let stub_dir = write_stub_roger_binary(&review_payload, 0, &status_payload, 0);
+    let stub_rr = stub_dir.path().join("rr-stub");
+
+    let resp = handle_bridge_intent(&intent, &preflight, &stub_rr);
+    assert!(!resp.ok);
+    assert_eq!(resp.failure_kind, Some(BridgeFailureKind::MissingSessionId));
+    assert!(resp.message.contains("canonical Roger session id"));
+    assert!(
+        resp.guidance
+            .as_deref()
+            .is_some_and(|guidance| guidance.contains("rr review"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bridge_launch_failure_reports_blocked_cli_outcome_with_real_repair_guidance() {
+    let intent = BridgeLaunchIntent {
+        action: "start_review".to_owned(),
+        owner: "acme".to_owned(),
+        repo: "widgets".to_owned(),
+        pr_number: 12,
+        head_ref: None,
+        instance: None,
+        extension_id: None,
+        browser: None,
+    };
+    let preflight = BridgePreflight {
+        roger_binary_found: true,
+        roger_data_dir_exists: true,
+        gh_available: true,
+    };
+    let review_payload = serde_json::to_string_pretty(&serde_json::json!({
+        "schema_id": "rr.robot.review.v1",
+        "command": "rr review",
+        "robot_format": "json",
+        "outcome": "blocked",
+        "generated_at": "2026-04-15T00:00:00Z",
+        "exit_code": 3,
+        "warnings": ["resume bundle missing"],
+        "repair_actions": ["rr resume --repo acme/widgets --pr 12 --robot --robot-format json"],
+        "data": {
+            "reason_code": "resume_failed_closed"
+        }
+    }))
+    .expect("serialize review payload");
+    let status_payload = serde_json::to_string_pretty(&serde_json::json!({
+        "schema_id": "rr.robot.status.v1",
+        "command": "rr status",
+        "robot_format": "json",
+        "outcome": "complete",
+        "generated_at": "2026-04-15T00:00:01Z",
+        "exit_code": 0,
+        "warnings": [],
+        "repair_actions": [],
+        "data": {
+            "session": {"id": "session-bridge-42"},
+            "attention": {"state": "review_launched"}
+        }
+    }))
+    .expect("serialize status payload");
+    let stub_dir = write_stub_roger_binary(&review_payload, 3, &status_payload, 0);
+    let stub_rr = stub_dir.path().join("rr-stub");
+
+    let resp = handle_bridge_intent(&intent, &preflight, &stub_rr);
+    assert!(!resp.ok);
+    assert_eq!(
+        resp.failure_kind,
+        Some(BridgeFailureKind::CliOutcomeNotSafe)
+    );
+    assert_eq!(resp.launch_outcome.as_deref(), Some("blocked"));
+    assert!(resp.message.contains("bridge-unsafe outcome 'blocked'"));
+    assert!(
+        resp.guidance
+            .as_deref()
+            .is_some_and(|guidance| guidance.contains("Repair actions"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bridge_launch_success_keeps_degraded_outcome_explicit() {
+    let intent = BridgeLaunchIntent {
+        action: "resume_review".to_owned(),
+        owner: "acme".to_owned(),
+        repo: "widgets".to_owned(),
+        pr_number: 12,
+        head_ref: None,
+        instance: None,
+        extension_id: None,
+        browser: None,
+    };
+    let preflight = BridgePreflight {
+        roger_binary_found: true,
+        roger_data_dir_exists: true,
+        gh_available: true,
+    };
+    let review_payload = serde_json::to_string_pretty(&serde_json::json!({
+        "schema_id": "rr.robot.resume.v1",
+        "command": "rr resume",
+        "robot_format": "json",
+        "outcome": "degraded",
+        "generated_at": "2026-04-15T00:00:00Z",
+        "exit_code": 5,
+        "warnings": ["reopened locator degraded; reseed suggested"],
+        "repair_actions": [],
+        "data": {
+            "session_id": "session-bridge-42"
+        }
+    }))
+    .expect("serialize review payload");
+    let status_payload = serde_json::to_string_pretty(&serde_json::json!({
+        "schema_id": "rr.robot.status.v1",
+        "command": "rr status",
+        "robot_format": "json",
+        "outcome": "complete",
+        "generated_at": "2026-04-15T00:00:01Z",
+        "exit_code": 0,
+        "warnings": [],
+        "repair_actions": [],
+        "data": {
+            "session": {"id": "session-bridge-42"},
+            "attention": {"state": "review_failed"}
+        }
+    }))
+    .expect("serialize status payload");
+    let stub_dir = write_stub_roger_binary(&review_payload, 5, &status_payload, 0);
+    let stub_rr = stub_dir.path().join("rr-stub");
+
+    let resp = handle_bridge_intent(&intent, &preflight, &stub_rr);
+    assert!(resp.ok);
+    assert_eq!(resp.launch_outcome.as_deref(), Some("degraded"));
+    assert_eq!(resp.attention_state.as_deref(), Some("review_failed"));
+    assert!(resp.message.contains("degraded mode"));
+    assert!(
+        resp.message
+            .contains("rr status --session session-bridge-42 --robot --robot-format json")
+    );
+    let lowered = resp.message.to_ascii_lowercase();
+    assert!(!lowered.contains("approval"));
+    assert!(!lowered.contains("ready to post"));
+}
+
+#[cfg(unix)]
+#[test]
+fn bridge_launch_failure_reports_noncanonical_status_readback() {
+    let intent = BridgeLaunchIntent {
+        action: "start_review".to_owned(),
+        owner: "acme".to_owned(),
+        repo: "widgets".to_owned(),
+        pr_number: 12,
+        head_ref: None,
+        instance: None,
+        extension_id: None,
+        browser: None,
+    };
+    let preflight = BridgePreflight {
+        roger_binary_found: true,
+        roger_data_dir_exists: true,
+        gh_available: true,
+    };
+    let review_payload = serde_json::to_string_pretty(&serde_json::json!({
+        "schema_id": "rr.robot.review.v1",
+        "command": "rr review",
+        "robot_format": "json",
+        "outcome": "complete",
+        "generated_at": "2026-04-15T00:00:00Z",
+        "exit_code": 0,
+        "warnings": [],
+        "repair_actions": [],
+        "data": {
+            "session_id": "session-bridge-42",
+            "launch_attempt_id": "attempt-bridge-42",
+        }
+    }))
+    .expect("serialize review payload");
+    let status_payload = serde_json::to_string_pretty(&serde_json::json!({
+        "schema_id": "rr.robot.status.v1",
+        "command": "rr status",
+        "robot_format": "json",
+        "outcome": "complete",
+        "generated_at": "2026-04-15T00:00:01Z",
+        "exit_code": 0,
+        "warnings": [],
+        "repair_actions": [],
+        "data": {
+            "session": {"id": "session-bridge-42"}
+        }
+    }))
+    .expect("serialize status payload");
+    let stub_dir = write_stub_roger_binary(&review_payload, 0, &status_payload, 0);
+    let stub_rr = stub_dir.path().join("rr-stub");
+
+    let resp = handle_bridge_intent(&intent, &preflight, &stub_rr);
+    assert!(!resp.ok);
+    assert_eq!(
+        resp.failure_kind,
+        Some(BridgeFailureKind::RobotSchemaMismatch)
+    );
+    assert!(resp.guidance.as_deref().is_some_and(|guidance| {
+        guidance.contains("rr status --session session-bridge-42 --robot --robot-format json")
+    }));
 }
 
 #[test]
