@@ -48,7 +48,7 @@ Rules:
 
 | Provider | `0.1.0` status | Minimum expectation |
 |----------|----------------|---------------------|
-| GitHub Copilot CLI | Golden-path first-class provider target, not yet live | Do not claim live support until verified launch, policy, worker boundary, and continuity coverage are real |
+| GitHub Copilot CLI | Feature-gated bounded Tier B | Exposed only with `RR_ENABLE_COPILOT_PROVIDER=1`; verified start, locator/session-id reopen, `rr return`, and honest `ResumeBundle` reseed fallback, but still withheld from the default public live claim |
 | OpenCode | First-class fallback and current strongest landed path | Real locator-based resume, Roger ledger integration, bare-harness dropout, `rr return` |
 | Codex | Secondary, bounded | Exposed via `rr review --provider codex`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |
 | Gemini | Secondary, bounded | Exposed via `rr review --provider gemini`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |
@@ -187,6 +187,7 @@ with parallel jobs for build, packaging, verification, and publication.
 | `release` `package-bridge` | Release pipeline | Generate Native Messaging manifests, platform registration helpers, and bridge install/uninstall bundles for supported OS targets | Per-OS bridge registration bundles |
 | `release` `package-extension` | Release pipeline | Produce browser-installable extension packages from the shared source base and stamp them with the release version/source revision | Extension sideload packages for Chrome/Brave/Edge |
 | `release` `verify-release-assets` | Release pipeline | Recompute checksums, verify archive contents, confirm release manifest completeness, and enforce publish gates | Verified `SHA256SUMS` and release asset manifest |
+| `release` `windows-install-update-rehearsal` | Release pipeline | Rehearse release-hosted PowerShell install on a GitHub-hosted Windows runner and run installed `rr update --dry-run --robot` against the same release contract | `windows-install-update-rehearsal` artifact containing run summary + robot outputs |
 | `release` `publish-release` | Release pipeline with explicit maintainer approval | Attach approved artifacts to the versioned release and publish notes from the same workflow run | Published GitHub release and notes |
 
 Ownership rules:
@@ -327,6 +328,10 @@ Behavior rules:
 - installer checksum/metadata behavior must follow the narrower current-truth
   rules in [`UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md`](UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md),
   including any surface-specific fallback or parity caveat
+- WSL is an explicit narrowed cohort: only Linux-side Unix installer usage
+  inside WSL is in scope for install guidance in `0.1.x`; Windows-host
+  PowerShell installs remain a distinct Windows cohort and do not imply WSL
+  parity
 - install success yields a usable local `rr` binary without requiring the
   browser extension, Native Messaging registration, or store publication
 - platform-specific install paths and PATH guidance are Roger-owned release-doc
@@ -349,17 +354,40 @@ Smoke validation for this contract:
   - installs `N` through the official installer, proves same-version no-op on
     the installed old binary, applies `rr update --yes --robot`, and then
     proves same-version no-op on the updated binary
+  - records explicit cohort posture in `update-upgrade-rehearsal-manifest.json`
+    where `cohort_contract.wsl_unix_shell.status=covered_by_release_wsl_lane`;
+    this rehearsal points to the dedicated WSL lane and does not widen WSL
+    claims by itself
   - serves as the representative `INV-UPDATE-004` proof for the bounded stable
-    direct-binary update lane; RC apply and Windows-host update proof remain
-    separately narrowed
+    direct-binary update lane; representative RC apply remains separately
+    narrowed
 - post-publish live stable smoke (manual release lane):
   - `curl -fsSL https://api.github.com/repos/cdilga/roger-reviewer/releases/latest`
   - `bash scripts/release/rr-install.sh --repo cdilga/roger-reviewer --dry-run`
   - fresh isolated install from the live Unix installer followed by
     `rr update --dry-run --robot` from that installed binary
   - record UTC timestamp + resolved stable tag in release closeout evidence
-- PowerShell installer validation is currently a manual smoke on a Windows host
-  until a stable `pwsh` lane is available in this workspace
+- release workflow Windows-host rehearsal lane:
+  - `release` `windows-install-update-rehearsal` runs on `windows-2022`
+  - installs from release-hosted `rr-install.ps1` and executes installed
+    `rr update --dry-run --robot` against the same artifact contract
+  - retains `windows-install-update-rehearsal-summary.json` plus robot/stdout
+    artifacts for release evidence
+- if the lane blocks or is missing for a release run, Windows install/update
+  claims must be narrowed explicitly in release notes and closeout
+- release workflow WSL-host rehearsal lane:
+  - `release` `wsl-install-update-rehearsal` runs on `windows-2022` and
+    executes `rr-install.sh` + installed `rr update --dry-run --robot` inside
+    WSL against the same artifact contract
+  - retains `wsl-install-update-rehearsal-summary.json` plus robot/stdout
+    artifacts for release evidence
+  - WSL support claims may widen only when retained lane summary evidence
+    reports `status=pass`; blocked/missing evidence keeps claims narrowed
+- dedicated local WSL rehearsal command (preflight aid):
+  - `bash scripts/release/test_update_upgrade_rehearsal_wsl.sh --output-dir <artifact-dir>`
+  - useful for rehearsal before publish, but release widening claims require the
+    retained `wsl-install-update-rehearsal` artifact from the unified release
+    run
 
 ### Update lane
 
@@ -386,8 +414,12 @@ Behavior rules:
   resolution
 - the representative stable direct-binary upgrade proof is the deterministic
   rehearsal `bash scripts/release/test_update_upgrade_rehearsal.sh --output-dir <artifact-dir>`;
-  Windows-host and representative RC apply rehearsals remain separate follow-on
-  proof lanes rather than implied parity
+  representative RC apply rehearsal remains a separate follow-on proof lane
+  rather than implied parity
+- WSL (`rr-install.sh` inside a WSL distro) remains an explicit narrowed cohort
+  in `0.1.x`; install and reinstall guidance is allowed, but no in-place WSL
+  update support claim should be made unless retained
+  `wsl-install-update-rehearsal` release-lane evidence reports `status=pass`
 - apply path uses an atomic rename/backup strategy with rollback restore when
   replacement fails after backup
 - installs created from local/unpublished artifacts should not be upgraded as
@@ -474,11 +506,16 @@ Purpose:
 
 - prove the full Roger loop works without the browser
 - primary persona anchors: `PJ-03A` and `PJ-05A`
-- invariant anchors: `INV-HARNESS-002`, `INV-POST-001`
+- invariant anchors: `INV-HARNESS-002`, `INV-POST-001`, `INV-POST-004`
 - executable proof today: `e2e_core_review_happy_path`
 - cheaper suites still own malformed-findings, invalidation, and post-recovery
   truth through `int_harness_opencode_resume`, `int_github_outbound_audit`, and
   `int_github_posting_safety_recovery`
+
+Outbound approval visibility mapping (non-E2E owner for `INV-POST-004`):
+
+- `cargo test -p roger-cli --test session_aware_cli_smoke status_and_findings_surface_outbound_approval_states_truthfully -- --nocapture`
+- `cargo test -p roger-app-core --test tui_shell_smoke queue_and_inspector_keep_outbound_states_and_posting_elevation_visible -- --nocapture`
 
 Rules:
 
@@ -500,7 +537,7 @@ Rules:
 
 Status:
 
-- budget-approved scenario slot; not yet implemented
+- implemented on the deterministic extension-loaded Chromium lane
 
 Required shape:
 
@@ -626,7 +663,8 @@ Purpose:
 - invariant anchors: `INV-POST-002`, `INV-POST-003`, `INV-HARNESS-003`
 - executable proof today: none
 - until the executable suite lands, the current cheaper owners are
-  `prop_refresh_identity_lifecycle` and `int_github_posting_safety_recovery`
+  `prop_refresh_identity_lifecycle`, `int_github_posting_safety_recovery`, and
+  `int_github_outbound_audit`
 - missing executable proof owner: `rr-6iah.3`
 
 Execution posture:
@@ -639,7 +677,7 @@ Execution posture:
 
 Status:
 
-- budget-approved scenario slot; not yet implemented
+- implemented executable heavyweight E2E
 
 Required shape:
 
@@ -660,11 +698,13 @@ Purpose:
 - persona anchors: `PJ-01A`, `PJ-01B`, and `PJ-01C`
 - invariant anchors: `INV-BRIDGE-001`, `INV-BRIDGE-002`,
   `INV-SESSION-001`
-- executable proof today: none
-- until the executable suite lands, the current cheaper owners are
+- executable proof today: `e2e_browser_setup_first_launch`
+  (`packages/cli/tests/e2e_browser_setup_first_launch.rs`)
+- deterministic setup/doctor + launch proof is now owned by the E2E lane above;
+  branded-browser smoke owners remain
   `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`,
-  `smoke_browser_launch_edge`, and `int_bridge_launch_only_no_status`
-- missing executable proof owner: `rr-6iah.4`
+  `smoke_browser_launch_edge` for browser-specific stability evidence
+- executable proof owner bead: `rr-6iah.4.2`
 
 Execution posture:
 
@@ -810,9 +850,41 @@ Purpose:
 
 - prove fallback is operational, not marketing
 
-Codex, Gemini, and Claude Code should not each get their own heavyweight automated
-E2E initially. They should get bounded provider-acceptance coverage plus smoke
-paths commensurate with the claim Roger is actually making.
+#### SMOKE-OPENCODE-01: OpenCode direct continuity smoke
+
+Required shape:
+
+- start or resume a Roger review through the real OpenCode binary path
+- prove locator reopen when available or truthful `ResumeBundle` reseed when the
+  stored locator is stale
+- intentionally drop to bare OpenCode without bypassing Roger posting gates
+- return through `rr return` and retain the same Roger continuity context
+- preserve session-locator evidence, reseed evidence when used, and the
+  resulting return or status envelope for closeout
+
+Purpose:
+
+- keep Roger's first-class OpenCode continuity claim attached to a named
+  real-provider smoke lane
+- separate first-class OpenCode continuity proof from deterministic acceptance
+  and integration coverage
+
+Rules:
+
+- `SMOKE-OPENCODE-01` is required when OpenCode support wording changes, when
+  locator reopen or `rr return` behavior changes, when provider launch capture
+  changes materially, or when Roger re-claims first-class OpenCode continuity
+  after a breakage
+- otherwise `accept_opencode_*`, `int_cli_opencode_transactional_*`, and the
+  last representative `SMOKE-OPENCODE-01` artifact are sufficient
+- Codex, Gemini, Claude Code, and feature-gated Copilot stay out of per-provider
+  real-provider smoke until Roger widens them beyond bounded, non-first-class
+  support wording
+
+Codex, Gemini, Claude Code, and feature-gated Copilot should not each get their
+own heavyweight automated E2E initially. They should keep bounded
+provider-acceptance coverage until a later claim widens into a first-class
+public support promise.
 
 ## Provider Acceptance Suites
 
@@ -823,13 +895,20 @@ paths commensurate with the claim Roger is actually making.
 - raw output and structured findings both persist
 - bare-harness dropout and `rr return` work
 
-### Bounded provider acceptance (`codex`, `claude`, `gemini`)
+### Bounded provider acceptance (`codex`, `claude`, `gemini`, feature-gated `copilot`)
 
 - Roger can start a bounded-provider-backed review through the live CLI surface
 - structured findings and/or raw output persist according to that provider's
   truthful current claim
 - ResumeBundle reseed path works truthfully
 - unsupported deeper capabilities fail clearly rather than pretending parity
+- Codex, Gemini, and Claude Code remain bounded Tier A only
+- Copilot remains feature-gated bounded Tier B: verified start,
+  locator/session-id reopen, `rr return`, and honest `ResumeBundle` reseed
+  fallback, but still no default public live claim
+- no bounded, non-first-class provider gets a dedicated real-provider smoke lane
+  in `0.1.0`; widen to smoke only in the same change that widens the public
+  support claim
 
 ## Fixture Repos
 
@@ -864,8 +943,8 @@ Manual release smoke is still required even with good CI.
 
 Minimum manual smoke set:
 
-- macOS `arm64`: OpenCode primary path, browser launch, Native Messaging host
-  registration
+- macOS `arm64`: OpenCode primary path (`SMOKE-OPENCODE-01`), browser launch,
+  Native Messaging host registration
 - Windows `x86_64`: Edge launch path, Native Messaging host registration,
   browser-extension install flow
 - Linux `x86_64`: CLI/TUI path plus bridge/install truthfulness for the shipped
@@ -879,6 +958,19 @@ Supported-browser release rule:
   support wording changed since the last passing smoke artifacts
 - otherwise, previously passing browser smoke artifacts plus green shared-source
   bridge integration coverage are sufficient
+
+First-class provider release rule:
+
+- run `SMOKE-OPENCODE-01` for release candidates whenever OpenCode support
+  wording, locator reopen or reseed semantics, dropout or return control flow,
+  or provider launch capture changed since the last passing smoke artifact
+- otherwise, green `accept_opencode_*` and `int_cli_opencode_transactional_*`
+  coverage plus the last representative `SMOKE-OPENCODE-01` artifact are
+  sufficient
+- bounded-provider release proof remains `accept_codex_*`,
+  `accept_gemini_*`, `accept_claude_*`, and `accept_copilot_*` plus
+  provider-surface truth coverage; do not invent per-provider real-provider
+  smoke until the support wording widens into a first-class public claim
 
 ## What Must Be Stubbed
 

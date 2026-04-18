@@ -16,8 +16,9 @@ Purpose: provide the minimum truthful manual smoke checklist that must be comple
 - the run is the unified `release` workflow for the intended tag
 - run conclusion is `success`
 - run event is `push` or `workflow_dispatch`
-- the internal jobs `build-core`, `package-bridge`, `package-extension`, and
-  `verify-release-assets` all succeeded for the run you are using
+- the internal jobs `build-core`, `package-bridge`, `package-extension`,
+  `verify-release-assets`, `windows-install-update-rehearsal`, and
+  `wsl-install-update-rehearsal` all succeeded for the run you are using
 
 2. Verify release artifacts in the `release-verify-assets-report` artifact:
 - `release-asset-manifest.json` schema is `roger.release-verify-assets.v1`
@@ -27,20 +28,34 @@ Purpose: provide the minimum truthful manual smoke checklist that must be comple
 - optional lane claims in verify data match the artifacts the unified release
   run actually produced (no silent optional-lane downgrade)
 
-3. Dry-run publication path as draft first (recommended):
+3. Verify Windows installer/update rehearsal artifact from the same run:
+- artifact name: `windows-install-update-rehearsal`
+- `windows-install-update-rehearsal-summary.json` has
+  `schema=roger.release.windows-install-update-rehearsal.v1` and `status=pass`
+- summary `run_url` matches the release workflow run URL used for publish
+- retained `windows-update-dry-run.json` is present and machine-readable
+
+4. Verify WSL installer/update rehearsal artifact from the same run:
+- artifact name: `wsl-install-update-rehearsal`
+- `wsl-install-update-rehearsal-summary.json` has
+  `schema=roger.release.wsl-install-update-rehearsal.v1` and `status=pass`
+- summary `run_url` matches the release workflow run URL used for publish
+- retained `wsl-update-dry-run.json` is present and machine-readable
+
+5. Dry-run publication path as draft first (recommended):
 ```bash
 gh workflow run release.yml \
   -f ref=refs/tags/<stable-or-rc-tag> \
   -f publish_mode=draft
 ```
 
-4. Inspect draft output:
+6. Inspect draft output:
 - generated release notes include support posture + narrowed claims + checksum references
 - attached assets match verified manifest + checksums
 - run provenance is recorded in plan/notes
 
-5. Stable publish confirmation:
-- only after steps 1-4 pass, run with `publish_mode=publish`
+7. Stable publish confirmation:
+- only after steps 1-6 pass, run with `publish_mode=publish`
 - publish mode must pass `--operator-smoke-ack`
 - example:
 ```bash
@@ -50,7 +65,7 @@ gh workflow run release.yml \
   -f operator_smoke_ack=true
 ```
 
-6. Post-publish live install/update proof (required for stable readiness):
+8. Post-publish live install/update proof (required for stable readiness):
 - `curl -fsSL https://api.github.com/repos/cdilga/roger-reviewer/releases/latest`
   must resolve (HTTP 200) and return the expected stable tag.
 - `bash scripts/release/rr-install.sh --repo cdilga/roger-reviewer --dry-run`
@@ -66,10 +81,16 @@ gh workflow run release.yml \
   - `--fresh-install-update-dry-run-outcome <complete|blocked|...>`
   - `--fresh-install-update-dry-run-reason-code <reason-or-none>`
 
-7. Keep the deterministic pre-publish upgrade rehearsal separate from the live publish smoke:
+9. Keep the deterministic pre-publish upgrade rehearsal separate from the live publish smoke:
 - `bash scripts/release/test_update_upgrade_rehearsal.sh --output-dir <artifact-dir>`
 - retain `update-upgrade-rehearsal-manifest.json`, the pre-update same-version no-op output,
   the `rr update --yes --robot` apply output, and the post-update same-version no-op output
+- retain WSL-lane summary output from:
+  `bash scripts/release/test_update_upgrade_rehearsal_wsl.sh --output-dir <artifact-dir>`
+- confirm deterministic manifest row
+  `cohort_contract.wsl_unix_shell.status=covered_by_release_wsl_lane`
+  is present and only points at the dedicated lane; widening decisions come from
+  retained `wsl-install-update-rehearsal` artifact evidence (`status=pass`)
 - this script is the representative `INV-UPDATE-004` proof for the bounded stable direct-binary
   update lane; it does not widen Windows-host or RC apply claims by itself
 
@@ -77,9 +98,18 @@ gh workflow run release.yml \
 
 - URL for the unified `release` workflow run used for publish
 - `release-publish-plan` artifact from the publish run
+- `windows-install-update-rehearsal` artifact from the same run, including
+  `windows-install-update-rehearsal-summary.json`
+- `wsl-install-update-rehearsal` artifact from the same run, including
+  `wsl-install-update-rehearsal-summary.json`
 - final release URL
 - deterministic upgrade rehearsal outputs from
   `bash scripts/release/test_update_upgrade_rehearsal.sh --output-dir <artifact-dir>`
+- explicit WSL lane-pointer evidence from that manifest
+  (`cohort_contract.wsl_unix_shell.status=covered_by_release_wsl_lane`)
+- dedicated WSL-lane summary artifact from
+  `bash scripts/release/test_update_upgrade_rehearsal_wsl.sh --output-dir <artifact-dir>`
+  (`wsl-install-update-rehearsal-summary.json` with status/reason/provenance)
 - live installer/update proof outputs (`releases/latest` response summary + installer dry-run output + fresh-install update dry-run output)
 - explicit CI evidence fields for the closeout guard:
   `latest_proof_utc`, `latest_proof_tag`, `installer_dry_run_outcome`,

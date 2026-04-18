@@ -19,6 +19,8 @@ publish = jobs.fetch("publish-release")
 fixture = jobs.fetch("fixture-rehearsal")
 build_core = jobs.fetch("build-core")
 verify_release_assets = jobs.fetch("verify-release-assets")
+windows_rehearsal = jobs.fetch("windows-install-update-rehearsal")
+wsl_rehearsal = jobs.fetch("wsl-install-update-rehearsal")
 
 unless publish["environment"] == "release-publish-approval"
   fail!("expected publish-release.environment=release-publish-approval")
@@ -85,8 +87,8 @@ end
 steps = publish.fetch("steps")
 
 needs = publish.fetch("needs")
-unless needs.sort == ["derive-release-metadata", "verify-release-assets"]
-  fail!("publish-release must depend on derive-release-metadata and verify-release-assets")
+unless needs.sort == ["derive-release-metadata", "verify-release-assets", "windows-install-update-rehearsal", "wsl-install-update-rehearsal"]
+  fail!("publish-release must depend on derive-release-metadata, verify-release-assets, windows-install-update-rehearsal, and wsl-install-update-rehearsal")
 end
 
 plan_step = steps.find { |step| step["name"] == "Build release publication plan" }
@@ -148,6 +150,118 @@ end
 verify_needs = verify_release_assets.fetch("needs")
 unless verify_needs.sort == ["aggregate-core-manifest", "derive-release-metadata", "summarize-optional-lanes"]
   fail!("verify-release-assets must fan in aggregate-core-manifest, derive-release-metadata, and summarize-optional-lanes")
+end
+
+unless windows_rehearsal["if"] == "github.event_name != 'pull_request'"
+  fail!("windows-install-update-rehearsal must run on non-pull_request release lanes")
+end
+unless windows_rehearsal["runs-on"] == "windows-2022"
+  fail!("windows-install-update-rehearsal must run on windows-2022")
+end
+
+windows_needs = windows_rehearsal.fetch("needs")
+unless windows_needs.sort == ["aggregate-core-manifest", "derive-release-metadata", "verify-release-assets"]
+  fail!("windows-install-update-rehearsal must depend on derive-release-metadata, aggregate-core-manifest, and verify-release-assets")
+end
+
+windows_steps = windows_rehearsal.fetch("steps")
+windows_run_step = windows_steps.find do |step|
+  step["name"] == "Rehearse PowerShell install + installed-binary dry-run update"
+end
+fail!("missing Windows PowerShell install/update rehearsal step") unless windows_run_step.is_a?(Hash)
+unless windows_run_step["shell"] == "pwsh"
+  fail!("Windows install/update rehearsal step must run under pwsh")
+end
+windows_run = windows_run_step["run"]
+unless windows_run.is_a?(String)
+  fail!("Windows install/update rehearsal step must define a run script")
+end
+["rr-install.ps1", "rr update", "--dry-run", "--robot"].each do |token|
+  unless windows_run.include?(token)
+    fail!("Windows install/update rehearsal must include #{token}")
+  end
+end
+
+windows_upload = windows_steps.find do |step|
+  step["name"] == "Upload Windows install/update rehearsal evidence"
+end
+fail!("missing upload step for Windows install/update rehearsal evidence") unless windows_upload.is_a?(Hash)
+windows_upload_with = windows_upload.fetch("with")
+unless windows_upload_with["name"] == "windows-install-update-rehearsal"
+  fail!("Windows install/update rehearsal upload artifact name must be windows-install-update-rehearsal")
+end
+windows_upload_path = windows_upload_with.fetch("path")
+[
+  "windows-install-update-rehearsal-summary.json",
+  "windows-update-dry-run.json",
+].each do |entry|
+unless windows_upload_path.include?(entry)
+    fail!("Windows install/update rehearsal upload must include #{entry}")
+  end
+end
+
+unless wsl_rehearsal["if"] == "github.event_name != 'pull_request'"
+  fail!("wsl-install-update-rehearsal must run on non-pull_request release lanes")
+end
+unless wsl_rehearsal["runs-on"] == "windows-2022"
+  fail!("wsl-install-update-rehearsal must run on windows-2022")
+end
+
+wsl_needs = wsl_rehearsal.fetch("needs")
+unless wsl_needs.sort == ["aggregate-core-manifest", "derive-release-metadata", "verify-release-assets"]
+  fail!("wsl-install-update-rehearsal must depend on derive-release-metadata, aggregate-core-manifest, and verify-release-assets")
+end
+
+wsl_steps = wsl_rehearsal.fetch("steps")
+wsl_run_step = wsl_steps.find do |step|
+  step["name"] == "Rehearse WSL install + installed-binary dry-run update"
+end
+fail!("missing WSL install/update rehearsal step") unless wsl_run_step.is_a?(Hash)
+unless wsl_run_step["shell"] == "pwsh"
+  fail!("WSL install/update rehearsal step must run under pwsh")
+end
+wsl_run = wsl_run_step["run"]
+unless wsl_run.is_a?(String)
+  fail!("WSL install/update rehearsal step must define a run script")
+end
+["wsl.exe", "rr-install.sh", "rr update", "--dry-run", "--robot", "roger.release.wsl-install-update-rehearsal.v1"].each do |token|
+  unless wsl_run.include?(token)
+    fail!("WSL install/update rehearsal must include #{token}")
+  end
+end
+
+wsl_upload = wsl_steps.find do |step|
+  step["name"] == "Upload WSL install/update rehearsal evidence"
+end
+fail!("missing upload step for WSL install/update rehearsal evidence") unless wsl_upload.is_a?(Hash)
+wsl_upload_with = wsl_upload.fetch("with")
+unless wsl_upload_with["name"] == "wsl-install-update-rehearsal"
+  fail!("WSL install/update rehearsal upload artifact name must be wsl-install-update-rehearsal")
+end
+wsl_upload_path = wsl_upload_with.fetch("path")
+[
+  "wsl-install-update-rehearsal-summary.json",
+  "wsl-update-dry-run.json",
+].each do |entry|
+  unless wsl_upload_path.include?(entry)
+    fail!("WSL install/update rehearsal upload must include #{entry}")
+  end
+end
+
+release_matrix_doc = File.read("docs/RELEASE_AND_TEST_MATRIX.md")
+unless release_matrix_doc.include?("wsl-install-update-rehearsal")
+  fail!("RELEASE_AND_TEST_MATRIX.md must reference wsl-install-update-rehearsal evidence")
+end
+
+update_contract_doc = File.read("docs/UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md")
+unless update_contract_doc.include?("| WSL user running Linux-side `rr` inside WSL |")
+  fail!("UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md must keep explicit WSL user cohort row")
+end
+unless update_contract_doc.include?("| WSL install/update cohort |")
+  fail!("UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md must keep explicit WSL proof-matrix row")
+end
+unless update_contract_doc.include?("wsl-install-update-rehearsal")
+  fail!("UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md must reference wsl-install-update-rehearsal evidence")
 end
 
 puts("test_release_publish_workflow: PASS")

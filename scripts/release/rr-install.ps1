@@ -185,6 +185,51 @@ function Read-ChecksumsEntry {
     return $matches[0]
 }
 
+function Download-ChecksumsManifest {
+    param(
+        [string]$DownloadRoot,
+        [string]$Tag,
+        [string]$DeclaredChecksumsName,
+        [string]$TmpDir
+    )
+
+    $attempts = @(
+        [pscustomobject]@{
+            Name = $DeclaredChecksumsName
+            UsedLegacyFallback = $false
+        }
+    )
+    if ($DeclaredChecksumsName -ne "SHA256SUMS") {
+        $attempts += [pscustomobject]@{
+            Name = "SHA256SUMS"
+            UsedLegacyFallback = $true
+        }
+    }
+
+    $lastError = $null
+    foreach ($attempt in $attempts) {
+        $checksumsUrl = "$DownloadRoot/$Tag/$($attempt.Name)"
+        $checksumsPath = Join-Path $TmpDir $attempt.Name
+        try {
+            Invoke-WebRequest -Uri $checksumsUrl -OutFile $checksumsPath -UseBasicParsing
+            return [pscustomobject]@{
+                Url = $checksumsUrl
+                Path = $checksumsPath
+                UsedLegacyFallback = $attempt.UsedLegacyFallback
+            }
+        }
+        catch {
+            $lastError = $_
+        }
+    }
+
+    if ($lastError) {
+        throw $lastError
+    }
+
+    Fail "failed to download checksums manifest"
+}
+
 if (-not $ApiRoot) {
     $ApiRoot = "https://api.github.com/repos/$Repo"
 }
@@ -233,10 +278,13 @@ try {
         -PayloadDir $entry.PayloadDir `
         -BinaryName $entry.BinaryName
 
-    $checksumsName = $entry.ChecksumsName
-    $checksumsUrl = "$DownloadRoot/$tag/$checksumsName"
-    $checksumsPath = Join-Path $tmpDir $checksumsName
-    Invoke-WebRequest -Uri $checksumsUrl -OutFile $checksumsPath -UseBasicParsing
+    $checksums = Download-ChecksumsManifest `
+        -DownloadRoot $DownloadRoot `
+        -Tag $tag `
+        -DeclaredChecksumsName $entry.ChecksumsName `
+        -TmpDir $tmpDir
+    $checksumsUrl = $checksums.Url
+    $checksumsPath = $checksums.Path
 
     $checksumsSha = Read-ChecksumsEntry -ChecksumsPath $checksumsPath -ArchiveName $entry.ArchiveName
     if ($checksumsSha -ne $entry.ArchiveSha256) {

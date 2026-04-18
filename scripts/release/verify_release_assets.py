@@ -464,7 +464,7 @@ def _verify_install_metadata_bundle(
         return None
 
     checksums_name = bundle.get("checksums_name")
-    expected_checksums_name = f"{artifact_stem}-checksums.txt"
+    expected_checksums_name = "SHA256SUMS"
     if checksums_name != expected_checksums_name:
         errors.append(
             "install metadata checksums_name mismatch: "

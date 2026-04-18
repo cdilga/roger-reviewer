@@ -82,7 +82,7 @@ write_install_metadata() {
     "prerelease": false,
     "artifact_stem": "roger-reviewer-2026.04.01"
   },
-  "checksums_name": "roger-reviewer-2026.04.01-checksums.txt",
+  "checksums_name": "SHA256SUMS",
   "core_manifest_name": "core-manifest.json",
   "targets": [
     {

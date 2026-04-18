@@ -533,11 +533,565 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  windows-install-update-rehearsal:
+    if: github.event_name != 'pull_request'
+    needs:
+      - derive-release-metadata
+      - aggregate-core-manifest
+      - verify-release-assets
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-version-metadata
+          path: upstream/version-metadata
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: core-install-metadata
+          path: upstream/assets
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-build-core-manifest
+          path: upstream/assets
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: core-*
+          path: upstream/assets
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-verify-assets-report
+          path: upstream/verify-report
+
+      - name: Rehearse PowerShell install + installed-binary dry-run update
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+
+          function Fail {
+              param([string]$Message)
+              throw $Message
+          }
+
+          function Find-SingleFile {
+              param(
+                  [string]$Root,
+                  [string]$Name
+              )
+
+              $matches = @(
+                  Get-ChildItem -Path $Root -Recurse -File -ErrorAction Stop |
+                      Where-Object { $_.Name -eq $Name }
+              )
+              if ($matches.Count -eq 0) {
+                  Fail "missing expected artifact '$Name' under $Root"
+              }
+              if ($matches.Count -gt 1) {
+                  Fail "ambiguous artifact '$Name' under $Root"
+              }
+              return $matches[0].FullName
+          }
+
+          function To-FileUri {
+              param([string]$Path)
+              $resolved = Resolve-Path -LiteralPath $Path -ErrorAction Stop
+              return ([System.Uri]$resolved.Path).AbsoluteUri.TrimEnd('/')
+          }
+
+          $workspaceRoot = $env:GITHUB_WORKSPACE
+          $artifactRoot = Join-Path $workspaceRoot "upstream/windows-rehearsal"
+          New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
+
+          $summaryPath = Join-Path $artifactRoot "windows-install-update-rehearsal-summary.json"
+          $robotOutputPath = Join-Path $artifactRoot "windows-update-dry-run.json"
+          $robotStderrPath = Join-Path $artifactRoot "windows-update-dry-run.stderr.txt"
+
+          $status = "pass"
+          $blockedReason = $null
+          $reasonCode = $null
+          $updateOutcome = $null
+          $version = $null
+          $tag = $null
+          $target = $null
+          $downloadRootUri = $null
+          $apiRootUri = $null
+          $runUrl = "$($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/actions/runs/$($env:GITHUB_RUN_ID)"
+
+          try {
+              $releaseMetadataPath = Find-SingleFile -Root (Join-Path $workspaceRoot "upstream/version-metadata") -Name "release-metadata.json"
+              $releaseMetadata = Get-Content -Raw -Path $releaseMetadataPath | ConvertFrom-Json
+              $version = [string]$releaseMetadata.version
+              $tag = [string]$releaseMetadata.tag
+              if ([string]::IsNullOrWhiteSpace($version) -or [string]::IsNullOrWhiteSpace($tag)) {
+                  Fail "release metadata must include non-empty version and tag"
+              }
+
+              if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") {
+                  $target = "aarch64-pc-windows-msvc"
+              } else {
+                  $target = "x86_64-pc-windows-msvc"
+              }
+
+              $assetRoot = Join-Path $workspaceRoot "upstream/assets"
+              $installMetadataName = "release-install-metadata-$version.json"
+              $installMetadataPath = Find-SingleFile -Root $assetRoot -Name $installMetadataName
+              $installMetadata = Get-Content -Raw -Path $installMetadataPath | ConvertFrom-Json
+
+              $matchingTargets = @($installMetadata.targets | Where-Object { $_.target -eq $target })
+              if ($matchingTargets.Count -eq 0) {
+                  Fail "install metadata has no entry for target $target"
+              }
+              if ($matchingTargets.Count -gt 1) {
+                  Fail "install metadata has ambiguous entries for target $target"
+              }
+              $targetEntry = $matchingTargets[0]
+              $archiveName = [string]$targetEntry.archive_name
+              if ([string]::IsNullOrWhiteSpace($archiveName)) {
+                  Fail "install metadata target entry missing archive_name for $target"
+              }
+
+              $coreManifestName = [string]$installMetadata.core_manifest_name
+              if ([string]::IsNullOrWhiteSpace($coreManifestName)) {
+                  Fail "install metadata missing core_manifest_name"
+              }
+
+              $rehearsalRoot = Join-Path $env:RUNNER_TEMP "windows-install-update-rehearsal"
+              if (Test-Path $rehearsalRoot) {
+                  Remove-Item -Path $rehearsalRoot -Recurse -Force
+              }
+              New-Item -ItemType Directory -Path $rehearsalRoot -Force | Out-Null
+
+              $downloadRootFs = Join-Path $rehearsalRoot "releases/download"
+              $tagRoot = Join-Path $downloadRootFs $tag
+              New-Item -ItemType Directory -Path $tagRoot -Force | Out-Null
+
+              Copy-Item -Path (Find-SingleFile -Root $assetRoot -Name $installMetadataName) -Destination (Join-Path $tagRoot $installMetadataName) -Force
+              Copy-Item -Path (Find-SingleFile -Root $assetRoot -Name $coreManifestName) -Destination (Join-Path $tagRoot $coreManifestName) -Force
+              Copy-Item -Path (Find-SingleFile -Root $assetRoot -Name $archiveName) -Destination (Join-Path $tagRoot $archiveName) -Force
+              Copy-Item -Path (Find-SingleFile -Root (Join-Path $workspaceRoot "upstream/verify-report") -Name "SHA256SUMS") -Destination (Join-Path $tagRoot "SHA256SUMS") -Force
+
+              $publishedInstallerPath = Join-Path $tagRoot "rr-install.ps1"
+              Copy-Item -Path (Find-SingleFile -Root $assetRoot -Name "rr-install.ps1") -Destination $publishedInstallerPath -Force
+
+              $apiRootFs = Join-Path $rehearsalRoot "api/repos/cdilga/roger-reviewer"
+              $apiReleasesDir = Join-Path $apiRootFs "releases"
+              New-Item -ItemType Directory -Path $apiReleasesDir -Force | Out-Null
+              @"
+          {
+            "tag_name": "$tag"
+          }
+          "@ | Set-Content -Path (Join-Path $apiReleasesDir "latest") -Encoding utf8NoBOM
+
+              $downloadRootUri = To-FileUri -Path $downloadRootFs
+              $apiRootUri = To-FileUri -Path $apiRootFs
+
+              $installDir = Join-Path $rehearsalRoot "install/bin"
+              New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+              & pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File $publishedInstallerPath `
+                  -Version $version `
+                  -DownloadRoot $downloadRootUri `
+                  -InstallDir $installDir `
+                  -Target $target
+
+              $rrPath = Join-Path $installDir "rr.exe"
+              if (-not (Test-Path -LiteralPath $rrPath -PathType Leaf)) {
+                  Fail "installer did not produce rr.exe at $rrPath"
+              }
+
+              $env:RR_STORE_ROOT = Join-Path $rehearsalRoot "store"
+              & $rrPath update `
+                  --api-root $apiRootUri `
+                  --download-root $downloadRootUri `
+                  --dry-run `
+                  --robot 1> $robotOutputPath 2> $robotStderrPath
+              $updateExit = $LASTEXITCODE
+              Remove-Item Env:RR_STORE_ROOT -ErrorAction SilentlyContinue
+
+              $robotRaw = ""
+              if (Test-Path -LiteralPath $robotOutputPath) {
+                  $robotRaw = Get-Content -Raw -Path $robotOutputPath
+              }
+              if ([string]::IsNullOrWhiteSpace($robotRaw)) {
+                  Fail "rr update --dry-run --robot produced no JSON output"
+              }
+              $robotPayload = $robotRaw | ConvertFrom-Json
+
+              $updateOutcome = [string]$robotPayload.outcome
+              if ($robotPayload.PSObject.Properties.Name -contains "data") {
+                  $data = $robotPayload.data
+                  if ($null -ne $data -and $data.PSObject.Properties.Name -contains "reason_code") {
+                      $reasonCode = [string]$data.reason_code
+                  }
+              }
+
+              if ($updateExit -ne 0) {
+                  Fail "rr update --dry-run --robot exited non-zero ($updateExit)"
+              }
+              if ($updateOutcome -eq "blocked" -or $updateOutcome -eq "error") {
+                  Fail "rr update dry-run outcome was $updateOutcome"
+              }
+              if ($reasonCode -in @("checksums_missing", "checksums_mismatch", "checksums_entry_invalid")) {
+                  Fail "rr update dry-run returned checksum/asset mismatch reason_code=$reasonCode"
+              }
+              if ($updateOutcome -notin @("complete", "empty")) {
+                  Fail "unexpected rr update dry-run outcome '$updateOutcome'"
+              }
+          }
+          catch {
+              $status = "blocked"
+              $blockedReason = $_.Exception.Message
+          }
+
+          $summary = [ordered]@{
+              schema = "roger.release.windows-install-update-rehearsal.v1"
+              status = $status
+              run_id = $env:GITHUB_RUN_ID
+              run_url = $runUrl
+              release_version = $version
+              release_tag = $tag
+              target = $target
+              download_root = $downloadRootUri
+              api_root = $apiRootUri
+              update_outcome = $updateOutcome
+              reason_code = $reasonCode
+              blocked_reason = $blockedReason
+              artifacts = @{
+                  robot_output = "windows-update-dry-run.json"
+                  robot_stderr = "windows-update-dry-run.stderr.txt"
+              }
+          }
+          $summary | ConvertTo-Json -Depth 6 | Set-Content -Path $summaryPath -Encoding utf8NoBOM
+
+          if ($status -ne "pass") {
+              Fail "Windows PowerShell install/update rehearsal blocked: $blockedReason"
+          }
+
+      - name: Upload Windows install/update rehearsal evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-install-update-rehearsal
+          path: |
+            upstream/windows-rehearsal/windows-install-update-rehearsal-summary.json
+            upstream/windows-rehearsal/windows-update-dry-run.json
+            upstream/windows-rehearsal/windows-update-dry-run.stderr.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  wsl-install-update-rehearsal:
+    if: github.event_name != 'pull_request'
+    needs:
+      - derive-release-metadata
+      - aggregate-core-manifest
+      - verify-release-assets
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-version-metadata
+          path: upstream/version-metadata
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: core-install-metadata
+          path: upstream/assets
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-build-core-manifest
+          path: upstream/assets
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: core-*
+          path: upstream/assets
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-verify-assets-report
+          path: upstream/verify-report
+
+      - name: Rehearse WSL install + installed-binary dry-run update
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+
+          function Fail {
+              param([string]$Message)
+              throw $Message
+          }
+
+          function Find-SingleFile {
+              param(
+                  [string]$Root,
+                  [string]$Name
+              )
+
+              $matches = @(
+                  Get-ChildItem -Path $Root -Recurse -File -ErrorAction Stop |
+                      Where-Object { $_.Name -eq $Name }
+              )
+              if ($matches.Count -eq 0) {
+                  Fail "missing expected artifact '$Name' under $Root"
+              }
+              if ($matches.Count -gt 1) {
+                  Fail "ambiguous artifact '$Name' under $Root"
+              }
+              return $matches[0].FullName
+          }
+
+          function To-WslPath {
+              param(
+                  [string]$Distro,
+                  [string]$WindowsPath
+              )
+              $converted = (& wsl.exe --distribution $Distro -- wslpath -a -u $WindowsPath)
+              if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($converted)) {
+                  Fail "failed to convert path '$WindowsPath' to WSL path"
+              }
+              return $converted.Trim()
+          }
+
+          $workspaceRoot = $env:GITHUB_WORKSPACE
+          $artifactRoot = Join-Path $workspaceRoot "upstream/wsl-rehearsal"
+          New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
+
+          $summaryPath = Join-Path $artifactRoot "wsl-install-update-rehearsal-summary.json"
+          $robotOutputPath = Join-Path $artifactRoot "wsl-update-dry-run.json"
+          $robotStderrPath = Join-Path $artifactRoot "wsl-update-dry-run.stderr.txt"
+
+          $status = "pass"
+          $blockedReason = $null
+          $reasonCode = $null
+          $updateOutcome = $null
+          $version = $null
+          $tag = $null
+          $target = $null
+          $downloadRootUri = $null
+          $apiRootUri = $null
+          $distro = $null
+          $runUrl = "$($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/actions/runs/$($env:GITHUB_RUN_ID)"
+
+          try {
+              $releaseMetadataPath = Find-SingleFile -Root (Join-Path $workspaceRoot "upstream/version-metadata") -Name "release-metadata.json"
+              $releaseMetadata = Get-Content -Raw -Path $releaseMetadataPath | ConvertFrom-Json
+              $version = [string]$releaseMetadata.version
+              $tag = [string]$releaseMetadata.tag
+              if ([string]::IsNullOrWhiteSpace($version) -or [string]::IsNullOrWhiteSpace($tag)) {
+                  Fail "release metadata must include non-empty version and tag"
+              }
+
+              if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") {
+                  $target = "aarch64-unknown-linux-gnu"
+              } else {
+                  $target = "x86_64-unknown-linux-gnu"
+              }
+
+              $assetRoot = Join-Path $workspaceRoot "upstream/assets"
+              $installMetadataName = "release-install-metadata-$version.json"
+              $installMetadataPath = Find-SingleFile -Root $assetRoot -Name $installMetadataName
+              $installMetadata = Get-Content -Raw -Path $installMetadataPath | ConvertFrom-Json
+
+              $matchingTargets = @($installMetadata.targets | Where-Object { $_.target -eq $target })
+              if ($matchingTargets.Count -eq 0) {
+                  Fail "install metadata has no entry for target $target"
+              }
+              if ($matchingTargets.Count -gt 1) {
+                  Fail "install metadata has ambiguous entries for target $target"
+              }
+              $targetEntry = $matchingTargets[0]
+              $archiveName = [string]$targetEntry.archive_name
+              if ([string]::IsNullOrWhiteSpace($archiveName)) {
+                  Fail "install metadata target entry missing archive_name for $target"
+              }
+
+              $coreManifestName = [string]$installMetadata.core_manifest_name
+              if ([string]::IsNullOrWhiteSpace($coreManifestName)) {
+                  Fail "install metadata missing core_manifest_name"
+              }
+
+              $distro = (
+                  & wsl.exe -l -q |
+                  ForEach-Object { $_.Trim() } |
+                  Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                  Select-Object -First 1
+              )
+              if ([string]::IsNullOrWhiteSpace($distro)) {
+                  Fail "no WSL distro is available on the runner"
+              }
+
+              $rehearsalRoot = Join-Path $env:RUNNER_TEMP "wsl-install-update-rehearsal"
+              if (Test-Path $rehearsalRoot) {
+                  Remove-Item -Path $rehearsalRoot -Recurse -Force
+              }
+              New-Item -ItemType Directory -Path $rehearsalRoot -Force | Out-Null
+
+              $downloadRootFs = Join-Path $rehearsalRoot "releases/download"
+              $tagRoot = Join-Path $downloadRootFs $tag
+              New-Item -ItemType Directory -Path $tagRoot -Force | Out-Null
+
+              Copy-Item -Path (Find-SingleFile -Root $assetRoot -Name $installMetadataName) -Destination (Join-Path $tagRoot $installMetadataName) -Force
+              Copy-Item -Path (Find-SingleFile -Root $assetRoot -Name $coreManifestName) -Destination (Join-Path $tagRoot $coreManifestName) -Force
+              Copy-Item -Path (Find-SingleFile -Root $assetRoot -Name $archiveName) -Destination (Join-Path $tagRoot $archiveName) -Force
+              Copy-Item -Path (Find-SingleFile -Root (Join-Path $workspaceRoot "upstream/verify-report") -Name "SHA256SUMS") -Destination (Join-Path $tagRoot "SHA256SUMS") -Force
+              Copy-Item -Path (Find-SingleFile -Root $assetRoot -Name "rr-install.sh") -Destination (Join-Path $tagRoot "rr-install.sh") -Force
+
+              $apiRootFs = Join-Path $rehearsalRoot "api/repos/cdilga/roger-reviewer"
+              $apiReleasesDir = Join-Path $apiRootFs "releases"
+              New-Item -ItemType Directory -Path $apiReleasesDir -Force | Out-Null
+              @"
+          {
+            "tag_name": "$tag"
+          }
+          "@ | Set-Content -Path (Join-Path $apiReleasesDir "latest") -Encoding utf8NoBOM
+
+              $wslRehearsalRoot = To-WslPath -Distro $distro -WindowsPath $rehearsalRoot
+              $downloadRootUri = "file://${wslRehearsalRoot}/releases/download"
+              $apiRootUri = "file://${wslRehearsalRoot}/api/repos/cdilga/roger-reviewer"
+
+              $wslCommandPath = Join-Path $rehearsalRoot "run-wsl-rehearsal.sh"
+              @"
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          version="$version"
+          tag="$tag"
+          target="$target"
+          rehearsal_root="$wslRehearsalRoot"
+          download_root_uri="$downloadRootUri"
+          api_root_uri="$apiRootUri"
+
+          install_dir="${rehearsal_root}/install/bin"
+          mkdir -p "${install_dir}"
+
+          bash "${rehearsal_root}/releases/download/${tag}/rr-install.sh" \
+            --version "${version}" \
+            --target "${target}" \
+            --download-root "${download_root_uri}" \
+            --api-root "${api_root_uri}" \
+            --install-dir "${install_dir}"
+
+          rr_path="${install_dir}/rr"
+          if [[ ! -x "${rr_path}" ]]; then
+            echo "installer did not produce rr at ${rr_path}" >&2
+            exit 1
+          fi
+
+          RR_STORE_ROOT="${rehearsal_root}/store" "${rr_path}" update \
+            --api-root "${api_root_uri}" \
+            --download-root "${download_root_uri}" \
+            --dry-run \
+            --robot \
+            1> "${rehearsal_root}/wsl-update-dry-run.json" \
+            2> "${rehearsal_root}/wsl-update-dry-run.stderr.txt"
+          "@ | Set-Content -Path $wslCommandPath -Encoding utf8NoBOM
+
+              $wslCommandPathUnix = To-WslPath -Distro $distro -WindowsPath $wslCommandPath
+              & wsl.exe --distribution $distro -- bash $wslCommandPathUnix
+              if ($LASTEXITCODE -ne 0) {
+                  Fail "WSL install/update rehearsal command failed with exit code $LASTEXITCODE"
+              }
+
+              $rawRobotPath = Join-Path $rehearsalRoot "wsl-update-dry-run.json"
+              $rawRobotStderrPath = Join-Path $rehearsalRoot "wsl-update-dry-run.stderr.txt"
+              if (-not (Test-Path -LiteralPath $rawRobotPath)) {
+                  Fail "WSL rehearsal missing robot output at $rawRobotPath"
+              }
+              if (-not (Test-Path -LiteralPath $rawRobotStderrPath)) {
+                  "" | Set-Content -Path $rawRobotStderrPath -Encoding utf8NoBOM
+              }
+              Copy-Item -Path $rawRobotPath -Destination $robotOutputPath -Force
+              Copy-Item -Path $rawRobotStderrPath -Destination $robotStderrPath -Force
+
+              $robotRaw = Get-Content -Raw -Path $robotOutputPath
+              if ([string]::IsNullOrWhiteSpace($robotRaw)) {
+                  Fail "WSL rehearsal rr update --dry-run --robot produced no JSON output"
+              }
+              $robotPayload = $robotRaw | ConvertFrom-Json
+              $updateOutcome = [string]$robotPayload.outcome
+              if ($robotPayload.PSObject.Properties.Name -contains "data") {
+                  $data = $robotPayload.data
+                  if ($null -ne $data -and $data.PSObject.Properties.Name -contains "reason_code") {
+                      $reasonCode = [string]$data.reason_code
+                  }
+              }
+              if ($updateOutcome -eq "blocked" -or $updateOutcome -eq "error") {
+                  Fail "WSL rehearsal rr update dry-run outcome was $updateOutcome"
+              }
+              if ($reasonCode -in @("checksums_missing", "checksums_mismatch", "checksums_entry_invalid")) {
+                  Fail "WSL rehearsal rr update returned checksum/asset mismatch reason_code=$reasonCode"
+              }
+              if ($updateOutcome -notin @("complete", "empty")) {
+                  Fail "unexpected WSL rehearsal rr update outcome '$updateOutcome'"
+              }
+          }
+          catch {
+              $status = "blocked"
+              $blockedReason = $_.Exception.Message
+          }
+
+          if (-not (Test-Path -LiteralPath $robotOutputPath)) {
+              "{}" | Set-Content -Path $robotOutputPath -Encoding utf8NoBOM
+          }
+          if (-not (Test-Path -LiteralPath $robotStderrPath)) {
+              "" | Set-Content -Path $robotStderrPath -Encoding utf8NoBOM
+          }
+
+          $summary = [ordered]@{
+              schema = "roger.release.wsl-install-update-rehearsal.v1"
+              status = $status
+              run_id = $env:GITHUB_RUN_ID
+              run_url = $runUrl
+              release_version = $version
+              release_tag = $tag
+              target = $target
+              wsl_distribution = $distro
+              download_root = $downloadRootUri
+              api_root = $apiRootUri
+              update_outcome = $updateOutcome
+              reason_code = $reasonCode
+              blocked_reason = $blockedReason
+              artifacts = @{
+                  robot_output = "wsl-update-dry-run.json"
+                  robot_stderr = "wsl-update-dry-run.stderr.txt"
+              }
+          }
+          $summary | ConvertTo-Json -Depth 6 | Set-Content -Path $summaryPath -Encoding utf8NoBOM
+
+          if ($status -ne "pass") {
+              Fail "WSL install/update rehearsal blocked: $blockedReason"
+          }
+
+      - name: Upload WSL install/update rehearsal evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wsl-install-update-rehearsal
+          path: |
+            upstream/wsl-rehearsal/wsl-install-update-rehearsal-summary.json
+            upstream/wsl-rehearsal/wsl-update-dry-run.json
+            upstream/wsl-rehearsal/wsl-update-dry-run.stderr.txt
+          if-no-files-found: error
+          retention-days: 14
+
   publish-release:
     if: github.event_name == 'workflow_dispatch'
     needs:
       - derive-release-metadata
       - verify-release-assets
+      - windows-install-update-rehearsal
+      - wsl-install-update-rehearsal
     runs-on: ubuntu-latest
     environment: release-publish-approval
     steps:

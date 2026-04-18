@@ -67,7 +67,7 @@ jq -e '.schema == "roger.release.install-metadata.v1"' \
   "${workdir}/release-install-metadata-2026.04.01.json" >/dev/null
 jq -e '.release.version == "2026.04.01"' \
   "${workdir}/release-install-metadata-2026.04.01.json" >/dev/null
-jq -e '.checksums_name == "roger-reviewer-2026.04.01-checksums.txt"' \
+jq -e '.checksums_name == "SHA256SUMS"' \
   "${workdir}/release-install-metadata-2026.04.01.json" >/dev/null
 jq -e '.core_manifest_name == "release-core-manifest-2026.04.01.json"' \
   "${workdir}/release-install-metadata-2026.04.01.json" >/dev/null

@@ -279,7 +279,7 @@ def main() -> int:
             "workspace_version": version_metadata.get("workspace_version"),
             "provenance": version_metadata.get("provenance", {}),
         },
-        "checksums_name": f"{artifact_stem}-checksums.txt",
+        "checksums_name": "SHA256SUMS",
         "core_manifest_name": f"release-core-manifest-{version}.json",
         "targets": targets,
         "store_compatibility": store_compatibility,

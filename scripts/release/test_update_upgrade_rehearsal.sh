@@ -49,6 +49,16 @@ detect_target() {
   esac
 }
 
+detect_host_environment() {
+  local os
+  os="$(uname -s)"
+  if [[ "${os}" == "Linux" ]] && grep -qiE "(microsoft|wsl)" /proc/version 2>/dev/null; then
+    echo "wsl"
+    return
+  fi
+  echo "native"
+}
+
 sha256_file() {
   python3 - "$1" <<'PY'
 import hashlib
@@ -254,6 +264,17 @@ if confirmation.get("mode") != "not_required_up_to_date":
 PY
 }
 
+assert_installed_help_surface() {
+  local binary_path="$1"
+  local help_output
+  help_output="$("${binary_path}" --help)"
+
+  grep -q "rr init" <<<"${help_output}" \
+    || die "installed rr help is missing rr init"
+  grep -q "rr doctor" <<<"${help_output}" \
+    || die "installed rr help is missing rr doctor"
+}
+
 assert_apply_payload() {
   local json_path="$1"
   local expected_current_version="$2"
@@ -315,13 +336,14 @@ write_manifest() {
   local pre_noop_json="$4"
   local apply_json="$5"
   local post_noop_json="$6"
+  local host_environment="$7"
 
-  python3 - "$path" "$old_version" "$new_version" "$TARGET" "$pre_noop_json" "$apply_json" "$post_noop_json" <<'PY'
+  python3 - "$path" "$old_version" "$new_version" "$TARGET" "$pre_noop_json" "$apply_json" "$post_noop_json" "$host_environment" <<'PY'
 import json
 import pathlib
 import sys
 
-manifest_path, old_version, new_version, target, pre_noop_json, apply_json, post_noop_json = sys.argv[1:8]
+manifest_path, old_version, new_version, target, pre_noop_json, apply_json, post_noop_json, host_environment = sys.argv[1:9]
 
 def load(path):
     return json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
@@ -330,8 +352,22 @@ manifest = {
     "schema": "roger.update.upgrade-rehearsal.v1",
     "channel": "stable",
     "target": target,
+    "host_environment": host_environment,
     "old_version": old_version,
     "new_version": new_version,
+    "cohort_contract": {
+        "unix_direct_binary": {
+            "status": "covered",
+            "entry_path": "unix_installer_native_shell",
+        },
+        "wsl_unix_shell": {
+            "status": "covered_by_release_wsl_lane",
+            "entry_path": "unix_installer_inside_wsl",
+            "evidence_lane": "wsl-install-update-rehearsal",
+            "evidence_schema": "roger.release.wsl-install-update-rehearsal.v1",
+            "claim_gate": "retain same-run WSL rehearsal artifact evidence or narrow WSL wording",
+        },
+    },
     "checks": {
         "pre_update_same_version_noop": load(pre_noop_json),
         "update_apply": load(apply_json),
@@ -343,6 +379,38 @@ pathlib.Path(manifest_path).write_text(
     json.dumps(manifest, indent=2, sort_keys=True) + "\n",
     encoding="utf-8",
 )
+PY
+}
+
+assert_manifest_cohort_contract() {
+  local path="$1"
+  python3 - "$path" <<'PY'
+import json
+import pathlib
+import sys
+
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+cohorts = manifest.get("cohort_contract") or {}
+
+unix_row = cohorts.get("unix_direct_binary") or {}
+if unix_row.get("status") != "covered":
+    raise SystemExit(
+        "expected cohort_contract.unix_direct_binary.status='covered'"
+    )
+
+wsl_row = cohorts.get("wsl_unix_shell") or {}
+if wsl_row.get("status") != "covered_by_release_wsl_lane":
+    raise SystemExit(
+        "expected cohort_contract.wsl_unix_shell.status='covered_by_release_wsl_lane'"
+    )
+if wsl_row.get("evidence_lane") != "wsl-install-update-rehearsal":
+    raise SystemExit(
+        "expected cohort_contract.wsl_unix_shell.evidence_lane='wsl-install-update-rehearsal'"
+    )
+if wsl_row.get("evidence_schema") != "roger.release.wsl-install-update-rehearsal.v1":
+    raise SystemExit(
+        "expected cohort_contract.wsl_unix_shell.evidence_schema='roger.release.wsl-install-update-rehearsal.v1'"
+    )
 PY
 }
 
@@ -394,6 +462,7 @@ else
 fi
 
 TARGET="$(detect_target)"
+HOST_ENVIRONMENT="$(detect_host_environment)"
 API_ROOT_FS="${WORKDIR}/api/repos/cdilga/roger-reviewer"
 DOWNLOAD_FS_ROOT="${WORKDIR}/releases/download"
 INSTALL_ROOT="${WORKDIR}/install/bin"
@@ -418,7 +487,7 @@ bash "${INSTALL_SCRIPT}" \
   --target "${TARGET}"
 
 [[ -x "${INSTALL_ROOT}/rr" ]] || die "installer did not create executable rr"
-"${INSTALL_ROOT}/rr" --help >/dev/null
+assert_installed_help_surface "${INSTALL_ROOT}/rr"
 
 write_latest_release_pointer "${OLD_TAG}"
 PRE_NOOP_JSON="${ARTIFACT_DIR}/pre-update-same-version-noop.json"
@@ -440,7 +509,7 @@ RR_STORE_ROOT="${WORKDIR}/store-apply" \
     --robot >"${APPLY_JSON}"
 assert_apply_payload "${APPLY_JSON}" "${OLD_VERSION}" "${NEW_VERSION}"
 
-"${INSTALL_ROOT}/rr" --help >/dev/null
+assert_installed_help_surface "${INSTALL_ROOT}/rr"
 
 POST_NOOP_JSON="${ARTIFACT_DIR}/post-update-same-version-noop.json"
 RR_STORE_ROOT="${WORKDIR}/store-post-noop" \
@@ -458,7 +527,9 @@ write_manifest \
   "${NEW_VERSION}" \
   "${PRE_NOOP_JSON}" \
   "${APPLY_JSON}" \
-  "${POST_NOOP_JSON}"
+  "${POST_NOOP_JSON}" \
+  "${HOST_ENVIRONMENT}"
+assert_manifest_cohort_contract "${MANIFEST_PATH}"
 
 echo "test_update_upgrade_rehearsal: PASS"
 echo "manifest: ${MANIFEST_PATH}"
