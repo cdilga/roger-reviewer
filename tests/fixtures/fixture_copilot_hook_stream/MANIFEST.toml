@@ -1,0 +1,15 @@
+[fixture]
+family = "fixture_copilot_hook_stream"
+description = "Deterministic Copilot hook-event payload corpus for session-start validation, tool audit capture, and end-of-session reconciliation."
+
+[[fixture.allowed_consumers]]
+suite_family = "int_harness_"
+notes = "Provider hook parsing and launch-attempt finalization boundaries."
+
+[[fixture.allowed_consumers]]
+suite_family = "int_cli_"
+notes = "CLI and worker projections that consume hook-derived launch/session evidence."
+
+[fixture.degraded_conditions]
+missing_session_start = "No session-start hook payload is emitted; launch attempt must remain pending or fail closed."
+malformed_payload = "Hook payload schema mismatch is surfaced as deterministic parse failure, not silent success."
