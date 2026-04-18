@@ -7,6 +7,7 @@ const {
   PR_SUBTITLE,
   buildLaunchMessage,
   buildPopupViewModel,
+  describeLaunchResponse,
   parsePullRequestContextFromUrl,
   SUPPORTED_ACTIONS,
   routePopupAction,
@@ -107,6 +108,19 @@ test('routePopupAction no longer exposes refresh_review as a supported action', 
       }),
     /Unsupported action/
   );
+});
+
+test('describeLaunchResponse appends repair guidance on successful launch responses', () => {
+  const feedback = describeLaunchResponse({
+    ok: true,
+    mode: 'native_messaging',
+    message: 'rr resume completed for octo/roger-reviewer#42',
+    guidance: 'Run `rr resume --session session-42` locally to reconcile stale state.',
+  });
+
+  assert.equal(feedback.isError, false);
+  assert.match(feedback.message, /rr resume completed/i);
+  assert.match(feedback.message, /rr resume --session session-42/);
 });
 
 test('buildLaunchMessage rejects unsupported actions', () => {

@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "Launch local Roger review flows from GitHub PR pages.",
   "minimum_chrome_version": "114",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2FDtjF8sDdzic557+0PBHZDHc0NoxOFpmh3YFtXyvMxDRqF4TeujY6y4SC5JjqUjnpbUYjMm7lNJFvd2kiauFYFBcAyJLeGGKUSzfgrr6LhpP8SRvd7+lZO6KsjsIkrJxOr8aL8uMmkwAIaC7owRO7CRjKgqaRcEublt6Xk3WfW/UKSxVry286T2DKlH+2zhz5xbnpldnWgnPEo1tdO/7Z1RfYYWZCZ47bFudhBc5Q54diUeIWtYgeSmsPmWu2gxHcaji2gIGRwtgsoTR+Fsnm1wB0XX7PsmR8iF17YgJIXeit464GQbzLt6o5tYFFXxzuU4Mrbyla0Dw76shE4eEQIDAQAB",
   "icons": {
     "16": "assets/icon-16.png",
     "32": "assets/icon-32.png",

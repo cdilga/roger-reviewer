@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  appendGuidance,
   BRAND_CHIP_CLASS,
   GITHUB_ACTION_BUTTON_CLASS,
   MODAL_FALLBACK_STATUS,
@@ -182,6 +183,17 @@ test('mountInto keeps placement idempotent and supports reinjection to a new par
   assert.equal(panel.parentElement, secondParent);
   assert.equal(firstParent.children.length, 0);
   assert.equal(secondParent.children.length, 1);
+});
+
+test('appendGuidance keeps stale-state repair guidance visible on extension surfaces', () => {
+  assert.equal(
+    appendGuidance(
+      'rr resume completed for octo/roger-reviewer#42',
+      'Run `rr resume --session session-42` locally to reconcile stale state.'
+    ),
+    'rr resume completed for octo/roger-reviewer#42. Run `rr resume --session session-42` locally to reconcile stale state.'
+  );
+  assert.equal(appendGuidance('Launch intent dispatched.', ''), 'Launch intent dispatched.');
 });
 
 test('applyPanelModeStyles flips between inline, rail, and modal class contracts', () => {

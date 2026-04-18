@@ -59,6 +59,20 @@ test('handleStatusMessage falls back to launch-only when status probe is unavail
   assert.deepEqual(response, launchOnlyStatusEnvelope());
 });
 
+test('launchOnlyStatusEnvelope keeps no-status guidance honest and non-posting', () => {
+  const response = launchOnlyStatusEnvelope();
+
+  assert.equal(response.ok, true);
+  assert.equal(response.mode, 'launch_only');
+  assert.match(response.message, /launch-only bridge mode/i);
+  assert.match(response.guidance, /rr status/);
+  assert.match(response.guidance, /rr findings/);
+
+  const combined = `${response.message} ${response.guidance}`.toLowerCase();
+  assert.doesNotMatch(combined, /approval/);
+  assert.doesNotMatch(combined, /ready to post/);
+});
+
 test('handleStatusMessage returns bounded status from companion-tier probe', async () => {
   const response = await handleStatusMessage(
     {
@@ -79,6 +93,21 @@ test('handleStatusMessage returns bounded status from companion-tier probe', asy
   assert.ok(response);
   assert.equal(response.mode, 'bounded_status');
   assert.equal(response.attention_state, 'refresh_recommended');
+});
+
+test('normalizeBoundedStatus preserves repair guidance for stale mirrored state', () => {
+  const response = normalizeBoundedStatus({
+    ok: true,
+    attention_state: 'refresh_recommended',
+    freshness_seconds: 9,
+    guidance: 'Run `rr resume --session session-42` locally before trusting stale findings.',
+  });
+
+  assert.ok(response);
+  assert.equal(
+    response.guidance,
+    'Run `rr resume --session session-42` locally before trusting stale findings.'
+  );
 });
 
 test('handleStatusMessage rejects malformed status request payload', async () => {

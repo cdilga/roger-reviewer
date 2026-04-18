@@ -82,6 +82,21 @@ function buildLaunchMessage(action, context) {
   };
 }
 
+function appendGuidance(message, guidance) {
+  const base = typeof message === 'string' ? message.trim() : '';
+  const extra = typeof guidance === 'string' ? guidance.trim() : '';
+
+  if (!base) {
+    return extra;
+  }
+  if (!extra) {
+    return base;
+  }
+
+  const normalizedBase = /[.!?]$/.test(base) ? base : `${base}.`;
+  return `${normalizedBase} ${extra}`.trim();
+}
+
 function routePopupAction(action, context, dispatch) {
   if (typeof dispatch !== 'function') {
     throw new Error('Popup action dispatcher must be a function.');
@@ -99,9 +114,8 @@ function describeLaunchResponse(response) {
   }
 
   if (!response.ok) {
-    const guidance = response.guidance ? ` ${response.guidance}` : '';
     return {
-      message: `${response.message || 'Launch failed.'}${guidance}`.trim(),
+      message: appendGuidance(response.message || 'Launch failed.', response.guidance),
       isError: true,
     };
   }
@@ -116,7 +130,7 @@ function describeLaunchResponse(response) {
   }
 
   return {
-    message: response.message || 'Launch intent dispatched.',
+    message: appendGuidance(response.message || 'Launch intent dispatched.', response.guidance),
     isError: false,
   };
 }

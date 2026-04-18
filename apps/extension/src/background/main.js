@@ -13,6 +13,30 @@ const CANONICAL_ATTENTION_STATES = new Set([
   'review_failed',
 ]);
 const MAX_MIRROR_FRESHNESS_SECONDS = 300;
+const BRIDGE_FAILURE_MODE_BY_KIND = Object.freeze({
+  preflight_failed: 'bridge_preflight_failed',
+  cli_spawn_failed: 'bridge_cli_spawn_failed',
+  robot_schema_mismatch: 'bridge_robot_schema_mismatch',
+  missing_session_id: 'bridge_missing_session_id',
+  cli_outcome_not_safe: 'bridge_cli_outcome_not_safe',
+});
+
+function classifyBridgeFailureMode(response) {
+  if (!response || typeof response !== 'object') {
+    return 'native_bridge_failure';
+  }
+
+  const failureKind =
+    typeof response.failure_kind === 'string' ? response.failure_kind : null;
+  const launchOutcome =
+    typeof response.launch_outcome === 'string' ? response.launch_outcome : null;
+
+  if (failureKind === 'cli_outcome_not_safe' && launchOutcome) {
+    return `bridge_cli_${launchOutcome}`;
+  }
+
+  return BRIDGE_FAILURE_MODE_BY_KIND[failureKind] || 'native_bridge_failure';
+}
 
 function dispatchNative(intent) {
   return new Promise((resolve) => {
@@ -38,11 +62,13 @@ function dispatchNative(intent) {
       const mirrored = normalizeBoundedStatus(response);
       resolve({
         ok: Boolean(response.ok),
-        mode: 'native_messaging',
+        mode: response.ok ? 'native_messaging' : classifyBridgeFailureMode(response),
         action: response.action,
         message: response.message || 'Bridge handled launch request.',
         guidance: response.guidance,
         session_id: response.session_id,
+        failure_kind: response.failure_kind,
+        launch_outcome: response.launch_outcome,
         ...(mirrored
           ? {
               attention_state: mirrored.attention_state,
@@ -111,6 +137,16 @@ function nativeUnavailableGuidance(nativeResult) {
     ].join(' ');
   }
 
+  if (normalized.includes('specified native messaging host is forbidden')) {
+    return [
+      'Roger Native Messaging host is registered but this browser profile is not allowed to access it yet.',
+      'Rerun `rr extension setup --browser <edge|chrome|brave>` against the real browser host path, then run `rr extension doctor --browser <edge|chrome|brave>`.',
+      'Confirm the discovered extension id matches the host manifest allowed origin.',
+      'Then fully quit and relaunch the browser with the isolated rehearsal profile so the browser reloads the native host policy.',
+      'If the host is still forbidden before the wrapper runs, this is a browser-side policy rejection and the next step is a sacrificial-profile/manual rehearsal, not GitHub posting.',
+    ].join(' ');
+  }
+
   return rawMessage;
 }
 
@@ -145,6 +181,11 @@ function normalizeBoundedStatus(response) {
     return null;
   }
 
+  const guidance =
+    typeof response.guidance === 'string' && response.guidance.trim().length > 0
+      ? response.guidance.trim()
+      : null;
+
   return {
     ok: true,
     mode: 'bounded_status',
@@ -153,6 +194,7 @@ function normalizeBoundedStatus(response) {
     freshness_label: `${freshnessSeconds}s old`,
     message: 'Mirroring bounded Roger attention state from local companion.',
     guidance: 'Open Roger locally (`rr status`) for full authoritative detail.',
+    ...(guidance ? { guidance } : {}),
   };
 }
 
@@ -160,8 +202,11 @@ function launchOnlyStatusEnvelope(reason = null) {
   return {
     ok: true,
     mode: 'launch_only',
-    message: 'Ready to launch Roger actions for this pull request.',
-    guidance: reason || 'Open Roger locally (`rr status`) for authoritative session state.',
+    message:
+      'Launch-only bridge mode. This browser surface can start Roger actions, but it does not own live local session state.',
+    guidance:
+      reason ||
+      'Open Roger locally (`rr status` or `rr findings`) for authoritative session state.',
   };
 }
 
@@ -209,6 +254,13 @@ async function handleLaunchMessage(payload) {
 
   const nativeResult = await dispatchNative(intent);
   if (nativeResult.ok) {
+    return nativeResult;
+  }
+
+  if (
+    nativeResult.mode !== 'native_error' &&
+    nativeResult.mode !== 'native_invalid_response'
+  ) {
     return nativeResult;
   }
 

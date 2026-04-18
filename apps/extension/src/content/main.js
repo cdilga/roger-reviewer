@@ -141,6 +141,21 @@ function readExtensionBuildLabel() {
 
 let inlineStatusResetTimer = null;
 
+function appendGuidance(message, guidance) {
+  const base = typeof message === 'string' ? message.trim() : '';
+  const extra = typeof guidance === 'string' ? guidance.trim() : '';
+
+  if (!base) {
+    return extra;
+  }
+  if (!extra) {
+    return base;
+  }
+
+  const normalizedBase = /[.!?]$/.test(base) ? base : `${base}.`;
+  return `${normalizedBase} ${extra}`.trim();
+}
+
 function setStatus(message, isError = false, options = {}) {
   if (typeof document === 'undefined') {
     return;
@@ -260,8 +275,7 @@ function requestStatusMirror(context) {
           applyActionModel(panel, lastAttentionState);
         }
         clearAttentionBadge();
-        const guidance = response.guidance ? ` ${response.guidance}` : '';
-        setStatus(`${response.message}.${guidance}`.trim(), true);
+        setStatus(appendGuidance(response.message, response.guidance), true);
         return;
       }
 
@@ -280,7 +294,9 @@ function requestStatusMirror(context) {
         applyActionModel(panel, lastAttentionState);
       }
       setAttentionBadge(response.attention_state, response.freshness_label || null);
-      setStatus(response.message || 'Mirroring bounded Roger status.');
+      setStatus(
+        appendGuidance(response.message || 'Mirroring bounded Roger status.', response.guidance)
+      );
     }
   );
 }
@@ -1127,8 +1143,7 @@ function triggerLaunch(action, context, button) {
           applyActionModel(panel, lastAttentionState);
         }
         clearAttentionBadge();
-        const guidance = response.guidance ? ` ${response.guidance}` : '';
-        setStatus(`${response.message}.${guidance}`.trim(), true, { revealInline: true });
+        setStatus(appendGuidance(response.message, response.guidance), true, { revealInline: true });
         return;
       }
 
@@ -1148,7 +1163,11 @@ function triggerLaunch(action, context, button) {
           applyActionModel(panel, lastAttentionState);
         }
         setAttentionBadge(response.attention_state, response.freshness_label || null);
-        setStatus(response.message || 'Launch intent dispatched.', false, { revealInline: true });
+        setStatus(
+          appendGuidance(response.message || 'Launch intent dispatched.', response.guidance),
+          false,
+          { revealInline: true }
+        );
         return;
       }
 
@@ -1156,7 +1175,11 @@ function triggerLaunch(action, context, button) {
       if (panel) {
         applyActionModel(panel, lastAttentionState);
       }
-      setStatus(response.message || 'Launch intent dispatched.', false, { revealInline: true });
+      setStatus(
+        appendGuidance(response.message || 'Launch intent dispatched.', response.guidance),
+        false,
+        { revealInline: true }
+      );
       requestStatusMirror(context);
     }
   );
@@ -1168,6 +1191,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    appendGuidance,
     BRAND_CHIP_CLASS,
     GITHUB_ACTION_BUTTON_CLASS,
     INLINE_ANCHOR_SELECTORS,
