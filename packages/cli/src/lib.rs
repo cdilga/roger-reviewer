@@ -3019,13 +3019,22 @@ fn extension_profile_roots_for_discovery(
     runtime: &CliRuntime,
 ) -> Vec<PathBuf> {
     let mut roots = Vec::new();
+    let mut explicit_profile_root = false;
     if let Ok(path) = std::env::var("RR_EXTENSION_PROFILE_ROOT") {
         let trimmed = path.trim();
         if !trimmed.is_empty() {
             roots.push(PathBuf::from(trimmed));
+            explicit_profile_root = true;
         }
     }
-    roots.push(extension_guided_profile_root(runtime, browser));
+    if !explicit_profile_root {
+        roots.push(extension_guided_profile_root(runtime, browser));
+    }
+    // When an explicit profile root is supplied for setup/doctor, treat it as
+    // authoritative and avoid probing the ambient browser profile tree.
+    if explicit_profile_root {
+        return roots;
+    }
     if let Some(default_root) = extension_default_profile_root(browser) {
         if !roots.iter().any(|existing| existing == &default_root) {
             roots.push(default_root);
@@ -3228,16 +3237,19 @@ fn write_native_host_launcher(
 
     let binary = bridge_binary.to_string_lossy();
     let contents = match host_os {
-        SupportedOs::Windows => {
-            format!("@echo off\r\n\"{}\" --native-host\r\n", binary.replace('\"', "\"\""))
-        }
+        SupportedOs::Windows => format!(
+            "@echo off\r\nif \"%RR_STORE_ROOT%\"==\"\" set \"RR_STORE_ROOT=%USERPROFILE%\\.roger\"\r\n\"{}\" --native-host\r\n",
+            binary.replace('\"', "\"\"")
+        ),
         SupportedOs::Macos | SupportedOs::Linux => {
             let escaped = binary
                 .replace('\\', "\\\\")
                 .replace('\"', "\\\"")
                 .replace('$', "\\$")
                 .replace('`', "\\`");
-            format!("#!/bin/sh\nexec \"{escaped}\" --native-host\n")
+            format!(
+                "#!/bin/sh\nif [ -n \"${{PATH:-}}\" ]; then\n  export PATH=\"/opt/homebrew/bin:/usr/local/bin:${{PATH}}\"\nelse\n  export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\"\nfi\nif [ -z \"${{RR_STORE_ROOT:-}}\" ]; then\n  export RR_STORE_ROOT=\"${{HOME}}/.roger\"\nfi\nexec \"{escaped}\" --native-host\n"
+            )
         }
     };
 
@@ -13637,6 +13649,106 @@ mod tests {
         let persisted = fs::read_to_string(extension_id_registry_path(&runtime.store_root))
             .expect("persisted extension identity should exist");
         assert_eq!(persisted.trim(), profile_id);
+    }
+
+    #[test]
+    fn extension_setup_with_explicit_profile_root_ignores_default_profile_stale_identity() {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _env_guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock");
+
+        let (tmp, runtime, _generated) = setup_bridge_workspace();
+        let install_root = tmp.path().join("install-root");
+        let explicit_profile_root = tmp.path().join("isolated-edge-profile");
+        let fake_home = tmp.path().join("fake-home");
+
+        let stale_default_id = "bcdefghijklmnopabcdefghijklmnopa";
+        let default_pref = fake_home.join(
+            "Library/Application Support/Microsoft Edge/Default/Secure Preferences",
+        );
+        fs::create_dir_all(default_pref.parent().expect("default pref parent"))
+            .expect("create default pref parent");
+        let package_dir = runtime
+            .cwd
+            .join("target/bridge/extension/roger-extension-unpacked");
+        let default_preferences = json!({
+            "extensions": {
+                "settings": {
+                    stale_default_id: {
+                        "path": package_dir.to_string_lossy().to_string()
+                    }
+                }
+            }
+        });
+        fs::write(
+            &default_pref,
+            serde_json::to_vec_pretty(&default_preferences).expect("serialize default prefs"),
+        )
+        .expect("write default preferences");
+
+        let previous_home = std::env::var_os("HOME");
+        let previous_profile_root = std::env::var_os("RR_EXTENSION_PROFILE_ROOT");
+        // SAFETY: tests serialize HOME/RR_EXTENSION_PROFILE_ROOT mutation via ENV_LOCK and restore before return.
+        unsafe {
+            std::env::set_var("HOME", &fake_home);
+            std::env::set_var("RR_EXTENSION_PROFILE_ROOT", &explicit_profile_root);
+        }
+
+        let setup = run(
+            &[
+                "extension".to_owned(),
+                "setup".to_owned(),
+                "--browser".to_owned(),
+                "edge".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+
+        match previous_profile_root {
+            Some(value) => {
+                // SAFETY: tests serialize RR_EXTENSION_PROFILE_ROOT mutation via ENV_LOCK and restore before return.
+                unsafe {
+                    std::env::set_var("RR_EXTENSION_PROFILE_ROOT", value);
+                }
+            }
+            None => {
+                // SAFETY: tests serialize RR_EXTENSION_PROFILE_ROOT mutation via ENV_LOCK and restore before return.
+                unsafe {
+                    std::env::remove_var("RR_EXTENSION_PROFILE_ROOT");
+                }
+            }
+        }
+        match previous_home {
+            Some(value) => {
+                // SAFETY: tests serialize HOME mutation via ENV_LOCK and restore before return.
+                unsafe {
+                    std::env::set_var("HOME", value);
+                }
+            }
+            None => {
+                // SAFETY: tests serialize HOME mutation via ENV_LOCK and restore before return.
+                unsafe {
+                    std::env::remove_var("HOME");
+                }
+            }
+        }
+
+        assert_eq!(setup.exit_code, 0, "{}", setup.stderr);
+        let setup_payload = parse_robot(&setup.stdout);
+        assert_eq!(setup_payload["outcome"], "complete");
+        assert_eq!(
+            setup_payload["data"]["extension_id"],
+            TEST_EXTENSION_MANIFEST_ID
+        );
+        assert_eq!(
+            setup_payload["data"]["extension_id_source"],
+            "packaged_manifest_key"
+        );
     }
 
     #[test]

@@ -117,6 +117,18 @@ fn extension_setup_writes_native_host_launcher_that_normalizes_browser_argv() {
         "launcher should force native-host mode: {launcher_contents}"
     );
     assert!(
+        launcher_contents.contains("RR_STORE_ROOT"),
+        "launcher should pin a stable default store root: {launcher_contents}"
+    );
+    assert!(
+        launcher_contents.contains(".roger"),
+        "launcher should default RR_STORE_ROOT to HOME/.roger: {launcher_contents}"
+    );
+    assert!(
+        launcher_contents.contains("/opt/homebrew/bin:/usr/local/bin"),
+        "launcher should prepend common gh/toolchain paths for browser-launched hosts: {launcher_contents}"
+    );
+    assert!(
         !launcher_contents.contains("$@"),
         "launcher must not forward browser argv directly: {launcher_contents}"
     );
