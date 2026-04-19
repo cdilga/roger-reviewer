@@ -42,14 +42,16 @@ Theme/readability smoke checklist:
 
 ## Visual Identity Direction (rr-vsr2)
 
-Chosen direction: **Signal Beacon**.
+Chosen direction: **Walkie-Talkie Relay**.
 
-- concise geometric mark (`static/roger-mark.svg`) for compact browser surfaces
-- two-line wordmark (`static/roger-wordmark.svg`) for popup and future cards
-- shared token sheet (`static/roger-identity.css`) for consistent accent/ink/canvas
-  values across extension surfaces
-- popup shell now presents the brand header while preserving manual-backup UX
-  and bounded launch controls
+- compact walkie-talkie mark (`static/roger-mark.svg`) with metallic shell and
+  radio accent for compact browser surfaces
+- two-line wordmark (`static/roger-wordmark.svg`) with matching relay motif for
+  popup and future cards
+- shared token sheet (`static/roger-identity.css`) for consistent metallic
+  accent/ink/canvas values across extension surfaces
+- popup shell keeps manual-backup semantics with one primary launch action,
+  demoted findings action, and a persistent build/fallback info affordance
 
 Identity assets intentionally avoid mutating posting/approval semantics; they
 decorate existing bounded UX rather than widening extension authority.

@@ -11,6 +11,10 @@ placement precedence and bounded fallback behavior.
 - popup remains a manual backup surface (PR-aware, non-PR fail-closed guidance)
 - popup actions preserve the bounded launch set:
   `start_review`, `resume_review`, `show_findings`
+- popup action hierarchy stays explicit: one primary launch action plus demoted
+  secondary actions, including findings
+- popup build/version details stay behind the persistent
+  `Build and fallback details` disclosure affordance (not inline status copy)
 - launch path is Native Messaging only; when unavailable, launch fails closed
   with setup guidance and does not open `roger://...`
 
@@ -44,7 +48,8 @@ This command executes focused placement/popup/launch tests and asserts:
 - Header + rail unavailable:
   `resolvePanelPlacement` returns modal fallback (`content/main.test.js`)
 - Popup on PR tab:
-  Start/Resume/Findings routes are enabled and dispatched (`popup/main.test.js`)
+  Start Review in Roger / Resume Existing Review / View Findings routes are
+  enabled and dispatched (`popup/main.test.js`)
 - Popup on non-PR tab:
   guidance mode is `non_pr` and launch controls are disabled (`popup/main.test.js`)
 - Native Messaging unavailable:
@@ -58,11 +63,32 @@ probe in at least one of Edge, Chrome, or Brave:
 1. Open a GitHub PR tab and verify header/rail/modal host behavior matches the
    current seam availability.
 2. In popup on a PR tab, verify Start/Resume/Findings remain enabled.
+   Verify hierarchy and copy:
+   Start Review in Roger (primary), Resume Existing Review, View Findings.
 3. With Native Messaging host uninstalled or misconfigured, verify launch is
    blocked with setup guidance and no custom URL tab opens.
-4. In popup on a non-PR tab, verify non-PR guidance and disabled launch actions.
+4. Expand `Build and fallback details` and verify build text is present inside
+   the disclosure, not as an inline status row.
+5. In popup on a non-PR tab, verify non-PR guidance and disabled launch actions.
 
 Record browser, URL shape, seam condition, and observed mode in bead notes.
+
+## Latest Popup Redesign Evidence (2026-04-19)
+
+Automated:
+
+- `node --test apps/extension/src/background.launch.test.js apps/extension/src/popup/main.test.js apps/extension/src/popup/index.test.js apps/extension/src/popup/layout_redesign.test.js`
+  - PASS
+  - confirms PR-context detection, launch dispatch honesty, revised popup copy,
+    explicit action hierarchy, and info-affordance markup
+
+Supported-browser popup smoke (Chrome shell render):
+
+- Browser: Chrome (headless, supported browser engine)
+- Surface: popup shell HTML render (`apps/extension/src/popup/index.html`)
+- Snapshot observation confirms redesigned labels and disclosure affordance:
+  `Manual Backup Controls`, `Start Review in Roger`, `Resume Existing Review`,
+  `View Findings`, and `Build and fallback details`
 
 ## Live Sacrificial-PR Operator-Stability Rehearsal (`rr-6iah.8`)
 
