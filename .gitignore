@@ -29,9 +29,21 @@ target/
 .ntm/
 .swarm-kit/
 mcp_agent_mail/
+.LOCAL_TRIAGE/
 .ntm/logs/
 .ntm/pids/
 .ntm/summaries/
 .ntm/rate_limits.json
 .ft/
 __pycache__/
+
+# Generated validation/operator evidence and local runtime scratch state
+out/
+test-results/
+.agent-mail-project-id
+
+# Local Beads repair/recovery scratch artifacts
+.beads/.manual_repair_*
+.beads/.metadata_repair_backups/
+.beads/.br_recovery/
+scripts/swarm/.metadata_repair_backups/
