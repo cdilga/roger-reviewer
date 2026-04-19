@@ -1,0 +1,17 @@
+# Metadata contract for executable E2E-02.
+# The suite implementation lives at:
+# packages/cli/tests/e2e_cross_surface_review_continuity.rs
+id = "e2e_cross_surface_review_continuity"
+budget_id = "E2E-02"
+family = "e2e"
+flow_ids = ["F02", "F01.1", "F05", "F07", "F09"]
+invariant_ids = ["INV-SESSION-002", "INV-CONTEXT-001", "INV-SEARCH-003", "INV-SEARCH-004"]
+persona_ids = ["PJ-02A", "PJ-02D", "PJ-04A", "PJ-04B"]
+fixture_families = ["fixture_cli_session_degraded_capabilities", "fixture_github_draft_batch"]
+support_tier = "deterministic_chromium_harness"
+support_status = "blessed"
+degraded = true
+bounded = true
+tier = "e2e"
+preserve_failure_artifacts = true
+artifact_retention = "always"
