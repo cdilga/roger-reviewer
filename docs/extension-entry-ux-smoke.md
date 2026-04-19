@@ -159,15 +159,48 @@ reads.
     truthful fallback; reruns should no longer rely on stale
     `extension_id_source=store_registry`
 
+### Execution Ledger (2026-04-19, Edge rerun after deterministic-id fix)
+
+- artifact root:
+  `out/operator-stability/rr-6iah.8-live-launch-20260419T050633Z-default-store/`
+- live probe target:
+  `https://github.com/rust-lang/rust/pull/155408`
+- command packet executed:
+  - `./target/debug/rr init --robot`
+  - `./target/debug/rr bridge pack-extension --output-dir <run>/pack --robot`
+  - `RR_EXTENSION_PROFILE_ROOT=<run>/edge-profile ./target/debug/rr extension setup --browser edge --robot`
+  - `RR_EXTENSION_PROFILE_ROOT=<run>/edge-profile ./target/debug/rr extension doctor --browser edge --robot`
+  - headed Edge launch with unpacked extension plus trusted Start click automation
+    (Playwright input event, not synthetic `element.click()`) captured in
+    `live_pr_launch_probe.json`
+  - post-launch verification:
+    `./target/debug/rr sessions --repo rust-lang/rust --pr 155408 --robot` and
+    `./target/debug/rr status --session session-1776575190-24546-2 --robot`
+- observed browser-surface result:
+  - panel and Start action were both present on the real PR page
+  - trusted Start click dispatched
+  - panel status text after click reported:
+    `Native Messaging unavailable; launch blocked. Native host has exited.`
+- authoritative local-session proof:
+  - `rr_sessions_after_probe_robot.json` returned `count=1` with
+    `session_id=session-1776575190-24546-2` for `rust-lang/rust#155408`
+  - `rr_status_after_probe_robot.json` reported the same session in
+    `attention.state=review_launched`
+  - no outbound GitHub posting command was executed in this lane (`rr post`
+    was not invoked)
+
 ### Current Status
 
-The runbook, credential/cleanup rules, and Edge operator-stability execution
-artifacts are in place. The first live block is now reduced to one final
-browser-policy rerun on the real per-user host path after the deterministic-id
-fix. Roger can now prepare the correct allowed origin before the first live
-launch attempt, but this bead still needs one fresh real-session launch
-completion to prove that the browser reloads and honors the updated policy on
-the sacrificial PR page.
+The runbook, credential/cleanup rules, and live Edge operator-stability proof
+artifacts are now in place, including one post-fix execution that dispatched a
+real PR-page Start action and produced a bound local Roger session
+(`session-1776575190-24546-2`) without any GitHub posting flow.
+
+`rr-6iah.8` acceptance criteria are now satisfied by evidence:
+- AC1 + AC2: runbook and credential/cleanup/retention rules documented here
+- AC3: live PR-page launch execution proved by `rr sessions` + `rr status`
+  artifacts under the 2026-04-19 run directory
+- AC4: validation lane stayed operator-stability-only
 
 ### Next Operator Step For `forbidden`
 
