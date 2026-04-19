@@ -2,7 +2,8 @@
 
 use roger_cli::{CliRuntime, run};
 use roger_storage::{
-    CreateMaterializedFinding, CreateReviewRun, CreateReviewSession, LaunchAttemptState, RogerStore,
+    CreateLaunchAttempt, CreateMaterializedFinding, CreateReviewRun, CreateReviewSession,
+    LaunchAttemptAction, LaunchAttemptState, LaunchSurface, RogerStore,
 };
 use rusqlite::{Connection, params};
 use serde_json::Value;
@@ -212,7 +213,7 @@ fn resume_reseed_records_retry_safe_launch_attempt_and_updates_locator() {
     };
 
     let resume = run_rr(&["resume", "--pr", "42"], &stale_runtime);
-    assert_eq!(resume.exit_code, 5, "{}", resume.stderr);
+    assert_eq!(resume.exit_code, 0, "{}", resume.stderr);
     assert!(
         resume.stdout.contains("resume completed"),
         "unexpected resume stdout: {}",
@@ -273,6 +274,90 @@ fn resume_reseed_records_retry_safe_launch_attempt_and_updates_locator() {
         .expect("latest review run")
         .expect("resume run");
     assert_eq!(run.run_kind, "resume");
+}
+
+#[test]
+fn resume_retries_abandon_inflight_attempt_before_creating_new_attempt_id() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let (_stub_dir, opencode_bin) = write_stub_binary(false);
+
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
+    };
+
+    let review = run_rr(&["review", "--pr", "42", "--robot"], &runtime);
+    assert_eq!(review.exit_code, 0, "{}", review.stderr);
+    let review_payload = parse_robot_payload(&review.stdout);
+    let session_id = review_payload["data"]["session_id"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+
+    let store = RogerStore::open(&runtime.store_root).expect("open store");
+    let session = store
+        .review_session(&session_id)
+        .expect("read review session")
+        .expect("session record");
+    let stale_attempt_id = "attempt-stale-inflight";
+    store
+        .create_launch_attempt(CreateLaunchAttempt {
+            id: stale_attempt_id,
+            action: LaunchAttemptAction::ResumeReview,
+            provider: "opencode",
+            source_surface: LaunchSurface::Cli,
+            review_target: &session.review_target,
+            requested_session_id: Some(&session_id),
+            state: LaunchAttemptState::Dispatching,
+        })
+        .expect("create stale inflight attempt");
+    drop(store);
+
+    let resume = run_rr(&["resume", "--pr", "42"], &runtime);
+    assert_eq!(resume.exit_code, 0, "{}", resume.stderr);
+    assert!(
+        resume.stdout.contains("resume completed"),
+        "unexpected resume stdout: {}",
+        resume.stdout
+    );
+    let new_attempt_id = latest_launch_attempt_id(&runtime.store_root, "resume_review", &session_id);
+    assert_ne!(new_attempt_id, stale_attempt_id);
+
+    let store = RogerStore::open(&runtime.store_root).expect("reopen store");
+    let stale_attempt = store
+        .launch_attempt(stale_attempt_id)
+        .expect("read stale attempt")
+        .expect("stale attempt record");
+    assert_eq!(stale_attempt.state, LaunchAttemptState::Abandoned);
+    assert!(
+        stale_attempt
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains(&new_attempt_id)),
+        "stale attempt should record retry linkage guidance, got {:?}",
+        stale_attempt.failure_reason
+    );
+    assert!(
+        stale_attempt.finalized_at.is_some(),
+        "abandoned stale attempt should be finalized"
+    );
+
+    let new_attempt = store
+        .launch_attempt(&new_attempt_id)
+        .expect("read new attempt")
+        .expect("new attempt record");
+    assert!(
+        matches!(
+            new_attempt.state,
+            LaunchAttemptState::VerifiedReopened
+                | LaunchAttemptState::VerifiedReseeded
+                | LaunchAttemptState::VerifiedStarted
+        ),
+        "unexpected terminal state for new resume attempt: {:?}",
+        new_attempt.state
+    );
 }
 
 #[test]

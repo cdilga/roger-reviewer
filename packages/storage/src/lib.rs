@@ -1908,6 +1908,33 @@ impl RogerStore {
         input: CreateLaunchAttempt<'_>,
     ) -> Result<LaunchAttemptRecord> {
         let now = time::now_ts();
+        if let Some(requested_session_id) = input.requested_session_id {
+            let abandoned_reason = format!("abandoned in favor of retry attempt {}", input.id);
+            self.conn.execute(
+                "UPDATE launch_attempts
+                 SET state = ?1,
+                     failure_reason = CASE
+                       WHEN failure_reason IS NULL OR failure_reason = '' THEN ?2
+                       ELSE failure_reason
+                     END,
+                     row_version = row_version + 1,
+                     updated_at = ?3,
+                     finalized_at = CASE
+                       WHEN finalized_at IS NULL THEN ?3
+                       ELSE finalized_at
+                     END
+                 WHERE requested_session_id = ?4
+                   AND action = ?5
+                   AND state IN ('pending', 'dispatching', 'awaiting_provider_verification', 'committing')",
+                params![
+                    LaunchAttemptState::Abandoned.as_str(),
+                    abandoned_reason,
+                    now,
+                    requested_session_id,
+                    input.action.as_str(),
+                ],
+            )?;
+        }
         self.conn.execute(
             "INSERT INTO launch_attempts (
                 id, action, provider, source_surface, review_target,
