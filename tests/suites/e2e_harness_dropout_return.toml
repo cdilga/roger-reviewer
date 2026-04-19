@@ -1,0 +1,17 @@
+# Metadata contract for executable E2E-06.
+# The suite implementation lives at:
+# packages/cli/tests/e2e_harness_dropout_return.rs
+id = "e2e_harness_dropout_return"
+budget_id = "E2E-06"
+family = "e2e"
+flow_ids = ["F01.1", "F05", "F17", "F17.1"]
+invariant_ids = ["INV-SESSION-002", "INV-CONTEXT-001"]
+persona_ids = ["PJ-03C", "PJ-04A", "PJ-04B"]
+fixture_families = ["fixture_resumebundle_stale_locator", "fixture_opencode_dropout_return"]
+support_tier = "opencode_tier_b"
+support_status = "blessed"
+degraded = false
+bounded = false
+tier = "e2e"
+preserve_failure_artifacts = true
+artifact_retention = "always"
