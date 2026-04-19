@@ -11,10 +11,22 @@
       "name": "Core review happy path",
       "status": "implemented",
       "notes": "CLI launch, blessed provider path, findings normalization, local approval, GitHub adapter double, audit persistence",
-      "persona_ids": ["PJ-03A", "PJ-05A"],
-      "flow_ids": ["F01", "F03", "F07"],
-      "invariant_ids": ["INV-HARNESS-002", "INV-POST-001"],
-      "executable_suite_ids": ["e2e_core_review_happy_path"],
+      "persona_ids": [
+        "PJ-03A",
+        "PJ-05A"
+      ],
+      "flow_ids": [
+        "F01",
+        "F03",
+        "F07"
+      ],
+      "invariant_ids": [
+        "INV-HARNESS-002",
+        "INV-POST-001"
+      ],
+      "executable_suite_ids": [
+        "e2e_core_review_happy_path"
+      ],
       "current_cheaper_suite_ids": [
         "int_harness_opencode_resume",
         "int_github_outbound_audit",
@@ -25,103 +37,162 @@
     {
       "id": "E2E-02",
       "name": "Cross-surface review continuity with recall",
-      "status": "budgeted_not_yet_implemented",
-      "notes": "Supported browser or bridge entry, continuity across dropout or resume, TUI triage, local draft persistence, and explicit memory truth assertions for retrieval mode, scope, provenance, and degraded lexical-only fallback.",
-      "persona_ids": ["PJ-02A", "PJ-02D", "PJ-04A", "PJ-04B"],
-      "flow_ids": ["F02", "F01.1", "F05", "F07", "F09"],
+      "status": "implemented",
+      "notes": "Deterministic bridge-entry + second-terminal resume executable path proving continuity state and local draft persistence, plus truthful recall assertions for query mode, retrieval mode, scope/provenance buckets, candidate posture, and degraded lexical-only semantic fallback.",
+      "persona_ids": [
+        "PJ-02A",
+        "PJ-02D",
+        "PJ-04A",
+        "PJ-04B"
+      ],
+      "flow_ids": [
+        "F02",
+        "F01.1",
+        "F05",
+        "F07",
+        "F09"
+      ],
       "invariant_ids": [
         "INV-SESSION-002",
         "INV-CONTEXT-001",
         "INV-SEARCH-003",
         "INV-SEARCH-004"
       ],
-      "executable_suite_ids": [],
+      "executable_suite_ids": [
+        "e2e_cross_surface_review_continuity"
+      ],
       "current_cheaper_suite_ids": [
         "int_cli_session_aware",
         "accept_opencode_resume",
         "int_search_prior_review_lookup"
       ],
-      "follow_on_bead_ids": ["rr-6iah.1"]
+      "follow_on_bead_ids": []
     },
     {
       "id": "E2E-03",
       "name": "TUI-first review with memory-assisted triage",
-      "status": "budgeted_not_yet_implemented",
-      "notes": "Local CLI or TUI entry, findings and history inspection, prior-review recall during triage, outbound draft refinement, and explicit memory truth assertions for mode, scope, provenance, and degraded fallback.",
-      "persona_ids": ["PJ-03A", "PJ-03C", "PJ-04A"],
-      "flow_ids": ["F01", "F04", "F05", "F08", "F09"],
+      "status": "implemented",
+      "notes": "Deterministic executable TUI-first triage path with memory-aware recall and truthful retrieval/scope/provenance assertions across triage outcomes and local draft refinement.",
+      "persona_ids": [
+        "PJ-03A",
+        "PJ-03C",
+        "PJ-04A"
+      ],
+      "flow_ids": [
+        "F01",
+        "F04",
+        "F05",
+        "F08",
+        "F09"
+      ],
       "invariant_ids": [
         "INV-TUI-001",
         "INV-TUI-002",
         "INV-SEARCH-003",
         "INV-SEARCH-004"
       ],
-      "executable_suite_ids": [],
+      "executable_suite_ids": [
+        "e2e_tui_first_memory_triage"
+      ],
       "current_cheaper_suite_ids": [
         "int_search_prior_review_lookup",
         "int_cli_session_aware"
       ],
-      "follow_on_bead_ids": ["rr-6iah.2"]
+      "follow_on_bead_ids": []
     },
     {
       "id": "E2E-04",
       "name": "Refresh and draft reconciliation after new commits",
-      "status": "budgeted_not_yet_implemented",
+      "status": "implemented",
       "notes": "Active review with pending drafts, refresh after new commits or rebase, finding reconciliation, draft revalidation or reconfirmation, and preserved audit lineage across target change.",
-      "persona_ids": ["PJ-02D", "PJ-04D", "PJ-05B"],
-      "flow_ids": ["F06", "F07", "F08", "F13"],
+      "persona_ids": [
+        "PJ-02D",
+        "PJ-04D",
+        "PJ-05B"
+      ],
+      "flow_ids": [
+        "F06",
+        "F07",
+        "F08",
+        "F13"
+      ],
       "invariant_ids": [
         "INV-POST-002",
         "INV-POST-003",
         "INV-HARNESS-003"
       ],
-      "executable_suite_ids": [],
+      "executable_suite_ids": [
+        "e2e_refresh_draft_reconciliation"
+      ],
       "current_cheaper_suite_ids": [
         "prop_refresh_identity_lifecycle",
-        "int_github_posting_safety_recovery"
+        "int_github_posting_safety_recovery",
+        "int_github_outbound_audit"
       ],
-      "follow_on_bead_ids": ["rr-6iah.3"]
+      "follow_on_bead_ids": []
     },
     {
       "id": "E2E-05",
       "name": "Browser setup and first PR-page launch",
-      "status": "budgeted_not_yet_implemented",
-      "notes": "Guided setup, extension identity discovery without manual entry, Native Messaging host registration, truthful doctor result, and first PR-page launch into the correct local Roger session.",
-      "persona_ids": ["PJ-01A", "PJ-01B", "PJ-01C"],
-      "flow_ids": ["F02", "F02.1", "F10", "F14"],
+      "status": "implemented",
+      "notes": "Guided setup, extension identity discovery without manual entry, Native Messaging host registration, truthful doctor result, and first PR-page launch into the correct local Roger session. Official automation shape: deterministic extension-loaded Chromium harness for the executable proof; branded Chrome/Brave/Edge remain smoke/operator-stability coverage; live sacrificial-PR rehearsal is separate operator-stability evidence rather than part of deterministic closeout.",
+      "persona_ids": [
+        "PJ-01A",
+        "PJ-01B",
+        "PJ-01C"
+      ],
+      "flow_ids": [
+        "F02",
+        "F02.1",
+        "F10",
+        "F14"
+      ],
       "invariant_ids": [
         "INV-BRIDGE-001",
         "INV-BRIDGE-002",
         "INV-SESSION-001"
       ],
-      "executable_suite_ids": [],
+      "executable_suite_ids": [
+        "e2e_browser_setup_first_launch"
+      ],
       "current_cheaper_suite_ids": [
         "smoke_browser_launch_chrome",
         "smoke_browser_launch_brave",
         "smoke_browser_launch_edge",
         "int_bridge_launch_only_no_status"
       ],
-      "follow_on_bead_ids": ["rr-6iah.4"]
+      "follow_on_bead_ids": []
     },
     {
       "id": "E2E-06",
       "name": "Bare-harness dropout and return continuity",
-      "status": "budgeted_not_yet_implemented",
-      "notes": "Intentional dropout from Roger to a supported harness, preserved control context, return through rr or harness-native affordance, and continuity back into the same Roger session.",
-      "persona_ids": ["PJ-03C", "PJ-04A", "PJ-04B"],
-      "flow_ids": ["F01.1", "F05", "F17", "F17.1"],
+      "status": "implemented",
+      "notes": "Deterministic executable bare-harness dropout/return continuity path preserving session linkage and truthful return-state boundaries without live GitHub posting.",
+      "persona_ids": [
+        "PJ-03C",
+        "PJ-04A",
+        "PJ-04B"
+      ],
+      "flow_ids": [
+        "F01.1",
+        "F05",
+        "F17",
+        "F17.1"
+      ],
       "invariant_ids": [
         "INV-SESSION-002",
         "INV-CONTEXT-001"
       ],
-      "executable_suite_ids": [],
+      "executable_suite_ids": [
+        "e2e_harness_dropout_return"
+      ],
       "current_cheaper_suite_ids": [
         "accept_opencode_dropout_return",
         "accept_opencode_resume",
         "smoke_opencode_continuity",
         "int_storage_opencode_dropout_return"
       ],
-      "follow_on_bead_ids": ["rr-6iah.5"]
+      "follow_on_bead_ids": []
     }
   ],
   "cataloged_candidate_e2e_ids": [],
