@@ -1,8 +1,8 @@
 pub mod calver;
 
 use roger_test_harness::{
-    BudgetReport, E2eBudgetPolicy, SuiteMetadata, ValidationLane, ValidationPlan, artifact_dir,
-    evaluate_e2e_budget, load_suite_metadata, plan_for_lane,
+    artifact_dir, evaluate_e2e_budget, load_suite_metadata, plan_for_lane, BudgetReport,
+    E2eBudgetPolicy, SuiteMetadata, ValidationLane, ValidationPlan,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -220,6 +220,7 @@ const PERSONA_OWNERSHIP_EXPECTATIONS: &[PersonaGuardExpectation] = &[
             "accept_opencode_resume",
             "int_harness_opencode_resume",
             "int_cli_session_aware",
+            "smoke_opencode_continuity",
         ],
         bead_ids: &["rr-003.3", "rr-018", "rr-6iah.2", "rr-6iah.5"],
     },
@@ -239,7 +240,11 @@ const PERSONA_RECOVERY_EXPECTATIONS: &[PersonaGuardExpectation] = &[
     PersonaGuardExpectation {
         id: "PJ-04A",
         invariant_ids: &["INV-SESSION-002"],
-        suite_ids: &["int_cli_session_aware", "accept_opencode_resume"],
+        suite_ids: &[
+            "int_cli_session_aware",
+            "accept_opencode_resume",
+            "smoke_opencode_continuity",
+        ],
         bead_ids: &["rr-003.3", "rr-x51h.3.2", "rr-6iah.1", "rr-6iah.5"],
     },
     PersonaGuardExpectation {
@@ -275,7 +280,7 @@ const PERSONA_RECOVERY_EXPECTATIONS: &[PersonaGuardExpectation] = &[
             "prop_refresh_identity_lifecycle",
             "int_github_posting_safety_recovery",
         ],
-        bead_ids: &["rr-ph77.1", "rr-x51h.5.2", "rr-6iah.3"],
+        bead_ids: &["rr-ph77.1", "rr-x51h.5.2", "rr-x51h.8.4", "rr-6iah.3"],
     },
     PersonaGuardExpectation {
         id: "PJ-05C",
@@ -439,6 +444,8 @@ pub fn persona_recovery_report(
 mod tests {
     use super::*;
     use roger_test_harness::BudgetStatus;
+    use roger_test_harness::SupportStatus;
+    use serde_json::Value;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -593,7 +600,7 @@ artifact_retention = "always"
     {
       "id": "E2E-05",
       "name": "Browser setup and first PR-page launch",
-      "status": "budgeted_not_yet_implemented",
+      "status": "implemented",
       "notes": "Budget-approved scenario slot",
       "persona_ids": ["PJ-01A", "PJ-01B", "PJ-01C"],
       "flow_ids": ["F02", "F02.1", "F10", "F14"],
@@ -602,14 +609,14 @@ artifact_retention = "always"
         "INV-BRIDGE-002",
         "INV-SESSION-001"
       ],
-      "executable_suite_ids": [],
+      "executable_suite_ids": ["e2e_browser_setup_first_launch"],
       "current_cheaper_suite_ids": [
         "smoke_browser_launch_chrome",
         "smoke_browser_launch_brave",
         "smoke_browser_launch_edge",
         "int_bridge_launch_only_no_status"
       ],
-      "follow_on_bead_ids": ["rr-6iah.4"]
+      "follow_on_bead_ids": []
     },
     {
       "id": "E2E-06",
@@ -687,7 +694,7 @@ artifact_retention = "on_failure"
     }
 
     #[test]
-    fn full_repo_suite_directory_supports_codex_acceptance_metadata() {
+    fn full_repo_suite_directory_supports_provider_acceptance_metadata() {
         let metadata_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/suites");
         let plan = build_plan(
             ValidationLane::Gated,
@@ -696,10 +703,369 @@ artifact_retention = "on_failure"
         )
         .expect("real suite metadata directory should be plannable");
         let suite_ids = plan.suite_ids();
-        assert!(
-            suite_ids.contains(&"accept_codex_reseed"),
-            "gated lane plan should include codex acceptance metadata"
+        for suite_id in [
+            "accept_opencode_resume",
+            "accept_opencode_dropout_return",
+            "accept_codex_reseed",
+            "accept_gemini_reseed",
+            "accept_claude_reseed",
+            "accept_copilot_tier_b",
+        ] {
+            assert!(
+                suite_ids.contains(&suite_id),
+                "gated lane plan should include provider acceptance metadata for {suite_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_repo_suite_directory_preserves_provider_surface_truth_metadata() {
+        let metadata_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/suites");
+        let suites = discover_suite_metadata(&metadata_dir)
+            .expect("real suite metadata directory should be discoverable");
+
+        let provider_surface_truth = suites
+            .iter()
+            .find(|suite| suite.id == "int_cli_provider_surface_truth")
+            .expect("provider surface truth suite metadata should exist");
+        assert!(provider_surface_truth
+            .invariant_ids
+            .iter()
+            .any(|id| id == "INV-PROVIDER-001"));
+        assert_eq!(
+            provider_surface_truth.support_tier,
+            "provider_surface_truth"
         );
+        assert_eq!(
+            provider_surface_truth.support_status,
+            roger_test_harness::SupportStatus::Bounded
+        );
+        assert!(provider_surface_truth.degraded);
+        assert!(provider_surface_truth.bounded);
+        assert!(provider_surface_truth.preserve_failure_artifacts);
+        assert_eq!(
+            provider_surface_truth.artifact_retention,
+            roger_test_harness::ArtifactRetention::OnFailure
+        );
+
+        for (suite_id, support_tier, expected_fixtures) in [
+            (
+                "accept_codex_reseed",
+                "codex_tier_a",
+                vec!["fixture_resumebundle_stale_locator"],
+            ),
+            (
+                "accept_gemini_reseed",
+                "gemini_tier_a",
+                vec!["fixture_resumebundle_stale_locator"],
+            ),
+            (
+                "accept_claude_reseed",
+                "claude_tier_a",
+                vec!["fixture_resumebundle_stale_locator"],
+            ),
+            (
+                "accept_copilot_tier_b",
+                "copilot_tier_b_feature_gated",
+                vec![
+                    "fixture_copilot_launch_resume",
+                    "fixture_copilot_hook_stream",
+                    "fixture_copilot_policy_failure",
+                    "fixture_copilot_crash_recovery",
+                ],
+            ),
+        ] {
+            let suite = suites
+                .iter()
+                .find(|suite| suite.id == suite_id)
+                .expect("suite metadata should exist");
+            assert!(
+                suite.invariant_ids.iter().any(|id| id == "INV-SESSION-002"),
+                "{suite_id} should preserve INV-SESSION-002 wiring"
+            );
+            assert!(
+                suite
+                    .invariant_ids
+                    .iter()
+                    .any(|id| id == "INV-PROVIDER-001"),
+                "{suite_id} should preserve INV-PROVIDER-001 wiring"
+            );
+            assert_eq!(suite.support_tier, support_tier);
+            assert_eq!(
+                suite.support_status,
+                roger_test_harness::SupportStatus::Bounded
+            );
+            assert!(suite.degraded, "{suite_id} should remain degraded");
+            assert!(suite.bounded, "{suite_id} should remain bounded");
+            for expected_fixture in expected_fixtures {
+                assert!(
+                    suite
+                        .fixture_families
+                        .iter()
+                        .any(|fixture| fixture == expected_fixture),
+                    "{suite_id} should preserve fixture family {expected_fixture}",
+                );
+            }
+            assert!(suite.preserve_failure_artifacts);
+            assert_eq!(
+                suite.artifact_retention,
+                roger_test_harness::ArtifactRetention::OnFailure
+            );
+        }
+    }
+
+    #[test]
+    fn full_repo_release_plan_keeps_smoke_scoped_to_first_class_claims() {
+        let metadata_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/suites");
+        let plan = build_plan(
+            ValidationLane::Release,
+            &metadata_dir,
+            "target/test-artifacts",
+        )
+        .expect("real suite metadata directory should be plannable for release");
+
+        let smoke_suites: Vec<_> = plan
+            .suites
+            .iter()
+            .filter(|suite| suite.tier == roger_test_harness::SuiteTier::Smoke)
+            .collect();
+        let smoke_ids: Vec<_> = smoke_suites.iter().map(|suite| suite.id.as_str()).collect();
+        assert_eq!(
+            smoke_ids,
+            vec![
+                "smoke_browser_launch_brave",
+                "smoke_browser_launch_chrome",
+                "smoke_browser_launch_edge",
+                "smoke_opencode_continuity",
+            ]
+        );
+
+        let opencode_smoke = smoke_suites
+            .iter()
+            .find(|suite| suite.id == "smoke_opencode_continuity")
+            .expect("OpenCode smoke suite metadata should exist");
+        assert_eq!(opencode_smoke.support_status, SupportStatus::Blessed);
+        assert_eq!(opencode_smoke.support_tier, "opencode_tier_b");
+        for flow_id in ["F01.1", "F05", "F17", "F17.1"] {
+            assert!(
+                opencode_smoke.flow_ids.iter().any(|id| id == flow_id),
+                "OpenCode smoke should preserve flow {flow_id}",
+            );
+        }
+        for persona_id in ["PJ-03C", "PJ-04A", "PJ-04B"] {
+            assert!(
+                opencode_smoke.persona_ids.iter().any(|id| id == persona_id),
+                "OpenCode smoke should preserve persona {persona_id}",
+            );
+        }
+        for fixture_family in [
+            "fixture_resumebundle_stale_locator",
+            "fixture_opencode_dropout_return",
+        ] {
+            assert!(
+                opencode_smoke
+                    .fixture_families
+                    .iter()
+                    .any(|fixture| fixture == fixture_family),
+                "OpenCode smoke should preserve fixture family {fixture_family}",
+            );
+        }
+
+        for browser_smoke_id in [
+            "smoke_browser_launch_brave",
+            "smoke_browser_launch_chrome",
+            "smoke_browser_launch_edge",
+        ] {
+            let suite = smoke_suites
+                .iter()
+                .find(|suite| suite.id == browser_smoke_id)
+                .expect("browser smoke metadata should exist");
+            assert_eq!(suite.support_status, SupportStatus::Bounded);
+            assert_eq!(suite.support_tier, "native_messaging_v1");
+        }
+    }
+
+    #[test]
+    fn full_repo_budget_guard_matches_blessed_e2e_policy() {
+        let metadata_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/suites");
+        let budget_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/AUTOMATED_E2E_BUDGET.json");
+        let suites = discover_suite_metadata(&metadata_dir)
+            .expect("real suite metadata directory should be discoverable");
+        let policy = E2eBudgetPolicy::load(&budget_path)
+            .expect("budget policy should load from the real repo fixture");
+        let report = evaluate_e2e_budget(&policy, &suites);
+
+        assert_eq!(report.status, BudgetStatus::Ok);
+        assert_eq!(
+            report.observed_heavyweight_e2e_count,
+            policy.blessed_automated_e2e_budget
+        );
+        assert_eq!(
+            report.observed_heavyweight_e2e_count,
+            policy.current_planned_blessed_automated_e2e_count
+        );
+        assert!(report.unexpected_ids.is_empty());
+        assert!(report.blessed_ids.contains("E2E-01"));
+        assert!(report.blessed_ids.contains("E2E-02"));
+        assert!(report.blessed_ids.contains("E2E-03"));
+        assert!(report.blessed_ids.contains("E2E-04"));
+        assert!(report.blessed_ids.contains("E2E-05"));
+        assert!(report.blessed_ids.contains("E2E-06"));
+    }
+
+    #[test]
+    fn full_repo_suite_directory_preserves_outbound_recovery_metadata() {
+        let metadata_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/suites");
+        let suites = discover_suite_metadata(&metadata_dir)
+            .expect("real suite metadata directory should be discoverable");
+
+        let outbound_audit = suites
+            .iter()
+            .find(|suite| suite.id == "int_github_outbound_audit")
+            .expect("outbound audit suite metadata should exist");
+        assert!(outbound_audit
+            .invariant_ids
+            .iter()
+            .any(|id| id == "INV-POST-002"));
+        assert!(outbound_audit
+            .invariant_ids
+            .iter()
+            .any(|id| id == "INV-POST-003"));
+        assert!(outbound_audit.persona_ids.iter().any(|id| id == "PJ-05B"));
+        assert!(outbound_audit
+            .fixture_families
+            .iter()
+            .any(|family| family == "fixture_partial_post_recovery"));
+        assert!(outbound_audit.preserve_failure_artifacts);
+        assert_eq!(
+            outbound_audit.artifact_retention,
+            roger_test_harness::ArtifactRetention::OnFailure
+        );
+
+        let posting_recovery = suites
+            .iter()
+            .find(|suite| suite.id == "int_github_posting_safety_recovery")
+            .expect("posting safety recovery suite metadata should exist");
+        assert!(posting_recovery
+            .invariant_ids
+            .iter()
+            .any(|id| id == "INV-POST-002"));
+        assert!(posting_recovery
+            .invariant_ids
+            .iter()
+            .any(|id| id == "INV-POST-003"));
+        for persona_id in ["PJ-05B", "PJ-05C", "PJ-05D"] {
+            assert!(
+                posting_recovery
+                    .persona_ids
+                    .iter()
+                    .any(|id| id == persona_id),
+                "posting safety recovery suite should preserve persona owner {persona_id}",
+            );
+        }
+        for family in [
+            "fixture_refresh_rebase_target_drift",
+            "fixture_github_draft_batch",
+            "fixture_partial_post_recovery",
+        ] {
+            assert!(
+                posting_recovery
+                    .fixture_families
+                    .iter()
+                    .any(|fixture| fixture == family),
+                "posting safety recovery suite should preserve fixture family {family}",
+            );
+        }
+        assert!(posting_recovery.preserve_failure_artifacts);
+        assert_eq!(
+            posting_recovery.artifact_retention,
+            roger_test_harness::ArtifactRetention::OnFailure
+        );
+    }
+
+    #[test]
+    fn copilot_fixture_families_exist_with_expected_case_ids() {
+        let fixtures_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+        let expected_fixtures = [
+            (
+                "fixture_copilot_launch_resume",
+                "copilot_launch_resume_cases.json",
+                &[
+                    "launch_review_verified_session_id",
+                    "resume_stale_locator_reseed",
+                ][..],
+            ),
+            (
+                "fixture_copilot_hook_stream",
+                "copilot_hook_events.json",
+                &["session_start_verified_id", "missing_session_start"][..],
+            ),
+            (
+                "fixture_copilot_transcript_capture",
+                "copilot_transcript_refs.json",
+                &[
+                    "transcript_capture_nominal",
+                    "transcript_capture_missing_file",
+                ][..],
+            ),
+            (
+                "fixture_copilot_policy_failure",
+                "copilot_policy_failure_cases.json",
+                &["policy_violation_blocked_tool_use"][..],
+            ),
+            (
+                "fixture_copilot_crash_recovery",
+                "copilot_crash_recovery_cases.json",
+                &["launch_process_crash_before_session_start"][..],
+            ),
+        ];
+
+        for (family, case_file, required_case_ids) in expected_fixtures {
+            let fixture_dir = fixtures_root.join(family);
+            assert!(fixture_dir.is_dir(), "missing fixture directory: {family}");
+
+            let manifest_path = fixture_dir.join("MANIFEST.toml");
+            let manifest_raw =
+                fs::read_to_string(&manifest_path).expect("failed to read fixture manifest");
+            assert!(
+                manifest_raw.contains(&format!("family = \"{family}\"")),
+                "manifest family mismatch for {family}"
+            );
+
+            let case_path = fixture_dir.join(case_file);
+            let case_raw = fs::read_to_string(&case_path).expect("failed to read fixture case");
+            let case_json: Value =
+                serde_json::from_str(&case_raw).expect("parse fixture case json");
+
+            let case_ids: Vec<&str> = ["cases", "events", "records"]
+                .into_iter()
+                .flat_map(|key| {
+                    case_json[key]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|entry| entry["id"].as_str())
+                })
+                .collect();
+            assert!(
+                !case_ids.is_empty(),
+                "fixture {family} case json must contain one of: cases/events/records"
+            );
+            let negative_ids: Vec<&str> = case_json["negative_events"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry["id"].as_str())
+                .collect();
+
+            for required_case_id in required_case_ids {
+                assert!(
+                    case_ids.contains(required_case_id) || negative_ids.contains(required_case_id),
+                    "fixture {family} is missing required case id {required_case_id}"
+                );
+            }
+        }
     }
 
     #[test]
