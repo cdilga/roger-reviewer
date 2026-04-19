@@ -3200,6 +3200,78 @@ fn extension_browser_url(browser: SupportedBrowser) -> &'static str {
     }
 }
 
+fn native_host_launcher_path(manifest_path: &Path, host_os: SupportedOs) -> PathBuf {
+    let stem = manifest_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("com.roger_reviewer.bridge");
+    let suffix = match host_os {
+        SupportedOs::Windows => "cmd",
+        SupportedOs::Macos | SupportedOs::Linux => "sh",
+    };
+    manifest_path.with_file_name(format!("{stem}.{suffix}"))
+}
+
+fn write_native_host_launcher(
+    launcher_path: &Path,
+    bridge_binary: &Path,
+    host_os: SupportedOs,
+) -> Result<(), String> {
+    if let Some(parent) = launcher_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create native host launcher directory {}: {err}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let binary = bridge_binary.to_string_lossy();
+    let contents = match host_os {
+        SupportedOs::Windows => {
+            format!("@echo off\r\n\"{}\" --native-host\r\n", binary.replace('\"', "\"\""))
+        }
+        SupportedOs::Macos | SupportedOs::Linux => {
+            let escaped = binary
+                .replace('\\', "\\\\")
+                .replace('\"', "\\\"")
+                .replace('$', "\\$")
+                .replace('`', "\\`");
+            format!("#!/bin/sh\nexec \"{escaped}\" --native-host\n")
+        }
+    };
+
+    fs::write(launcher_path, contents).map_err(|err| {
+        format!(
+            "failed to write native host launcher {}: {err}",
+            launcher_path.display()
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(launcher_path)
+            .map_err(|err| {
+                format!(
+                    "failed to stat native host launcher {}: {err}",
+                    launcher_path.display()
+                )
+            })?
+            .permissions();
+        permissions.set_mode(permissions.mode() | 0o755);
+        fs::set_permissions(launcher_path, permissions).map_err(|err| {
+            format!(
+                "failed to make native host launcher executable {}: {err}",
+                launcher_path.display()
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
 fn persist_extension_id(runtime: &CliRuntime, extension_id: &str) -> Result<(), String> {
     let path = extension_id_registry_path(&runtime.store_root);
     if let Some(parent) = path.parent() {
@@ -3646,7 +3718,11 @@ fn handle_extension_setup(
     };
 
     let manifest_path = native_host_install_path_for(&browser, host_os, &install_root);
-    let manifest = NativeHostManifest::for_roger(&bridge_binary, &extension_id);
+    let launcher_path = native_host_launcher_path(&manifest_path, host_os);
+    if let Err(err) = write_native_host_launcher(&launcher_path, &bridge_binary, host_os) {
+        return error_response(err);
+    }
+    let manifest = NativeHostManifest::for_roger(&launcher_path, &extension_id);
     let manifest_bytes = match serde_json::to_vec_pretty(&manifest) {
         Ok(mut bytes) => {
             bytes.push(b'\n');
@@ -3727,7 +3803,8 @@ fn handle_extension_setup(
             "registration_observed_during_setup_wait": observed_during_setup_wait,
             "manual_browser_step": load_step,
             "install_root": install_root.to_string_lossy().to_string(),
-            "host_binary": bridge_binary.to_string_lossy().to_string(),
+            "host_binary": launcher_path.to_string_lossy().to_string(),
+            "bridge_host_binary": bridge_binary.to_string_lossy().to_string(),
             "native_manifest_path": manifest_path.to_string_lossy().to_string(),
             "doctor": doctor.data,
         }),
@@ -4305,7 +4382,13 @@ fn handle_bridge(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 SupportedBrowser::Brave,
             ] {
                 let path = native_host_install_path_for(&browser, host_os, &install_root);
-                let manifest = NativeHostManifest::for_roger(&bridge_binary, &extension_id);
+                let launcher_path = native_host_launcher_path(&path, host_os);
+                if let Err(err) =
+                    write_native_host_launcher(&launcher_path, &bridge_binary, host_os)
+                {
+                    return error_response(err);
+                }
+                let manifest = NativeHostManifest::for_roger(&launcher_path, &extension_id);
                 let bytes = match serde_json::to_vec_pretty(&manifest) {
                     Ok(mut bytes) => {
                         bytes.push(b'\n');
