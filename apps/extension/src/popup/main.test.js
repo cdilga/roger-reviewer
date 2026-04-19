@@ -35,6 +35,7 @@ test('buildPopupViewModel returns non_pr guidance when active tab is not a pull 
 
   assert.equal(viewModel.mode, 'non_pr');
   assert.equal(viewModel.context, null);
+  assert.equal(viewModel.showFindings, false);
   assert.equal(viewModel.subtitle, NON_PR_SUBTITLE);
   assert.match(viewModel.subtitle, /manual backup/i);
   assert.match(viewModel.subtitle, /Open a GitHub pull request tab/i);
@@ -49,6 +50,7 @@ test('buildPopupViewModel returns PR context title and action subtitle on pull r
     repo: 'roger-reviewer',
     pr_number: 42,
   });
+  assert.equal(viewModel.showFindings, true);
   assert.equal(viewModel.subtitle, PR_SUBTITLE);
   assert.match(viewModel.title, /octo\/roger-reviewer#42/);
   assert.match(viewModel.subtitle, /manual backup controls/i);

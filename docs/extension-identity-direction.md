@@ -78,6 +78,6 @@ should not add fresh Signal Beacon derivatives.
 
 ## Validation Hooks
 
-- `node --test apps/extension/src/popup/index.test.js apps/extension/src/popup/main.test.js`
+- `node --test apps/extension/src/popup/index.test.js apps/extension/src/popup/layout_redesign.test.js apps/extension/src/popup/main.test.js`
 - `scripts/swarm/validate_extension_entry_placements.sh`
 - `docs/extension-visual-identity-smoke.md`

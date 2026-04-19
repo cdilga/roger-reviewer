@@ -38,3 +38,12 @@ test('popup copy preserves manual-backup guidance in branded shell', () => {
   assert.match(popupHtml, /id="popup-title"/);
   assert.match(popupHtml, /id="popup-subtitle"/);
 });
+
+test('popup info affordance is details-based with stable disclosure copy', () => {
+  assert.match(popupHtml, /<details class="popup-info" id="popup-info">/);
+  assert.match(popupHtml, /<summary id="popup-info-toggle">Build and fallback details<\/summary>/);
+  assert.match(
+    popupHtml,
+    /Use this popup only as a manual backup when in-page Roger controls are unavailable\./
+  );
+});

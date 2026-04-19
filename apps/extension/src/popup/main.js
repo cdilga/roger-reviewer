@@ -248,18 +248,18 @@ function setFindingsButtonVisibility(visible) {
 }
 
 function wireInfoAffordance() {
+  const details = document.getElementById('popup-info');
   const toggle = document.getElementById('popup-info-toggle');
-  const panel = document.getElementById('popup-info-panel');
-  if (!toggle || !panel) {
+  if (!toggle || !details) {
     return;
   }
 
-  toggle.addEventListener('click', () => {
-    const open = !panel.hidden;
-    panel.hidden = open;
-    toggle.setAttribute('aria-expanded', open ? 'false' : 'true');
-    toggle.textContent = open ? 'Info' : 'Hide Info';
-  });
+  const syncToggleLabel = () => {
+    toggle.textContent = details.open ? 'Hide Info' : 'Build and fallback details';
+  };
+
+  syncToggleLabel();
+  details.addEventListener('toggle', syncToggleLabel);
 }
 
 async function handleActionClick(action, context, button) {
