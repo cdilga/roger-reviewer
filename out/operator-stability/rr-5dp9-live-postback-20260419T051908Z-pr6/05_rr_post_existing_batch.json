@@ -1,0 +1,254 @@
+{
+  "schema_id": "rr.robot.post.v1",
+  "command": "rr post",
+  "robot_format": "json",
+  "outcome": "complete",
+  "generated_at": "1776576022",
+  "exit_code": 0,
+  "warnings": [],
+  "repair_actions": [],
+  "data": {
+    "session_id": "session-1776424142-86073-2",
+    "review_run_id": "run-1776424351-91482-2",
+    "target": {
+      "provider": "github",
+      "repository": "cdilga/roger-reviewer",
+      "pull_request": 6,
+      "repo_id": "cdilga/roger-reviewer",
+      "remote_review_target_id": "pr-6"
+    },
+    "draft_batch": {
+      "id": "draft-batch-1776424747-1929-1",
+      "approval_state": "approved",
+      "payload_digest": "sha256:b5eae10461ccc2c5fae8887e38296181d7fdbd3bdc7a3e8cfccdbb1da7c96d88",
+      "target_tuple_json": "{\"review_session_id\":\"session-1776424142-86073-2\",\"repo_id\":\"cdilga/roger-reviewer\",\"remote_review_target_id\":\"pr-6\"}",
+      "draft_count": 1
+    },
+    "approval": {
+      "id": "approval-1776576021-46430-1",
+      "payload_digest": "sha256:b5eae10461ccc2c5fae8887e38296181d7fdbd3bdc7a3e8cfccdbb1da7c96d88",
+      "target_tuple_json": "{\"review_session_id\":\"session-1776424142-86073-2\",\"repo_id\":\"cdilga/roger-reviewer\",\"remote_review_target_id\":\"pr-6\"}",
+      "approved_at": 1776576021,
+      "revoked_at": null
+    },
+    "posting_result": {
+      "outcome": "posted",
+      "reason_code": null
+    },
+    "posted_action": {
+      "id": "posted-batch-1776576021-46435-1",
+      "draft_batch_id": "draft-batch-1776424747-1929-1",
+      "provider": "github",
+      "remote_identifier": "https://github.com/cdilga/roger-reviewer/pull/6#issuecomment-4275238185",
+      "status": "Succeeded",
+      "posted_payload_digest": "sha256:b5eae10461ccc2c5fae8887e38296181d7fdbd3bdc7a3e8cfccdbb1da7c96d88",
+      "posted_at": 1776576022,
+      "failure_code": null
+    },
+    "item_results": [
+      {
+        "draft_id": "draft-1776424747-1929-2",
+        "status": "posted",
+        "remote_identifier": "https://github.com/cdilga/roger-reviewer/pull/6#issuecomment-4275238185",
+        "failure_code": null
+      }
+    ],
+    "retry_draft_ids": [],
+    "mutation_guard": {
+      "github_posture": "posted",
+      "approval_required": false,
+      "posted": true
+    },
+    "queryable_surfaces": {
+      "status_command": "rr status --session session-1776424142-86073-2",
+      "findings_command": "rr findings --session session-1776424142-86073-2 --robot",
+      "outbound_state_counts": {
+        "not_drafted": 0,
+        "awaiting_approval": 0,
+        "approved": 0,
+        "invalidated": 0,
+        "posted": 2,
+        "failed": 0
+      }
+    },
+    "provider_capability": {
+      "provider": "opencode",
+      "display_name": "OpenCode",
+      "status": "first_class_live",
+      "tier": "tier_b",
+      "support_tier": "tier_b",
+      "surface_class": "review_primary",
+      "capability_provenance": {
+        "layer": "built_in",
+        "source": "providers.opencode.support_matrix",
+        "repair_only": false
+      },
+      "policy_profile": {
+        "id": "review_safe_tier_b_continuity",
+        "summary": "first-class review-safe policy with locator reopen and rr return",
+        "mutation_posture": "review_only",
+        "continuity_mode": "locator_reopen_and_return"
+      },
+      "policy_profile_digest_sha256": "sha256:82a218d387806fcf704d54eed277d41c318dfc9001607eb337127a88d0f4e9ee",
+      "hook_profile": {
+        "id": "review_safe_tier_b_continuity.hooks",
+        "contract_version": "none",
+        "contract_provenance": {
+          "layer": "built_in",
+          "source": "providers.opencode.hook_contract_version",
+          "repair_only": false
+        }
+      },
+      "hook_profile_digest_sha256": "sha256:5b2e87fafddb50582b859b8f6cb0cf2898f777de6b18e71846cf4eb7fcdd635e",
+      "custom_instructions": {
+        "id": "review_safe_tier_b_continuity.instructions",
+        "contract_version": "prompt_preset_contract.v1",
+        "contract_provenance": {
+          "layer": "built_in",
+          "source": "providers.opencode.instruction_contract_version",
+          "repair_only": false
+        }
+      },
+      "custom_instructions_digest_sha256": "sha256:03c278f7342c533c016feedc32dfeff7f89dbb4505f30eb622265e653b30e3fe",
+      "mcp_posture": {
+        "posture": "not_declared",
+        "source": "provider.policy_profile.denied_capabilities",
+        "builtin_github_mcp": {
+          "state": "not_denied",
+          "denied": false
+        },
+        "broad_mcp_access": {
+          "state": "not_denied",
+          "denied": false
+        }
+      },
+      "denied_capabilities": [],
+      "audit_artifact_classes": [],
+      "status_reason": null,
+      "supports": {
+        "review_start": true,
+        "resume_reseed": true,
+        "resume_reopen": true,
+        "return": true,
+        "status": true,
+        "findings": true,
+        "sessions": true,
+        "doctor": true
+      },
+      "notes": "first-class tier-b continuity path with locator reopen and rr return"
+    },
+    "routine_surface": {
+      "surface": "cli",
+      "launch_profile_id": "profile-open-pr",
+      "launch_profile": {
+        "id": "profile-open-pr",
+        "provenance": {
+          "layer": "built_in",
+          "source": "launch.defaults.by_surface.cli",
+          "repair_only": false
+        }
+      },
+      "provider": {
+        "provider": "opencode",
+        "display_name": "OpenCode",
+        "status": "first_class_live",
+        "tier": "tier_b",
+        "support_tier": "tier_b",
+        "surface_class": "review_primary",
+        "capability_provenance": {
+          "layer": "built_in",
+          "source": "providers.opencode.support_matrix",
+          "repair_only": false
+        },
+        "policy_profile": {
+          "id": "review_safe_tier_b_continuity",
+          "summary": "first-class review-safe policy with locator reopen and rr return",
+          "mutation_posture": "review_only",
+          "continuity_mode": "locator_reopen_and_return"
+        },
+        "policy_profile_digest_sha256": "sha256:82a218d387806fcf704d54eed277d41c318dfc9001607eb337127a88d0f4e9ee",
+        "hook_profile": {
+          "id": "review_safe_tier_b_continuity.hooks",
+          "contract_version": "none",
+          "contract_provenance": {
+            "layer": "built_in",
+            "source": "providers.opencode.hook_contract_version",
+            "repair_only": false
+          }
+        },
+        "hook_profile_digest_sha256": "sha256:5b2e87fafddb50582b859b8f6cb0cf2898f777de6b18e71846cf4eb7fcdd635e",
+        "custom_instructions": {
+          "id": "review_safe_tier_b_continuity.instructions",
+          "contract_version": "prompt_preset_contract.v1",
+          "contract_provenance": {
+            "layer": "built_in",
+            "source": "providers.opencode.instruction_contract_version",
+            "repair_only": false
+          }
+        },
+        "custom_instructions_digest_sha256": "sha256:03c278f7342c533c016feedc32dfeff7f89dbb4505f30eb622265e653b30e3fe",
+        "mcp_posture": {
+          "posture": "not_declared",
+          "source": "provider.policy_profile.denied_capabilities",
+          "builtin_github_mcp": {
+            "state": "not_denied",
+            "denied": false
+          },
+          "broad_mcp_access": {
+            "state": "not_denied",
+            "denied": false
+          }
+        },
+        "denied_capabilities": [],
+        "audit_artifact_classes": [],
+        "status_reason": null,
+        "supports": {
+          "review_start": true,
+          "resume_reseed": true,
+          "resume_reopen": true,
+          "return": true,
+          "status": true,
+          "findings": true,
+          "sessions": true,
+          "doctor": true
+        },
+        "notes": "first-class tier-b continuity path with locator reopen and rr return"
+      },
+      "ui_target": "cli",
+      "instance_preference": "reuse_if_possible",
+      "isolation_mode": "current_checkout",
+      "named_instance_on_collision": true,
+      "provenance": {
+        "launch_profile_id": {
+          "layer": "built_in",
+          "source": "launch.defaults.by_surface.cli",
+          "repair_only": false
+        },
+        "ui_target": {
+          "layer": "built_in",
+          "source": "launch.defaults.by_surface.cli.ui_target",
+          "repair_only": false
+        },
+        "instance_preference": {
+          "layer": "built_in",
+          "source": "launch_profiles.profile-open-pr.reuse_policy",
+          "repair_only": false
+        },
+        "isolation_mode": {
+          "layer": "built_in",
+          "source": "isolation.default_mode",
+          "repair_only": false
+        },
+        "named_instance_on_collision": {
+          "layer": "built_in",
+          "source": "isolation.named_instance.default",
+          "repair_only": false
+        }
+      },
+      "repair_overrides_active": false,
+      "active_repair_override_keys": [],
+      "status_reason": null,
+      "worktree_root": "/Users/cdilga/Documents/dev/roger-reviewer"
+    }
+  }
+}

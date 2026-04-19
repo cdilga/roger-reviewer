@@ -1,0 +1,249 @@
+{
+  "schema_id": "rr.robot.status.v1",
+  "command": "rr status",
+  "robot_format": "json",
+  "outcome": "complete",
+  "generated_at": "1776576022",
+  "exit_code": 0,
+  "warnings": [],
+  "repair_actions": [],
+  "data": {
+    "repo": {
+      "root": "/Users/cdilga/Documents/dev/roger-reviewer",
+      "branch": "main",
+      "repository": "cdilga/roger-reviewer"
+    },
+    "session": {
+      "id": "session-1776424142-86073-2",
+      "resume_mode": "opencode_bound",
+      "provider": "opencode"
+    },
+    "target": {
+      "provider": "github",
+      "pull_request": 6
+    },
+    "attention": {
+      "state": "returned_to_roger",
+      "updated_at": 1776424351
+    },
+    "reconciliation": {
+      "mode": "automatic_background",
+      "fractional_staleness_allowed": true,
+      "stale_target_detected": false
+    },
+    "findings": {
+      "total": 2,
+      "needs_follow_up": 0
+    },
+    "drafts": {
+      "awaiting_approval": 0,
+      "approved": 0,
+      "invalidated": 0,
+      "posted": 2,
+      "failed": 0
+    },
+    "outbound": {
+      "state_counts": {
+        "not_drafted": 0,
+        "awaiting_approval": 0,
+        "approved": 0,
+        "invalidated": 0,
+        "posted": 2,
+        "failed": 0
+      },
+      "posting_gate": {
+        "ready_count": 0,
+        "visibly_elevated": false
+      },
+      "recovery": {
+        "retry_needed_count": 0,
+        "superseded_count": 0,
+        "invalidation_reason_counts": {}
+      }
+    },
+    "continuity": {
+      "tier": "tier_b",
+      "resume_locator_present": true,
+      "state": "return:usable"
+    },
+    "provider_capability": {
+      "provider": "opencode",
+      "display_name": "OpenCode",
+      "status": "first_class_live",
+      "tier": "tier_b",
+      "support_tier": "tier_b",
+      "surface_class": "review_primary",
+      "capability_provenance": {
+        "layer": "built_in",
+        "source": "providers.opencode.support_matrix",
+        "repair_only": false
+      },
+      "policy_profile": {
+        "id": "review_safe_tier_b_continuity",
+        "summary": "first-class review-safe policy with locator reopen and rr return",
+        "mutation_posture": "review_only",
+        "continuity_mode": "locator_reopen_and_return"
+      },
+      "policy_profile_digest_sha256": "sha256:82a218d387806fcf704d54eed277d41c318dfc9001607eb337127a88d0f4e9ee",
+      "hook_profile": {
+        "id": "review_safe_tier_b_continuity.hooks",
+        "contract_version": "none",
+        "contract_provenance": {
+          "layer": "built_in",
+          "source": "providers.opencode.hook_contract_version",
+          "repair_only": false
+        }
+      },
+      "hook_profile_digest_sha256": "sha256:5b2e87fafddb50582b859b8f6cb0cf2898f777de6b18e71846cf4eb7fcdd635e",
+      "custom_instructions": {
+        "id": "review_safe_tier_b_continuity.instructions",
+        "contract_version": "prompt_preset_contract.v1",
+        "contract_provenance": {
+          "layer": "built_in",
+          "source": "providers.opencode.instruction_contract_version",
+          "repair_only": false
+        }
+      },
+      "custom_instructions_digest_sha256": "sha256:03c278f7342c533c016feedc32dfeff7f89dbb4505f30eb622265e653b30e3fe",
+      "mcp_posture": {
+        "posture": "not_declared",
+        "source": "provider.policy_profile.denied_capabilities",
+        "builtin_github_mcp": {
+          "state": "not_denied",
+          "denied": false
+        },
+        "broad_mcp_access": {
+          "state": "not_denied",
+          "denied": false
+        }
+      },
+      "denied_capabilities": [],
+      "audit_artifact_classes": [],
+      "status_reason": null,
+      "supports": {
+        "review_start": true,
+        "resume_reseed": true,
+        "resume_reopen": true,
+        "return": true,
+        "status": true,
+        "findings": true,
+        "sessions": true,
+        "doctor": true
+      },
+      "notes": "first-class tier-b continuity path with locator reopen and rr return"
+    },
+    "routine_surface": {
+      "surface": "cli",
+      "launch_profile_id": "profile-open-pr",
+      "launch_profile": {
+        "id": "profile-open-pr",
+        "provenance": {
+          "layer": "built_in",
+          "source": "launch.defaults.by_surface.cli",
+          "repair_only": false
+        }
+      },
+      "provider": {
+        "provider": "opencode",
+        "display_name": "OpenCode",
+        "status": "first_class_live",
+        "tier": "tier_b",
+        "support_tier": "tier_b",
+        "surface_class": "review_primary",
+        "capability_provenance": {
+          "layer": "built_in",
+          "source": "providers.opencode.support_matrix",
+          "repair_only": false
+        },
+        "policy_profile": {
+          "id": "review_safe_tier_b_continuity",
+          "summary": "first-class review-safe policy with locator reopen and rr return",
+          "mutation_posture": "review_only",
+          "continuity_mode": "locator_reopen_and_return"
+        },
+        "policy_profile_digest_sha256": "sha256:82a218d387806fcf704d54eed277d41c318dfc9001607eb337127a88d0f4e9ee",
+        "hook_profile": {
+          "id": "review_safe_tier_b_continuity.hooks",
+          "contract_version": "none",
+          "contract_provenance": {
+            "layer": "built_in",
+            "source": "providers.opencode.hook_contract_version",
+            "repair_only": false
+          }
+        },
+        "hook_profile_digest_sha256": "sha256:5b2e87fafddb50582b859b8f6cb0cf2898f777de6b18e71846cf4eb7fcdd635e",
+        "custom_instructions": {
+          "id": "review_safe_tier_b_continuity.instructions",
+          "contract_version": "prompt_preset_contract.v1",
+          "contract_provenance": {
+            "layer": "built_in",
+            "source": "providers.opencode.instruction_contract_version",
+            "repair_only": false
+          }
+        },
+        "custom_instructions_digest_sha256": "sha256:03c278f7342c533c016feedc32dfeff7f89dbb4505f30eb622265e653b30e3fe",
+        "mcp_posture": {
+          "posture": "not_declared",
+          "source": "provider.policy_profile.denied_capabilities",
+          "builtin_github_mcp": {
+            "state": "not_denied",
+            "denied": false
+          },
+          "broad_mcp_access": {
+            "state": "not_denied",
+            "denied": false
+          }
+        },
+        "denied_capabilities": [],
+        "audit_artifact_classes": [],
+        "status_reason": null,
+        "supports": {
+          "review_start": true,
+          "resume_reseed": true,
+          "resume_reopen": true,
+          "return": true,
+          "status": true,
+          "findings": true,
+          "sessions": true,
+          "doctor": true
+        },
+        "notes": "first-class tier-b continuity path with locator reopen and rr return"
+      },
+      "ui_target": "cli",
+      "instance_preference": "reuse_if_possible",
+      "isolation_mode": "current_checkout",
+      "named_instance_on_collision": true,
+      "provenance": {
+        "launch_profile_id": {
+          "layer": "built_in",
+          "source": "launch.defaults.by_surface.cli",
+          "repair_only": false
+        },
+        "ui_target": {
+          "layer": "built_in",
+          "source": "launch.defaults.by_surface.cli.ui_target",
+          "repair_only": false
+        },
+        "instance_preference": {
+          "layer": "built_in",
+          "source": "launch_profiles.profile-open-pr.reuse_policy",
+          "repair_only": false
+        },
+        "isolation_mode": {
+          "layer": "built_in",
+          "source": "isolation.default_mode",
+          "repair_only": false
+        },
+        "named_instance_on_collision": {
+          "layer": "built_in",
+          "source": "isolation.named_instance.default",
+          "repair_only": false
+        }
+      },
+      "repair_overrides_active": false,
+      "active_repair_override_keys": [],
+      "status_reason": null,
+      "worktree_root": "/Users/cdilga/Documents/dev/roger-reviewer"
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "schema_id": "rr.robot.draft.v1",
+  "command": "rr draft",
+  "robot_format": "json",
+  "outcome": "blocked",
+  "generated_at": "1776575948",
+  "exit_code": 3,
+  "warnings": [],
+  "repair_actions": [
+    "inspect rr findings --session session-1776424142-86073-2 --robot to review triage and outbound state",
+    "choose only Accepted findings whose outbound state is still not_drafted"
+  ],
+  "data": {
+    "reason_code": "stale_local_state",
+    "session_id": "session-1776424142-86073-2",
+    "review_run_id": "run-1776424351-91482-2",
+    "selection_issues": [
+      {
+        "finding_id": "finding-test-2",
+        "reason_code": "existing_outbound_state",
+        "current_outbound_state": "awaiting_approval",
+        "draft_id": "draft-1776424747-1929-2",
+        "draft_batch_id": "draft-batch-1776424747-1929-1",
+        "approval_id": null,
+        "posted_action_id": null
+      }
+    ]
+  }
+}

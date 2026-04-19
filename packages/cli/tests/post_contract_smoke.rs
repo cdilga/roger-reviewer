@@ -1,11 +1,11 @@
 #![cfg(unix)]
 
 use roger_app_core::{PostedActionStatus, ReviewTarget};
-use roger_cli::{CliRuntime, run};
+use roger_cli::{run, CliRuntime};
 use roger_storage::{
     CreateMaterializedFinding, CreateReviewRun, CreateReviewSession, RogerStore, StorageLayout,
 };
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use serde_json::Value;
 use std::ffi::OsString;
 use std::fs;
@@ -13,7 +13,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use tempfile::{TempDir, tempdir};
+use tempfile::{tempdir, TempDir};
 
 fn sample_target(repository: &str, pr_number: u64) -> ReviewTarget {
     ReviewTarget {
@@ -310,11 +310,9 @@ fn robot_docs_advertise_rr_post_surface() {
     let command_items = commands_payload["data"]["items"]
         .as_array()
         .expect("command items");
-    assert!(
-        command_items
-            .iter()
-            .any(|item| item["command"] == "rr post")
-    );
+    assert!(command_items
+        .iter()
+        .any(|item| item["command"] == "rr post"));
 
     let schemas = run_rr(&["robot-docs", "schemas", "--robot"], &runtime);
     assert_eq!(schemas.exit_code, 0, "{}", schemas.stderr);
@@ -322,11 +320,9 @@ fn robot_docs_advertise_rr_post_surface() {
     let schema_items = schemas_payload["data"]["items"]
         .as_array()
         .expect("schema items");
-    assert!(
-        schema_items.iter().any(|item| {
-            item["command"] == "rr post" && item["schema_id"] == "rr.robot.post.v1"
-        })
-    );
+    assert!(schema_items
+        .iter()
+        .any(|item| { item["command"] == "rr post" && item["schema_id"] == "rr.robot.post.v1" }));
 
     let workflows = run_rr(&["robot-docs", "workflows", "--robot"], &runtime);
     assert_eq!(workflows.exit_code, 0, "{}", workflows.stderr);
@@ -339,11 +335,9 @@ fn robot_docs_advertise_rr_post_surface() {
         .find(|item| item["name"] == "local_outbound_post")
         .expect("local outbound post workflow");
     let steps = post_workflow["steps"].as_array().expect("workflow steps");
-    assert!(
-        steps
-            .iter()
-            .any(|step| { step == "rr post --session <id> --batch <draft-batch-id> --robot" })
-    );
+    assert!(steps
+        .iter()
+        .any(|step| { step == "rr post --session <id> --batch <draft-batch-id> --robot" }));
 }
 
 #[test]
@@ -403,6 +397,21 @@ fn post_executes_exact_approved_batch_and_records_posted_action() {
         .expect("item results");
     assert_eq!(item_results.len(), 2);
     assert!(item_results.iter().all(|item| item["status"] == "posted"));
+    let posted_remote = payload["data"]["posted_action"]["remote_identifier"]
+        .as_str()
+        .expect("posted action remote identifier");
+    assert!(posted_remote.contains("#issuecomment-"));
+    let item_remotes = item_results
+        .iter()
+        .map(|item| {
+            item["remote_identifier"]
+                .as_str()
+                .expect("item remote identifier")
+        })
+        .collect::<Vec<_>>();
+    assert!(item_remotes
+        .iter()
+        .all(|remote| { remote.contains("#issuecomment-") }));
     assert_eq!(payload["data"]["retry_draft_ids"], Value::Array(Vec::new()));
     assert_eq!(payload["data"]["posted_action"]["status"], "Succeeded");
 
@@ -443,11 +452,9 @@ fn post_executes_exact_approved_batch_and_records_posted_action() {
     let finding_items = findings_payload["data"]["items"]
         .as_array()
         .expect("finding items");
-    assert!(
-        finding_items
-            .iter()
-            .all(|item| item["outbound_state"] == "posted")
-    );
+    assert!(finding_items
+        .iter()
+        .all(|item| item["outbound_state"] == "posted"));
 
     let log_lines = read_log_lines(&log_path);
     assert_eq!(
@@ -561,11 +568,9 @@ fn post_blocks_duplicate_attempt_and_preserves_recorded_post_lineage() {
     let finding_items = findings_payload["data"]["items"]
         .as_array()
         .expect("finding items");
-    assert!(
-        finding_items
-            .iter()
-            .all(|item| item["outbound_state"] == "posted")
-    );
+    assert!(finding_items
+        .iter()
+        .all(|item| item["outbound_state"] == "posted"));
     assert!(finding_items.iter().all(|item| {
         item["outbound_detail"]["posted_action_status"] == "Succeeded"
             && item["outbound_detail"]["posted_action_id"]
@@ -633,12 +638,10 @@ fn post_blocks_when_stored_approval_payload_digest_drifted() {
     );
 
     let store = RogerStore::open(&runtime.store_root).expect("open store");
-    assert!(
-        store
-            .posted_actions_for_batch(&batch_id)
-            .expect("posted actions lookup")
-            .is_empty()
-    );
+    assert!(store
+        .posted_actions_for_batch(&batch_id)
+        .expect("posted actions lookup")
+        .is_empty());
     assert!(read_log_lines(&log_path).is_empty());
 }
 

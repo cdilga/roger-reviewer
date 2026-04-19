@@ -1,0 +1,59 @@
+{
+  "schema_id": "rr.robot.sessions.v1",
+  "command": "rr sessions",
+  "robot_format": "json",
+  "outcome": "complete",
+  "generated_at": "1776575948",
+  "exit_code": 0,
+  "warnings": [],
+  "repair_actions": [],
+  "data": {
+    "items": [
+      {
+        "session_id": "session-1776424142-86073-2",
+        "repo": "cdilga/roger-reviewer",
+        "target": {
+          "repository": "cdilga/roger-reviewer",
+          "pull_request": 6
+        },
+        "attention_state": "returned_to_roger",
+        "provider": "opencode",
+        "provider_capability": {
+          "provider": "opencode",
+          "display_name": "OpenCode",
+          "status": "first_class_live",
+          "tier": "tier_b",
+          "support_tier": "tier_b",
+          "denied_capabilities": [],
+          "audit_artifact_classes": [],
+          "notes": "first-class tier-b continuity path with locator reopen and rr return",
+          "supports": {
+            "review_start": true,
+            "resume_reseed": true,
+            "resume_reopen": true,
+            "return": true,
+            "status": true,
+            "findings": true,
+            "sessions": true
+          }
+        },
+        "updated_at": 1776424351,
+        "follow_on": {
+          "requires_explicit_session": true,
+          "resume_command": "rr resume --session session-1776424142-86073-2",
+          "reconciliation_mode": "automatic_background",
+          "manual_refresh_supported": false,
+          "stale_target_detected": false
+        }
+      }
+    ],
+    "count": 1,
+    "truncated": false,
+    "filters_applied": {
+      "repository": "cdilga/roger-reviewer",
+      "pull_request": 6,
+      "attention_states": [],
+      "limit": 25
+    }
+  }
+}
