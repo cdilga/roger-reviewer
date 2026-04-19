@@ -37,7 +37,7 @@ DEFAULT_INSTRUCTIONS = (
     "4. dedupe against existing open/in-progress repair beads before creating a new one\n"
     "5. preserve remote closeout evidence with scripts/swarm/check_ci_closeout_evidence.sh"
 )
-DEFAULT_AGENT_MAIL_API = "http://127.0.0.1:8765/api/"
+DEFAULT_AGENT_MAIL_API = "http://127.0.0.1:8765/mcp/"
 DEFAULT_AGENT_MAIL_TOKEN_PATHS = (
     pathlib.Path.home() / "mcp_agent_mail" / "codex.mcp.json",
     pathlib.Path(__file__).resolve().parents[2] / "mcp_agent_mail" / "codex.mcp.json",
@@ -175,8 +175,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--br-binary",
-        default="scripts/swarm/br_pinned.sh",
-        help="br command path (default: scripts/swarm/br_pinned.sh).",
+        default="scripts/swarm/br_safe.sh",
+        help="br command path (default: scripts/swarm/br_safe.sh).",
     )
     parser.add_argument(
         "--parent-id",

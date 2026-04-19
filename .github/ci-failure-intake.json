@@ -13,7 +13,7 @@
   "agent_mail": {
     "enabled": true,
     "am_binary": "am",
-    "api_url": "http://127.0.0.1:8765/api/",
+    "api_url": "http://127.0.0.1:8765/mcp/",
     "sender_name": "BlueHarbor",
     "sender_program": "ci-failure-watch",
     "sender_model": "deterministic-script",

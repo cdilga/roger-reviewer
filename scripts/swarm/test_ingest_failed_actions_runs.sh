@@ -3,12 +3,32 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT="${ROOT_DIR}/scripts/swarm/ingest_failed_actions_runs.py"
-BR_BIN="$("${ROOT_DIR}/scripts/swarm/resolve_br.sh" --print-path)"
+BR_BIN="$("${ROOT_DIR}/scripts/swarm/br_safe.sh" --print-path)"
 
 if [[ ! -x "${BR_BIN}" ]]; then
-  echo "missing pinned br binary: ${BR_BIN}" >&2
+  echo "missing br binary: ${BR_BIN}" >&2
   exit 1
 fi
+
+# Guard default Agent Mail endpoint drift: repo-owned defaults should stay on /mcp/.
+if rg -n "127.0.0.1:8765/api/" \
+  "${ROOT_DIR}/.codex/config.toml" \
+  "${ROOT_DIR}/.github/ci-failure-intake.json" \
+  "${ROOT_DIR}/scripts/swarm/ingest_failed_actions_runs.py" >/dev/null; then
+  echo "expected Agent Mail defaults to use /mcp/ (found stale /api/ default)" >&2
+  exit 1
+fi
+
+for cfg in \
+  "${ROOT_DIR}/.codex/config.toml" \
+  "${ROOT_DIR}/.github/ci-failure-intake.json" \
+  "${ROOT_DIR}/scripts/swarm/ingest_failed_actions_runs.py"
+do
+  if ! rg -n "127.0.0.1:8765/mcp/" "${cfg}" >/dev/null; then
+    echo "missing /mcp/ Agent Mail default in ${cfg}" >&2
+    exit 1
+  fi
+done
 
 workdir="$(mktemp -d)"
 trap 'rm -rf "${workdir}"' EXIT
@@ -163,7 +183,7 @@ python3 - <<PY
 from pathlib import Path
 config = Path("intake-config.json").read_text(encoding="utf-8")
 config = config.replace("__FAKE_AM__", str(Path("${workdir}") / "fake-am"))
-config = config.replace("__FAKE_API__", "http://127.0.0.1:${FAKE_AM_PORT}/api/")
+config = config.replace("__FAKE_API__", "http://127.0.0.1:${FAKE_AM_PORT}/mcp/")
 config = config.replace("__TOKEN_PATH__", str(Path("${workdir}") / "token.json"))
 Path("intake-config.json").write_text(config, encoding="utf-8")
 PY
