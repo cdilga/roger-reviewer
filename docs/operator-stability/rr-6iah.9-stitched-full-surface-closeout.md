@@ -31,17 +31,17 @@ explicit:
 - Browser launch: deterministic extension-loaded Chromium harness
 - Sacrificial live PR rehearsal: excluded from this deterministic lane
 
-## Validation Evidence (2026-04-19)
+## Validation Evidence (2026-04-19, Revalidated)
 
 Executed commands:
 
 - `bash scripts/swarm/test_run_stitched_full_surface_e2e.sh`
 - `cargo run -q -p roger-validation -- guard-e2e-budget tests/suites docs/AUTOMATED_E2E_BUDGET.json`
-- `bash scripts/swarm/run_stitched_full_surface_e2e.sh --artifact-root out/operator-stability/rr-6iah.9-stitched-full-surface-20260419T055429Z`
+- `bash scripts/swarm/run_stitched_full_surface_e2e.sh --artifact-root out/operator-stability/rr-6iah.9-stitched-full-surface-20260419T055829Z`
 
 Aggregate artifact root:
 
-- `out/operator-stability/rr-6iah.9-stitched-full-surface-20260419T055429Z/`
+- `out/operator-stability/rr-6iah.9-stitched-full-surface-20260419T055829Z/`
 
 Key artifacts:
 
