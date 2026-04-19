@@ -1,14 +1,19 @@
 const ACTIONS = [
-  { id: 'start_review', label: 'Start' },
-  { id: 'resume_review', label: 'Resume' },
-  { id: 'show_findings', label: 'Findings' },
+  { id: 'start_review', label: 'Start Review in Roger', hierarchy: 'primary' },
+  { id: 'resume_review', label: 'Resume Existing Review', hierarchy: 'secondary' },
+  { id: 'show_findings', label: 'View Findings', hierarchy: 'secondary' },
 ];
 const NON_PR_SUBTITLE =
-  'Manual backup only: open a GitHub pull request tab and use this popup only when in-page Roger controls are unavailable.';
+  'Open a GitHub pull request tab to enable manual backup launch actions.';
 const PR_SUBTITLE =
-  'Manual backup only for this pull request. Prefer in-page Roger controls and in-page modal fallback when available.';
+  'Manual backup controls for this pull request. Prefer in-page Roger controls when available.';
+const FINDINGS_VISIBLE_ATTENTION_STATES = new Set([
+  'findings_ready',
+  'awaiting_outbound_approval',
+]);
 
 const SUPPORTED_ACTIONS = new Set(ACTIONS.map((action) => action.id));
+const ACTION_LABELS = new Map(ACTIONS.map((action) => [action.id, action.label]));
 
 function parsePullRequestContextFromUrl(rawUrl) {
   if (typeof rawUrl !== 'string' || rawUrl.length === 0) {
@@ -46,6 +51,7 @@ function buildPopupViewModel(rawUrl) {
       context: null,
       title: 'Roger Reviewer',
       subtitle: NON_PR_SUBTITLE,
+      showFindings: false,
     };
   }
 
@@ -54,6 +60,7 @@ function buildPopupViewModel(rawUrl) {
     context,
     title: `Roger: ${context.owner}/${context.repo}#${context.pr_number}`,
     subtitle: PR_SUBTITLE,
+    showFindings: true,
   };
 }
 
@@ -105,11 +112,29 @@ function routePopupAction(action, context, dispatch) {
   return dispatch(buildLaunchMessage(action, context));
 }
 
+function resolveFindingsKnownEmpty(response) {
+  if (!response || typeof response !== 'object') {
+    return null;
+  }
+
+  if (typeof response.finding_count === 'number') {
+    return response.finding_count <= 0;
+  }
+  if (typeof response.has_findings === 'boolean') {
+    return !response.has_findings;
+  }
+  if (typeof response.attention_state === 'string') {
+    return !FINDINGS_VISIBLE_ATTENTION_STATES.has(response.attention_state);
+  }
+  return null;
+}
+
 function describeLaunchResponse(response) {
   if (!response) {
     return {
       message: 'No launch response received. Open Roger locally and run the equivalent rr command.',
       isError: true,
+      findingsKnownEmpty: null,
     };
   }
 
@@ -117,6 +142,7 @@ function describeLaunchResponse(response) {
     return {
       message: appendGuidance(response.message || 'Launch failed.', response.guidance),
       isError: true,
+      findingsKnownEmpty: null,
     };
   }
 
@@ -126,12 +152,14 @@ function describeLaunchResponse(response) {
         response.message ||
         'Native bridge unavailable; launched via URL fallback. Open Roger locally for full status.',
       isError: false,
+      findingsKnownEmpty: resolveFindingsKnownEmpty(response),
     };
   }
 
   return {
     message: appendGuidance(response.message || 'Launch intent dispatched.', response.guidance),
     isError: false,
+    findingsKnownEmpty: resolveFindingsKnownEmpty(response),
   };
 }
 
@@ -176,20 +204,19 @@ function readExtensionBuildLabel(manifestProvider = null) {
   }
 }
 
+function describeBuildInfo(label) {
+  if (!label) {
+    return 'Extension build unavailable.';
+  }
+  return `Extension build ${label}.`;
+}
+
 function renderBuildLabel(label) {
-  const buildNode = document.getElementById('popup-build');
+  const buildNode = document.getElementById('popup-build-info');
   if (!buildNode) {
     return;
   }
-
-  if (!label) {
-    buildNode.hidden = true;
-    buildNode.textContent = '';
-    return;
-  }
-
-  buildNode.hidden = false;
-  buildNode.textContent = `Build ${label}`;
+  buildNode.textContent = describeBuildInfo(label);
 }
 
 function setSubtitle(text, isError = false) {
@@ -205,20 +232,51 @@ function setSubtitle(text, isError = false) {
 function setButtonsDisabled(disabled) {
   const buttons = document.querySelectorAll('button[data-action]');
   for (const button of buttons) {
+    if (button.hidden) {
+      continue;
+    }
     button.disabled = disabled;
   }
+}
+
+function setFindingsButtonVisibility(visible) {
+  const findingsButton = document.querySelector('button[data-action="show_findings"]');
+  if (!findingsButton) {
+    return;
+  }
+  findingsButton.hidden = !visible;
+}
+
+function wireInfoAffordance() {
+  const toggle = document.getElementById('popup-info-toggle');
+  const panel = document.getElementById('popup-info-panel');
+  if (!toggle || !panel) {
+    return;
+  }
+
+  toggle.addEventListener('click', () => {
+    const open = !panel.hidden;
+    panel.hidden = open;
+    toggle.setAttribute('aria-expanded', open ? 'false' : 'true');
+    toggle.textContent = open ? 'Info' : 'Hide Info';
+  });
 }
 
 async function handleActionClick(action, context, button) {
   const previousLabel = button.textContent;
   button.disabled = true;
-  button.textContent = '…';
-  setSubtitle('Dispatching launch intent…');
+  button.textContent = 'Launching…';
+  setSubtitle('Sending launch request…');
 
   try {
     const response = await routePopupAction(action, context, sendRuntimeMessage);
     const feedback = describeLaunchResponse(response);
     setSubtitle(feedback.message, feedback.isError);
+    if (feedback.findingsKnownEmpty === true) {
+      setFindingsButtonVisibility(false);
+    } else if (feedback.findingsKnownEmpty === false) {
+      setFindingsButtonVisibility(true);
+    }
   } catch (error) {
     setSubtitle(`Bridge error: ${String(error?.message || error)}`, true);
   } finally {
@@ -233,6 +291,7 @@ function renderViewModel(viewModel) {
     title.textContent = viewModel.title;
   }
   setSubtitle(viewModel.subtitle);
+  setFindingsButtonVisibility(Boolean(viewModel.showFindings));
 
   if (viewModel.mode !== 'pr' || !viewModel.context) {
     setButtonsDisabled(true);
@@ -247,6 +306,7 @@ function renderViewModel(viewModel) {
       continue;
     }
 
+    button.textContent = ACTION_LABELS.get(action) || action;
     button.disabled = false;
     button.addEventListener('click', () => handleActionClick(action, viewModel.context, button));
   }
@@ -254,6 +314,7 @@ function renderViewModel(viewModel) {
 
 async function bootstrapPopup() {
   try {
+    wireInfoAffordance();
     renderBuildLabel(readExtensionBuildLabel());
     const activeTab = await queryActiveTab();
     const viewModel = buildPopupViewModel(activeTab?.url || '');
@@ -273,13 +334,16 @@ if (typeof module !== 'undefined' && module.exports) {
     ACTIONS,
     NON_PR_SUBTITLE,
     PR_SUBTITLE,
+    FINDINGS_VISIBLE_ATTENTION_STATES,
     SUPPORTED_ACTIONS,
     buildLaunchMessage,
     buildPopupViewModel,
     describeLaunchResponse,
+    describeBuildInfo,
     parsePullRequestContextFromUrl,
     readExtensionBuildLabel,
     renderBuildLabel,
+    resolveFindingsKnownEmpty,
     routePopupAction,
   };
 }
