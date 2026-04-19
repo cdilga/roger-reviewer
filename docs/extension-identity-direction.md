@@ -11,19 +11,21 @@ semantics intact.
 
 ## Options Considered
 
-### Option A: Signal Beacon (Selected)
+### Option A: Walkie-Talkie Relay (Selected)
 
-- Geometric mark with high contrast and clear silhouette at small sizes.
-- Soft cyan/teal accent family for "assistive, local-first" tone.
-- Two-line wordmark for popup headers and docs.
-- Shared token sheet to keep brand colors consistent across popup and in-page
-  surfaces without forcing a full theme rewrite.
+- Compact walkie-talkie mark with radio pulse accent and metallic shell.
+- Steel and graphite neutrals aligned to GitHub/Primer surfaces, with a focused
+  blue radio accent for interactive emphasis.
+- Two-line wordmark with embedded compact relay motif for popup headers and docs.
+- Shared token sheet that supports a metallic variant without implying a full
+  extension theme takeover.
 
 Why selected:
 
-- Stays readable in dense popup layouts.
-- Distinct from GitHub's native marks without looking off-brand in context.
-- Scales to icon, chip, and card treatments.
+- Stays legible at extension popup scale (16-34px mark usage).
+- Feels GitHub-adjacent instead of generic teal product chrome.
+- Preserves a clear Roger-specific personality across mark, wordmark, and chip
+  treatments.
 
 ### Option B: Monogram-Only Minimal
 
@@ -35,19 +37,19 @@ Why not selected now:
 - Too ambiguous in the popup context and weak for future mixed surfaces.
 - Harder to express a system (mark + wordmark + tokens) from one glyph alone.
 
-### Option C: GitHub-Mimic Neutral
+### Option C: Signal Beacon (Demoted)
 
-- Near-default Primer-like neutral palette and typography.
-- Minimal Roger-specific visual personality.
+- Prior teal beacon direction used in earlier popup identity work.
 
-Why not selected now:
+Why demoted:
 
-- Underdelivers on the explicit "Roger identity" objective.
-- Makes extension surfaces feel generic and less discoverable.
+- Over-indexed on teal accenting and now clashes with the metallic GitHub-aligned
+  redesign direction tracked under `rr-22ak.*`.
+- Did not carry clear "radio relay" metaphor for operator continuity.
 
 ## Chosen Direction
 
-Direction: **Signal Beacon**.
+Direction: **Walkie-Talkie Relay**.
 
 Asset set:
 
@@ -60,6 +62,12 @@ Asset set:
 - Popup shell: adopted in `apps/extension/src/popup/index.html`
 - In-page PR entry surfaces: deferred to `rr-vsr2.3`
 - Future surfaces (options/settings/onboarding): pending future lane
+
+## Deprecated Direction Note
+
+The earlier **Signal Beacon** rationale is now historical context only. New
+identity or token updates should follow the walkie-talkie metallic direction and
+should not add fresh Signal Beacon derivatives.
 
 ## Guardrails
 

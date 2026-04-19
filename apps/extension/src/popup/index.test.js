@@ -29,6 +29,8 @@ test('popup shell imports shared extension identity tokens', () => {
   const identityCss = fs.readFileSync(identityCssPath, 'utf8');
   assert.match(identityCss, /--rr-brand-accent-500/);
   assert.match(identityCss, /--rr-brand-ink-900/);
+  assert.match(identityCss, /--rr-brand-metal-700/);
+  assert.match(identityCss, /--rr-brand-radio-500/);
 });
 
 test('popup copy preserves manual-backup guidance in branded shell', () => {

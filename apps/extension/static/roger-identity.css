@@ -1,12 +1,16 @@
 :root {
-  --rr-brand-ink-900: #15232f;
-  --rr-brand-ink-700: #2a4150;
-  --rr-brand-ink-500: #4f6270;
-  --rr-brand-accent-700: #08586e;
-  --rr-brand-accent-500: #0b6d88;
-  --rr-brand-accent-300: #2f93ab;
-  --rr-brand-glow-200: #9ad2dd;
-  --rr-brand-canvas-100: #f4f8f9;
+  --rr-brand-ink-900: #0d1117;
+  --rr-brand-ink-700: #30363d;
+  --rr-brand-ink-500: #57606a;
+  --rr-brand-accent-700: #1f6feb;
+  --rr-brand-accent-500: #2f81f7;
+  --rr-brand-accent-300: #79c0ff;
+  --rr-brand-glow-200: #d0d7de;
+  --rr-brand-canvas-100: #f6f8fa;
+  --rr-brand-metal-700: #6e7781;
+  --rr-brand-metal-500: #8c959f;
+  --rr-brand-radio-500: #2f81f7;
+  --rr-brand-radio-300: #79c0ff;
 }
 
 .rr-brand-chip {
@@ -14,8 +18,13 @@
   align-items: center;
   gap: 6px;
   border-radius: 999px;
-  border: 1px solid var(--rr-brand-glow-200);
-  background: linear-gradient(110deg, #ffffff 0%, var(--rr-brand-canvas-100) 100%);
+  border: 1px solid var(--rr-brand-metal-500);
+  background: linear-gradient(
+    120deg,
+    #ffffff 0%,
+    var(--rr-brand-canvas-100) 44%,
+    #e6edf3 100%
+  );
   color: var(--rr-brand-ink-700);
   font-size: 11px;
   line-height: 1;
@@ -27,6 +36,6 @@
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--rr-brand-accent-500);
-  box-shadow: 0 0 0 3px rgba(11, 109, 136, 0.14);
+  background: var(--rr-brand-radio-500);
+  box-shadow: 0 0 0 3px rgba(47, 129, 247, 0.16);
 }
