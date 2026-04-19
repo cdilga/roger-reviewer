@@ -1,0 +1,17 @@
+# Metadata contract for executable E2E-03.
+# The suite implementation lives at:
+# packages/cli/tests/e2e_tui_first_memory_triage.rs
+id = "e2e_tui_first_memory_triage"
+budget_id = "E2E-03"
+family = "e2e"
+flow_ids = ["F01", "F04", "F05", "F08", "F09"]
+invariant_ids = ["INV-TUI-001", "INV-TUI-002", "INV-SEARCH-003", "INV-SEARCH-004"]
+persona_ids = ["PJ-03A", "PJ-03C", "PJ-04A"]
+fixture_families = ["fixture_cli_session_degraded_capabilities", "fixture_github_draft_batch"]
+support_tier = "opencode_tier_b"
+support_status = "blessed"
+degraded = false
+bounded = false
+tier = "e2e"
+preserve_failure_artifacts = true
+artifact_retention = "always"

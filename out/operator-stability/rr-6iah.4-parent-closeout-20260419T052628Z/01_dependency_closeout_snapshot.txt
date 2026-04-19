@@ -1,0 +1,146 @@
+== br show rr-6iah.4
+◐ rr-6iah.4 · Implement executable E2E-05 browser setup and first PR-page launch   [● P1 · IN_PROGRESS]
+Owner: cdilga · Type: task
+Created: 2026-04-15 · Updated: 2026-04-19
+Labels: bridge, browser, e2e, personas, validation
+
+Turn budget slot E2E-05 into a real executable first-use browser proof. rr-ouyz found supported-browser smoke and bridge integration coverage, but no owned executable suite for the full setup-plus-first-launch journey Roger budgets as a heavyweight E2E.
+
+Acceptance Criteria:
+1. The deterministic executable proof for E2E-05 is owned by explicit child beads for harness plumbing and suite implementation instead of one coarse browser task. 2. The executable proof follows the official shape: deterministic extension-loaded Chromium automation for setup, doctor, Native Messaging host truth, and first PR-page launch, without requiring real GitHub mutation. 3. Separate follow-on beads track branded-browser smoke/operator-stability evidence and later live sacrificial-PR rehearsal so those lanes are visible without silently expanding deterministic closeout. 4. Closeout records the exact run command and preserves the cheaper smoke/integration owners for browser support truth.
+
+Notes:
+This parent now acts as the deterministic E2E-05 integration checkpoint over rr-6iah.4.1 and rr-6iah.4.2. Branded-browser smoke and live GitHub rehearsal remain intentionally separate follow-ons.
+
+Dependencies:
+  -> rr-x51h.4.1 (blocks) - Round 06 G3.1: Extend resolved config/defaulting for provider capabilities and policy profiles
+  -> rr-6iah.4.2 (blocks) - Implement executable E2E-05 on the deterministic extension-loaded browser path
+  -> rr-6iah.4.1 (blocks) - Build deterministic browser harness and artifact plumbing for E2E-05
+  -> rr-x51h.3.5 (blocks) - Round 06 G2.7: Export bridge status-mirror fields through the generated extension contract
+  -> rr-6iah (parent-child) - Map persona journeys and E2E contracts into owned proof and implementation beads
+  -> rr-8isd.5.1 (blocks) - Round 06 G3.2: Implement lightweight rr init for Roger-owned local bootstrap
+
+Dependents:
+  <- rr-6iah.9 (blocks) - Add stitched full-surface deterministic Roger E2E validation run
+
+== br show rr-6iah.4.1
+✓ rr-6iah.4.1 · Build deterministic browser harness and artifact plumbing for E2E-05   [● P1 · CLOSED]
+Owner: cdilga · Type: task
+Created: 2026-04-16 · Updated: 2026-04-16
+Labels: automation, bridge, browser, e2e, validation
+Closed: 2026-04-16 (Committed deterministic Chromium harness/artifact plumbing in b04a901. Added deterministic_browser_harness entrypoint, stable launch/repair/native-transcript artifact paths, runtime/evidence-class reporting, fail-closed startup handling, and integration suite metadata for int_bridge_browser_harness_chromium. Validation: cargo fmt --check -p roger-test-harness; rch exec -- cargo test -p roger-test-harness --test browser_harness_smoke (2 passed); cargo run -q -p roger-validation -- plan fast-local tests/suites target/test-artifacts | rg 'int_bridge_browser_harness_chromium|failure_artifact_root'.)
+
+Create the Roger-owned automation harness for E2E-05. This slice owns the deterministic extension-loaded browser runner, unpacked-extension load strategy, isolated browser profile policy, transcript/artifact capture, and the executable entrypoint that later suites will call. Official shape: the extension-loaded automated path uses a deterministic Chromium runtime rather than branded Edge/Chrome side-loading.
+
+Acceptance Criteria:
+1. A runnable harness/entrypoint exists for the E2E-05 browser lane and can load Roger's unpacked extension in an isolated deterministic browser runtime. 2. The harness captures launch, repair, and Native Messaging transcripts as proof artifacts with stable locations. 3. The harness records which runtime was exercised and distinguishes deterministic Chromium automation from branded-browser smoke/operator-stability evidence. 4. Validation contract: targeted harness or integration coverage for extension loading, transcript capture, and fail-closed startup behavior.
+
+Notes:
+This bead owns automation plumbing only. It does not require real GitHub mutation and does not replace the separate branded-browser smoke or live sacrificial-PR follow-ons.
+
+Dependents:
+  <- rr-6iah.7 (blocks) - Refresh branded-browser launch smoke/operator-stability evidence with Edge as the first target
+  <- rr-6iah.4.2 (blocks) - Implement executable E2E-05 on the deterministic extension-loaded browser path
+  <- rr-6iah.4 (blocks) - Implement executable E2E-05 browser setup and first PR-page launch
+
+== br show rr-6iah.4.2
+✓ rr-6iah.4.2 · Implement executable E2E-05 on the deterministic extension-loaded browser path   [● P1 · CLOSED]
+Owner: cdilga · Type: task
+Created: 2026-04-16 · Updated: 2026-04-16
+Labels: bridge, browser, e2e, playwright, validation
+Closed: 2026-04-16 (Closed stale-open E2E-05 implementation after repairing deterministic-suite drift and rerunning proof. Executable suite and metadata are present at packages/cli/tests/e2e_browser_setup_first_launch.rs and tests/suites/e2e_browser_setup_first_launch.toml. Repaired bridge response assertion to use response.status and kept preflight failure assertion fail-closed and truthful. Updated docs/RELEASE_AND_TEST_MATRIX.md E2E-05 section to mark deterministic executable ownership implemented while keeping branded-browser smoke lanes explicit. Validation: cargo test -q -p roger-cli --test e2e_browser_setup_first_launch; cargo run -q -p roger-validation -- plan release tests/suites; ./scripts/swarm/check_ci_closeout_evidence.sh --bead rr-6iah.4.2 --local-only-reason "E2E-05 deterministic browser path is proven via local executable suite and metadata validation in this lane" --json)
+
+Land the executable E2E-05 suite over the official deterministic browser path. This slice owns the extension-loaded first-use proof using the Roger-owned browser harness, setup and doctor execution, truthful Native Messaging host registration or repair guidance, and PR-page launch into the correct local Roger session without depending on real GitHub mutation.
+
+Acceptance Criteria:
+1. An executable suite and suite metadata exist for E2E-05 on the official deterministic extension-loaded browser path. 2. The suite starts from an unconfigured or partially configured browser path, runs Roger's setup and doctor surfaces, proves truthful Native Messaging host registration or honest repair guidance, and launches from a GitHub PR page into the correct local Roger session. 3. The suite preserves launch and repair transcripts plus enough artifact metadata to distinguish this deterministic Chromium proof from branded-browser smoke evidence. 4. Validation contract: executable browser E2E plus any focused integration coverage needed to keep the harness deterministic and fail closed.
+
+Notes:
+Keep real GitHub mutation out of this bead. Use Roger-owned doubles or other bounded non-live seams for the outbound GitHub boundary; live sacrificial-PR rehearsal is tracked separately.
+
+Dependencies:
+  -> rr-x51h.4.1 (blocks) - Round 06 G3.1: Extend resolved config/defaulting for provider capabilities and policy profiles
+  -> rr-6iah.4.1 (blocks) - Build deterministic browser harness and artifact plumbing for E2E-05
+  -> rr-8isd.5.1 (blocks) - Round 06 G3.2: Implement lightweight rr init for Roger-owned local bootstrap
+
+Dependents:
+  <- rr-6iah.4 (blocks) - Implement executable E2E-05 browser setup and first PR-page launch
+  <- rr-6iah.8 (blocks) - Add sacrificial-PR operator-stability rehearsal for live browser launch handoff
+
+Comments:
+  [2026-04-16 23:35 UTC] cdilga: Follow-up regression note after closeout: live repro showed extension-load failure in both Chrome and Edge ('Could not load icon assets/icon-16.png'). Root cause narrowed to pack-extension assembly omitting assets/ despite manifest icon declarations. Current focused proof rerun passes with packaging contract defended at cheap truthful layers: cargo test -q -p roger-cli bridge_pack_extension_emits_checksum_asset_manifest -- --nocapture; cargo test -q -p roger-cli --test e2e_browser_setup_first_launch -- --nocapture; cargo run -q -p roger-cli --bin rr -- bridge pack-extension --robot with packaged assets/icon-16.png present.
+
+== br show rr-6iah.7
+✓ rr-6iah.7 · Refresh branded-browser launch smoke/operator-stability evidence with Edge as the first target   [● P1 · CLOSED]
+Owner: cdilga · Type: task
+Created: 2026-04-16 · Updated: 2026-04-16
+Labels: browser, edge, operator-stability, smoke, validation
+Closed: 2026-04-16 (Stale-open on current HEAD: Edge-first branded-browser smoke and operator-stability ownership are already wired through tests/suites/smoke_browser_launch_edge.toml (budget_id SMOKE-BRIDGE-EDGE-01), release/validation docs, and the extension entry smoke runbook command. Shared-source sufficiency versus fresh Edge execution is explicitly documented in docs/TEST_EXECUTION_TIERS_AND_E2E_BUDGET.md and docs/RELEASE_AND_TEST_MATRIX.md. Validation commands: scripts/swarm/validate_extension_entry_placements.sh; scripts/swarm/smoke_extension_entry_ux.sh; cargo run -q -p roger-validation -- plan release tests/suites artifacts/validation; cargo run -q -p roger-validation -- guard-persona-ownership tests/suites .beads/issues.jsonl.)
+
+Keep branded-browser support claims separate from the deterministic extension-loaded E2E by refreshing the supported-browser smoke lane with Edge as the first explicit target. This bead owns representative Edge launch smoke artifacts, rerun triggers, and the operator-stability guidance that ties Edge evidence back to the shared browser lane.
+
+Acceptance Criteria:
+1. The browser lane has an explicit branded-browser smoke/operator-stability owner that keeps public Edge support claims separate from the deterministic E2E-05 automation lane. 2. An exact run command and representative artifact set exist for SMOKE-BRIDGE-EDGE-01 or its direct successor, including setup/doctor truth and host-runtime truth. 3. The closeout records when shared-source coverage is sufficient versus when fresh Edge execution is required. 4. Validation contract: smoke/operator-stability evidence only; this bead must not widen deterministic E2E-05 scope.
+
+Notes:
+Edge is the first explicit branded-browser target because the user wants an honest real-browser proving lane, but the resulting rules should still preserve Chrome/Brave parity where shared-source reruns are insufficient.
+
+Dependencies:
+  -> rr-x51h.4.1 (blocks) - Round 06 G3.1: Extend resolved config/defaulting for provider capabilities and policy profiles
+  -> rr-6iah.4.1 (blocks) - Build deterministic browser harness and artifact plumbing for E2E-05
+  -> rr-8isd.5.1 (blocks) - Round 06 G3.2: Implement lightweight rr init for Roger-owned local bootstrap
+
+Dependents:
+  <- rr-6iah (blocks) - Map persona journeys and E2E contracts into owned proof and implementation beads
+  <- rr-6iah.8 (blocks) - Add sacrificial-PR operator-stability rehearsal for live browser launch handoff
+
+== br show rr-6iah.8
+✓ rr-6iah.8 · Add sacrificial-PR operator-stability rehearsal for live browser launch handoff   [● P2 · CLOSED]
+Owner: cdilga · Type: task
+Created: 2026-04-16 · Updated: 2026-04-19
+Assignee: CreamPlateau
+Labels: browser, github, operator-stability, validation
+Closed: 2026-04-19 (Operator-stability sacrificial PR rehearsal runbook is documented and exercised with real Edge PR-page launch evidence: trusted Start click on rust-lang/rust#155408 plus authoritative local session binding proof via rr sessions/status artifacts under out/operator-stability/rr-6iah.8-live-launch-20260419T050633Z-default-store)
+
+Track the later real GitHub rehearsal for the browser lane without folding it into deterministic E2E-05 closeout. This bead owns the sacrificial-account or sacrificial-PR runbook, browser-profile isolation, credential-handling rules, reset steps, and artifact capture for a real PR-page launch into the correct local Roger session.
+
+Acceptance Criteria:
+1. A runbook exists for a real GitHub PR-page launch rehearsal using a sacrificial account or resettable PR target and isolated browser profile. 2. The runbook names exact credential-handling rules, reset or cleanup steps, and artifact retention for launch/handoff evidence. 3. At least one operator-stability execution proves a real PR-page launch into the correct local Roger session without requiring live GitHub comment posting. 4. Validation contract: operator-stability evidence only; this bead is not part of deterministic E2E-05 closeout.
+
+Notes:
+CobaltLeopard claiming lane for live sacrificial PR-page rerun attempt and AC#3 closeout validation.
+
+Dependencies:
+  -> rr-6iah.7 (blocks) - Refresh branded-browser launch smoke/operator-stability evidence with Edge as the first target
+  -> rr-6iah.4.2 (blocks) - Implement executable E2E-05 on the deterministic extension-loaded browser path
+
+Dependents:
+  <- rr-6iah (blocks) - Map persona journeys and E2E contracts into owned proof and implementation beads
+  <- rr-5dp9 (blocks) - Add sacrificial-PR operator-stability rehearsal for explicit outbound post-back
+
+Comments:
+  [2026-04-16 23:35 UTC] cdilga: Cross-browser reproduced failure during live browser launch handoff rehearsal: both Chrome and Edge rejected loading target/bridge/extension/roger-extension-unpacked with 'Could not load icon assets/icon-16.png specified in icons'. Diagnosis: packaging contract bug in rr bridge pack-extension where manifest icon paths pointed to assets/* but package assembly omitted copying apps/extension/assets into roger-extension-unpacked. This is not browser-specific behavior. Current worktree includes the packaging fix (assets copy + packaged-manifest icon-path validation). Focused proof rerun on this lane: cargo test -q -p roger-cli bridge_pack_extension_emits_checksum_asset_manifest -- --nocapture; cargo test -q -p roger-cli --test e2e_browser_setup_first_launch -- --nocapture; cargo run -q -p roger-cli --bin rr -- bridge pack-extension --robot (verified assets/icon-16.png present in package_dir).
+  [2026-04-18 23:26 UTC] cdilga: 2026-04-19 execution pass: validated the packaging/launch hardening path with (1) cargo test -q -p roger-cli bridge_pack_extension_emits_checksum_asset_manifest -- --nocapture, (2) cargo test -q -p roger-cli --test e2e_browser_setup_first_launch -- --nocapture, and (3) cargo run -q -p roger-cli --bin rr -- bridge pack-extension --robot with package_dir=/Users/cdilga/Documents/dev/roger-reviewer/target/bridge/extension/roger-extension-unpacked and assets/icon-16.png present. Remaining gap for AC#3 is still the live sacrificial PR-page rerun proving launch into the correct local session on the real per-user Edge host path after policy refresh; this requires an interactive browser/profile run and cannot be truthfully closed from deterministic CLI-only execution.
+  [2026-04-19 05:08 UTC] cdilga: 2026-04-19 live rerun evidence captured at out/operator-stability/rr-6iah.8-live-launch-20260419T050633Z-default-store/. Real Edge PR-page probe on https://github.com/rust-lang/rust/pull/155408 loaded the Roger panel and dispatched a trusted Start click (live_pr_launch_probe.json). Authoritative session proof: rr_sessions_after_probe_robot.json returned session-1776575190-24546-2 (count=1) for rust-lang/rust#155408, and rr_status_after_probe_robot.json reported attention.state=review_launched for the same session. No rr post command was executed in this lane.
+
+== br show rr-5dp9
+✓ rr-5dp9 · Add sacrificial-PR operator-stability rehearsal for explicit outbound post-back   [● P2 · CLOSED]
+Owner: cdilga · Type: task
+Created: 2026-04-16 · Updated: 2026-04-19
+Labels: github, operator-stability, outbound, validation
+Closed: 2026-04-19 (Landed rr-5dp9 operator-stability sacrificial outbound rehearsal runbook and real GitHub mutation evidence with explicit cleanup in commit 2efa384 (pushed to main).)
+
+Track the later live GitHub mutation rehearsal after the explicit outbound command surface and browser launch lane are both honest. This slice owns the sacrificial-PR reset policy, exact draft/approve/post runbook, credential isolation, and evidence required to prove actual GitHub posting on a throwaway path without widening the deterministic test lanes.
+
+Acceptance Criteria:
+1. A sacrificial-PR runbook exists for a full live draft/approve/post rehearsal after the explicit outbound flow and live browser launch handoff are both honest. 2. The runbook defines credential isolation, throwaway target policy, reset or reopen steps, and artifact retention for posted-versus-cleaned-up evidence. 3. At least one operator-stability execution proves real GitHub mutation on the sacrificial path and records exact commands plus observed remote identifiers or cleanup state. 4. Validation contract: operator-stability/release-candidate evidence only; this bead must not widen deterministic integration/E2E requirements.
+
+Notes:
+Created because the user explicitly wants eventual non-mocked proof. Keep this separate from the deterministic browser lane so actual GitHub calls never become ambient prerequisites for ordinary development or CI.
+
+Dependencies:
+  -> rr-x51h.5.2 (blocks) - Round 06 G4.5: Add outbound visibility, invalidation, and partial-post recovery proof
+  -> rr-6iah.8 (blocks) - Add sacrificial-PR operator-stability rehearsal for live browser launch handoff
+
+Comments:
+  [2026-04-19 05:25 UTC] cdilga: 2026-04-19 closeout evidence landed in commit 2efa384 and pushed to main. Added runbook docs/operator-stability/rr-5dp9-sacrificial-pr-outbound-postback.md plus live artifact bundle out/operator-stability/rr-5dp9-live-postback-20260419T051908Z-pr6. Live mutation proof: rr post posted_action.id=posted-batch-1776576021-46435-1 with remote_identifier=https://github.com/cdilga/roger-reviewer/pull/6#issuecomment-4275238185, followed by cleanup via gh api DELETE repos/cdilga/roger-reviewer/issues/comments/4275238185 and PR comments snapshot proving comment absence. Validation: cargo test -q -p roger-cli --test post_contract_smoke post_executes_exact_approved_batch_and_records_posted_action; jq check for remote identifier and cleanup count=0.

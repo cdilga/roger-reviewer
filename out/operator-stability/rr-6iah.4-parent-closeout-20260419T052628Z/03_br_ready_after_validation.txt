@@ -1,0 +1,5 @@
+📋 Ready work (3 issues with no blockers):
+
+1. [● P1] [task] rr-6iah.5: Implement executable E2E-06 bare-harness dropout and return continuity
+2. [● P1] [feature] rr-22ak: Redesign extension popup fallback with GitHub-metal layout, corrected action copy, and walkie-talkie branding
+3. [● P2] [task] rr-22ak.2: Create walkie-talkie-derived Roger SVG identity set and retire the current Signal Beacon popup shell
