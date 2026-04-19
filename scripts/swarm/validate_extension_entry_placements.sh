@@ -8,6 +8,7 @@ echo "[validate] extension entry placement + fallback smoke"
 node --test \
   apps/extension/src/content/main.test.js \
   apps/extension/src/popup/main.test.js \
+  apps/extension/src/popup/layout_redesign.test.js \
   apps/extension/src/background.launch.test.js \
   apps/extension/src/background.test.js
 
@@ -33,7 +34,7 @@ do
   fi
 done
 
-echo "[validate] assert popup action set remains Start/Resume/Findings"
+echo "[validate] assert popup supported action ids remain start/resume/show_findings"
 node <<'NODE'
 const { ACTIONS } = require('./apps/extension/src/popup/main.js');
 const expected = ['start_review', 'resume_review', 'show_findings'];
@@ -59,5 +60,6 @@ done
 cat <<'EOF'
 [validate] pass
 Validated PR entry placement precedence (header -> rail -> modal),
-popup manual backup action set, and Native Messaging fail-closed launch behavior.
+popup manual backup action ids plus redesign layout/info affordance assertions,
+and Native Messaging fail-closed launch behavior.
 EOF

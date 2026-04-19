@@ -9,7 +9,8 @@ node --test \
   apps/extension/src/background.test.js \
   apps/extension/src/background.launch.test.js \
   apps/extension/src/content/main.test.js \
-  apps/extension/src/popup/main.test.js
+  apps/extension/src/popup/main.test.js \
+  apps/extension/src/popup/layout_redesign.test.js
 
 echo "[smoke] verify supported-browser launch suite ids are present"
 for suite in \

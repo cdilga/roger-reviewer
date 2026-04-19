@@ -32,6 +32,8 @@ This command executes focused placement/popup/launch tests and asserts:
   `apps/extension/src/content/main.test.js`
 - popup action routing covers all 3 documented launch actions in
   `apps/extension/src/popup/main.test.js`
+- popup redesign hierarchy/info-affordance assertions run in
+  `apps/extension/src/popup/layout_redesign.test.js`
 - Native Messaging fail-closed launch behavior is exercised in
   `apps/extension/src/background.launch.test.js`
 - supported-browser launch smoke suite metadata files exist:
@@ -62,9 +64,11 @@ probe in at least one of Edge, Chrome, or Brave:
 
 1. Open a GitHub PR tab and verify header/rail/modal host behavior matches the
    current seam availability.
-2. In popup on a PR tab, verify Start/Resume/Findings remain enabled.
-   Verify hierarchy and copy:
-   Start Review in Roger (primary), Resume Existing Review, View Findings.
+2. In popup on a PR tab, verify explicit launch labels and truthful findings
+   visibility.
+   Expected baseline: Start Review in Roger (primary) and Resume Existing
+   Review are available; View Findings appears only when bounded local status or
+   a launch response indicates findings-ready focus.
 3. With Native Messaging host uninstalled or misconfigured, verify launch is
    blocked with setup guidance and no custom URL tab opens.
 4. Expand `Build and fallback details` and verify build text is present inside
@@ -88,7 +92,8 @@ Supported-browser popup smoke (Chrome shell render):
 - Surface: popup shell HTML render (`apps/extension/src/popup/index.html`)
 - Snapshot observation confirms redesigned labels and disclosure affordance:
   `Manual Backup Controls`, `Start Review in Roger`, `Resume Existing Review`,
-  `View Findings`, and `Build and fallback details`
+  and `Build and fallback details`, with `View Findings` remaining a
+  conditional action rather than default always-visible copy
 
 ## Live Sacrificial-PR Operator-Stability Rehearsal (`rr-6iah.8`)
 
@@ -280,5 +285,6 @@ Observed blocking result before this repo-side/runbook correction:
 - `scripts/swarm/validate_extension_entry_placements.sh` exits `0`
 - placement precedence (header -> rail -> modal) assertions pass
 - popup action-set and non-PR gating assertions pass
+- popup redesign hierarchy/info-affordance assertions pass
 - Native Messaging fail-closed assertions pass
 - supported-browser launch metadata files are present
