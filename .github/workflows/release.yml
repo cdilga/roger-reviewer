@@ -1035,7 +1035,9 @@ jobs:
                   Replace("__REHEARSAL_ROOT__", $wslRehearsalRoot).
                   Replace("__DOWNLOAD_ROOT_URI__", $downloadRootUri).
                   Replace("__API_ROOT_URI__", $apiRootUri)
-              $wslScript | Set-Content -Path $wslCommandPath -Encoding utf8NoBOM
+              # bash rejects CRLF ("set: pipefail\r"); force LF line endings.
+              $wslScript = ($wslScript -replace "`r`n", "`n") + "`n"
+              [System.IO.File]::WriteAllText($wslCommandPath, $wslScript)
 
               $wslCommandPathUnix = To-WslPath -Distro $distro -WindowsPath $wslCommandPath
               & wsl.exe --distribution $distro -- bash $wslCommandPathUnix
