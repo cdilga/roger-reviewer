@@ -12,6 +12,26 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Save-UrlToFile {
+    param(
+        [string]$Uri,
+        [string]$OutFile
+    )
+
+    # GitHub runners' PowerShell 7 dropped 'file' scheme support in
+    # Invoke-WebRequest; release rehearsals point the installer at local
+    # artifact roots via file:// URLs, so copy those directly instead.
+    if ($Uri -match '^file://') {
+        $localPath = ([System.Uri]$Uri).LocalPath
+        if (-not (Test-Path -Path $localPath -PathType Leaf)) {
+            throw "file URL source not found: $localPath"
+        }
+        Copy-Item -Path $localPath -Destination $OutFile -Force
+        return
+    }
+    Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing
+}
+
 function Fail {
     param([string]$Message)
     throw "error: $Message"
@@ -211,7 +231,7 @@ function Download-ChecksumsManifest {
         $checksumsUrl = "$DownloadRoot/$Tag/$($attempt.Name)"
         $checksumsPath = Join-Path $TmpDir $attempt.Name
         try {
-            Invoke-WebRequest -Uri $checksumsUrl -OutFile $checksumsPath -UseBasicParsing
+            Save-UrlToFile -Uri $checksumsUrl -OutFile $checksumsPath
             return [pscustomobject]@{
                 Url = $checksumsUrl
                 Path = $checksumsPath
@@ -260,14 +280,14 @@ try {
     $installMetadataName = "release-install-metadata-$Version.json"
     $installMetadataUrl = "$DownloadRoot/$tag/$installMetadataName"
     $installMetadataPath = Join-Path $tmpDir $installMetadataName
-    Invoke-WebRequest -Uri $installMetadataUrl -OutFile $installMetadataPath -UseBasicParsing
+    Save-UrlToFile -Uri $installMetadataUrl -OutFile $installMetadataPath
 
     $entry = Read-InstallMetadataEntry -InstallMetadataPath $installMetadataPath -Target $Target -Version $Version
 
     $manifestName = $entry.CoreManifestName
     $manifestUrl = "$DownloadRoot/$tag/$manifestName"
     $manifestPath = Join-Path $tmpDir $manifestName
-    Invoke-WebRequest -Uri $manifestUrl -OutFile $manifestPath -UseBasicParsing
+    Save-UrlToFile -Uri $manifestUrl -OutFile $manifestPath
 
     Assert-ManifestTarget `
         -ManifestPath $manifestPath `
@@ -306,7 +326,7 @@ try {
     }
 
     $archivePath = Join-Path $tmpDir $entry.ArchiveName
-    Invoke-WebRequest -Uri $archiveUrl -OutFile $archivePath -UseBasicParsing
+    Save-UrlToFile -Uri $archiveUrl -OutFile $archivePath
 
     $archiveSha = (Get-FileHash -Algorithm SHA256 -Path $archivePath).Hash.ToLowerInvariant()
     if ($archiveSha -ne $entry.ArchiveSha256) {

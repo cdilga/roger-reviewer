@@ -828,6 +828,14 @@ jobs:
           name: release-verify-assets-report
           path: upstream/verify-report
 
+      # The windows-2022 runner image no longer ships a default WSL distro
+      # (first observed 2026-06-10: `wsl -l -q` is empty), so provision one
+      # explicitly before the rehearsal asserts distro availability.
+      - name: Provision WSL distro for rehearsal
+        uses: Vampire/setup-wsl@v5
+        with:
+          distribution: Ubuntu-24.04
+
       - name: Rehearse WSL install + installed-binary dry-run update
         shell: pwsh
         run: |
