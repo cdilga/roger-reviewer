@@ -990,16 +990,19 @@ jobs:
               $apiRootUri = "file://${wslRehearsalRoot}/api/repos/cdilga/roger-reviewer"
 
               $wslCommandPath = Join-Path $rehearsalRoot "run-wsl-rehearsal.sh"
-              @"
+              # Literal here-string: bash ${...} expansions must reach the
+              # script untouched; pwsh StrictMode rejects interpolation of
+              # unset ${snake_case} names in an expandable here-string.
+              $wslScript = @'
           #!/usr/bin/env bash
           set -euo pipefail
 
-          version="$version"
-          tag="$tag"
-          target="$target"
-          rehearsal_root="$wslRehearsalRoot"
-          download_root_uri="$downloadRootUri"
-          api_root_uri="$apiRootUri"
+          version="__VERSION__"
+          tag="__TAG__"
+          target="__TARGET__"
+          rehearsal_root="__REHEARSAL_ROOT__"
+          download_root_uri="__DOWNLOAD_ROOT_URI__"
+          api_root_uri="__API_ROOT_URI__"
 
           install_dir="${rehearsal_root}/install/bin"
           mkdir -p "${install_dir}"
@@ -1024,7 +1027,15 @@ jobs:
             --robot \
             1> "${rehearsal_root}/wsl-update-dry-run.json" \
             2> "${rehearsal_root}/wsl-update-dry-run.stderr.txt"
-          "@ | Set-Content -Path $wslCommandPath -Encoding utf8NoBOM
+          '@
+              $wslScript = $wslScript.
+                  Replace("__VERSION__", $version).
+                  Replace("__TAG__", $tag).
+                  Replace("__TARGET__", $target).
+                  Replace("__REHEARSAL_ROOT__", $wslRehearsalRoot).
+                  Replace("__DOWNLOAD_ROOT_URI__", $downloadRootUri).
+                  Replace("__API_ROOT_URI__", $apiRootUri)
+              $wslScript | Set-Content -Path $wslCommandPath -Encoding utf8NoBOM
 
               $wslCommandPathUnix = To-WslPath -Distro $distro -WindowsPath $wslCommandPath
               & wsl.exe --distribution $distro -- bash $wslCommandPathUnix
