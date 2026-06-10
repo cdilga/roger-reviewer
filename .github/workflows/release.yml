@@ -842,6 +842,10 @@ jobs:
           $ErrorActionPreference = "Stop"
           Set-StrictMode -Version Latest
 
+          # wsl.exe emits UTF-16LE by default, which mangles captured distro
+          # names (and then every `wsl -d <distro>` call); force UTF-8.
+          $env:WSL_UTF8 = "1"
+
           function Fail {
               param([string]$Message)
               throw $Message

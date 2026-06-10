@@ -112,15 +112,15 @@ function Read-InstallMetadataEntry {
         Fail "install metadata core_manifest_name must be a file name"
     }
 
-    $matches = @($metadata.targets | Where-Object { $_.target -eq $Target })
-    if ($matches.Count -eq 0) {
+    $targetEntries = @($metadata.targets | Where-Object { $_.target -eq $Target })
+    if ($targetEntries.Count -eq 0) {
         Fail "install metadata has no entry for target $Target"
     }
-    if ($matches.Count -gt 1) {
+    if ($targetEntries.Count -gt 1) {
         Fail "install metadata has ambiguous entries for target $Target"
     }
 
-    $entry = $matches[0]
+    $entry = $targetEntries[0]
     foreach ($field in @("archive_name", "archive_sha256", "payload_dir", "binary_name")) {
         if (-not $entry.$field) {
             Fail "target entry missing required field '$field'"
@@ -153,15 +153,15 @@ function Assert-ManifestTarget {
         Fail "manifest version mismatch: expected $Version got $($manifest.version)"
     }
 
-    $matches = @($manifest.targets | Where-Object { $_.target -eq $Target })
-    if ($matches.Count -eq 0) {
+    $targetEntries = @($manifest.targets | Where-Object { $_.target -eq $Target })
+    if ($targetEntries.Count -eq 0) {
         Fail "manifest has no entry for target $Target"
     }
-    if ($matches.Count -gt 1) {
+    if ($targetEntries.Count -gt 1) {
         Fail "manifest has ambiguous entries for target $Target"
     }
 
-    $entry = $matches[0]
+    $entry = $targetEntries[0]
     if ($entry.archive_name -ne $ArchiveName) {
         Fail "manifest target mismatch for archive_name"
     }
@@ -182,27 +182,27 @@ function Read-ChecksumsEntry {
         [string]$ArchiveName
     )
 
-    $matches = @()
+    # Do not name the accumulator $matches: that collides (case-insensitively)
+    # with PowerShell's automatic $Matches regex variable, turning the array
+    # append into hashtable addition after every -match.
+    $checksumEntries = @()
     foreach ($line in Get-Content -Path $ChecksumsPath) {
         if ($line -match '^\s*([0-9a-fA-F]{64})\s+\*?(.+?)\s*$') {
-            if ($matches.Count -gt 10) {
-                Fail "checksums file appears malformed"
-            }
             $name = $Matches[2]
             if ($name -eq $ArchiveName) {
-                $matches += $Matches[1].ToLowerInvariant()
+                $checksumEntries += $Matches[1].ToLowerInvariant()
             }
         }
     }
 
-    if ($matches.Count -eq 0) {
+    if ($checksumEntries.Count -eq 0) {
         Fail "checksums file missing entry for $ArchiveName"
     }
-    if ($matches.Count -gt 1) {
+    if ($checksumEntries.Count -gt 1) {
         Fail "checksums file has ambiguous entries for $ArchiveName"
     }
 
-    return $matches[0]
+    return $checksumEntries[0]
 }
 
 function Download-ChecksumsManifest {
