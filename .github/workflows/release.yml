@@ -513,8 +513,15 @@ jobs:
             exit 1
           fi
 
-          cp "${installer_sh}" upstream/assets/rr-install.sh
-          cp "${installer_ps1}" upstream/assets/rr-install.ps1
+          # The install-metadata bundle may already place the installers at
+          # the canonical top-level path; cp onto the same file fails under
+          # set -e, so only normalize when the discovered path differs.
+          if [[ "${installer_sh}" != upstream/assets/rr-install.sh ]]; then
+            cp "${installer_sh}" upstream/assets/rr-install.sh
+          fi
+          if [[ "${installer_ps1}" != upstream/assets/rr-install.ps1 ]]; then
+            cp "${installer_ps1}" upstream/assets/rr-install.ps1
+          fi
 
           python3 scripts/release/verify_release_assets.py \
             --version-metadata "${version_metadata}" \
@@ -1151,8 +1158,15 @@ jobs:
             exit 1
           fi
 
-          cp "${installer_sh}" upstream/assets/rr-install.sh
-          cp "${installer_ps1}" upstream/assets/rr-install.ps1
+          # The install-metadata bundle may already place the installers at
+          # the canonical top-level path; cp onto the same file fails under
+          # set -e, so only normalize when the discovered path differs.
+          if [[ "${installer_sh}" != upstream/assets/rr-install.sh ]]; then
+            cp "${installer_sh}" upstream/assets/rr-install.sh
+          fi
+          if [[ "${installer_ps1}" != upstream/assets/rr-install.ps1 ]]; then
+            cp "${installer_ps1}" upstream/assets/rr-install.ps1
+          fi
 
           smoke_ack_flag=()
           if [[ "${{ inputs.operator_smoke_ack }}" == 'true' ]]; then
