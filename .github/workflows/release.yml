@@ -875,11 +875,21 @@ jobs:
                   [string]$Distro,
                   [string]$WindowsPath
               )
-              $converted = (& wsl.exe --distribution $Distro -- wslpath -a -u $WindowsPath)
-              if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($converted)) {
-                  Fail "failed to convert path '$WindowsPath' to WSL path"
+              $output = & wsl.exe --distribution $Distro -- wslpath -a -u $WindowsPath 2>&1
+              $converted = ($output | Out-String).Trim()
+              if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($converted) -and $converted.StartsWith("/")) {
+                  return $converted
               }
-              return $converted.Trim()
+              # Fall back to the deterministic default automount layout; on
+              # freshly provisioned CI distros wslpath has been observed to
+              # fail even though /mnt/<drive> is mounted normally.
+              Write-Host "wslpath conversion failed for '$WindowsPath' (exit=$LASTEXITCODE output='$converted'); using /mnt fallback"
+              if ($WindowsPath -match '^([A-Za-z]):[\\/](.*)$') {
+                  $drive = $Matches[1].ToLowerInvariant()
+                  $rest = $Matches[2] -replace '\\', '/'
+                  return "/mnt/$drive/$rest"
+              }
+              Fail "failed to convert path '$WindowsPath' to WSL path"
           }
 
           $workspaceRoot = $env:GITHUB_WORKSPACE
