@@ -33,7 +33,9 @@ These are not preferences. Violating them is a bug.
 - **No long-running daemon as the architecture center.** The system must be
   daemonless in steady state.
 - **OpenCode fallback must stay real.** Every Roger review session must map to
-  an underlying OpenCode session that can be resumed directly.
+  an underlying supported harness session or transcript anchor, and Roger must
+  preserve a real plain OpenCode fallback/reference path rather than making it
+  aspirational.
 - **Mutation-capable flows must be visibly elevated**, not implicit.
 - **No raw review communication via `gh` or other direct GitHub write tools.**
   Agent-authored review comments, questions, and suggestions must flow through
@@ -133,6 +135,7 @@ Do not assume every document below needs to be re-read on every pass.
 | [`docs/STORE_MIGRATION_COMPATIBILITY_AND_OPERATOR_CONTRACT.md`](docs/STORE_MIGRATION_COMPATIBILITY_AND_OPERATOR_CONTRACT.md) | Implementation-facing migration/update compatibility contract: envelope fields, migration classes, fail-closed boundaries, updater preflight output, and first-run auto-migration limits (closes `rr-1xhg.1`) |
 | [`docs/UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md`](docs/UPDATE_RELEASE_AND_TESTED_UPGRADE_CONTRACT.md) | Support contract for update semantics, GitHub Releases asset mechanics, install-layout boundaries, and the proof required before Roger claims a tested upgrade path |
 | [`docs/ROBOT_CLI_CONTRACT.md`](docs/ROBOT_CLI_CONTRACT.md) | Support contract for the `0.1.0` `--robot` command shortlist and stable machine-readable output envelopes |
+| [`docs/REVIEW_AUTOMATION_PATHS.md`](docs/REVIEW_AUTOMATION_PATHS.md) | Support contract for current scriptable review-automation surfaces (queue, worker transport, outbound chain) and the bounded next automation lanes |
 | [`docs/HARNESS_SESSION_LINKAGE_CONTRACT.md`](docs/HARNESS_SESSION_LINKAGE_CONTRACT.md) | Implementation-facing contract for the Roger-to-harness session boundary, `SessionLocator`, `ResumeBundle`, and adapter obligations (closes `rr-015`) |
 | [`docs/REVIEW_WORKER_RUNTIME_AND_BOUNDARY_CONTRACT.md`](docs/REVIEW_WORKER_RUNTIME_AND_BOUNDARY_CONTRACT.md) | Implementation-facing contract for the manager/worker/provider split, the `ReviewTask` ledger, and the agent-only `rr agent` boundary |
 | [`docs/SEARCH_MEMORY_LIFECYCLE_AND_SEMANTIC_ASSET_POLICY.md`](docs/SEARCH_MEMORY_LIFECYCLE_AND_SEMANTIC_ASSET_POLICY.md) | Support contract for prior-review search, semantic asset lifecycle, memory promotion rules, and `0.1.0` scope fence before `rr-024` |
@@ -424,8 +427,11 @@ Do not optimize for these:
 
 ## Working with Beads
 
-All implementation work is tracked as beads in `.beads/beads.db`. Use `br`
-(beads_rust) to interact with them.
+All implementation work is tracked as beads in `.beads/beads.db`. The default
+swarm front door is `br`. On this machine `~/.local/bin/br` is expected to
+resolve to the Roger-safe front door, which then delegates to the managed
+underlying binary. `./scripts/swarm/br_safe.sh` remains the maintainer/debug
+entrypoint, not the command agents should have to remember.
 
 Common commands:
 
@@ -437,17 +443,22 @@ br ready             # open, unblocked, not deferred
 br show <id>         # full bead detail
 br update <id> --status in_progress
 br close <id>        # mark a bead complete
-br doctor            # workspace health check
+./scripts/swarm/check_beads_trust.sh         # canonical queue-trust check
 ```
 
-`br` currently resolves to a locally pinned source build under
-`~/.local/bin/br -> ~/.local/bin/br-0.1.40.pinned`.
+Implementation detail:
 
-Important 2026-04-15 follow-up:
+- `~/.local/bin/br` should point at the Roger-safe front door
+- that front door delegates to `~/.local/bin/br-main.current` unless
+  `RR_BR_BIN` explicitly overrides it
+- maintainers can still inspect the delegated binary with
+  `./scripts/swarm/br_safe.sh --print-path`
 
-- GitHub `beads_rust` latest official release is `v0.1.40`
-  (published `2026-04-15T00:45:55Z`), and this repo now pins a locally built
-  `0.1.40` from upstream `main` commit
+Important 2026-04-17 follow-up:
+
+- GitHub `beads_rust` latest official release is `v0.1.42`
+  (published `2026-04-16T20:50:08Z`), but this repo still pins a locally
+  revalidated `0.1.40` source build from upstream `main` commit
   `766559a4207e30cab0680ae814a668c7961fb027`
   (`2026-04-15T00:47:07-04:00`,
   `fix(doctor): remove stale mention of out-of-order from VACUUM comment`).
@@ -457,9 +468,20 @@ Important 2026-04-15 follow-up:
     passed with the source-built `0.1.40`
   - live Roger workspace `br ready`, `br sync --status`, and `br doctor`
     passed with the same source-built `0.1.40`
-- `scripts/swarm/resolve_br.sh` and `scripts/swarm/br_pinned.sh` now default to
-  `br-0.1.40.pinned` so swarm and onboarding flows converge on the latest
-  locally revalidated binary.
+- reevaluation on 2026-04-17 against the published `v0.1.42`
+  `darwin_arm64` artifact:
+  - installed the release binary at `~/.local/bin/br-0.1.42.pinned`
+  - fresh temp-workspace
+    `git init -> br init -> br create -> br create -> sqlite3 integrity_check -> br doctor`
+    passed
+  - Roger rebuild matrix
+    `br init -> copy canonical issues.jsonl/config.yaml -> br sync --import-only --rebuild -> sqlite3 integrity_check -> br doctor`
+    failed because `sqlite3 integrity_check` reported repeated
+    `Page N: never used` anomalies and `br doctor` returned non-zero
+  - live Roger workspace `br doctor` also returned non-zero with the same
+    integrity warnings
+  - therefore at that time Roger continued to use the previously revalidated
+    `0.1.40` path instead of widening the default surface to that release
 - future reevaluation of newer upstream versions must still use the same
   fresh-init matrix plus a Roger workspace rebuild test; do not assume a newer
   upstream release is safe by default.
@@ -467,8 +489,19 @@ Important 2026-04-15 follow-up:
 Upstream fresh-init regression report remains:
 `Dicklesworthstone/beads_rust#213`.
 
-If `br doctor` or `check_beads_trust.sh` reports malformed-page warnings again,
-repair with:
+If `br doctor` or `check_beads_trust.sh` reports native SQLite corruption,
+prefer the safe rebuild script first:
+
+```sh
+./scripts/swarm/rebuild_beads_db_safe.sh --install
+```
+
+That path rebuilds a fresh DB from canonical `issues.jsonl` using a clean
+import-only flow and validates the candidate with native `sqlite3` before it
+swaps the live DB family. For default live-DB mutations routed through `br`,
+the safe front door also runs a post-mutation trust check and auto-repairs from
+canonical JSONL when it detects real corruption rather than simple lock
+contention. If you need the manual fallback path, use:
 
 ```sh
 cp -a .beads ".beads/.manual_repair_$(date -u +%Y%m%d_%H%M%S)"
@@ -488,8 +521,10 @@ br doctor
 DB rebuild from canonical JSONL restored trust cleanly. Preserved recovery
 artefacts under `.beads/.br_recovery` are still only a cleanup warning.
 
-Do not assume a newer upstream `br` release is safe by default. If you need to
-reevaluate a future upstream version, test it explicitly against:
+Do not assume a newer upstream `br` release is safe by default. Even though the
+default local `br` surface now tracks a managed latest-main build rather
+than a fixed version pin, reevaluate future upstream versions explicitly
+against:
 
 ```sh
 git init tmp && cd tmp
@@ -502,7 +537,8 @@ br doctor
 
 ### How to pick your next bead
 
-1. Run `br ready` to see available work, or `br list --status open` for the full queue.
+1. Run `br ready` to see available work, or
+   `br list --status open` for the full queue.
 2. Respect the dependency graph — do not start a bead whose dependencies are
    not yet `done`.
 3. Mark the bead `in_progress` before starting work.
@@ -510,9 +546,9 @@ br doctor
 5. If you discover a blocker or ambiguity, add a note to the bead rather than
    guessing.
 
-If `br` reports `database is busy`, do not treat that as "no work exists".
-Wait briefly, then retry. The live queue is authoritative only after a clean
-read.
+If `br` reports `database is busy`, do not
+treat that as "no work exists". Wait briefly, then retry. The live queue is
+authoritative only after a clean read.
 
 ### Bead shaping is allowed
 
@@ -557,8 +593,9 @@ Rules:
   session, split it before or during execution
 - parent beads should usually act as integration checkpoints; child beads should
   carry the implementation burden
-- if `br ready` is empty but adjacent safe work is obvious, do not declare the
-  repo "done"; shape the graph or create the missing child bead instead
+- if `br ready` is empty but adjacent safe work is
+  obvious, do not declare the repo "done"; shape the graph or create the
+  missing child bead instead
 - if a bead contains multiple disjoint code areas, multiple support claims, or
   multiple unrelated validation layers, it is probably undersplit
 - if failure handling, degraded mode, invalidation, or recovery are part of the
@@ -1023,12 +1060,12 @@ every provider is equally supported.
 
 | Provider | Roger role | `0.1.0` drop-in support | `0.1.0` deeper integration | Notes |
 |----------|------------|-------------------------|----------------------------|-------|
-| GitHub Copilot CLI | Golden-path first-class provider | Not yet | Planned Tier B target | Authoritative `#1` provider target; keep out of live support claims until verified launch/policy/continuity proof exists |
-| OpenCode | First-class continuity fallback and reference harness | Yes | Yes | Authoritative `#2` provider; must preserve real direct-resume fallback |
+| GitHub Copilot CLI | Feature-gated bounded continuity provider | Yes, behind feature gate | Bounded Tier B | Authoritative `#1` provider in the product-support order, but current live claim is feature-gated bounded Tier B only: verified start, `review_readonly` policy posture, locator/session-id reopen, `rr return`, and honest `ResumeBundle` reseed fallback with no default public live claim |
+| OpenCode | First-class continuity fallback and reference harness | Yes | Yes | Authoritative `#2` provider and current strongest landed continuity path |
 | Codex | Secondary bounded review harness | Yes | Bounded | Authoritative `#3` provider; exposed via `rr review --provider codex`; Tier A only today (no locator reopen or `rr return`) |
 | Gemini | Secondary bounded review harness | Yes | Bounded | Authoritative `#4` provider; exposed via `rr review --provider gemini`; keep Tier A live-CLI claims truthful and do not imply locator reopen or `rr return` |
 | Claude Code | Secondary bounded review harness | Yes | Bounded | Authoritative `#5` provider; exposed via `rr review --provider claude`; Tier A only today (no locator reopen or `rr return`) |
-| Pi-Agent | Future review harness | No | No | Keep room in the adapter contract only |
+| Pi-Agent | Deferred future review harness candidate | No | No | Post-`0.1.0` admission candidate only; evaluate `_exploration/pi_agent_rust` against the same direct-CLI launch, policy-control, auditability, and continuity-tier rubric Roger uses for every provider before creating implementation beads |
 | GitHub CLI (`gh`) | GitHub adapter, not review harness | N/A | N/A | Write/read adapter for GitHub flows, not a drop-in review engine |
 
 Rules:
@@ -1037,12 +1074,15 @@ Rules:
   Codex, Gemini, then Claude Code
 - that order is the product support hierarchy, not permission to widen live
   claims before proof exists
-- OpenCode remains the strongest currently landed continuity path until the
-  Copilot golden path is fully verified
+- OpenCode remains the strongest current first-class continuity path; Copilot
+  is now feature-gated bounded Tier B and still outside the default public live
+  claim
 - Codex, Gemini, and Claude Code claims must stay truthful and bounded; all
   three are currently exposed in the live `rr review --provider ...` surface
-- GitHub Copilot CLI is active implementation scope, but it should remain out
-  of live support claims until the verified launch and continuity path are real.
+- GitHub Copilot CLI stays feature-gated bounded Tier B only when Roger can
+  enforce the `review_readonly` policy profile, repo-owned hook/instruction
+  assets, verified start, locator/session-id reopen, `rr return`, and honest
+  `ResumeBundle` reseed fallback
 - Roger may commit to an eventual broader provider/browser/OS support track, but
   current beta claims must still stay honest about which paths are presently
   blessed, acceptance-tested, or partial.
@@ -1061,12 +1101,13 @@ Capability-tier rule:
 
 `0.1.0` intent:
 
-- GitHub Copilot CLI is the first-class golden-path provider target and must
-  land through the same verified-lifecycle, policy, and proof rules as every
-  other provider
+- GitHub Copilot CLI currently occupies the feature-gated bounded Tier B lane:
+  verified launch, `review_readonly` policy posture, locator/session-id reopen,
+  `rr return`, and honest `ResumeBundle` reseed fallback without a default
+  public live claim
 - OpenCode should reach Tier B and remains the required fallback/reference path
 - Codex, Gemini, and Claude Code currently expose bounded Tier A paths in the
-  live CLI
+  live CLI and must be documented literally as such
 - no provider is allowed to claim deeper support than its capability tier earns
 
 Harness-native Roger commands are optional in `0.1.0`. If implemented, prefer
@@ -1129,10 +1170,11 @@ artefacts all live there.
 `br` never executes git commands. Bead workflow and git workflow are related
 but not the same thing:
 
-- use `br` to read and mutate queue truth
-- use `br sync --status` to check DB/JSONL consistency
-- use `br sync --flush-only` or `br sync --import-only --rebuild` only when
-  you are intentionally exporting/importing or repairing workspace trust
+- use `br` as the default queue read/mutation entrypoint
+- use `./scripts/swarm/check_beads_trust.sh` as the normal DB/JSONL trust check
+- use `br sync --flush-only` or
+  `br sync --import-only --rebuild` only when you are intentionally
+  exporting/importing or repairing workspace trust
 - do not treat git commits, pushes, or PRs as mandatory session-end cleanup
 - local commits and branches are allowed when useful or when the user/repo
   workflow calls for them; they are not required just because bead data changed
@@ -1150,7 +1192,7 @@ br show <id>            # Full issue details with dependencies
 br create --title="..." --type task --priority 2
 br update <id> --status in_progress
 br close <id> --reason "Completed"
-br sync --status        # Read-only DB/JSONL trust check
+./scripts/swarm/check_beads_trust.sh            # Read-only DB/JSONL trust check
 ```
 
 ### Workflow Pattern
@@ -1159,12 +1201,14 @@ br sync --status        # Read-only DB/JSONL trust check
 2. **Claim**: Use `br update <id> --status in_progress`
 3. **Work**: Implement the task
 4. **Complete truthfully**: Close only after acceptance and proof are real
-5. **Keep queue state clean**: If you changed bead data, confirm `br sync --status`
-   is clean or record why it is intentionally not
+5. **Keep queue state clean**: If you changed bead data, confirm
+   `./scripts/swarm/check_beads_trust.sh` passes or record why it is
+   intentionally not clean
 
 ### Key Concepts
 
-- **Dependencies**: Issues can block other issues. `br ready` shows only unblocked work.
+- **Dependencies**: Issues can block other issues.
+  `br ready` shows only unblocked work.
 - **Priority**: P0=critical, P1=high, P2=medium, P3=low, P4=backlog (use numbers, not words)
 - **Types**: task, bug, feature, epic, question, docs
 - **Blocking**: `br dep add <issue> <depends-on>` to add dependencies
@@ -1184,7 +1228,7 @@ br sync --status        # Read-only DB/JSONL trust check
 - Update status as you work (in_progress → closed)
 - Create new issues with `br create` when you discover tasks
 - Use descriptive titles and set appropriate priority/type
-- Prefer `br sync --status` as the normal safety check
+- Prefer `./scripts/swarm/check_beads_trust.sh` as the normal safety check
 - Use export/import sync commands deliberately, not mechanically
 
 <!-- end-bv-agent-instructions -->

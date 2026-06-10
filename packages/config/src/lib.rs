@@ -4,6 +4,7 @@ use std::path::Path;
 pub mod cli_defaults {
     pub const ENV_STORE_ROOT: &str = "RR_STORE_ROOT";
     pub const ENV_OPENCODE_BIN: &str = "RR_OPENCODE_BIN";
+    pub const ENV_COPILOT_BIN: &str = roger_session_copilot::ENV_COPILOT_BIN;
     pub const ENV_BRIDGE_EXTENSION_ID: &str = "RR_BRIDGE_EXTENSION_ID";
     pub const ENV_BRIDGE_HOST_BINARY: &str = "RR_BRIDGE_HOST_BINARY";
     pub const ENV_EXTENSION_PROFILE_ROOT: &str = "RR_EXTENSION_PROFILE_ROOT";
@@ -12,6 +13,7 @@ pub mod cli_defaults {
     pub const DEFAULT_CODEX_BIN: &str = "codex";
     pub const DEFAULT_GEMINI_BIN: &str = "gemini";
     pub const DEFAULT_CLAUDE_BIN: &str = "claude";
+    pub const DEFAULT_COPILOT_BIN: &str = roger_session_copilot::DEFAULT_COPILOT_BIN;
     pub const DEFAULT_UI_TARGET: &str = "cli";
     pub const DEFAULT_INSTANCE_PREFERENCE: &str = "reuse_if_possible";
     pub const DEFAULT_LAUNCH_PROFILE_ID: &str = "profile-open-pr";
@@ -122,6 +124,10 @@ pub struct ResolvedProviderCapability {
     pub fail_closed_reason: Option<String>,
     pub degraded_reason: Option<String>,
     pub supports: ResolvedProviderSupportMatrix,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denied_capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audit_artifact_classes: Vec<String>,
     pub notes: String,
 }
 
@@ -212,13 +218,22 @@ impl ResolvedRogerConfig {
             Vec::new()
         };
 
+        let isolation_mode = if provider.provider == roger_session_copilot::PROVIDER_ID {
+            ResolvedValue::built_in(
+                roger_session_copilot::REVIEW_READONLY_REQUIRED_ISOLATION_MODE.to_owned(),
+                roger_session_copilot::REVIEW_READONLY_ISOLATION_SOURCE,
+            )
+        } else {
+            self.launch.isolation_mode.clone()
+        };
+
         Ok(ResolvedRoutineSurfaceBaseline {
             surface: self.surface.clone(),
             launch_profile_id: self.launch.launch_profile_id.clone(),
             provider,
             ui_target: self.launch.ui_target.clone(),
             instance_preference: self.launch.instance_preference.clone(),
-            isolation_mode: self.launch.isolation_mode.clone(),
+            isolation_mode,
             named_instance_on_collision: self.launch.named_instance_on_collision.clone(),
             repair_overrides_active: self.repair_overrides_active(),
             active_repair_override_keys,
@@ -373,9 +388,14 @@ where
             cli_defaults::DEFAULT_CLAUDE_BIN.to_owned(),
             "providers.claude.binary_path",
         ),
-        "copilot" => {
-            ResolvedValue::built_in("github-copilot".to_owned(), "providers.copilot.binary_path")
-        }
+        "copilot" => lookup(cli_defaults::ENV_COPILOT_BIN)
+            .map(|value| ResolvedValue::env(value, cli_defaults::ENV_COPILOT_BIN, false))
+            .unwrap_or_else(|| {
+                ResolvedValue::built_in(
+                    cli_defaults::DEFAULT_COPILOT_BIN.to_owned(),
+                    "providers.copilot.binary_path",
+                )
+            }),
         "pi-agent" => {
             ResolvedValue::built_in("pi-agent".to_owned(), "providers.pi-agent.binary_path")
         }
@@ -414,6 +434,14 @@ where
             sessions: true,
             doctor: provider != "pi-agent",
         },
+        denied_capabilities: provider_denied_capabilities(provider)
+            .iter()
+            .map(|capability| (*capability).to_owned())
+            .collect(),
+        audit_artifact_classes: provider_audit_artifact_classes(provider)
+            .iter()
+            .map(|artifact_class| (*artifact_class).to_owned())
+            .collect(),
         notes: provider_support_notes(provider).to_owned(),
     }
 }
@@ -473,11 +501,10 @@ fn provider_policy_profile(provider: &str) -> ResolvedPolicyProfile {
             continuity_mode: "reseed_only".to_owned(),
         },
         "copilot" => ResolvedPolicyProfile {
-            id: "provider_admission_pending".to_owned(),
-            summary: "provider admission is planned, but live policy hooks and proofs are pending"
-                .to_owned(),
+            id: roger_session_copilot::REVIEW_READONLY_POLICY_PROFILE_ID.to_owned(),
+            summary: roger_session_copilot::REVIEW_READONLY_POLICY_SUMMARY.to_owned(),
             mutation_posture: "review_only".to_owned(),
-            continuity_mode: "not_live".to_owned(),
+            continuity_mode: roger_session_copilot::REVIEW_READONLY_CONTINUITY_MODE.to_owned(),
         },
         _ => ResolvedPolicyProfile {
             id: "unsupported".to_owned(),
@@ -490,14 +517,14 @@ fn provider_policy_profile(provider: &str) -> ResolvedPolicyProfile {
 
 fn provider_hook_contract_version(provider: &str) -> &'static str {
     match provider {
-        "copilot" => "pending_provider_hooks",
+        "copilot" => roger_session_copilot::REVIEW_READONLY_HOOK_CONTRACT_VERSION,
         _ => cli_defaults::DEFAULT_HOOK_CONTRACT_VERSION,
     }
 }
 
 fn provider_instruction_contract_version(provider: &str) -> &'static str {
     match provider {
-        "copilot" => "pending_provider_instructions",
+        "copilot" => roger_session_copilot::REVIEW_READONLY_INSTRUCTION_CONTRACT_VERSION,
         "pi-agent" => "none",
         _ => cli_defaults::DEFAULT_PROMPT_CONTRACT_VERSION,
     }
@@ -509,9 +536,25 @@ fn provider_support_notes(provider: &str) -> &'static str {
         "codex" | "gemini" | "claude" => {
             "bounded tier-a start/reseed/raw-capture path only; no locator reopen or rr return"
         }
-        "copilot" => "planned target, not yet a live rr review --provider value",
+        "copilot" => {
+            "planned target with enforced review_readonly policy + worktree isolation baseline; not yet a live rr review --provider value"
+        }
         "pi-agent" => "not part of the 0.1.0 live CLI surface",
         _ => "provider is not part of the current live rr review surface",
+    }
+}
+
+fn provider_denied_capabilities(provider: &str) -> &'static [&'static str] {
+    match provider {
+        "copilot" => roger_session_copilot::review_readonly_denied_capabilities(),
+        _ => &[],
+    }
+}
+
+fn provider_audit_artifact_classes(provider: &str) -> &'static [&'static str] {
+    match provider {
+        "copilot" => roger_session_copilot::review_readonly_audit_artifact_classes(),
+        _ => &[],
     }
 }
 
@@ -599,18 +642,37 @@ mod tests {
         assert_eq!(copilot.status, "planned_not_live");
         assert_eq!(copilot.support_tier, "tier_a_planned");
         assert_eq!(copilot.surface_class, "admission_pending");
-        assert_eq!(copilot.policy_profile.id, "provider_admission_pending");
+        assert_eq!(copilot.policy_profile.id, "review_readonly");
         assert_eq!(
             copilot.fail_closed_reason.as_deref(),
             Some("provider_not_live")
         );
         assert_eq!(
             copilot.hook_contract_version.value,
-            "pending_provider_hooks"
+            "copilot_review_readonly_hooks.v1"
         );
         assert_eq!(
             copilot.instruction_contract_version.value,
-            "pending_provider_instructions"
+            "copilot_review_readonly_instructions.v1"
+        );
+        assert_eq!(copilot.binary_path.value, cli_defaults::DEFAULT_COPILOT_BIN);
+        assert_eq!(
+            copilot.denied_capabilities,
+            vec![
+                "builtin_github_mcp",
+                "broad_mcp_access",
+                "shell_execution",
+                "write_tool",
+                "external_url_access",
+                "provider_memory_write",
+                "allow_all_mode",
+                "raw_gh_write",
+                "remote_delegation",
+            ]
+        );
+        assert_eq!(
+            copilot.audit_artifact_classes,
+            vec!["copilot_tool_denial", "copilot_transcript_reference"]
         );
         assert!(!resolved.repair_overrides_active());
         assert!(resolved.active_repair_override_keys().is_empty());
@@ -626,6 +688,10 @@ mod tests {
             (
                 cli_defaults::ENV_OPENCODE_BIN.to_owned(),
                 "/opt/opencode/bin/opencode".to_owned(),
+            ),
+            (
+                cli_defaults::ENV_COPILOT_BIN.to_owned(),
+                "/opt/copilot/bin/copilot".to_owned(),
             ),
             (
                 cli_defaults::ENV_BRIDGE_EXTENSION_ID.to_owned(),
@@ -657,6 +723,14 @@ mod tests {
             ValueProvenanceLayer::Env
         );
         assert!(!opencode.binary_path.provenance.repair_only);
+
+        let copilot = resolved.provider("copilot").expect("copilot capability");
+        assert_eq!(copilot.binary_path.value, "/opt/copilot/bin/copilot");
+        assert_eq!(
+            copilot.binary_path.provenance.layer,
+            ValueProvenanceLayer::Env
+        );
+        assert!(!copilot.binary_path.provenance.repair_only);
 
         assert_eq!(
             resolved
@@ -734,10 +808,14 @@ mod tests {
         assert_eq!(baseline.provider.provider, "copilot");
         assert_eq!(baseline.provider.support_tier, "tier_a_planned");
         assert_eq!(baseline.provider.surface_class, "admission_pending");
+        assert_eq!(baseline.status_reason.as_deref(), Some("provider_not_live"));
+        assert_eq!(baseline.provider.policy_profile.id, "review_readonly");
+        assert_eq!(baseline.isolation_mode.value, "worktree");
         assert_eq!(
-            baseline.status_reason.as_deref(),
-            Some("provider_not_live")
+            baseline.isolation_mode.provenance.source,
+            "providers.copilot.review_readonly.isolation_mode"
         );
+        assert_eq!(baseline.named_instance_on_collision.value, true);
         assert_eq!(
             baseline.provider.capability_provenance.source,
             "providers.copilot.support_matrix"
@@ -784,9 +862,8 @@ mod tests {
             err,
             ResolvedConfigError {
                 reason_code: "provider_override_unknown".to_owned(),
-                message:
-                    "resolved config has no provider capability entry for 'totally-unknown'"
-                        .to_owned(),
+                message: "resolved config has no provider capability entry for 'totally-unknown'"
+                    .to_owned(),
             }
         );
     }

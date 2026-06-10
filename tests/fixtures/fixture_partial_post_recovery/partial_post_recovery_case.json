@@ -1,0 +1,83 @@
+{
+  "batch": {
+    "id": "batch-partial-1",
+    "review_session_id": "session-partial-1",
+    "review_run_id": "run-partial-1",
+    "repo_id": "owner/repo",
+    "remote_review_target_id": "pr-42",
+    "payload_digest": "payload-partial-aaa",
+    "approval_state": "Approved",
+    "approved_at": 1700030000,
+    "invalidated_at": null,
+    "invalidation_reason_code": null,
+    "row_version": 1
+  },
+  "drafts": [
+    {
+      "id": "draft-partial-1",
+      "review_session_id": "session-partial-1",
+      "review_run_id": "run-partial-1",
+      "finding_id": "finding-partial-1",
+      "draft_batch_id": "batch-partial-1",
+      "repo_id": "owner/repo",
+      "remote_review_target_id": "pr-42",
+      "payload_digest": "payload-partial-aaa",
+      "approval_state": "Approved",
+      "anchor_digest": "anchor-partial-1",
+      "target_locator": "github:owner/repo#42/files#thread-partial-1",
+      "body": "First partial-post recovery finding.",
+      "row_version": 1
+    },
+    {
+      "id": "draft-partial-2",
+      "review_session_id": "session-partial-1",
+      "review_run_id": "run-partial-1",
+      "finding_id": "finding-partial-2",
+      "draft_batch_id": "batch-partial-1",
+      "repo_id": "owner/repo",
+      "remote_review_target_id": "pr-42",
+      "payload_digest": "payload-partial-aaa",
+      "approval_state": "Approved",
+      "anchor_digest": "anchor-partial-2",
+      "target_locator": "github:owner/repo#42/files#thread-partial-2",
+      "body": "Second partial-post recovery finding.",
+      "row_version": 1
+    }
+  ],
+  "approval": {
+    "id": "approval-partial-1",
+    "draft_batch_id": "batch-partial-1",
+    "payload_digest": "payload-partial-aaa",
+    "target_tuple_json": "{}",
+    "approved_at": 1700030001,
+    "revoked_at": null
+  },
+  "partial_item_results": [
+    {
+      "draft_id": "draft-partial-1",
+      "status": "posted",
+      "remote_identifier": "https://api.github.com/reviews/partial-123",
+      "failure_code": null
+    },
+    {
+      "draft_id": "draft-partial-2",
+      "status": "failed",
+      "remote_identifier": null,
+      "failure_code": "retryable:service_unavailable"
+    }
+  ],
+  "duplicate_item_results": [
+    {
+      "draft_id": "draft-partial-1",
+      "status": "posted",
+      "remote_identifier": "https://api.github.com/reviews/partial-123",
+      "failure_code": null
+    },
+    {
+      "draft_id": "draft-partial-1",
+      "status": "failed",
+      "remote_identifier": null,
+      "failure_code": "retryable:duplicate_delivery"
+    }
+  ]
+}

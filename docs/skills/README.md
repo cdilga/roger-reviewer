@@ -20,6 +20,16 @@ This directory contains reusable Roger-specific skill artifacts.
   - Narrow agent-only skill for safe in-harness operation when already inside a
     Roger-managed session; keeps the agent on the supported Roger-native subset.
 
+- `ROGER_REVIEW_DRIVER.md`
+  - Operator-side skill for driving the full rr review loop from outside a
+    provider session: start/resume/inspect, robot envelopes, provider
+    selection, draft → approve → post gates, and fail-closed recovery.
+
+- `ROGER_COPILOT_HARNESS.md`
+  - Truthful operating recipe for the feature-gated GitHub Copilot CLI
+    provider lane: gate enablement, doctor preflight, `review_readonly`
+    policy posture, and bounded Tier B continuity.
+
 ## Intended use
 
 These files are for:

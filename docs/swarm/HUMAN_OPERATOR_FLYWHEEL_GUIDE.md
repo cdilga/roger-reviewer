@@ -89,6 +89,7 @@ The important operator surfaces are:
 - `ntm add`
 - `ntm palette`
 - `ntm send`
+- `ntm health`
 - `ntm activity`
 - `ntm status`
 - `ntm controller`
@@ -120,8 +121,9 @@ A good default operator loop is:
 ntm spawn roger-reviewer --cod=4 --no-user --auto-restart
 ./scripts/swarm/run_assign_watch.sh --session roger-reviewer
 ntm palette roger-reviewer
+ntm health roger-reviewer
 ntm activity roger-reviewer --watch
-ntm status roger-reviewer
+./scripts/swarm/observe_swarm.sh --session roger-reviewer
 ```
 
 Important spawn behavior:
@@ -138,12 +140,24 @@ ntm assign roger-reviewer --watch --auto --strategy=dependency
 ntm add roger-reviewer --persona=reviewer --prompt "Review the active changes deeply"
 ntm palette roger-reviewer
 ntm send roger-reviewer --cod --file some-prompt.md
+ntm health roger-reviewer
 ntm controller roger-reviewer
-ntm coordinator status roger-reviewer
+./scripts/swarm/observe_swarm.sh --session roger-reviewer
 ntm handoff create roger-reviewer --auto
 ntm interrupt roger-reviewer
 ntm kill --project roger-reviewer --force
 ```
+
+Observation note:
+
+- treat `ntm health` as the primary machine-readable truth for whether panes
+  are running versus idle at an interactive prompt
+- treat `scripts/swarm/observe_swarm.sh` as the local tie-breaker when NTM
+  surfaces disagree, because it classifies panes from tmux scrollback rather
+  than coordinator state
+- treat `ntm coordinator status` and `ntm coordinator digest` as advisory, not
+  authoritative, when they conflict with `ntm health`, `ntm activity`, or pane
+  scrollback
 
 ---
 
@@ -210,9 +224,12 @@ At minimum:
 - `read_agents_and_investigate`
 - `next_bead` or `next_useful_task`
 - `frontier_widening`
+- `testing_first_closeout`
+- `expand_validation_frontier`
 - `fresh_review`
 - `recovery_continue`
 - `recovery_exhausted_queue`
+- `checkpoint_owned_commit`
 
 If the run is going to do heavy `cargo` work, bake `rch` into the launch plan
 when it is available:
@@ -229,6 +246,9 @@ The operator should think:
 
 - "This worker is drifting, give it recovery"
 - "This pane is idle, give it frontier widening"
+- "This bead is about to close weakly, give it testing-first closeout"
+- "We are widening features faster than proof, give someone validation expansion"
+- "The swarm is hoarding uncommitted validated work, give it checkpoint-owned-commit"
 - "This new agent should start in recon mode"
 - "This part of the system needs a fresh-eyes review"
 

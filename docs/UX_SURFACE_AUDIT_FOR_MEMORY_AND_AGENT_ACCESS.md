@@ -137,18 +137,18 @@ is fully reconciled yet.
 
 - README placement language has drifted from the current rail-first
   implementation
-- `awaiting_outbound_approval` still maps to a generic findings action instead
-  of a more distinct draft-facing handoff
+- approval-required and recovery-focused browser states still need a better
+  draft/open-local verb story than the current launch-tier surface can truthfully
+  support
 - the extension remains intentionally too small to expose more nuanced
   draft/recovery states, which is defensible for `0.1.0` but should be explicit
 
 ### Sensible defaults
 
-- keep only the current four safe actions:
+- keep only the current launch-tier action family:
   - `start`
   - `resume`
-  - `findings`
-  - `refresh`
+  - conditional `findings` when bounded local state is findings-ready
 - keep memory/search out of the extension entirely
 - keep no-status mode whenever authoritative readback is unavailable
 
@@ -164,14 +164,16 @@ is fully reconciled yet.
 ### U1. Approval-state semantics still blur across surfaces
 
 - the TUI contract treats draft review and approval as first-class
-- the extension collapses `awaiting_outbound_approval` into `show_findings`
+- the extension still lacks a distinct draft-facing action for
+  `awaiting_outbound_approval`
 - CLI status naming appears to blur approved state and awaiting-approval state
 
 Default reconciliation:
 
 - make “drafts need operator approval” a distinct user-facing concept across all
-  surfaces, even when the extension still only deep-links into the richer local
-  surface
+  surfaces, while keeping the current browser launch tier truthful by preferring
+  `resume`/open-local handoff over a fake findings action until a real draft
+  queue affordance exists
 
 ### U2. Active-agent memory access exists architecturally, but not yet as one UX story
 
@@ -228,4 +230,3 @@ The correct UX architecture is now fairly clear:
 
 That should be treated as the default until a stronger reason appears to do
 otherwise.
-

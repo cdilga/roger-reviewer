@@ -23,11 +23,27 @@ struct OutboundAuditFixture {
     posted_action: PostedAction,
 }
 
+#[derive(Debug, Deserialize)]
+struct PartialPostRecoveryFixture {
+    batch: OutboundDraftBatch,
+    drafts: Vec<OutboundDraft>,
+    approval: OutboundApprovalToken,
+    partial_item_results: Vec<PostingAdapterItemResult>,
+    duplicate_item_results: Vec<PostingAdapterItemResult>,
+}
+
 fn load_fixture() -> OutboundAuditFixture {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/fixture_github_draft_batch/outbound_audit_case.json");
     let raw = fs::read_to_string(&path).expect("failed to read outbound audit fixture");
     serde_json::from_str(&raw).expect("failed to decode outbound audit fixture")
+}
+
+fn load_partial_post_fixture() -> PartialPostRecoveryFixture {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/fixture_partial_post_recovery/partial_post_recovery_case.json");
+    let raw = fs::read_to_string(&path).expect("failed to read partial-post recovery fixture");
+    serde_json::from_str(&raw).expect("failed to decode partial-post recovery fixture")
 }
 
 fn sample_target() -> ReviewTarget {
@@ -412,31 +428,13 @@ fn explicit_posting_fails_closed_when_local_draft_state_drifts() {
 
 #[test]
 fn explicit_posting_records_partial_outcome_and_retry_candidates() {
-    let fixture = load_fixture();
-    let batch = fixture.valid_batch;
-    let draft_one = fixture.valid_draft;
-    let mut draft_two = draft_one.clone();
-    draft_two.id = "draft-2".to_owned();
-    draft_two.finding_id = Some("finding-2".to_owned());
-    draft_two.anchor_digest = "anchor-2".to_owned();
-    let drafts = vec![draft_one.clone(), draft_two.clone()];
-    let mut approval = fixture.valid_approval;
+    let fixture = load_partial_post_fixture();
+    let batch = fixture.batch;
+    let drafts = fixture.drafts;
+    let mut approval = fixture.approval;
     approval.target_tuple_json = outbound_target_tuple_json(&batch);
 
-    let adapter = StubPostingAdapter::succeeds(vec![
-        PostingAdapterItemResult {
-            draft_id: draft_one.id.clone(),
-            status: PostingAdapterItemStatus::Posted,
-            remote_identifier: Some("https://api.github.com/reviews/123".to_owned()),
-            failure_code: None,
-        },
-        PostingAdapterItemResult {
-            draft_id: draft_two.id.clone(),
-            status: PostingAdapterItemStatus::Failed,
-            remote_identifier: None,
-            failure_code: Some("thread_not_found".to_owned()),
-        },
-    ]);
+    let adapter = StubPostingAdapter::succeeds(fixture.partial_item_results);
 
     let result = execute_explicit_posting_flow(
         ExplicitPostingInput {
@@ -453,41 +451,24 @@ fn explicit_posting_records_partial_outcome_and_retry_candidates() {
     );
 
     assert_eq!(result.outcome, ExplicitPostingOutcome::Partial);
-    assert_eq!(result.retry_draft_ids, vec!["draft-2".to_owned()]);
+    assert_eq!(result.retry_draft_ids, vec!["draft-partial-2".to_owned()]);
     let posted = result.posted_action.expect("posted action");
     assert_eq!(posted.status, PostedActionStatus::Partial);
     assert_eq!(posted.failure_code.as_deref(), Some("partial_failure"));
-    assert!(posted.remote_identifier.contains("/reviews/123"));
+    assert!(posted.remote_identifier.contains("/reviews/partial-123"));
 }
 
 #[test]
 fn partial_post_materializes_per_draft_audit_items_for_restart_lineage() {
-    let fixture = load_fixture();
-    let batch = fixture.valid_batch;
-    let draft_one = fixture.valid_draft;
-    let mut draft_two = draft_one.clone();
-    draft_two.id = "draft-2".to_owned();
-    draft_two.finding_id = Some("finding-2".to_owned());
-    draft_two.anchor_digest = "anchor-2".to_owned();
-    draft_two.target_locator = "github:owner/repo#42/files#thread-2".to_owned();
-    let drafts = vec![draft_one.clone(), draft_two.clone()];
-    let mut approval = fixture.valid_approval;
+    let fixture = load_partial_post_fixture();
+    let batch = fixture.batch;
+    let drafts = fixture.drafts;
+    let draft_one = drafts[0].clone();
+    let draft_two = drafts[1].clone();
+    let mut approval = fixture.approval;
     approval.target_tuple_json = outbound_target_tuple_json(&batch);
 
-    let adapter = StubPostingAdapter::succeeds(vec![
-        PostingAdapterItemResult {
-            draft_id: draft_one.id.clone(),
-            status: PostingAdapterItemStatus::Posted,
-            remote_identifier: Some("https://api.github.com/reviews/123".to_owned()),
-            failure_code: None,
-        },
-        PostingAdapterItemResult {
-            draft_id: draft_two.id.clone(),
-            status: PostingAdapterItemStatus::Failed,
-            remote_identifier: None,
-            failure_code: Some("retryable:service_unavailable".to_owned()),
-        },
-    ]);
+    let adapter = StubPostingAdapter::succeeds(fixture.partial_item_results);
 
     let result = execute_explicit_posting_flow(
         ExplicitPostingInput {
@@ -513,7 +494,7 @@ fn partial_post_materializes_per_draft_audit_items_for_restart_lineage() {
     assert_eq!(items[0].status, PostingAdapterItemStatus::Posted);
     assert_eq!(
         items[0].remote_identifier.as_deref(),
-        Some("https://api.github.com/reviews/123")
+        Some("https://api.github.com/reviews/partial-123")
     );
     assert_eq!(items[0].failure_code, None);
 
@@ -524,6 +505,43 @@ fn partial_post_materializes_per_draft_audit_items_for_restart_lineage() {
         items[1].failure_code.as_deref(),
         Some("retryable:service_unavailable")
     );
+}
+
+#[test]
+fn explicit_posting_fails_closed_on_duplicate_adapter_results_for_same_draft() {
+    let fixture = load_partial_post_fixture();
+    let batch = fixture.batch;
+    let drafts = fixture.drafts;
+    let mut approval = fixture.approval;
+    approval.target_tuple_json = outbound_target_tuple_json(&batch);
+
+    let adapter = StubPostingAdapter::succeeds(fixture.duplicate_item_results);
+
+    let result = execute_explicit_posting_flow(
+        ExplicitPostingInput {
+            action_id: "posted-action-duplicate-results",
+            provider: "github",
+            target: &sample_target(),
+            batch: &batch,
+            drafts: &drafts,
+            approval: &approval,
+            refresh_signals: &[],
+            reconfirmed_finding_ids: &HashSet::new(),
+        },
+        &adapter,
+    );
+
+    assert_eq!(result.outcome, ExplicitPostingOutcome::Failed);
+    assert_eq!(
+        result.reason_code.as_deref(),
+        Some("adapter_result_invalid:duplicate_draft:draft-partial-1")
+    );
+    assert_eq!(
+        result.retry_draft_ids,
+        vec!["draft-partial-1".to_owned(), "draft-partial-2".to_owned()]
+    );
+    let posted = result.posted_action.expect("failed posted action");
+    assert_eq!(posted.status, PostedActionStatus::Failed);
 }
 
 #[test]

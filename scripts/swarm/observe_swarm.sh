@@ -3,7 +3,6 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd "${SCRIPT_DIR}/../.." && pwd)
-BR_RESOLVER="${SCRIPT_DIR}/resolve_br.sh"
 DEFAULT_SESSION_NAME="$(basename "$PROJECT_ROOT" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//')"
 
 SESSION_NAME="${DEFAULT_SESSION_NAME}-swarm"
@@ -86,9 +85,7 @@ if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
   exit 1
 fi
 
-if [[ -x "$BR_RESOLVER" ]]; then
-  BR_BIN="$("$BR_RESOLVER" --quiet --print-path 2>/dev/null || true)"
-fi
+BR_BIN="${RR_BR_BIN:-$(command -v br 2>/dev/null || true)}"
 
 ready_count() {
   if [[ -n "$BR_BIN" && -f "${PROJECT_ROOT}/.beads/beads.db" ]]; then
@@ -144,10 +141,10 @@ pane_state() {
 
   if [[ "$pane_dead" != "0" ]]; then
     printf 'dead\n'
-  elif [[ "$working" == "true" ]]; then
-    printf 'working\n'
   elif [[ "$idle_prompt" == "true" ]]; then
     printf 'idle\n'
+  elif [[ "$working" == "true" ]]; then
+    printf 'working\n'
   else
     printf 'active\n'
   fi

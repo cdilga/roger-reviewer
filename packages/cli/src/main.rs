@@ -7,6 +7,12 @@ use roger_bridge::{
 };
 use roger_cli::{CliRuntime, run};
 
+fn is_native_host_wrapper_arg(arg: &str) -> bool {
+    arg.starts_with("chrome-extension://")
+        || arg.starts_with("--parent-window")
+        || arg.starts_with("--native-host")
+}
+
 fn run_native_host_mode(runtime: &CliRuntime) -> i32 {
     let binary_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rr"));
     let preflight = BridgePreflight::check(&binary_path, &runtime.store_root);
@@ -36,8 +42,13 @@ fn main() {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let runtime = CliRuntime::from_env(cwd);
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let stdin_is_terminal = std::io::stdin().is_terminal();
+    let native_host_wrapper_args = !args.is_empty()
+        && args
+            .iter()
+            .all(|arg| is_native_host_wrapper_arg(arg.as_str()));
 
-    if args.is_empty() && !std::io::stdin().is_terminal() {
+    if !stdin_is_terminal && (args.is_empty() || native_host_wrapper_args) {
         std::process::exit(run_native_host_mode(&runtime));
     }
 

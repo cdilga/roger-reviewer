@@ -1,0 +1,17 @@
+# Metadata contract for executable E2E-04.
+# The suite implementation lives at:
+# packages/cli/tests/e2e_refresh_draft_reconciliation.rs
+id = "e2e_refresh_draft_reconciliation"
+budget_id = "E2E-04"
+family = "e2e"
+flow_ids = ["F06", "F07", "F08", "F13"]
+invariant_ids = ["INV-POST-002", "INV-POST-003", "INV-HARNESS-003"]
+persona_ids = ["PJ-02D", "PJ-04D", "PJ-05B"]
+fixture_families = ["fixture_refresh_rebase_target_drift", "fixture_github_draft_batch"]
+support_tier = "opencode_tier_b"
+support_status = "blessed"
+degraded = false
+bounded = false
+tier = "e2e"
+preserve_failure_artifacts = true
+artifact_retention = "always"

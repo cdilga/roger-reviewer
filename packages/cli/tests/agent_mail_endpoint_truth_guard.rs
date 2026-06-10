@@ -41,10 +41,9 @@ fn agent_mail_endpoint_defaults_use_mcp_path() {
         ".github/ci-failure-intake.json",
     );
 
-    let ingest_script = fs::read_to_string(
-        workspace_root().join("scripts/swarm/ingest_failed_actions_runs.py"),
-    )
-    .expect("read ingest_failed_actions_runs.py");
+    let ingest_script =
+        fs::read_to_string(workspace_root().join("scripts/swarm/ingest_failed_actions_runs.py"))
+            .expect("read ingest_failed_actions_runs.py");
     assert_contains(
         &ingest_script,
         "DEFAULT_AGENT_MAIL_API = \"http://127.0.0.1:8765/mcp/\"",

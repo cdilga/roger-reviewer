@@ -76,7 +76,7 @@ Practical rule:
 | `int_github_*` | draft invalidation, payload rendering, partial post handling | `rr-020`, `rr-008.1`, `rr-011.4` |
 | `int_search_*` | prior-review lookup, query-mode planning, recall envelopes, lexical-only degrade, provenance-safe search | `rr-024` |
 | `accept_opencode_*` | OpenCode provider-claim acceptance | `rr-011.1`, `rr-011.5` |
-| `accept_bounded_provider_*` | bounded live-CLI provider-claim acceptance (`codex`, `claude`, `gemini`; later `copilot`) | `rr-011.1` |
+| `accept_codex_*`, `accept_gemini_*`, `accept_claude_*`, `accept_copilot_*` | bounded live-CLI provider-claim acceptance for Codex, Gemini, Claude Code, and feature-gated Copilot | `rr-011.1`, `rr-x51h.8.3` |
 | `e2e_*` | heavyweight multi-boundary product journeys from the six-slot catalog (`E2E-01` through `E2E-06`) | `rr-011.7` plus later implementation beads |
 | `smoke_*` | manual or release-lane smoke on real targets | `rr-011.4`, `rr-011.5`, `rr-011.6` |
 
@@ -103,14 +103,19 @@ Each fixture family must be small, named by purpose, and reusable across suites.
 | `fixture_search_auto_resolution` | search requests where omitted or `auto` intent must resolve to concrete planner intent before execution | `unit_*`, `int_search_*`, `int_cli_*`, `int_worker_*` |
 | `fixture_search_recovery_scan_degraded` | missing/corrupt lexical sidecar forcing explicit `recovery_scan` mode with visible degradation | `int_search_*`, `int_cli_*` |
 | `fixture_session_baseline_search_defaults` | session baseline snapshots proving default query mode, candidate visibility, and allowed-scope posture across dropout/return/reseed | `int_cli_*`, `int_worker_*`, `accept_opencode_*` |
-| `fixture_resumebundle_stale_locator` | stale `SessionLocator` plus valid `ResumeBundle` reseed path | `accept_opencode_*`, `accept_bounded_provider_*`, `rr-011.5` |
-| `fixture_opencode_dropout_return` | bare-harness dropout and `rr return` control flow | `accept_opencode_*`, `rr-011.5` |
+| `fixture_resumebundle_stale_locator` | stale `SessionLocator` plus valid `ResumeBundle` reseed path | `accept_opencode_*`, `accept_codex_*`, `accept_gemini_*`, `accept_claude_*`, `accept_copilot_*`, `smoke_opencode_continuity`, `rr-011.5` |
+| `fixture_opencode_dropout_return` | bare-harness dropout and `rr return` control flow | `accept_opencode_*`, `smoke_opencode_continuity`, `rr-011.5` |
 | `fixture_bridge_launch_only_no_status` | bridge present, truthful launch-only/no-status mode | `int_bridge_*`, `rr-011.4` |
 | `fixture_bridge_transcripts` | browser launch-intent and Native Messaging transcript corpus for supported browsers | `int_bridge_*`, `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, `smoke_browser_launch_edge` |
 | `fixture_bridge_install_recovery` | missing host manifest, version drift, install repair path | `int_bridge_*`, `smoke_bridge_install_*` |
 | `fixture_github_draft_batch` | local outbound drafts, approval snapshot, payload rendering | `int_github_*`, `e2e_core_review_happy_path` |
 | `fixture_partial_post_recovery` | one posted action succeeds while another fails | `int_github_*`, `rr-011.4` |
 | `fixture_refresh_rebase_target_drift` | rebased target with moved anchors and invalidation pressure | `prop_*`, `int_github_*`, `rr-011.2`, `rr-011.4` |
+| `fixture_copilot_launch_resume` | deterministic Copilot launch/resume/reseed continuity doubles | `int_harness_*`, `int_cli_*`, `accept_copilot_*` |
+| `fixture_copilot_hook_stream` | deterministic Copilot hook payload stream and parse-failure cases | `int_harness_*`, `int_cli_*`, `accept_copilot_*` |
+| `fixture_copilot_transcript_capture` | deterministic Copilot transcript reference corpus for nominal/missing/truncated lookup | `int_storage_*`, `int_harness_*` |
+| `fixture_copilot_policy_failure` | deterministic policy-violation and missing-policy-digest fail-closed cases | `int_cli_*`, `int_harness_*`, `accept_copilot_*` |
+| `fixture_copilot_crash_recovery` | deterministic provider launch/hook crash points with retry-evidence expectations | `int_storage_*`, `int_cli_*`, `accept_copilot_*` |
 
 ## Flow-To-Coverage Map
 
@@ -129,14 +134,16 @@ Each fixture family must be small, named by purpose, and reusable across suites.
 | `F09.2` candidate audit and memory review during review | `unit_*`, `int_search_*`, `int_worker_*`, `int_tui_*`, and targeted manual smoke | `rr-024`, later agent-access beads |
 | `F10`, `F14` bridge recovery and honest no-status mode | `int_bridge_*`, `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, `smoke_browser_launch_edge`, supported-browser `smoke_*` | `rr-011.4` |
 | `F12` same-PR multi-instance selection and routing | `prop_*`, `int_cli_*`, `int_bridge_*`, `smoke_*` | `rr-011.6` |
-| `F17`, `F17.1` harness dropout and return | `accept_opencode_*`, `int_cli_opencode_transactional_*`, targeted `smoke_*`, and approved `E2E-06` when implemented | `rr-011.5` |
+| `F17`, `F17.1` harness dropout and return | `accept_opencode_*`, `int_cli_opencode_transactional_*`, `smoke_opencode_continuity`, and approved `E2E-06` when implemented | `rr-011.5` |
 
 ## Support-Claim Ownership
 
 | Claim | Minimum defending coverage |
 |-------|----------------------------|
-| OpenCode direct resume, stale-locator reseed, dropout, and `rr return` | `accept_opencode_*`, `int_cli_opencode_transactional_*`, plus release-lane `smoke_*` |
-| Bounded live-CLI provider Tier A support | `accept_bounded_provider_*`; no deeper continuity claim without new acceptance |
+| OpenCode direct resume, stale-locator reseed, dropout, and `rr return` | `accept_opencode_*`, `int_cli_opencode_transactional_*`, and `smoke_opencode_continuity` |
+| Bounded non-first-class provider claims stay at acceptance scope until wording widens into a first-class public claim (`codex`, `gemini`, `claude`, feature-gated `copilot`) | `accept_codex_*`, `accept_gemini_*`, `accept_claude_*`, `accept_copilot_*`, `int_cli_provider_surface_truth`; no per-provider `smoke_*` lane in `0.1.0` |
+| Bounded live-CLI provider support | `accept_codex_*`, `accept_gemini_*`, `accept_claude_*`, and `accept_copilot_*`; Copilot Tier B admission fixtures (`fixture_copilot_launch_resume`, `fixture_copilot_hook_stream`, `fixture_copilot_policy_failure`, `fixture_copilot_crash_recovery`) defend deterministic Copilot reopen/return/reseed proof; no first-class public claim without a named smoke lane |
+| Provider capability/status surfaces (policy digests, hook/instruction versions, audit artifact classes, MCP posture, worktree-root-aware routine surface) | `int_cli_provider_surface_truth`, `accept_codex_*`, `accept_gemini_*`, `accept_claude_*`, `accept_copilot_*`, `int_cli_*` |
 | Native Messaging is the serious v1 bridge | `int_bridge_*` plus supported-browser `smoke_*` |
 | Chrome/Brave/Edge browser launch support is explicit and bounded | `int_bridge_*`, `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, `smoke_browser_launch_edge`, `fixture_bridge_transcripts` |
 | Launch-only bridge mode is truthful and does not fake status | `fixture_bridge_launch_only_no_status`, `int_bridge_*`, `rr-011.4` |

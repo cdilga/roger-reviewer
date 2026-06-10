@@ -7,9 +7,12 @@ const NON_PR_SUBTITLE =
   'Open a GitHub pull request tab to enable manual backup launch actions.';
 const PR_SUBTITLE =
   'Manual backup controls for this pull request. Prefer in-page Roger controls when available.';
-const FINDINGS_VISIBLE_ATTENTION_STATES = new Set([
-  'findings_ready',
+const FINDINGS_VISIBLE_ATTENTION_STATES = new Set(['findings_ready']);
+const RESUME_PRIMARY_ATTENTION_STATES = new Set([
+  'awaiting_user_input',
   'awaiting_outbound_approval',
+  'refresh_recommended',
+  'review_failed',
 ]);
 
 const SUPPORTED_ACTIONS = new Set(ACTIONS.map((action) => action.id));
@@ -51,7 +54,7 @@ function buildPopupViewModel(rawUrl) {
       context: null,
       title: 'Roger Reviewer',
       subtitle: NON_PR_SUBTITLE,
-      showFindings: false,
+      attentionState: null,
     };
   }
 
@@ -60,7 +63,7 @@ function buildPopupViewModel(rawUrl) {
     context,
     title: `Roger: ${context.owner}/${context.repo}#${context.pr_number}`,
     subtitle: PR_SUBTITLE,
-    showFindings: true,
+    attentionState: null,
   };
 }
 
@@ -82,6 +85,26 @@ function buildLaunchMessage(action, context) {
     type: 'roger_bridge_launch',
     intent: {
       action,
+      owner: context.owner,
+      repo: context.repo,
+      pr_number: context.pr_number,
+    },
+  };
+}
+
+function buildStatusMessage(context) {
+  if (
+    !context ||
+    typeof context.owner !== 'string' ||
+    typeof context.repo !== 'string' ||
+    typeof context.pr_number !== 'number'
+  ) {
+    throw new Error('Missing pull request context for status request.');
+  }
+
+  return {
+    type: 'roger_bridge_status',
+    intent: {
       owner: context.owner,
       repo: context.repo,
       pr_number: context.pr_number,
@@ -112,6 +135,23 @@ function routePopupAction(action, context, dispatch) {
   return dispatch(buildLaunchMessage(action, context));
 }
 
+function deriveActionModel(attentionState) {
+  const visibleActions = new Set(['start_review', 'resume_review']);
+  let primaryActionId = 'start_review';
+
+  if (FINDINGS_VISIBLE_ATTENTION_STATES.has(attentionState)) {
+    visibleActions.add('show_findings');
+    primaryActionId = 'show_findings';
+  } else if (RESUME_PRIMARY_ATTENTION_STATES.has(attentionState)) {
+    primaryActionId = 'resume_review';
+  }
+
+  return {
+    visibleActions,
+    primaryActionId,
+  };
+}
+
 function resolveFindingsKnownEmpty(response) {
   if (!response || typeof response !== 'object') {
     return null;
@@ -129,12 +169,25 @@ function resolveFindingsKnownEmpty(response) {
   return null;
 }
 
+function resolveAttentionState(response) {
+  if (!response || typeof response !== 'object') {
+    return null;
+  }
+
+  if (typeof response.attention_state === 'string') {
+    return response.attention_state;
+  }
+
+  return resolveFindingsKnownEmpty(response) === false ? 'findings_ready' : null;
+}
+
 function describeLaunchResponse(response) {
   if (!response) {
     return {
       message: 'No launch response received. Open Roger locally and run the equivalent rr command.',
       isError: true,
       findingsKnownEmpty: null,
+      attentionState: null,
     };
   }
 
@@ -143,6 +196,7 @@ function describeLaunchResponse(response) {
       message: appendGuidance(response.message || 'Launch failed.', response.guidance),
       isError: true,
       findingsKnownEmpty: null,
+      attentionState: null,
     };
   }
 
@@ -153,6 +207,7 @@ function describeLaunchResponse(response) {
         'Native bridge unavailable; launched via URL fallback. Open Roger locally for full status.',
       isError: false,
       findingsKnownEmpty: resolveFindingsKnownEmpty(response),
+      attentionState: resolveAttentionState(response),
     };
   }
 
@@ -160,6 +215,7 @@ function describeLaunchResponse(response) {
     message: appendGuidance(response.message || 'Launch intent dispatched.', response.guidance),
     isError: false,
     findingsKnownEmpty: resolveFindingsKnownEmpty(response),
+    attentionState: resolveAttentionState(response),
   };
 }
 
@@ -239,12 +295,20 @@ function setButtonsDisabled(disabled) {
   }
 }
 
-function setFindingsButtonVisibility(visible) {
-  const findingsButton = document.querySelector('button[data-action="show_findings"]');
-  if (!findingsButton) {
-    return;
+function applyActionModel(attentionState) {
+  const model = deriveActionModel(attentionState);
+  const buttons = document.querySelectorAll('button[data-action]');
+  for (const button of buttons) {
+    const action = button.dataset.action;
+    const isVisible = model.visibleActions.has(action);
+    const isPrimary = action === model.primaryActionId;
+    const isTertiary = action === 'show_findings' && isVisible && !isPrimary;
+    button.hidden = !isVisible;
+    button.classList.toggle('action-primary', isPrimary && isVisible);
+    button.classList.toggle('action-secondary', !isPrimary && !isTertiary && isVisible);
+    button.classList.toggle('action-tertiary', isTertiary);
   }
-  findingsButton.hidden = !visible;
+  return model;
 }
 
 function wireInfoAffordance() {
@@ -272,11 +336,7 @@ async function handleActionClick(action, context, button) {
     const response = await routePopupAction(action, context, sendRuntimeMessage);
     const feedback = describeLaunchResponse(response);
     setSubtitle(feedback.message, feedback.isError);
-    if (feedback.findingsKnownEmpty === true) {
-      setFindingsButtonVisibility(false);
-    } else if (feedback.findingsKnownEmpty === false) {
-      setFindingsButtonVisibility(true);
-    }
+    applyActionModel(feedback.attentionState);
   } catch (error) {
     setSubtitle(`Bridge error: ${String(error?.message || error)}`, true);
   } finally {
@@ -291,7 +351,7 @@ function renderViewModel(viewModel) {
     title.textContent = viewModel.title;
   }
   setSubtitle(viewModel.subtitle);
-  setFindingsButtonVisibility(Boolean(viewModel.showFindings));
+  applyActionModel(viewModel.attentionState || null);
 
   if (viewModel.mode !== 'pr' || !viewModel.context) {
     setButtonsDisabled(true);
@@ -312,6 +372,22 @@ function renderViewModel(viewModel) {
   }
 }
 
+async function syncPopupActionModel(context) {
+  if (!context) {
+    return null;
+  }
+
+  try {
+    const response = await sendRuntimeMessage(buildStatusMessage(context));
+    const attentionState = resolveAttentionState(response);
+    applyActionModel(attentionState);
+    return attentionState;
+  } catch {
+    applyActionModel(null);
+    return null;
+  }
+}
+
 async function bootstrapPopup() {
   try {
     wireInfoAffordance();
@@ -319,6 +395,9 @@ async function bootstrapPopup() {
     const activeTab = await queryActiveTab();
     const viewModel = buildPopupViewModel(activeTab?.url || '');
     renderViewModel(viewModel);
+    if (viewModel.mode === 'pr' && viewModel.context) {
+      await syncPopupActionModel(viewModel.context);
+    }
   } catch (error) {
     setButtonsDisabled(true);
     setSubtitle(`Unable to read active tab: ${String(error?.message || error)}`, true);
@@ -335,15 +414,21 @@ if (typeof module !== 'undefined' && module.exports) {
     NON_PR_SUBTITLE,
     PR_SUBTITLE,
     FINDINGS_VISIBLE_ATTENTION_STATES,
+    RESUME_PRIMARY_ATTENTION_STATES,
     SUPPORTED_ACTIONS,
+    applyActionModel,
     buildLaunchMessage,
+    buildStatusMessage,
     buildPopupViewModel,
     describeLaunchResponse,
     describeBuildInfo,
+    deriveActionModel,
     parsePullRequestContextFromUrl,
     readExtensionBuildLabel,
     renderBuildLabel,
+    resolveAttentionState,
     resolveFindingsKnownEmpty,
     routePopupAction,
+    syncPopupActionModel,
   };
 }

@@ -132,9 +132,15 @@ fn e2e_browser_setup_first_launch_runs_deterministic_extension_loaded_path() {
                 action
                     .as_str()
                     .unwrap_or_default()
-                    .contains("chrome://extensions")
+                    .contains("launch_preloaded_browser.sh")
             }),
-        "setup should still surface the manual browser load step"
+        "setup should surface the guided browser launch step"
+    );
+    assert!(
+        setup_payload["data"]["guided_browser_command"]
+            .as_str()
+            .expect("guided browser command")
+            .contains("launch_preloaded_browser.sh")
     );
     assert_eq!(setup_payload["data"]["subcommand"], "setup");
     assert_eq!(setup_payload["data"]["extension_id"], extension_id);

@@ -1,15 +1,15 @@
 #![cfg(unix)]
 
 use roger_app_core::{ApprovalState, RogerCommandId};
-use roger_cli::{run, run_harness_command, CliRuntime, HarnessCommandInvocation};
+use roger_cli::{CliRuntime, HarnessCommandInvocation, run, run_harness_command};
 use roger_storage::{CreateMaterializedFinding, CreateSessionBaselineSnapshot, RogerStore};
 use roger_validation::{discover_suite_metadata, failure_artifact_paths};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
-use tempfile::{tempdir, TempDir};
+use tempfile::{TempDir, tempdir};
 
 fn run_rr(args: &[&str], runtime: &CliRuntime) -> roger_cli::CliRunResult {
     let argv = args

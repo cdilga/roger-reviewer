@@ -1,6 +1,4 @@
-use roger_config::{
-    ResolvedConfigError, cli_defaults, resolve_cli_config_from_lookup,
-};
+use roger_config::{ResolvedConfigError, cli_defaults, resolve_cli_config_from_lookup};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
@@ -50,13 +48,25 @@ fn resolved_config_serializes_stable_provider_capability_shape() {
     assert_eq!(copilot["status"], "planned_not_live");
     assert_eq!(copilot["support_tier"], "tier_a_planned");
     assert_eq!(copilot["surface_class"], "admission_pending");
+    assert_eq!(copilot["fail_closed_reason"], "provider_not_live");
+    assert_eq!(copilot["policy_profile"]["id"], "review_readonly");
     assert_eq!(
-        copilot["fail_closed_reason"],
-        "provider_not_live"
+        copilot["denied_capabilities"],
+        serde_json::json!([
+            "builtin_github_mcp",
+            "broad_mcp_access",
+            "shell_execution",
+            "write_tool",
+            "external_url_access",
+            "provider_memory_write",
+            "allow_all_mode",
+            "raw_gh_write",
+            "remote_delegation"
+        ])
     );
     assert_eq!(
-        copilot["policy_profile"]["id"],
-        "provider_admission_pending"
+        copilot["audit_artifact_classes"],
+        serde_json::json!(["copilot_tool_denial", "copilot_transcript_reference"])
     );
 }
 
@@ -96,8 +106,33 @@ fn routine_surface_baseline_serializes_demoted_repair_overrides_and_degraded_rea
             cli_defaults::ENV_BRIDGE_HOST_BINARY
         ])
     );
-    assert!(json.get("bridge").is_none(), "baseline should not expose raw bridge config");
-    assert!(json.get("providers").is_none(), "baseline should not dump the full provider matrix");
+    assert!(
+        json.get("bridge").is_none(),
+        "baseline should not expose raw bridge config"
+    );
+    assert!(
+        json.get("providers").is_none(),
+        "baseline should not dump the full provider matrix"
+    );
+}
+
+#[test]
+fn routine_surface_baseline_enforces_copilot_worktree_isolation_profile() {
+    let resolved = resolve_cli_config_from_lookup(Path::new("/tmp/roger"), |_| None);
+
+    let baseline = resolved
+        .routine_surface_baseline(Some("copilot"))
+        .expect("copilot routine surface baseline");
+    let json = serde_json::to_value(&baseline).expect("serialize routine surface baseline");
+
+    assert_eq!(json["provider"]["provider"], "copilot");
+    assert_eq!(json["provider"]["policy_profile"]["id"], "review_readonly");
+    assert_eq!(json["isolation_mode"]["value"], "worktree");
+    assert_eq!(
+        json["isolation_mode"]["provenance"]["source"],
+        "providers.copilot.review_readonly.isolation_mode"
+    );
+    assert_eq!(json["status_reason"], "provider_not_live");
 }
 
 #[test]

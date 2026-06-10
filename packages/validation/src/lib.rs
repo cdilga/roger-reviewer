@@ -1,8 +1,8 @@
 pub mod calver;
 
 use roger_test_harness::{
-    artifact_dir, evaluate_e2e_budget, load_suite_metadata, plan_for_lane, BudgetReport,
-    E2eBudgetPolicy, SuiteMetadata, ValidationLane, ValidationPlan,
+    BudgetReport, E2eBudgetPolicy, SuiteMetadata, ValidationLane, ValidationPlan, artifact_dir,
+    evaluate_e2e_budget, load_suite_metadata, plan_for_lane,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -728,10 +728,12 @@ artifact_retention = "on_failure"
             .iter()
             .find(|suite| suite.id == "int_cli_provider_surface_truth")
             .expect("provider surface truth suite metadata should exist");
-        assert!(provider_surface_truth
-            .invariant_ids
-            .iter()
-            .any(|id| id == "INV-PROVIDER-001"));
+        assert!(
+            provider_surface_truth
+                .invariant_ids
+                .iter()
+                .any(|id| id == "INV-PROVIDER-001")
+        );
         assert_eq!(
             provider_surface_truth.support_tier,
             "provider_surface_truth"
@@ -924,19 +926,25 @@ artifact_retention = "on_failure"
             .iter()
             .find(|suite| suite.id == "int_github_outbound_audit")
             .expect("outbound audit suite metadata should exist");
-        assert!(outbound_audit
-            .invariant_ids
-            .iter()
-            .any(|id| id == "INV-POST-002"));
-        assert!(outbound_audit
-            .invariant_ids
-            .iter()
-            .any(|id| id == "INV-POST-003"));
+        assert!(
+            outbound_audit
+                .invariant_ids
+                .iter()
+                .any(|id| id == "INV-POST-002")
+        );
+        assert!(
+            outbound_audit
+                .invariant_ids
+                .iter()
+                .any(|id| id == "INV-POST-003")
+        );
         assert!(outbound_audit.persona_ids.iter().any(|id| id == "PJ-05B"));
-        assert!(outbound_audit
-            .fixture_families
-            .iter()
-            .any(|family| family == "fixture_partial_post_recovery"));
+        assert!(
+            outbound_audit
+                .fixture_families
+                .iter()
+                .any(|family| family == "fixture_partial_post_recovery")
+        );
         assert!(outbound_audit.preserve_failure_artifacts);
         assert_eq!(
             outbound_audit.artifact_retention,
@@ -947,14 +955,18 @@ artifact_retention = "on_failure"
             .iter()
             .find(|suite| suite.id == "int_github_posting_safety_recovery")
             .expect("posting safety recovery suite metadata should exist");
-        assert!(posting_recovery
-            .invariant_ids
-            .iter()
-            .any(|id| id == "INV-POST-002"));
-        assert!(posting_recovery
-            .invariant_ids
-            .iter()
-            .any(|id| id == "INV-POST-003"));
+        assert!(
+            posting_recovery
+                .invariant_ids
+                .iter()
+                .any(|id| id == "INV-POST-002")
+        );
+        assert!(
+            posting_recovery
+                .invariant_ids
+                .iter()
+                .any(|id| id == "INV-POST-003")
+        );
         for persona_id in ["PJ-05B", "PJ-05C", "PJ-05D"] {
             assert!(
                 posting_recovery

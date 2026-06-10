@@ -1,3 +1,5 @@
+use std::fs;
+
 use tempfile::tempdir;
 
 use roger_app_core::ReviewTarget;
@@ -535,6 +537,67 @@ fn explicit_session_reentry_rejects_cross_root_binding_reuse() -> Result<()> {
                     && candidates[0].session_id == "session-explicit"
         ),
         "expected explicit-session cross-root reuse to fail closed, got {resolution:?}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn explicit_session_reentry_accepts_canonical_aliases_for_local_root() -> Result<()> {
+    let temp = tempdir()?;
+    let repo_root = temp.path().join("repo");
+    let worktree_root = repo_root.join(".worktrees/pr-42");
+    fs::create_dir_all(&worktree_root)?;
+    let canonical_worktree_root = fs::canonicalize(&worktree_root)?;
+    let store = RogerStore::open(temp.path())?;
+
+    let review_target = target("owner/repo", 42);
+    store.create_review_session(CreateReviewSession {
+        id: "session-alias",
+        review_target: &review_target,
+        provider: "opencode",
+        session_locator: None,
+        resume_bundle_artifact_id: None,
+        continuity_state: "awaiting_resume",
+        attention_state: "awaiting_user_input",
+        launch_profile_id: None,
+    })?;
+    store.put_session_launch_binding(CreateSessionLaunchBinding {
+        id: "binding-alias",
+        session_id: "session-alias",
+        repo_locator: &review_target.repository,
+        review_target: Some(&review_target),
+        surface: LaunchSurface::Cli,
+        launch_profile_id: None,
+        ui_target: Some("cli"),
+        instance_preference: Some("reuse_if_possible"),
+        cwd: Some(worktree_root.to_string_lossy().as_ref()),
+        worktree_root: None,
+    })?;
+
+    let resolution = store.resolve_session_reentry_with_context(
+        ResolveSessionReentry {
+            explicit_session_id: Some("session-alias".to_owned()),
+            repository: Some(review_target.repository.clone()),
+            pull_request_number: Some(review_target.pull_request_number),
+            source_surface: LaunchSurface::Cli,
+            ui_target: Some("cli".to_owned()),
+            instance_preference: Some("reuse_if_possible".to_owned()),
+        },
+        ResolveSessionLocalRoot {
+            cwd: Some(worktree_root.to_string_lossy().as_ref()),
+            worktree_root: Some(canonical_worktree_root.to_string_lossy().as_ref()),
+        },
+    )?;
+
+    assert!(
+        matches!(
+            &resolution,
+            SessionReentryResolution::Resolved { session, binding }
+                if session.id == "session-alias"
+                    && binding.as_ref().expect("binding").id == "binding-alias"
+        ),
+        "expected equivalent canonical aliases to resolve safely, got {resolution:?}"
     );
 
     Ok(())

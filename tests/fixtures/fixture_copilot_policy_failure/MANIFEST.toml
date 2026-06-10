@@ -1,0 +1,15 @@
+[fixture]
+family = "fixture_copilot_policy_failure"
+description = "Deterministic Copilot policy-violation fixture family for review-safe enforcement and fail-closed launch behavior."
+
+[[fixture.allowed_consumers]]
+suite_family = "int_cli_"
+notes = "CLI-level provider admission and policy violation fail-closed guidance."
+
+[[fixture.allowed_consumers]]
+suite_family = "int_harness_"
+notes = "Hook-policy rejection and launch-attempt failure evidence retention."
+
+[fixture.degraded_conditions]
+policy_violation = "Copilot command or hook payload violates review-safe policy and launch must fail closed."
+missing_policy_digest = "Expected policy digest is absent; launch attempt cannot be marked verified."

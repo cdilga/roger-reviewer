@@ -54,6 +54,10 @@ Chosen direction:
 - explicit gates use a warmer accent
 - repair and demoted paths stay visually muted rather than competing with the
   main product path
+- root-level visuals should line up with the current live `rr` command palette:
+  `review`, `resume`, `return`, `sessions`, `findings`, `search`, `status`,
+  `update`, `extension setup`, `extension doctor`, `robot-docs`, demoted
+  `bridge` repair commands, and the separate worker-only `rr agent` transport
 
 ---
 
@@ -77,16 +81,16 @@ flowchart TD
     PREFLIGHT{"Preflight safe<br/>and unambiguous?"}:::gate
     ATTEMPT["LaunchAttempt<br/>recorded durably"]:::gate
     VERIFY{"Real provider session<br/>verified?"}:::gate
-    WORKER["Review worker gets<br/>bounded task + context"]:::core
+    WORKER["Review worker via rr agent gets<br/>bounded task + context"]:::core
     PACK["Structured findings pack<br/>plus raw output"]:::core
     NORMALIZE["Roger normalizes findings,<br/>attention, and lineage"]:::core
-    INSPECT["TUI / CLI inspect, triage,<br/>clarify, and reconcile"]:::core
-    DRAFT["Draft comments locally"]:::core
+    INSPECT["TUI / CLI inspect, triage,<br/>search, clarify, and reconcile"]:::core
+    DRAFT["Local draft queue<br/>and draft materialization"]:::core
     APPROVE{"Explicit human approval?"}:::gate
     POST["GitHub adapter posts"]:::external
     AUDIT["PostedAction audit trail"]:::data
     STORE["SQLite + artifacts + search"]:::data
-    BLOCK["Fail closed<br/>status / doctor / repair guidance"]:::blocked
+    BLOCK["Fail closed<br/>status / setup / repair guidance"]:::blocked
 
     ENTRY --> INTAKE --> PREFLIGHT
     PREFLIGHT -- no --> BLOCK
@@ -96,7 +100,7 @@ flowchart TD
     VERIFY -- no --> BLOCK
     VERIFY -- yes --> WORKER --> PACK --> NORMALIZE --> INSPECT
     NORMALIZE --> STORE
-    INSPECT -- follow-up / automatic reconciliation --> WORKER
+    INSPECT -- follow-up / re-entry reconcile --> WORKER
     INSPECT --> DRAFT --> APPROVE
     APPROVE -- not yet --> INSPECT
     APPROVE -- approved --> POST --> AUDIT --> STORE
@@ -108,6 +112,8 @@ Why this stays small:
 - it keeps the worker bounded and Roger-owned
 - it makes approval a first-class gate
 - it shows that GitHub posting is downstream of local review, not parallel to it
+- it keeps launch-only or no-status recovery in a bounded repair lane instead
+  of pretending the browser owns local state
 
 ---
 
@@ -131,10 +137,10 @@ flowchart LR
 
     subgraph SURFACES["Surfaces"]
         direction TB
-        CLI["CLI<br/>review / resume / status"]:::surface
+        CLI["CLI<br/>review / resume / return / findings / status / search / update"]:::surface
         TUI["TUI<br/>dense review cockpit"]:::surface
-        EXT["Extension<br/>launch only"]:::surface
-        ROBOT["rr --robot"]:::surface
+        EXT["Extension<br/>launch + bounded mirror"]:::surface
+        ROBOT["rr --robot<br/>operator automation surface"]:::surface
     end
 
     subgraph INTAKE["Canonical intake"]
@@ -161,6 +167,7 @@ flowchart LR
     subgraph WORKER["Worker boundary"]
         direction TB
         TASK["ReviewTask"]:::gate
+        AGENT["rr agent<br/>worker-only transport"]:::gate
         CONTEXT["WorkerContextPacket"]:::core
         RESULT["WorkerInvocation + result"]:::core
     end
@@ -186,7 +193,7 @@ flowchart LR
     MANAGER <--> ART
     MANAGER <--> SEARCH
 
-    MANAGER --> TASK --> CONTEXT --> HOST --> PROVIDERS
+    MANAGER --> TASK --> AGENT --> CONTEXT --> HOST --> PROVIDERS
     PROVIDERS --> RESULT --> MANAGER
 
     MANAGER --> APPROVAL --> ADAPTER --> GHTHREADS
@@ -196,9 +203,11 @@ flowchart LR
 Why this matters:
 
 - it makes the manager/worker/provider split legible
-- it keeps the extension in its bounded launch role
+- it keeps the extension in its bounded launch + mirror role
 - it shows canonical Roger state as local and authoritative
 - it keeps GitHub write ownership behind the explicit approval lane
+- it separates `rr --robot` from the worker-only `rr agent` transport instead
+  of blurring them into one machine surface
 
 ---
 
@@ -217,18 +226,18 @@ flowchart TD
     classDef repair fill:#F4F4F5,stroke:#71717A,color:#27272A,stroke-width:1.1px,stroke-dasharray: 4 3;
     classDef blocked fill:#FFF0F0,stroke:#CB3A3A,color:#6B1F1F,stroke-width:1.4px;
 
-    ENTRY["Launch / resume / open local"]:::surface
-    READ["read_query<br/>status, findings, search, history"]:::core
+    ENTRY["Launch / resume / return / open local"]:::surface
+    READ["read_query<br/>status, findings, sessions, search, history"]:::core
     CLARIFY["clarify<br/>follow-up without mutation"]:::core
     DRAFT["request_draft<br/>local draft queue"]:::core
     APPROVAL["request_approval<br/>explicit human handoff"]:::gate
     POST["post<br/>GitHub adapter only"]:::external
     AUDIT["Posted action + audit trail"]:::data
 
-    EXTENSION["Extension can launch or open local only"]:::surface
-    WORKER["Worker may read, clarify,<br/>and request draft/approval only"]:::external
-    REPAIR["Demoted repair lane<br/>doctor / extension setup / update / bridge"]:::repair
-    BLOCK["Ambiguous target, unsafe topology,<br/>invalidated draft, or missing approval<br/>=> block or degrade"]:::blocked
+    EXTENSION["Extension can launch,<br/>mirror bounded status,<br/>and open local only"]:::surface
+    WORKER["Worker via rr agent may read, clarify,<br/>and request draft/approval only"]:::external
+    REPAIR["Demoted repair lane<br/>extension setup / extension doctor / update / bridge"]:::repair
+    BLOCK["Ambiguous target, unsafe topology,<br/>no bounded bridge readback,<br/>invalidated draft, or missing approval<br/>=> block or degrade"]:::blocked
 
     ENTRY --> READ --> CLARIFY --> DRAFT --> APPROVAL --> POST --> AUDIT
     APPROVAL -- not approved --> READ
@@ -246,6 +255,34 @@ What this diagram protects against:
 - making the extension look like it owns review mutation
 - letting repair/admin surfaces dominate the product story
 - blurring the difference between “the worker proposed it” and “Roger posted it”
+- confusing launch-only or bounded-mirror browser behavior with canonical local
+  session authority
+
+---
+
+## Command Hierarchy Snapshot
+
+This is the textual companion to the diagrams above. It keeps the top-level
+visual story aligned with the real command and action hierarchy Roger exposes
+today.
+
+- Product-facing entry and inspection commands are `rr review`, `rr resume`,
+  `rr return`, `rr sessions`, `rr findings`, `rr search`, `rr status`,
+  `rr update`, `rr extension setup`, `rr extension doctor`, and
+  `rr robot-docs`.
+- `rr --robot` is the machine-readable form of ordinary operator-facing Roger
+  commands. It is part of the main command surface, not a hidden worker
+  transport.
+- `rr agent` is separate. It is worker-only, bound to an active
+  session/run/task, and should not be depicted as a normal launch or operator
+  entry path.
+- `rr bridge ...` remains a demoted repair and packaging lane. It is useful for
+  maintainers, but it is not the normal product help path and should not crowd
+  out the main review-story diagrams.
+- Browser action hierarchy stays bounded: Start, Resume, and Findings are PR-page
+  launch or re-entry affordances; bounded mirror state is allowed only when the
+  bridge readback is truthful; approval and posting remain local-first and do
+  not belong in the browser surface.
 
 ---
 

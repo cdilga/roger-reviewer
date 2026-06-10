@@ -1,0 +1,38 @@
+{
+  "schema_id": "fixture-copilot-crash-recovery.v1",
+  "cases": [
+    {
+      "id": "launch_process_crash_before_session_start",
+      "session_id": "cp-crash-001",
+      "phase": "launch",
+      "stub_output": {
+        "exit_code": 137,
+        "stderr_lines": [
+          "copilot process terminated unexpectedly"
+        ]
+      },
+      "expected": {
+        "launch_attempt_state": "failed",
+        "reason_code": "provider_process_crash",
+        "retry_allowed": true
+      }
+    },
+    {
+      "id": "hook_pipeline_crash_after_launch",
+      "session_id": "cp-crash-002",
+      "phase": "session-start-hook",
+      "stub_output": {
+        "exit_code": 101,
+        "stderr_lines": [
+          "hook dispatcher panic"
+        ]
+      },
+      "expected": {
+        "launch_attempt_state": "failed",
+        "reason_code": "hook_pipeline_crash",
+        "retry_allowed": true,
+        "first_failure_evidence_retained": true
+      }
+    }
+  ]
+}

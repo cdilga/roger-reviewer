@@ -9,6 +9,7 @@ const {
   MODAL_OPEN_BUTTON_LABEL,
   applyActionModel,
   applyPanelModeStyles,
+  clearStatus,
   createBrandChip,
   createPanel,
   deriveActionModel,
@@ -54,10 +55,21 @@ function createTestElement(tagName) {
     id: '',
     className: '',
     textContent: '',
+    hidden: false,
     children: [],
     parentElement: null,
     dataset: {},
     style: {},
+    querySelectorAll(selector) {
+      if (selector === 'button[data-action]') {
+        return findNodes(
+          this,
+          (node) => node.dataset && typeof node.dataset.action === 'string',
+          []
+        );
+      }
+      return [];
+    },
     appendChild(node) {
       if (!node) {
         return null;
@@ -241,13 +253,14 @@ test('deriveActionModel keeps the default action set limited to launch, resume, 
   assert.equal(model.primaryActionId, 'start_review');
   assert.equal(model.visibleActions.has('start_review'), true);
   assert.equal(model.visibleActions.has('resume_review'), true);
-  assert.equal(model.visibleActions.has('show_findings'), true);
+  assert.equal(model.visibleActions.has('show_findings'), false);
   assert.equal(model.visibleActions.has('refresh_review'), false);
 });
 
 test('deriveActionModel promotes Resume when refresh is recommended', () => {
   const model = deriveActionModel('refresh_recommended');
   assert.equal(model.primaryActionId, 'resume_review');
+  assert.equal(model.visibleActions.has('show_findings'), false);
   assert.equal(model.visibleActions.has('refresh_review'), false);
   assert.equal(model.visibleActions.has('resume_review'), true);
 });
@@ -256,18 +269,17 @@ test('deriveActionModel maps canonical attention states to expected primary acti
   const scenarios = [
     ['awaiting_user_input', 'resume_review', false],
     ['review_failed', 'resume_review', false],
-    ['findings_ready', 'show_findings', false],
-    ['awaiting_outbound_approval', 'show_findings', false],
+    ['findings_ready', 'show_findings', true],
+    ['awaiting_outbound_approval', 'resume_review', false],
     ['refresh_recommended', 'resume_review', false],
   ];
 
-  for (const [attentionState, expectedPrimary, refreshVisible] of scenarios) {
+  for (const [attentionState, expectedPrimary, findingsVisible] of scenarios) {
     const model = deriveActionModel(attentionState);
     assert.equal(model.primaryActionId, expectedPrimary);
-    assert.equal(model.visibleActions.has('refresh_review'), refreshVisible);
+    assert.equal(model.visibleActions.has('show_findings'), findingsVisible);
     assert.equal(model.visibleActions.has('start_review'), true);
     assert.equal(model.visibleActions.has('resume_review'), true);
-    assert.equal(model.visibleActions.has('show_findings'), true);
   }
 });
 
@@ -312,12 +324,18 @@ test('applyActionModel toggles visibility and primary emphasis on action buttons
   assert.equal(buttons[0].hidden, false);
   assert.equal(buttons[0].hasClass('roger-panel-button--primary'), true);
   assert.equal(buttons[1].hidden, false);
-  assert.equal(buttons[2].hidden, false);
+  assert.equal(buttons[1].hasClass('roger-panel-button--secondary'), true);
+  assert.equal(buttons[2].hidden, true);
 
   applyActionModel(panel, 'refresh_recommended');
   assert.equal(buttons[1].hidden, false);
   assert.equal(buttons[1].hasClass('roger-panel-button--primary'), true);
   assert.equal(buttonStates.get('resume_review:aria-hidden'), 'false');
+  assert.equal(buttons[2].hidden, true);
+
+  applyActionModel(panel, 'findings_ready');
+  assert.equal(buttons[2].hidden, false);
+  assert.equal(buttons[2].hasClass('roger-panel-button--primary'), true);
 });
 
 test('createBrandChip renders shared rr-brand-chip primitive', () => {
@@ -331,8 +349,9 @@ test('createBrandChip renders shared rr-brand-chip primitive', () => {
   assert.equal(chip.tagName, 'SPAN');
   assert.equal(chip.className, BRAND_CHIP_CLASS);
   assert.match(chip.className, /\brr-brand-chip\b/);
-  assert.equal(chip.textContent, 'Roger');
   assert.equal(chip.getAttribute('aria-label'), 'Roger identity');
+  assert.equal(chip.children.length, 1);
+  assert.equal(chip.children[0].textContent, 'Roger');
 });
 
 test('createPanel keeps GitHub button semantics while rendering Roger identity chip', () => {
@@ -376,6 +395,21 @@ test('createPanel keeps GitHub button semantics while rendering Roger identity c
   for (const button of actionButtons) {
     assert.equal(button.className, GITHUB_ACTION_BUTTON_CLASS);
   }
+  const findingsButton = actionButtons.find((button) => button.dataset.action === 'show_findings');
+  assert.equal(findingsButton.hidden, true);
+  const infoSummaries = findNodes(
+    panel,
+    (node) => typeof node.className === 'string' && node.className === 'roger-panel-info-toggle'
+  );
+  assert.equal(infoSummaries.length, 1);
+  assert.match(infoSummaries[0].getAttribute('title'), /Extension build unavailable/i);
+  const infoPanels = findNodes(
+    panel,
+    (node) => typeof node.className === 'string' && node.className === 'roger-panel-info-panel'
+  );
+  assert.equal(infoPanels.length, 1);
+  assert.equal(infoPanels[0].children.length, 1);
+  assert.match(infoPanels[0].children[0].textContent, /Launch Roger locally/i);
 });
 
 test('modal fallback copy keeps the in-page modal primary and popup manual-only', () => {
@@ -436,6 +470,7 @@ test('setStatus toggles status classes for readable ok/error states', () => {
   try {
     setStatus('Idle status');
     assert.equal(statusNode.textContent, 'Idle status');
+    assert.equal(statusNode.hidden, false);
     assert.equal(classes.has('roger-panel-status--ok'), true);
     assert.equal(classes.has('roger-panel-status--error'), false);
 
@@ -446,6 +481,10 @@ test('setStatus toggles status classes for readable ok/error states', () => {
 
     setStatus('Launch blocked', true, { revealInline: true });
     assert.equal(classes.has('roger-panel-status--inline-visible'), true);
+
+    clearStatus();
+    assert.equal(statusNode.hidden, true);
+    assert.equal(statusNode.textContent, '');
   } finally {
     global.document = originalDocument;
   }

@@ -65,6 +65,19 @@ implementation is still not truthful enough: setup/doctor can pass while the
 registered `rr` binary still fails to act as a Native Messaging host at
 runtime.
 
+### Reproduced browser-load failure (Chrome + Edge)
+
+Live browser testing reproduced the same unpacked-extension load failure in
+both Chrome and Edge:
+
+- `Failed to load extension from .../target/bridge/extension/roger-extension-unpacked`
+- `Could not load icon assets/icon-16.png specified in icons`
+
+Root cause in packaging path: `rr bridge pack-extension` copied `src/` and
+`static/` into `roger-extension-unpacked` but omitted `assets/`, while the
+packaged `manifest.json` still declared `assets/icon-16.png` (and related icon
+paths). This is a package assembly bug, not a browser-specific behavior.
+
 ### What the current blessed automated E2E actually covers
 
 The one blessed automated E2E,
@@ -187,6 +200,34 @@ This means:
 
 The answer is not "make everything an E2E." The answer is "make every product
 claim map to the cheapest truthful defending suite."
+
+## Official Browser-Testing Shape
+
+Roger should standardize the browser lane around three distinct proof shapes:
+
+1. Deterministic extension-loaded automation for the missing heavyweight
+   browser journey. This is the canonical automation owner for `E2E-05`.
+2. Supported-browser launch smoke for the branded browser matrix
+   (`Chrome`/`Brave`/`Edge`). This keeps support wording honest for the
+   browsers Roger names publicly.
+3. Operator-stability or release-candidate rehearsal for a real GitHub PR page
+   on a sacrificial account/repo path when the team needs end-to-end confidence
+   across the live boundary.
+
+The deterministic automated path should use a Roger-owned browser automation
+harness that loads the unpacked extension into a persistent Chromium runtime,
+captures Native Messaging transcripts, and proves the first-use contract
+without requiring real GitHub writes. This lane may authenticate to a browser
+session if needed for page shape, but it should not depend on live GitHub
+comment posting or a normal developer account.
+
+Supported-browser smoke remains separate on purpose. Edge, Chrome, and Brave
+support is a release claim and should keep named smoke/operator-stability proof
+instead of becoming the canonical extension-side-loading automation lane.
+
+Live GitHub rehearsal is still desirable, but it belongs in operator-stability
+or release-candidate evidence. Treat it as a later sacrificial-PR workflow, not
+as the default deterministic `0.1.x` browser E2E.
 
 ---
 
@@ -373,6 +414,7 @@ The current `rr-jj1e` / release-proof direction is correct and should remain.
 | Browser panel render | GitHub PR content script | `int_extension_panel_render_contract` | pr/gated |
 | Browser panel readability | GitHub PR content script | `int_extension_panel_theme_readability` + manual smoke | pr/release |
 | Launch with Native Messaging | extension -> local Roger | existing `int_bridge_*` + host-runtime round-trip smoke + browser smoke suites | gated/release |
+| First-use extension-loaded browser journey | `rr extension setup` -> extension -> local Roger | executable `E2E-05` via deterministic Chromium harness, plus existing cheaper bridge/browser suites | operator-stability/release |
 | Public install path | release assets + `rr-install` | release-proof lanes + live installer proof | release |
 
 ---
@@ -488,6 +530,9 @@ This plan should eventually decompose into a small spine like:
 5. Add command-surface integration tests
 6. Add guided setup acceptance suite
 7. Add extension panel GitHub/Primer style bead
+8. Add deterministic Chromium-based browser harness bead for `E2E-05`
+9. Keep branded-browser smoke and live sacrificial-PR rehearsal as separate
+   proof owners rather than folding them into the same automation lane
 8. Add light/dark readability validation bead
 9. Reconcile release/browser claim gates with the new setup surface
 

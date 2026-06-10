@@ -2,6 +2,7 @@ id = "accept_gemini_reseed"
 budget_id = "ACCEPT-GEMINI-01"
 family = "accept_gemini"
 flow_ids = ["F01", "F03"]
+invariant_ids = ["INV-SESSION-002", "INV-PROVIDER-001"]
 fixture_families = ["fixture_resumebundle_stale_locator"]
 support_tier = "gemini_tier_a"
 support_status = "bounded"

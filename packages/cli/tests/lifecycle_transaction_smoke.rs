@@ -322,7 +322,8 @@ fn resume_retries_abandon_inflight_attempt_before_creating_new_attempt_id() {
         "unexpected resume stdout: {}",
         resume.stdout
     );
-    let new_attempt_id = latest_launch_attempt_id(&runtime.store_root, "resume_review", &session_id);
+    let new_attempt_id =
+        latest_launch_attempt_id(&runtime.store_root, "resume_review", &session_id);
     assert_ne!(new_attempt_id, stale_attempt_id);
 
     let store = RogerStore::open(&runtime.store_root).expect("reopen store");

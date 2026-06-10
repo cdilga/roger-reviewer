@@ -469,9 +469,9 @@ fn parse_toon_payload(stdout: &str) -> Value {
 }
 
 fn assert_sha256_prefixed(value: &Value, label: &str) {
-    let digest = value
-        .as_str()
-        .unwrap_or_else(|| panic!("{label} must be a string digest"));
+    let digest = value.as_str();
+    assert!(digest.is_some(), "{label} must be a string digest");
+    let digest = digest.expect("digest presence already asserted");
     assert!(
         digest.starts_with("sha256:"),
         "{label} must start with sha256:, got {digest}"
@@ -794,7 +794,7 @@ fn rr_binary_native_host_path_returns_bridge_response_for_launch_intents() {
     assert!(!response.ok);
     assert_eq!(response.action, "start_review");
     assert!(
-        response.message.contains("Roger is not ready"),
+        response.message.contains("Roger bridge preflight failed"),
         "unexpected response message: {}",
         response.message
     );
@@ -837,7 +837,7 @@ fn rr_binary_native_host_path_handles_all_primary_launch_actions_without_hanging
         );
         assert_eq!(response.action, action);
         assert!(
-            response.message.contains("Roger is not ready"),
+            response.message.contains("Roger bridge preflight failed"),
             "unexpected message for action={action}: {}",
             response.message
         );
@@ -4701,6 +4701,12 @@ fn extension_setup_uses_packaged_manifest_key_before_registration_in_smoke() {
             .as_str()
             .expect("manual browser step")
             .contains("chrome://extensions")
+    );
+    assert!(
+        payload["data"]["guided_browser_command"]
+            .as_str()
+            .expect("guided browser command")
+            .contains("scripts/extension/launch_preloaded_browser.sh")
     );
     assert!(
         payload["warnings"]

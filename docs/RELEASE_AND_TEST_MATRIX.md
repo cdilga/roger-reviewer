@@ -480,15 +480,15 @@ will be implemented incrementally rather than all at once.
 Budget posture:
 
 - budget-approved major journey slots: `E2E-01` through `E2E-06`
-- executable today: `E2E-01`
-- `E2E-02` through `E2E-06` are approved scenario slots for planning and guard
-  purposes, but they do not count as functional coverage until executable
-  suites land and run
+- executable today: `E2E-01`, `E2E-02`, `E2E-03`, `E2E-04`, `E2E-05`, and
+  `E2E-06`
 - Roger intentionally keeps these as six distinct major proofs rather than one
   sprawling omnibus E2E so failures stay diagnostic and the implemented journeys
   can run in parallel when needed
 - persona scenario ids such as `PJ-03A` or `PJ-05D` should be used as the
   human-readable story anchors when defining or defending one of these E2Es
+- stitched aggregate run entrypoint:
+  `./scripts/swarm/run_stitched_full_surface_e2e.sh --artifact-root <out-dir>`
 
 ### E2E-01: Core review happy path
 
@@ -576,11 +576,11 @@ Purpose:
 - persona anchors: `PJ-02A`, `PJ-02D`, `PJ-04A`, and `PJ-04B`
 - invariant anchors: `INV-SESSION-002`, `INV-CONTEXT-001`,
   `INV-SEARCH-003`, `INV-SEARCH-004`
-- executable proof today: none
+- executable proof today: `e2e_cross_surface_review_continuity`
 - until the executable suite lands, the current cheaper owners are
   `int_cli_session_aware`, `accept_opencode_resume`, and
   `int_search_prior_review_lookup`
-- missing executable proof owner: `rr-6iah.1`
+- missing executable proof owner: none
 
 Execution posture:
 
@@ -592,7 +592,7 @@ Execution posture:
 
 Status:
 
-- budget-approved scenario slot; not yet implemented
+- implemented executable heavyweight E2E
 
 Required shape:
 
@@ -624,23 +624,23 @@ Purpose:
 - persona anchors: `PJ-03A`, `PJ-03C`, and `PJ-04A`
 - invariant anchors: `INV-TUI-001`, `INV-TUI-002`, `INV-SEARCH-003`,
   `INV-SEARCH-004`
-- executable proof today: none
-- until the executable suite lands, the current cheaper owners are
+- executable proof today: `e2e_tui_first_memory_triage`
+  (`packages/cli/tests/e2e_tui_first_memory_triage.rs`)
+- cheaper owners that still defend narrower seams are
   `int_search_prior_review_lookup` and `int_cli_session_aware`
-- missing executable proof owner: `rr-6iah.2`
+- executable proof owner bead: `rr-6iah.2`
 
 Execution posture:
 
-- earn this slot only if the TUI-first journey still exposes a real
-  multi-surface gap after `integration` coverage is strong
-- keep non-interactive `--robot` equivalents in `integration` by default unless
-  a later justification proves a full E2E is necessary
+- preferred in `operator stability` or `release-candidate`
+- keep non-interactive `--robot` equivalents and memory-seam guards in
+  `integration` so this E2E only owns the full stitched operator flow
 
 ### E2E-04: Refresh and draft reconciliation after new commits
 
 Status:
 
-- budget-approved scenario slot; not yet implemented
+- implemented executable heavyweight E2E
 
 Required shape:
 
@@ -661,15 +661,16 @@ Purpose:
   pile of narrower reconciliation helpers
 - persona anchors: `PJ-02D`, `PJ-04D`, and `PJ-05B`
 - invariant anchors: `INV-POST-002`, `INV-POST-003`, `INV-HARNESS-003`
-- executable proof today: none
-- until the executable suite lands, the current cheaper owners are
+- executable proof today: `e2e_refresh_draft_reconciliation`
+  (`packages/cli/tests/e2e_refresh_draft_reconciliation.rs`)
+- cheaper owners that still defend narrower invalidation and recovery contracts are
   `prop_refresh_identity_lifecycle`, `int_github_posting_safety_recovery`, and
   `int_github_outbound_audit`
-- missing executable proof owner: `rr-6iah.3`
+- executable proof owner bead: `rr-6iah.3`
 
 Execution posture:
 
-- preferred in `operator stability` or `nightly` once implemented
+- preferred in `operator stability` or `nightly`
 - most fingerprinting, invalidation, and anchor-remap rules still belong in
   `unit`, `prop_*`, and `integration`
 
@@ -717,7 +718,7 @@ Execution posture:
 
 Status:
 
-- budget-approved scenario slot; not yet implemented
+- implemented executable heavyweight E2E
 
 Required shape:
 
@@ -736,17 +737,37 @@ Purpose:
   harness path remains a real way out and back
 - persona anchors: `PJ-03C`, `PJ-04A`, and `PJ-04B`
 - invariant anchors: `INV-SESSION-002`, `INV-CONTEXT-001`
-- executable proof today: none
-- until the executable suite lands, the current cheaper owners are
+- executable proof today: `e2e_harness_dropout_return`
+  (`packages/cli/tests/e2e_harness_dropout_return.rs`)
+- cheaper owners that still defend narrower seams are
   `accept_opencode_dropout_return`, `accept_opencode_resume`,
   `smoke_opencode_continuity`, and `int_storage_opencode_dropout_return`
-- missing executable proof owner: `rr-6iah.5`
+- executable proof owner bead: `rr-6iah.5`
 
 Execution posture:
 
 - preferred on the strongest supported direct-resume path first
 - bounded providers may assert a truthful reduced form later rather than
   claiming parity too early
+
+### Stitched deterministic full-surface run
+
+Entry point:
+
+- `./scripts/swarm/run_stitched_full_surface_e2e.sh --artifact-root <out-dir>`
+
+Contract:
+
+- runs all six blessed heavyweight E2E suites (`E2E-01` through `E2E-06`) as
+  one deterministic sequence
+- captures one aggregate artifact bundle under the chosen output directory with
+  per-suite logs, a manifest, and a stitched run summary
+- records GitHub boundary posture explicitly:
+  GitHub reads are fixture/double-backed, GitHub mutation remains mocked or
+  doubled (no live posting), and browser launch stays on deterministic
+  extension-loaded Chromium harness evidence
+- keeps sacrificial live PR rehearals outside this deterministic stitched lane
+  unless explicitly requested in a separate operator-stability run
 
 ### High-value automated boundary paths
 

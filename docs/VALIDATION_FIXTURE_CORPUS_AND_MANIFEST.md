@@ -156,7 +156,7 @@ in the diff or repo snapshot.
 **Purpose:** A stale `SessionLocator` (points to a moved or deleted OpenCode
 session) paired with a valid `ResumeBundle` for the reseed path.
 
-**Allowed consumers:** `accept_opencode_*`, `accept_bounded_provider_*`, `rr-011.5`
+**Allowed consumers:** `accept_opencode_*`, `accept_codex_*`, `accept_gemini_*`, `accept_claude_*`, `accept_copilot_*`, `rr-011.5`
 
 **Contents:**
 - a `SessionLocator` encoded to point at a non-existent session path
@@ -301,6 +301,98 @@ enforcement fixture.
 
 ---
 
+## Copilot Admission Fixture Families (`rr-x51h.8.1`)
+
+The following deterministic families extend the corpus for the Copilot
+admission wave without claiming live provider parity.
+
+### `fixture_copilot_launch_resume`
+
+**Purpose:** Deterministic launch and resume/reseed doubles for Copilot session
+linkage, including verified session-id extraction and stale-locator fallback.
+
+**Allowed consumers:** `int_harness_*`, `int_cli_*`
+
+**Contents:**
+- deterministic Copilot launch command output samples
+- stale-locator resume case with reseed outcome and expected launch-attempt state
+- explicit verified session-id and continuity-quality expectations
+
+**Degraded conditions:**
+- `stale_locator_reseed`
+- `missing_session_id`
+
+---
+
+### `fixture_copilot_hook_stream`
+
+**Purpose:** Deterministic hook-event payload stream for session-start,
+tool-audit, and session-end reconciliation behavior.
+
+**Allowed consumers:** `int_harness_*`, `int_cli_*`
+
+**Contents:**
+- canonical hook payload events (`session-start`, `pre-tool-use`, `post-tool-use`, `session-end`)
+- malformed and missing-session-id negative payloads
+
+**Degraded conditions:**
+- `missing_session_start`
+- `malformed_payload`
+
+---
+
+### `fixture_copilot_transcript_capture`
+
+**Purpose:** Deterministic transcript-reference corpus for raw-capture lookup,
+missing artifact detection, and truncated transcript handling.
+
+**Allowed consumers:** `int_storage_*`, `int_harness_*`
+
+**Contents:**
+- transcript artifact-reference records for nominal, missing, and truncated cases
+- expected lookup states and degraded reason codes
+
+**Degraded conditions:**
+- `missing_transcript_file`
+- `truncated_transcript`
+
+---
+
+### `fixture_copilot_policy_failure`
+
+**Purpose:** Deterministic policy-violation fixture family for fail-closed
+launch and hook enforcement behavior.
+
+**Allowed consumers:** `int_cli_*`, `int_harness_*`
+
+**Contents:**
+- blocked tool-use case with expected fail-closed reason
+- missing policy-digest case with expected launch-attempt failure state
+
+**Degraded conditions:**
+- `policy_violation`
+- `missing_policy_digest`
+
+---
+
+### `fixture_copilot_crash_recovery`
+
+**Purpose:** Deterministic crash-point and retry fixture family for provider
+process crashes and hook pipeline failures.
+
+**Allowed consumers:** `int_storage_*`, `int_cli_*`
+
+**Contents:**
+- launch crash case before session-start confirmation
+- hook pipeline crash case after process launch
+- expected retry eligibility and failure-evidence retention markers
+
+**Degraded conditions:**
+- `launch_crash`
+- `hook_crash`
+
+---
+
 ## Fixture Provenance and Update Rules
 
 **Provenance:** Each fixture was synthesized from first principles to be
@@ -327,7 +419,9 @@ No fixture captures a real production system's state.
 This document now provides:
 
 - the full list of named initial fixture families with purpose, allowed
-  consumers, and degraded-condition annotations
+  consumers, and degraded-condition annotations, plus deterministic Copilot
+  admission fixture families for launch/resume/hooks/transcripts/policy/crash
+  validation
 - provenance and update rules that prevent silent fixture drift
 - enough structure for `rr-025.3` to wire CI artifact retention and for
   implementation beads to load fixtures by family name without ad hoc paths

@@ -3,7 +3,7 @@
 
 The Roger workspace treats `.beads/issues.jsonl` as canonical when the SQLite
 store needs to be rebuilt. This helper patches that canonical JSONL for a very
-small exact-ID mutation subset so `scripts/swarm/br_pinned.sh` can recover from
+small exact-ID mutation subset so `scripts/swarm/br_safe.sh` can recover from
 known `br` import-only ID-resolution failures:
 
 - `close <id> [--reason] [--session]`

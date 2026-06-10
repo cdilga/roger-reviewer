@@ -89,9 +89,9 @@ Rules:
 
 Current repo truth:
 
-- `E2E-01` is the first implemented executable heavyweight E2E
-- `E2E-02` through `E2E-06` are budget-approved scenario slots until their
-  suites land and run
+- `E2E-01` through `E2E-06` are implemented executable heavyweight E2Es
+- stitched deterministic aggregate entrypoint:
+  `./scripts/swarm/run_stitched_full_surface_e2e.sh --artifact-root <out-dir>`
 - the machine-readable budget now carries persona ids, flow ids, invariant ids,
   current executable suite ids, current cheaper-suite owners, and follow-on
   bead ids so this mapping is derivable without re-reading every matrix doc
@@ -101,15 +101,15 @@ Current ownership map:
 | E2E | Persona anchors | Invariant anchors | Executable proof today | Current cheaper proof owners | Missing executable owner |
 |-----|-----------------|-------------------|------------------------|------------------------------|--------------------------|
 | `E2E-01` | `PJ-03A`, `PJ-05A` | `INV-HARNESS-002`, `INV-POST-001` | `e2e_core_review_happy_path` | `int_harness_opencode_resume`, `int_github_outbound_audit`, `int_github_posting_safety_recovery` still own malformed/degraded/post-recovery truth | none |
-| `E2E-02` | `PJ-02A`, `PJ-02D`, `PJ-04A`, `PJ-04B` | `INV-SESSION-002`, `INV-CONTEXT-001`, `INV-SEARCH-003`, `INV-SEARCH-004` | none | `int_cli_session_aware`, `accept_opencode_resume`, `int_search_prior_review_lookup` | `rr-6iah.1` |
-| `E2E-03` | `PJ-03A`, `PJ-03C`, `PJ-04A` | `INV-TUI-001`, `INV-TUI-002`, `INV-SEARCH-003`, `INV-SEARCH-004` | none | `int_search_prior_review_lookup`, `int_cli_session_aware` | `rr-6iah.2` |
-| `E2E-04` | `PJ-02D`, `PJ-04D`, `PJ-05B` | `INV-POST-002`, `INV-POST-003`, `INV-HARNESS-003` | none | `prop_refresh_identity_lifecycle`, `int_github_posting_safety_recovery` | `rr-6iah.3` |
-| `E2E-05` | `PJ-01A`, `PJ-01B`, `PJ-01C` | `INV-BRIDGE-001`, `INV-BRIDGE-002`, `INV-SESSION-001` | none | `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, `smoke_browser_launch_edge`, `int_bridge_launch_only_no_status` | `rr-6iah.4` |
-| `E2E-06` | `PJ-03C`, `PJ-04A`, `PJ-04B` | `INV-SESSION-002`, `INV-CONTEXT-001` | none | `accept_opencode_dropout_return`, `accept_opencode_resume`, `smoke_opencode_continuity`, `int_storage_opencode_dropout_return` | `rr-6iah.5` |
+| `E2E-02` | `PJ-02A`, `PJ-02D`, `PJ-04A`, `PJ-04B` | `INV-SESSION-002`, `INV-CONTEXT-001`, `INV-SEARCH-003`, `INV-SEARCH-004` | `e2e_cross_surface_review_continuity` | `int_cli_session_aware`, `accept_opencode_resume`, `int_search_prior_review_lookup` | none |
+| `E2E-03` | `PJ-03A`, `PJ-03C`, `PJ-04A` | `INV-TUI-001`, `INV-TUI-002`, `INV-SEARCH-003`, `INV-SEARCH-004` | `e2e_tui_first_memory_triage` | `int_search_prior_review_lookup`, `int_cli_session_aware` | none |
+| `E2E-04` | `PJ-02D`, `PJ-04D`, `PJ-05B` | `INV-POST-002`, `INV-POST-003`, `INV-HARNESS-003` | `e2e_refresh_draft_reconciliation` | `prop_refresh_identity_lifecycle`, `int_github_posting_safety_recovery`, `int_github_outbound_audit` | none |
+| `E2E-05` | `PJ-01A`, `PJ-01B`, `PJ-01C` | `INV-BRIDGE-001`, `INV-BRIDGE-002`, `INV-SESSION-001` | `e2e_browser_setup_first_launch` | `smoke_browser_launch_chrome`, `smoke_browser_launch_brave`, `smoke_browser_launch_edge`, `int_bridge_launch_only_no_status` | none |
+| `E2E-06` | `PJ-03C`, `PJ-04A`, `PJ-04B` | `INV-SESSION-002`, `INV-CONTEXT-001` | `e2e_harness_dropout_return` | `accept_opencode_dropout_return`, `accept_opencode_resume`, `smoke_opencode_continuity`, `int_storage_opencode_dropout_return` | none |
 
 Official browser-lane posture for `E2E-05`:
 
-- the executable automation owner should be a deterministic extension-loaded
+- the executable automation owner is the deterministic extension-loaded
   Chromium harness that proves setup, identity discovery, host registration,
   truthful doctor output, and first PR-page launch without depending on real
   GitHub mutation
@@ -118,6 +118,22 @@ Official browser-lane posture for `E2E-05`:
 - a live sacrificial-PR rehearsal is still desirable, but it belongs in a
   later operator-stability or release-candidate lane rather than in the base
   deterministic E2E closeout
+
+First-class provider smoke posture:
+
+- `SMOKE-OPENCODE-01` is the named real-provider smoke lane for Roger's
+  first-class OpenCode continuity claim
+- bounded, non-first-class providers (`codex`, `gemini`, `claude`,
+  feature-gated `copilot`) stay on acceptance plus integration proof until
+  their support wording widens into a first-class public claim
+
+Release-proof audit entrypoints:
+
+- `cargo run -q -p roger-validation -- guard-e2e-budget tests/suites docs/AUTOMATED_E2E_BUDGET.json`
+- `cargo run -q -p roger-validation -- plan release tests/suites target/test-artifacts`
+- these are the machine-readable checks that the release lane still carries only
+  the blessed heavyweight E2E catalog plus the named smoke suites required by
+  current support wording
 
 The detailed scenario contract lives in
 [`docs/RELEASE_AND_TEST_MATRIX.md`](docs/RELEASE_AND_TEST_MATRIX.md), and the
@@ -160,6 +176,13 @@ Current pinned posture:
   - `bash scripts/release/test_update_upgrade_rehearsal.sh --output-dir <artifact-dir>`
   - this is the canonical automated `INV-UPDATE-004` proof for the bounded
     stable direct-binary update lane
+  - the rehearsal manifest keeps WSL explicit as a dedicated-lane pointer via
+    `cohort_contract.wsl_unix_shell.status=covered_by_release_wsl_lane`
+  - WSL in-place update widening is gated by retained
+    `wsl-install-update-rehearsal` summary evidence (`status=pass`) from the
+    same unified release run; local
+    `bash scripts/release/test_update_upgrade_rehearsal_wsl.sh --output-dir <artifact-dir>`
+    remains a preflight aid, not the release-claim widening proof by itself
   - it does not widen Windows-host or RC apply claims, which remain separate
     follow-on proof lanes
 - the repo-pinned Rust compiler channel is `nightly` via
@@ -209,6 +232,9 @@ Examples:
 
 - approval must bind to the exact draft payload and target
 - target drift must invalidate prior approval automatically
+- status/findings/TUI projections must expose the same outbound state machine
+  (`awaiting_approval`, `approved`, `posted`, `invalidated`, `failed`) and keep
+  posting readiness visibly elevated (`INV-POST-004`)
 - ambiguous session selection must fail closed instead of guessing
 - partial findings salvage must preserve valid findings rather than discarding
   the whole pack

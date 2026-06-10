@@ -54,7 +54,8 @@ fn future_provider_admission_stays_gate_driven_and_non_widening() {
     );
 
     let spike_memo = fs::read_to_string(
-        workspace_root().join("docs/operator-stability/rr-x51h.6.6-future-provider-admission-spike.md"),
+        workspace_root()
+            .join("docs/operator-stability/rr-x51h.6.6-future-provider-admission-spike.md"),
     )
     .expect("read rr-x51h.6.6 spike memo");
     assert_contains_all(

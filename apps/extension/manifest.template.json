@@ -24,6 +24,12 @@
       "run_at": "document_idle"
     }
   ],
+  "web_accessible_resources": [
+    {
+      "resources": ["static/roger-mark.svg"],
+      "matches": ["https://github.com/*"]
+    }
+  ],
   "action": {
     "default_title": "Roger Reviewer",
     "default_icon": {

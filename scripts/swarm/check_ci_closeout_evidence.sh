@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -90,8 +92,22 @@ if [[ -z "$BEAD_ID" ]]; then
   exit 2
 fi
 
-if ! command -v br >/dev/null 2>&1; then
-  echo "br command is required" >&2
+BR_SHOW_BIN="${RR_BR_SHOW_BIN:-}"
+if [[ -z "$BR_SHOW_BIN" ]]; then
+  if [[ -x "${SCRIPT_DIR}/br_safe.sh" ]]; then
+    BR_SHOW_BIN="${SCRIPT_DIR}/br_safe.sh"
+  else
+    BR_SHOW_BIN="br"
+  fi
+fi
+
+if [[ "$BR_SHOW_BIN" == */* ]]; then
+  if [[ ! -x "$BR_SHOW_BIN" ]]; then
+    echo "br show command is not executable: $BR_SHOW_BIN" >&2
+    exit 2
+  fi
+elif ! command -v "$BR_SHOW_BIN" >/dev/null 2>&1; then
+  echo "br show command is required: $BR_SHOW_BIN" >&2
   exit 2
 fi
 
@@ -100,7 +116,7 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 2
 fi
 
-SHOW_JSON="$(br show "$BEAD_ID" --json --no-auto-import --no-auto-flush 2>/dev/null || true)"
+SHOW_JSON="$("$BR_SHOW_BIN" show "$BEAD_ID" --json --no-auto-import --no-auto-flush 2>/dev/null || true)"
 if [[ -z "$SHOW_JSON" ]]; then
   echo "failed to read bead: $BEAD_ID" >&2
   exit 1

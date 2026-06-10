@@ -6,7 +6,6 @@ PROJECT_ROOT=$(cd "${SCRIPT_DIR}/../.." && pwd)
 DEFAULT_BEADS_DIR="${PROJECT_ROOT}/.beads"
 DEFAULT_DB_PATH="${DEFAULT_BEADS_DIR}/beads.db"
 DEFAULT_JSONL_PATH="${DEFAULT_BEADS_DIR}/issues.jsonl"
-BR_RESOLVER="${SCRIPT_DIR}/resolve_br.sh"
 FK_REPRO_SCRIPT="${PROJECT_ROOT}/scripts/br-repros/repro_foreign_key_parent_child_metadata.sh"
 
 BEADS_DIR="${DEFAULT_BEADS_DIR}"
@@ -16,6 +15,17 @@ RUN_BR_DOCTOR=1
 RUN_MUTATION_PROBE=0
 MUTATION_PROBE_ITERATIONS=200
 BR_BIN=""
+SQLITE_RETRY_ATTEMPTS="${RR_BR_TRUST_SQLITE_RETRY_ATTEMPTS:-5}"
+SQLITE_RETRY_SLEEP_SEC="${RR_BR_TRUST_SQLITE_RETRY_SLEEP_SEC:-0.2}"
+
+resolve_br_bin() {
+  local candidate="${RR_BR_BIN:-$(command -v br 2>/dev/null || true)}"
+  if [[ -n "${candidate}" && -x "${candidate}" ]]; then
+    printf '%s\n' "${candidate}"
+    return 0
+  fi
+  return 1
+}
 
 cleanup() {
   rm -f "${TMP_DB:-}" "${TMP_JSONL:-}"
@@ -50,6 +60,27 @@ require_command() {
     echo "TRUST_REASON=missing command: $cmd"
     exit 2
   fi
+}
+
+run_sqlite_capture() {
+  local db_path="$1"
+  local sql="$2"
+  local output=""
+  local attempts=0
+
+  while true; do
+    if output=$(sqlite3 "$db_path" "$sql" 2>&1); then
+      printf '%s' "$output"
+      return 0
+    fi
+    if [[ "$output" == *"database is busy"* || "$output" == *"database is locked"* || "$output" == *"SQLITE_BUSY"* || "$output" == *"SQLITE_LOCKED"* ]] && [[ "$attempts" -lt "$SQLITE_RETRY_ATTEMPTS" ]]; then
+      attempts=$((attempts + 1))
+      sleep "$SQLITE_RETRY_SLEEP_SEC"
+      continue
+    fi
+    printf '%s' "$output"
+    return 1
+  done
 }
 
 while [[ $# -gt 0 ]]; do
@@ -136,7 +167,13 @@ fi
 TMP_DB=$(mktemp)
 TMP_JSONL=$(mktemp)
 
-db_integrity=$(sqlite3 "$DB_PATH" "PRAGMA integrity_check;")
+if ! db_integrity=$(run_sqlite_capture "$DB_PATH" "PRAGMA integrity_check;"); then
+  echo "TRUST_STATUS=fail"
+  echo "TRUST_REASON=sqlite integrity check query failed"
+  echo "SQLITE_INTEGRITY=$db_integrity"
+  exit 1
+fi
+
 if [[ "$db_integrity" != "ok" ]]; then
   echo "TRUST_STATUS=fail"
   echo "TRUST_REASON=sqlite integrity check failed"
@@ -144,7 +181,15 @@ if [[ "$db_integrity" != "ok" ]]; then
   exit 1
 fi
 
-fk_check=$(sqlite3 "$DB_PATH" "PRAGMA foreign_key_check;")
+if ! fk_check=$(run_sqlite_capture "$DB_PATH" "PRAGMA foreign_key_check;"); then
+  echo "TRUST_STATUS=fail"
+  echo "TRUST_REASON=sqlite foreign key check query failed"
+  echo "SQLITE_FOREIGN_KEY_CHECK_START"
+  echo "$fk_check"
+  echo "SQLITE_FOREIGN_KEY_CHECK_END"
+  exit 1
+fi
+
 if [[ -n "$fk_check" ]]; then
   echo "TRUST_STATUS=fail"
   echo "TRUST_REASON=sqlite foreign key check failed"
@@ -154,14 +199,39 @@ if [[ -n "$fk_check" ]]; then
   exit 1
 fi
 
-db_total=$(sqlite3 "$DB_PATH" "select count(*) from issues;")
-db_open=$(sqlite3 "$DB_PATH" "select count(*) from issues where status='open';")
-db_closed=$(sqlite3 "$DB_PATH" "select count(*) from issues where status='closed';")
+if ! db_total=$(run_sqlite_capture "$DB_PATH" "select count(*) from issues;"); then
+  echo "TRUST_STATUS=fail"
+  echo "TRUST_REASON=failed to count issues in db"
+  echo "SQLITE_COUNT_ERROR=$db_total"
+  exit 1
+fi
+if ! db_open=$(run_sqlite_capture "$DB_PATH" "select count(*) from issues where status='open';"); then
+  echo "TRUST_STATUS=fail"
+  echo "TRUST_REASON=failed to count open issues in db"
+  echo "SQLITE_COUNT_ERROR=$db_open"
+  exit 1
+fi
+if ! db_closed=$(run_sqlite_capture "$DB_PATH" "select count(*) from issues where status='closed';"); then
+  echo "TRUST_STATUS=fail"
+  echo "TRUST_REASON=failed to count closed issues in db"
+  echo "SQLITE_COUNT_ERROR=$db_closed"
+  exit 1
+fi
 jsonl_total=$(wc -l < "$JSONL_PATH" | tr -d ' ')
 jsonl_open=$(jq -r 'select(.status == "open") | .id' "$JSONL_PATH" | wc -l | tr -d ' ')
 jsonl_closed=$(jq -r 'select(.status == "closed") | .id' "$JSONL_PATH" | wc -l | tr -d ' ')
 
-sqlite3 "$DB_PATH" "select id || '|' || status from issues order by id;" | LC_ALL=C sort > "$TMP_DB"
+if ! db_rows=$(run_sqlite_capture "$DB_PATH" "select id || '|' || status from issues order by id;"); then
+  echo "TRUST_STATUS=fail"
+  echo "TRUST_REASON=failed to enumerate id/status rows from db"
+  echo "SQLITE_ENUM_ERROR=$db_rows"
+  exit 1
+fi
+if [[ -n "$db_rows" ]]; then
+  printf '%s\n' "$db_rows" | LC_ALL=C sort > "$TMP_DB"
+else
+  : > "$TMP_DB"
+fi
 jq -r '.id + "|" + .status' "$JSONL_PATH" | LC_ALL=C sort > "$TMP_JSONL"
 
 missing_in_db=$(comm -23 "$TMP_JSONL" "$TMP_DB" || true)
@@ -169,7 +239,7 @@ missing_in_jsonl=$(comm -13 "$TMP_JSONL" "$TMP_DB" || true)
 
 doctor_status="skipped"
 doctor_summary=""
-if [[ "$RUN_BR_DOCTOR" -eq 1 && -x "$BR_RESOLVER" ]] && BR_BIN="$($BR_RESOLVER --quiet --print-path 2>/dev/null)"; then
+if [[ "$RUN_BR_DOCTOR" -eq 1 ]] && BR_BIN="$(resolve_br_bin 2>/dev/null)"; then
   if doctor_output=$(cd "$PROJECT_ROOT" && "$BR_BIN" doctor 2>&1); then
     doctor_status="ok"
     doctor_summary=$(printf '%s\n' "$doctor_output" | tail -n 1)
@@ -194,10 +264,8 @@ if [[ "$RUN_MUTATION_PROBE" -eq 1 ]]; then
     exit 2
   fi
 
-  probe_br_bin=""
-  if [[ -x "$BR_RESOLVER" ]] && probe_br_bin="$($BR_RESOLVER --quiet --print-path 2>/dev/null)"; then
-    :
-  else
+  probe_br_bin="$(resolve_br_bin 2>/dev/null || true)"
+  if [[ -z "${probe_br_bin}" ]]; then
     probe_br_bin="${BR_BIN:-br}"
   fi
 

@@ -1,10 +1,26 @@
 # Plan For Truthful Provider Parity And GitHub Copilot CLI
 
-Status: Proposed bounded side-plan. Accepted directions should be folded back
-into `PLAN_FOR_ROGER_REVIEWER.md` or the relevant support contracts rather than
-leaving this file as a long-lived parallel source of product truth.
+Status: Historical bounded side-plan from the Round 06 provider-truth pass.
+Accepted directions now live in `PLAN_FOR_ROGER_REVIEWER.md` and the owning
+support contracts; use this file for rationale and audit context only, not as a
+parallel source of current product truth.
+Accepted directions were merged back into the canonical plan and owning support
+contracts on 2026-04-17.
 Intended repo path: `docs/PLAN_FOR_TRUTHFUL_PROVIDER_PARITY_AND_GITHUB_COPILOT_CLI.md`
 Audience: Roger maintainers and implementers working on `0.1.x` hardening and provider expansion
+
+---
+
+## Current accepted live truth
+
+- GitHub Copilot CLI is the authoritative `#1` provider in the product support
+  order, but the current live claim remains feature-gated bounded Tier B only
+  behind `RR_ENABLE_COPILOT_PROVIDER=1`.
+- OpenCode remains the strongest current first-class continuity path and the
+  required fallback/reference harness in `0.1.0`.
+- Codex, Gemini, and Claude Code remain truthful bounded Tier A live-CLI
+  providers; do not describe them as locator-reopen or `rr return` capable.
+- Pi-Agent remains planning-only and outside the `0.1.0` live CLI surface.
 
 ---
 
@@ -126,9 +142,12 @@ Until those conditions hold, the provider is bounded, experimental, or contract-
 
 ### Target state
 
+Historical note: the table below is the Round 06 target-state sketch preserved
+for audit context; it is not the current live support snapshot.
+
 | Provider | Intended status | Target tier | Notes |
 |---|---|---:|---|
-| GitHub Copilot CLI | First-class / golden path | Tier B | Authoritative `#1` provider target once verified |
+| GitHub Copilot CLI | First-class provider target | Tier B | Authoritative `#1` provider target once verified |
 | OpenCode | First-class fallback/reference | Tier B (selected Tier C optional) | Authoritative `#2` provider and current strongest landed continuity path |
 | Codex | Secondary, bounded | Tier A | Authoritative `#3` provider; keep truthful or remove live claim until verified |
 | Gemini | Secondary, bounded | Tier A | Authoritative `#4` provider; keep adapter lane honest until live launch is exposed |

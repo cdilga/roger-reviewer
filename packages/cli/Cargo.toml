@@ -14,10 +14,12 @@ roger-bridge = { path = "../bridge" }
 roger-config = { path = "../config" }
 roger-github-adapter = { path = "../github-adapter" }
 roger-session-claude = { path = "../session-claude" }
+roger-session-copilot = { path = "../session-copilot" }
 roger-session-codex = { path = "../session-codex" }
 roger-session-gemini = { path = "../session-gemini" }
 roger-session-opencode = { path = "../session-opencode" }
 roger-storage = { path = "../storage" }
+base64.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true

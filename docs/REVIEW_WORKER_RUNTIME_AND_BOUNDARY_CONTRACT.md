@@ -392,7 +392,7 @@ Required inputs:
 
 - task binding
 - query text or anchor hints
-- `query_mode`
+- `query_mode` compatibility ingress
 - requested retrieval classes
 - requested scopes
 
@@ -406,8 +406,9 @@ Rules:
 
 - every returned item is a `RecallEnvelope` projection from the canonical
   search/memory contract
-- the output must preserve `query_mode`, `retrieval_mode`, provenance, scope,
-  trust, degraded flags, citation posture, and citation ids
+- the output must preserve `requested_query_mode`, `resolved_query_mode`,
+  `retrieval_mode`, provenance, scope, trust, degraded flags, citation
+  posture, and citation ids
 - candidate memory must remain visibly tentative
 - out-of-scope or policy-disallowed requests must fail closed
 - `promotion_review` is a retrieval posture only; it does not mutate memory

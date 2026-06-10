@@ -1,0 +1,15 @@
+[fixture]
+family = "fixture_copilot_crash_recovery"
+description = "Deterministic Copilot crash-point and retry fixture family for launch-attempt evidence preservation and retry-safe recovery semantics."
+
+[[fixture.allowed_consumers]]
+suite_family = "int_storage_"
+notes = "Launch-attempt persistence and retry-safe lifecycle assertions."
+
+[[fixture.allowed_consumers]]
+suite_family = "int_cli_"
+notes = "Operator-visible recovery guidance after Copilot launch or hook crashes."
+
+[fixture.degraded_conditions]
+launch_crash = "Copilot process exits before session-start hook; launch attempt must remain failed with evidence."
+hook_crash = "Hook pipeline exits non-zero after launch; retry path must preserve first-failure context."

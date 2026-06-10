@@ -1,0 +1,15 @@
+[fixture]
+family = "fixture_copilot_launch_resume"
+description = "Deterministic GitHub Copilot CLI launch/resume fixture family for verified session-id binding and stale-locator reseed continuity."
+
+[[fixture.allowed_consumers]]
+suite_family = "int_harness_"
+notes = "Core provider launch/resume integration coverage for Copilot admission lanes."
+
+[[fixture.allowed_consumers]]
+suite_family = "int_cli_"
+notes = "CLI launch-attempt and fail-closed continuity behavior for provider=copilot."
+
+[fixture.degraded_conditions]
+stale_locator_reseed = "Direct resume with stale locator fails closed into deterministic reseed path while preserving review target identity."
+missing_session_id = "Launch command exits successfully but omits a verifiable session id; Roger must not finalize launch as started."

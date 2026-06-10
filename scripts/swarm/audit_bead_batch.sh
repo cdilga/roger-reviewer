@@ -4,9 +4,12 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd "${SCRIPT_DIR}/../.." && pwd)
 GRAPH_FILE="${PROJECT_ROOT}/.beads/issues.jsonl"
+DEFAULT_BR_READ_BIN="${PROJECT_ROOT}/scripts/swarm/br_safe.sh"
 
 LIMIT=12
 STRICT=0
+BR_READ_BIN="${RR_BR_READ_BIN:-}"
+FETCH_LIMIT="${RR_BR_AUDIT_FETCH_LIMIT:-1000}"
 
 usage() {
   cat <<EOF
@@ -36,7 +39,7 @@ run_br_json() {
   local status
 
   while true; do
-    if output=$(cd "$PROJECT_ROOT" && RUST_LOG=error br "$@" --json --no-auto-import --no-auto-flush 2>&1); then
+    if output=$(cd "$PROJECT_ROOT" && RUST_LOG=error "$BR_READ_BIN" "$@" --json --no-auto-import --no-auto-flush 2>&1); then
       printf '%s\n' "$output"
       return 0
     fi
@@ -53,11 +56,11 @@ run_br_json() {
 
 print_queue_repair_playbook() {
   cat <<'EOF'
-Queue repair playbook when useful work exists but `br ready` is thin or empty:
-1. Run `br blocked` and `bv --robot-triage` to identify near-frontier blockers.
-2. Inspect likely frontier beads with `br show <id>` and validate dependency edges.
+Queue repair playbook when useful work exists but `./scripts/swarm/br_safe.sh ready` is thin or empty:
+1. Run `./scripts/swarm/br_safe.sh blocked` and `bv --robot-triage` to identify near-frontier blockers.
+2. Inspect likely frontier beads with `./scripts/swarm/br_safe.sh show <id>` and validate dependency edges.
 3. If the next safe slice is obvious but missing, create/split a child bead with explicit acceptance criteria and validation contract.
-4. Announce bead shaping in Agent Mail and run `br sync --flush-only`.
+4. Announce bead shaping in Agent Mail and run `./scripts/swarm/br_safe.sh sync --flush-only`.
 5. Re-run this audit before launching or re-launching a large swarm batch.
 EOF
 }
@@ -100,22 +103,45 @@ if ! [[ "$LIMIT" =~ ^[0-9]+$ ]] || [[ "$LIMIT" -le 0 ]]; then
   echo "--limit must be a positive integer" >&2
   exit 1
 fi
+if ! [[ "$FETCH_LIMIT" =~ ^[0-9]+$ ]] || [[ "$FETCH_LIMIT" -le 0 ]]; then
+  echo "RR_BR_AUDIT_FETCH_LIMIT must be a positive integer" >&2
+  exit 1
+fi
 
-require_command br
 require_command jq
+
+if [[ -z "$BR_READ_BIN" ]]; then
+  if [[ -x "$DEFAULT_BR_READ_BIN" ]]; then
+    BR_READ_BIN="$DEFAULT_BR_READ_BIN"
+  else
+    BR_READ_BIN="br"
+  fi
+fi
+
+if [[ "$BR_READ_BIN" == */* ]]; then
+  [[ -x "$BR_READ_BIN" ]] || {
+    echo "Missing executable br read command: $BR_READ_BIN" >&2
+    exit 1
+  }
+else
+  require_command "$BR_READ_BIN"
+fi
 
 if [[ ! -f "$GRAPH_FILE" ]]; then
   echo "Missing bead graph file: $GRAPH_FILE" >&2
   exit 1
 fi
 
-READY_JSON=$(run_br_json ready)
-OPEN_JSON=$(run_br_json list --status open)
+READY_JSON=$(run_br_json ready --limit "$FETCH_LIMIT")
+OPEN_JSON=$(run_br_json list --status open --limit "$FETCH_LIMIT")
 GRAPH_JSON=$(jq -s '.' "$GRAPH_FILE")
 
-READY_COUNT=$(jq 'length' <<<"$READY_JSON")
-OPEN_COUNT=$(jq 'length' <<<"$OPEN_JSON")
-BATCH_JSON=$(jq --argjson limit "$LIMIT" '.[0:$limit]' <<<"$READY_JSON")
+READY_ISSUES_JSON="$(jq -c 'if type == "array" then . elif type == "object" and (.issues? | type == "array") then .issues else [] end' <<<"$READY_JSON")"
+OPEN_ISSUES_JSON="$(jq -c 'if type == "array" then . elif type == "object" and (.issues? | type == "array") then .issues else [] end' <<<"$OPEN_JSON")"
+
+READY_COUNT=$(jq 'length' <<<"$READY_ISSUES_JSON")
+OPEN_COUNT=$(jq 'length' <<<"$OPEN_ISSUES_JSON")
+BATCH_JSON=$(jq --argjson limit "$LIMIT" '.[0:$limit]' <<<"$READY_ISSUES_JSON")
 BATCH_COUNT=$(jq 'length' <<<"$BATCH_JSON")
 
 WARNINGS=0
@@ -130,7 +156,7 @@ echo "Audit batch limit: $LIMIT"
 echo
 
 if [[ "$READY_COUNT" -eq 0 ]]; then
-  err "br ready returned zero issues."
+  err "./scripts/swarm/br_safe.sh ready returned zero issues."
   if [[ "$OPEN_COUNT" -gt 0 ]]; then
     echo "Open work still exists, so this is likely a graph/frontier hygiene gap."
   fi

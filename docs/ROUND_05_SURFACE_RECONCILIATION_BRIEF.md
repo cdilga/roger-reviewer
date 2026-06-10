@@ -931,18 +931,18 @@ Recommended rule:
 
 - inline or header seam: one primary CTA plus a compact Roger entry or overflow
   affordance
-- right-rail host: full safe action set plus bounded status and counts
-- modal fallback: same safe action set as the right-rail host when no coherent
-  page seam exists
+- right-rail host: explicit launch/resume affordances plus only the bounded
+  status/counts Roger can actually justify
+- modal fallback: same truthful safe action family as the right-rail host when
+  no coherent page seam exists
 
 ## Action model
 
-Current safe action family:
+Current shipped launch-tier action family:
 
 - `Start`
 - `Resume`
-- `Findings`
-- `Open in Roger`
+- conditional `Findings` (only when bounded local state is findings-ready)
 
 Recommended companion-tier additions:
 
@@ -950,11 +950,16 @@ Recommended companion-tier additions:
 - `Open Draft Queue`
 - `Open Session Overview`
 
-Recommended mapping:
+Recommended mapping for the current shipped launch-tier slice:
 
 - no matching local session: `Start`
-- `review_started` or `awaiting_user_input`: `Resume`
+- launch-only / unknown browser state: keep `Start` + `Resume`, hide `Findings`
+- `review_started`, `awaiting_user_input`, `refresh_recommended`,
+  `awaiting_outbound_approval`, or `review_failed`: `Resume`
 - `findings_ready`: `Findings`
+
+Recommended companion-tier follow-ons once deeper local focus verbs are real:
+
 - `refresh_recommended`: `Open in Roger`
 - `awaiting_outbound_approval`: `Open Draft Queue`
 - `review_failed`: `Open in Roger` with failure guidance
@@ -1184,10 +1189,10 @@ Use this test for `0.1.x`:
 | toolbar popup backup | launch only | bundle | manual backup path | Important fallback, not the main surface. |
 | `Start` | launch intent | keep | contextual PR-page action | Needed when no local session exists. |
 | `Resume` | `ReviewSession`, `AttentionState` | keep | contextual PR-page action | Needed when a local session already exists. |
-| `Findings` | `Finding`, `AttentionState` | keep | contextual PR-page action | Needed when findings are the next truthful local focus. |
+| `Findings` | `Finding`, `AttentionState` | keep | contextual PR-page action | Needed only when findings are the next truthful local focus; launch-only or unknown browser state should hide it. |
 | `refresh_recommended` state | refresh recommendation + target revision | keep | contextual PR-page feedback only | Needed, but the PR page should surface reconciliation guidance instead of a standalone refresh button. |
-| `Open Draft Queue` | `OutboundDraftBatch`, `AttentionState` | keep | contextual PR-page action | Needed for approval-required state. |
-| `Open in Roger` | `ReviewSession` | keep | contextual PR-page action | Needed as the broad recovery/open-local affordance. |
+| `Open Draft Queue` | `OutboundDraftBatch`, `AttentionState` | keep | contextual PR-page action | Needed for approval-required state, but should not be faked before the bridge/CLI surface supports it. |
+| `Open in Roger` | `ReviewSession` | keep | contextual PR-page action | Needed as the broad recovery/open-local affordance once the current launch-tier surface can support it truthfully. |
 | `Open Session Overview` | `ReviewSession` | bundle | `Open in Roger` with focus | Not worth a separate named action. |
 | bounded status + freshness mirror | `AttentionState` | bundle | inline/rail host | Required, but as mirrored UI inside the existing host. |
 | extension help surface | UI only | bundle | settings/help surface | Needed, but not a PR-page primary action. |

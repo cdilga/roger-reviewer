@@ -10,16 +10,17 @@ Bounded live rehearsal for `rr-eus.5` on the active swarm session `roger-reviewe
 
 ## Commands Run
 
-1. `ntm coordinator status roger-reviewer`
+1. `ntm health roger-reviewer`
 2. `ntm activity roger-reviewer --json`
-3. `br ready`
-4. `tmux capture-pane -p -t roger-reviewer-control-plane:0 -S -400 | rg -n 'Assign|assigned|No ready|idle|Completion|Warning|exhaust'`
-5. `sleep 35; tmux capture-pane -p -t roger-reviewer-control-plane:0 -S -120 | tail -n 60`
-6. `tmux list-sessions | rg 'roger-reviewer-(control-plane|controller|health|ft)' || true`
+3. `./scripts/swarm/observe_swarm.sh --session roger-reviewer --json`
+4. `br ready`
+5. `tmux capture-pane -p -t roger-reviewer-control-plane:0 -S -400 | rg -n 'Assign|assigned|No ready|idle|Completion|Warning|exhaust'`
+6. `sleep 35; tmux capture-pane -p -t roger-reviewer-control-plane:0 -S -120 | tail -n 60`
+7. `tmux list-sessions | rg 'roger-reviewer-(control-plane|controller|health|ft)' || true`
 
 ## Observed Outcomes
 
-- Control-plane status showed the real session with mixed live states (working + idle panes), plus active Agent Mail connectivity.
+- `ntm health` plus the tmux-scrollback observer showed the real session with mixed live states (working + idle panes), plus active Agent Mail connectivity.
 - Assign-watch log contains successful assignment events, including:
   - `Assigned rr-xr6.1 to pane 0`
   - `Assigned rr-eus to pane 1`

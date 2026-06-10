@@ -84,6 +84,28 @@ Rules:
   `completed_without_findings`, it should be added deliberately rather than
   inferred by surfaces ad hoc.
 
+## Outbound-State Projection Alignment (`0.1.0`)
+
+Attention state and outbound draft state are related but not identical.
+
+Canonical outbound projection vocabulary across CLI/TUI/robot surfaces:
+
+- `awaiting_approval`
+- `approved`
+- `posted`
+- `invalidated`
+- `failed`
+
+Alignment rules:
+
+- `awaiting_outbound_approval` is the attention-state mirror of local outbound
+  draft work that is currently in `awaiting_approval`.
+- `invalidated` and `failed` outbound states must never be treated as posting
+  ready; surfaces should keep mutation-capable actions visibly elevated and
+  surface repair or reconfirmation guidance.
+- superseded outcomes are represented as `invalidated` plus a reason code, not
+  as a separate top-level outbound state label.
+
 ## `review_attached` Clarification
 
 The canonical plan's minimum event set also mentioned `review_attached`.

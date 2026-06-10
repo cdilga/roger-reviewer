@@ -6,7 +6,7 @@ use roger_app_core::tui_shell::{
     SearchHistoryView, SessionChrome, SupervisorSnapshot,
 };
 use roger_app_core::{RecallEnvelope, RecallSourceRef, ReviewTarget, SessionBaselineSnapshot};
-use roger_cli::{run, CliRuntime};
+use roger_cli::{CliRuntime, run};
 use roger_storage::{CreateMaterializedFinding, CreateOutboundDraft, RogerStore, UpsertMemoryItem};
 use roger_validation::{discover_suite_metadata, failure_artifact_paths};
 use serde_json::Value;
@@ -15,7 +15,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
-use tempfile::{tempdir, TempDir};
+use tempfile::{TempDir, tempdir};
 
 fn run_rr(args: &[&str], runtime: &CliRuntime) -> roger_cli::CliRunResult {
     let argv = args

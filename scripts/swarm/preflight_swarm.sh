@@ -3,7 +3,6 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd "${SCRIPT_DIR}/../.." && pwd)
-BR_RESOLVER="${SCRIPT_DIR}/resolve_br.sh"
 DEFAULT_SESSION_NAME="$(basename "$PROJECT_ROOT" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//')"
 
 SESSION_NAME="${DEFAULT_SESSION_NAME}"
@@ -42,6 +41,18 @@ require_command() {
     echo "PREFLIGHT_REASON=missing command: $cmd"
     exit 1
   fi
+}
+
+agent_mail_tmux_session_name() {
+  if tmux has-session -t agent-mail 2>/dev/null; then
+    printf 'agent-mail\n'
+    return 0
+  fi
+  if tmux has-session -t mcp-agent-mail 2>/dev/null; then
+    printf 'mcp-agent-mail\n'
+    return 0
+  fi
+  return 1
 }
 
 operator_fail() {
@@ -191,15 +202,15 @@ if (( OPENCODE_COUNT > 0 )); then
   require_command opencode
 fi
 
-if [[ ! -x "$BR_RESOLVER" ]]; then
-  operator_fail "missing required script: $BR_RESOLVER"
-fi
-if ! BR_BIN="$($BR_RESOLVER --quiet --print-path)"; then
-  operator_fail "unable to resolve vetted br path"
+BR_BIN="${RR_BR_BIN:-$(command -v br 2>/dev/null || true)}"
+if [[ -z "${BR_BIN}" || ! -x "${BR_BIN}" ]]; then
+  operator_fail "unable to find a usable br binary on PATH"
 fi
 
+AGENT_MAIL_SESSION="$(agent_mail_tmux_session_name || true)"
+
 if ! curl -fsS http://127.0.0.1:8765/health/readiness >/dev/null; then
-  operator_fail "agent mail readiness check failed" "Start or inspect Agent Mail with: tmux attach -t mcp-agent-mail"
+  operator_fail "agent mail readiness check failed" "Start or inspect Agent Mail with: tmux attach -t ${AGENT_MAIL_SESSION:-agent-mail}"
 fi
 
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then

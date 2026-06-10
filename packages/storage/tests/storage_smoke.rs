@@ -346,7 +346,6 @@ fn storage_smoke_persists_resume_and_approval_state_across_restart() -> Result<(
         assert!(by_target_none.is_empty());
     }
 
-
     Ok(())
 }
 
@@ -657,6 +656,274 @@ fn launch_binding_resolution_fails_closed_for_ambiguous_and_mismatched_state() -
 }
 
 #[test]
+fn existing_session_launch_attempt_finalize_updates_session_state_atomically() -> Result<()> {
+    let temp = tempdir()?;
+    let store = RogerStore::open(temp.path())?;
+    let target = sample_target();
+    let original_locator = SessionLocator {
+        provider: "opencode".to_owned(),
+        session_id: "oc-existing".to_owned(),
+        invocation_context_json: "{\"cwd\":\"/tmp/repo\"}".to_owned(),
+        captured_at: 1,
+        last_tested_at: Some(1),
+    };
+    let updated_locator = SessionLocator {
+        provider: "opencode".to_owned(),
+        session_id: "oc-reseed-2".to_owned(),
+        invocation_context_json: "{\"cwd\":\"/tmp/repo\"}".to_owned(),
+        captured_at: 2,
+        last_tested_at: Some(2),
+    };
+
+    store.create_review_session(CreateReviewSession {
+        id: "session-existing",
+        review_target: &target,
+        provider: "opencode",
+        session_locator: Some(&original_locator),
+        resume_bundle_artifact_id: None,
+        continuity_state: "usable",
+        attention_state: "review_launched",
+        launch_profile_id: Some("profile-open-pr"),
+    })?;
+    store.put_session_launch_binding(CreateSessionLaunchBinding {
+        id: "binding-existing",
+        session_id: "session-existing",
+        repo_locator: "owner/repo",
+        review_target: Some(&target),
+        surface: LaunchSurface::Cli,
+        launch_profile_id: Some("profile-open-pr"),
+        ui_target: Some("cli"),
+        instance_preference: Some("reuse_if_possible"),
+        cwd: Some("/tmp/repo"),
+        worktree_root: None,
+    })?;
+    store.create_launch_attempt(CreateLaunchAttempt {
+        id: "attempt-existing",
+        action: LaunchAttemptAction::ResumeReview,
+        provider: "opencode",
+        source_surface: LaunchSurface::Cli,
+        review_target: &target,
+        requested_session_id: Some("session-existing"),
+        state: LaunchAttemptState::Pending,
+    })?;
+    store.update_launch_attempt(UpdateLaunchAttempt {
+        id: "attempt-existing",
+        state: LaunchAttemptState::AwaitingProviderVerification,
+        final_session_id: None,
+        launch_binding_id: None,
+        provider_session_id: None,
+        verified_locator: Some(&updated_locator),
+        failure_reason: None,
+    })?;
+
+    let finalized =
+        store.finalize_existing_session_launch_attempt(FinalizeExistingSessionLaunchAttempt {
+            attempt_id: "attempt-existing",
+            terminal_state: LaunchAttemptState::VerifiedReseeded,
+            provider_session_id: "oc-reseed-2",
+            verified_locator: &updated_locator,
+            review_session_id: "session-existing",
+            expected_session_row_version: 0,
+            continuity_state: "resume:degraded",
+            attention_state: "review_resumed",
+            review_run: CreateReviewRun {
+                id: "run-existing",
+                session_id: "session-existing",
+                run_kind: "resume",
+                repo_snapshot: "owner/repo#42",
+                continuity_quality: "degraded",
+                session_locator_artifact_id: None,
+            },
+            launch_binding: CreateSessionLaunchBinding {
+                id: "binding-existing",
+                session_id: "session-existing",
+                repo_locator: "owner/repo",
+                review_target: Some(&target),
+                surface: LaunchSurface::Cli,
+                launch_profile_id: Some("profile-open-pr"),
+                ui_target: Some("cli"),
+                instance_preference: Some("reuse_if_possible"),
+                cwd: Some("/tmp/repo/rebound"),
+                worktree_root: None,
+            },
+        })?;
+
+    assert_eq!(finalized.state, LaunchAttemptState::VerifiedReseeded);
+    assert_eq!(
+        finalized.final_session_id.as_deref(),
+        Some("session-existing")
+    );
+    assert_eq!(
+        finalized.provider_session_id.as_deref(),
+        Some("oc-reseed-2")
+    );
+
+    let session = store
+        .review_session("session-existing")?
+        .expect("review session");
+    assert_eq!(session.row_version, 1);
+    assert_eq!(session.continuity_state, "resume:degraded");
+    assert_eq!(session.attention_state, "review_resumed");
+    assert_eq!(
+        session
+            .session_locator
+            .as_ref()
+            .expect("updated locator")
+            .session_id,
+        "oc-reseed-2"
+    );
+
+    let bindings = store.launch_bindings_for_session("session-existing")?;
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].id, "binding-existing");
+    assert_eq!(bindings[0].row_version, 1);
+    assert_eq!(bindings[0].cwd.as_deref(), Some("/tmp/repo/rebound"));
+
+    let run = store
+        .latest_review_run("session-existing")?
+        .expect("resume run");
+    assert_eq!(run.id, "run-existing");
+    assert_eq!(run.run_kind, "resume");
+
+    Ok(())
+}
+
+#[test]
+fn failed_existing_session_launch_finalize_rolls_back_partial_updates() -> Result<()> {
+    let temp = tempdir()?;
+    let store = RogerStore::open(temp.path())?;
+    let target = sample_target();
+    let original_locator = SessionLocator {
+        provider: "opencode".to_owned(),
+        session_id: "oc-return-old".to_owned(),
+        invocation_context_json: "{\"cwd\":\"/tmp/repo\"}".to_owned(),
+        captured_at: 1,
+        last_tested_at: Some(1),
+    };
+    let rebound_locator = SessionLocator {
+        provider: "opencode".to_owned(),
+        session_id: "oc-return-new".to_owned(),
+        invocation_context_json: "{\"cwd\":\"/tmp/repo\"}".to_owned(),
+        captured_at: 2,
+        last_tested_at: Some(2),
+    };
+
+    store.create_review_session(CreateReviewSession {
+        id: "session-rollback",
+        review_target: &target,
+        provider: "opencode",
+        session_locator: Some(&original_locator),
+        resume_bundle_artifact_id: None,
+        continuity_state: "awaiting_return",
+        attention_state: "awaiting_return",
+        launch_profile_id: Some("profile-open-pr"),
+    })?;
+    store.put_session_launch_binding(CreateSessionLaunchBinding {
+        id: "binding-rollback",
+        session_id: "session-rollback",
+        repo_locator: "owner/repo",
+        review_target: Some(&target),
+        surface: LaunchSurface::Cli,
+        launch_profile_id: Some("profile-open-pr"),
+        ui_target: Some("cli"),
+        instance_preference: Some("reuse_if_possible"),
+        cwd: Some("/tmp/repo"),
+        worktree_root: None,
+    })?;
+    store.create_launch_attempt(CreateLaunchAttempt {
+        id: "attempt-rollback-existing",
+        action: LaunchAttemptAction::ReturnToRoger,
+        provider: "opencode",
+        source_surface: LaunchSurface::Cli,
+        review_target: &target,
+        requested_session_id: Some("session-rollback"),
+        state: LaunchAttemptState::AwaitingProviderVerification,
+    })?;
+
+    let err = store
+        .finalize_existing_session_launch_attempt(FinalizeExistingSessionLaunchAttempt {
+            attempt_id: "attempt-rollback-existing",
+            terminal_state: LaunchAttemptState::VerifiedReopened,
+            provider_session_id: "oc-return-new",
+            verified_locator: &rebound_locator,
+            review_session_id: "session-rollback",
+            expected_session_row_version: 0,
+            continuity_state: "return:usable",
+            attention_state: "returned_to_roger",
+            review_run: CreateReviewRun {
+                id: "run-rollback-existing",
+                session_id: "missing-session",
+                run_kind: "return",
+                repo_snapshot: "owner/repo#42",
+                continuity_quality: "usable",
+                session_locator_artifact_id: None,
+            },
+            launch_binding: CreateSessionLaunchBinding {
+                id: "binding-rollback",
+                session_id: "session-rollback",
+                repo_locator: "owner/repo",
+                review_target: Some(&target),
+                surface: LaunchSurface::Cli,
+                launch_profile_id: Some("profile-open-pr"),
+                ui_target: Some("cli"),
+                instance_preference: Some("reuse_if_possible"),
+                cwd: Some("/tmp/repo/rebound"),
+                worktree_root: None,
+            },
+        })
+        .expect_err("finalize should fail closed when the run points at a missing session");
+    assert!(matches!(
+        err,
+        ExistingSessionLaunchFinalizationError::Commit(_)
+    ));
+    assert!(err.to_string().contains("FOREIGN KEY"));
+
+    store.update_launch_attempt(UpdateLaunchAttempt {
+        id: "attempt-rollback-existing",
+        state: LaunchAttemptState::FailedCommit,
+        final_session_id: None,
+        launch_binding_id: None,
+        provider_session_id: Some("oc-return-new"),
+        verified_locator: Some(&rebound_locator),
+        failure_reason: Some("failed to finalize existing-session launch"),
+    })?;
+
+    let session = store
+        .review_session("session-rollback")?
+        .expect("session remains durable");
+    assert_eq!(session.row_version, 0);
+    assert_eq!(session.continuity_state, "awaiting_return");
+    assert_eq!(session.attention_state, "awaiting_return");
+    assert_eq!(
+        session
+            .session_locator
+            .as_ref()
+            .expect("original locator")
+            .session_id,
+        "oc-return-old"
+    );
+    assert!(store.latest_review_run("session-rollback")?.is_none());
+
+    let bindings = store.launch_bindings_for_session("session-rollback")?;
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].row_version, 0);
+    assert_eq!(bindings[0].cwd.as_deref(), Some("/tmp/repo"));
+
+    let attempt = store
+        .launch_attempt("attempt-rollback-existing")?
+        .expect("attempt record remains durable");
+    assert_eq!(attempt.state, LaunchAttemptState::FailedCommit);
+    assert!(attempt.final_session_id.is_none());
+    assert!(attempt.launch_binding_id.is_none());
+    assert_eq!(
+        attempt.provider_session_id.as_deref(),
+        Some("oc-return-new")
+    );
+
+    Ok(())
+}
+
+#[test]
 fn same_session_writes_fail_closed_on_row_version_mismatch() -> Result<()> {
     let temp = tempdir()?;
     let store = RogerStore::open(temp.path())?;
@@ -696,6 +963,94 @@ fn same_session_writes_fail_closed_on_row_version_mismatch() -> Result<()> {
     let message = conflict.to_string();
     assert!(message.contains("stale write conflict"));
     assert!(message.contains("session-1"));
+
+    Ok(())
+}
+
+#[test]
+fn update_finding_triage_state_bumps_row_version_and_records_decision_event() -> Result<()> {
+    use roger_storage::{CreateMaterializedFinding, StorageError, StorageLayout};
+    use rusqlite::Connection;
+
+    let temp = tempdir()?;
+    let store = RogerStore::open(temp.path())?;
+
+    store.create_review_session(CreateReviewSession {
+        id: "session-1",
+        review_target: &sample_target(),
+        provider: "opencode",
+        session_locator: None,
+        resume_bundle_artifact_id: None,
+        continuity_state: "resume:usable",
+        attention_state: "awaiting_user_input",
+        launch_profile_id: None,
+    })?;
+    store.create_review_run(CreateReviewRun {
+        id: "run-1",
+        session_id: "session-1",
+        run_kind: "deep_review",
+        repo_snapshot: "git:feedface",
+        continuity_quality: "usable",
+        session_locator_artifact_id: None,
+    })?;
+    let seeded = store.upsert_materialized_finding(CreateMaterializedFinding {
+        id: "finding-1",
+        session_id: "session-1",
+        review_run_id: "run-1",
+        stage: "deep_review",
+        fingerprint: "fp:triage-state",
+        title: "Triagable finding",
+        normalized_summary: "summary",
+        severity: "high",
+        confidence: "medium",
+        triage_state: "new",
+        outbound_state: "not_drafted",
+    })?;
+    assert_eq!(seeded.triage_state, "new");
+    assert_eq!(seeded.row_version, 0);
+
+    let event_count = |state: &str| -> Result<i64> {
+        let layout = StorageLayout::under(temp.path());
+        let conn = Connection::open(&layout.db_path)?;
+        let count = conn.query_row(
+            "SELECT COUNT(*) FROM finding_decision_events
+            WHERE finding_id = 'finding-1' AND triage_state = ?1",
+            [state],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count)
+    };
+    assert_eq!(event_count("accepted")?, 0);
+
+    let updated = store.update_finding_triage_state("finding-1", "accepted")?;
+    assert_eq!(updated.id, "finding-1");
+    assert_eq!(updated.triage_state, "accepted");
+    assert_eq!(updated.outbound_state, "not_drafted");
+    assert_eq!(updated.row_version, seeded.row_version + 1);
+
+    let readback = store
+        .materialized_finding("finding-1")?
+        .expect("finding persists");
+    assert_eq!(readback.triage_state, "accepted");
+    assert_eq!(readback.row_version, 1);
+    assert_eq!(event_count("accepted")?, 1);
+
+    // A second decision in the same second must also persist its own event row.
+    let resolved = store.update_finding_triage_state("finding-1", "resolved")?;
+    assert_eq!(resolved.row_version, 2);
+    assert_eq!(event_count("resolved")?, 1);
+
+    let missing = store
+        .update_finding_triage_state("finding-unknown", "accepted")
+        .expect_err("unknown finding id should fail closed");
+    assert!(
+        matches!(
+            &missing,
+            StorageError::NotFound { entity, id }
+                if *entity == "finding" && id == "finding-unknown"
+        ),
+        "expected NotFound for finding-unknown, got: {missing}"
+    );
 
     Ok(())
 }

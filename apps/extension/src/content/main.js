@@ -3,8 +3,8 @@ const STATUS_ID = 'roger-reviewer-status';
 const BADGE_ID = 'roger-reviewer-attention-badge';
 const HEADING_ID = 'roger-reviewer-heading';
 const SUBHEADING_ID = 'roger-reviewer-subheading';
-const BUILD_ID = 'roger-reviewer-build';
 const BRAND_CHIP_ID = 'roger-reviewer-brand-chip';
+const INFO_TEXT_ID = 'roger-reviewer-info-text';
 const INLINE_SLOT_ID = 'roger-reviewer-inline-slot';
 const RAIL_SLOT_ID = 'roger-reviewer-rail-slot';
 const MODAL_SLOT_ID = 'roger-reviewer-modal-slot';
@@ -37,10 +37,19 @@ const RAIL_REVIEWERS_SELECTORS = [
 ];
 
 const ACTIONS = [
-  { id: 'start_review', label: 'Start' },
-  { id: 'resume_review', label: 'Resume' },
-  { id: 'show_findings', label: 'Findings' },
+  { id: 'start_review', label: 'Start Review in Roger' },
+  { id: 'resume_review', label: 'Resume Existing Review' },
+  { id: 'show_findings', label: 'View Findings' },
 ];
+const FINDINGS_VISIBLE_ATTENTION_STATES = new Set(['findings_ready']);
+const RESUME_PRIMARY_ATTENTION_STATES = new Set([
+  'awaiting_user_input',
+  'awaiting_outbound_approval',
+  'refresh_recommended',
+  'review_failed',
+]);
+const DEFAULT_INFO_MESSAGE =
+  'Launch Roger locally from this pull request. For authoritative connection and review state, use Roger itself rather than this GitHub panel.';
 
 const ATTENTION_STYLES = {
   awaiting_user_input: {
@@ -71,14 +80,13 @@ const ATTENTION_STYLES = {
 };
 
 function deriveActionModel(attentionState) {
-  const visibleActions = new Set(['start_review', 'resume_review', 'show_findings']);
+  const visibleActions = new Set(['start_review', 'resume_review']);
   let primaryActionId = 'start_review';
 
-  if (attentionState === 'refresh_recommended') {
-    primaryActionId = 'resume_review';
-  } else if (attentionState === 'findings_ready' || attentionState === 'awaiting_outbound_approval') {
+  if (FINDINGS_VISIBLE_ATTENTION_STATES.has(attentionState)) {
+    visibleActions.add('show_findings');
     primaryActionId = 'show_findings';
-  } else if (attentionState === 'awaiting_user_input' || attentionState === 'review_failed') {
+  } else if (RESUME_PRIMARY_ATTENTION_STATES.has(attentionState)) {
     primaryActionId = 'resume_review';
   }
 
@@ -98,8 +106,14 @@ function applyActionModel(panel, attentionState) {
     const actionId = button.dataset?.action;
     const isVisible = actionId ? model.visibleActions.has(actionId) : true;
     const isPrimary = actionId === model.primaryActionId;
+    const isTertiary = actionId === 'show_findings' && isVisible && !isPrimary;
     button.hidden = !isVisible;
     button.classList?.toggle('roger-panel-button--primary', isPrimary && isVisible);
+    button.classList?.toggle(
+      'roger-panel-button--secondary',
+      !isPrimary && !isTertiary && isVisible
+    );
+    button.classList?.toggle('roger-panel-button--tertiary', isTertiary);
     button.setAttribute?.('aria-hidden', isVisible ? 'false' : 'true');
   }
 
@@ -139,6 +153,18 @@ function readExtensionBuildLabel() {
   }
 }
 
+function readRuntimeAssetUrl(relativePath) {
+  if (typeof chrome === 'undefined' || !chrome.runtime?.getURL) {
+    return '';
+  }
+
+  try {
+    return chrome.runtime.getURL(relativePath);
+  } catch {
+    return '';
+  }
+}
+
 let inlineStatusResetTimer = null;
 
 function appendGuidance(message, guidance) {
@@ -156,6 +182,38 @@ function appendGuidance(message, guidance) {
   return `${normalizedBase} ${extra}`.trim();
 }
 
+function setInfoMessage(message) {
+  if (typeof document === 'undefined') {
+    return;
+  }
+
+  const infoNode = document.getElementById(INFO_TEXT_ID);
+  if (!infoNode) {
+    return;
+  }
+
+  infoNode.textContent = message || DEFAULT_INFO_MESSAGE;
+}
+
+function clearStatus() {
+  if (typeof document === 'undefined') {
+    return;
+  }
+
+  const statusNode = document.getElementById(STATUS_ID);
+  if (!statusNode) {
+    return;
+  }
+
+  statusNode.hidden = true;
+  statusNode.textContent = '';
+  statusNode.classList.remove(
+    'roger-panel-status--ok',
+    'roger-panel-status--error',
+    'roger-panel-status--inline-visible'
+  );
+}
+
 function setStatus(message, isError = false, options = {}) {
   if (typeof document === 'undefined') {
     return;
@@ -165,7 +223,13 @@ function setStatus(message, isError = false, options = {}) {
   if (!statusNode) {
     return;
   }
+  if (!message) {
+    clearStatus();
+    return;
+  }
+
   statusNode.textContent = message;
+  statusNode.hidden = false;
   statusNode.classList.remove(
     'roger-panel-status--ok',
     'roger-panel-status--error',
@@ -182,6 +246,7 @@ function setStatus(message, isError = false, options = {}) {
     if (typeof setTimeout === 'function') {
       inlineStatusResetTimer = setTimeout(() => {
         statusNode.classList.remove('roger-panel-status--inline-visible');
+        statusNode.hidden = true;
         inlineStatusResetTimer = null;
       }, 4500);
     }
@@ -235,7 +300,8 @@ function requestStatusMirror(context) {
       applyActionModel(panel, lastAttentionState);
     }
     clearAttentionBadge();
-    setStatus('Launch-only mode. Open Roger locally for authoritative status.');
+    clearStatus();
+    setInfoMessage('Launch-only mode. Open Roger locally (`rr status`) for authoritative detail.');
     return;
   }
 
@@ -255,7 +321,8 @@ function requestStatusMirror(context) {
           applyActionModel(panel, lastAttentionState);
         }
         clearAttentionBadge();
-        setStatus('Launch-only mode. Open Roger locally for authoritative status.');
+        clearStatus();
+        setInfoMessage('Launch-only mode. Open Roger locally (`rr status`) for authoritative detail.');
         return;
       }
 
@@ -265,7 +332,8 @@ function requestStatusMirror(context) {
           applyActionModel(panel, lastAttentionState);
         }
         clearAttentionBadge();
-        setStatus('No status response. Open Roger locally for authoritative status.');
+        clearStatus();
+        setInfoMessage('No bounded status response. Open Roger locally (`rr status`) for authoritative detail.');
         return;
       }
 
@@ -275,7 +343,8 @@ function requestStatusMirror(context) {
           applyActionModel(panel, lastAttentionState);
         }
         clearAttentionBadge();
-        setStatus(appendGuidance(response.message, response.guidance), true);
+        clearStatus();
+        setInfoMessage(appendGuidance(response.message, response.guidance));
         return;
       }
 
@@ -285,7 +354,13 @@ function requestStatusMirror(context) {
           applyActionModel(panel, lastAttentionState);
         }
         clearAttentionBadge();
-        setStatus(response.message || 'Launch-only mode. Open Roger locally for authoritative status.');
+        clearStatus();
+        setInfoMessage(
+          appendGuidance(
+            response.message || 'Launch-only mode. Open Roger locally for authoritative detail.',
+            response.guidance
+          )
+        );
         return;
       }
 
@@ -294,7 +369,8 @@ function requestStatusMirror(context) {
         applyActionModel(panel, lastAttentionState);
       }
       setAttentionBadge(response.attention_state, response.freshness_label || null);
-      setStatus(
+      clearStatus();
+      setInfoMessage(
         appendGuidance(response.message || 'Mirroring bounded Roger status.', response.guidance)
       );
     }
@@ -406,19 +482,43 @@ function ensurePanelStyles(rootDocument) {
   styleNode.id = STYLE_ID;
   styleNode.textContent = `
 #${PANEL_ID} {
-  --rr-brand-ink-900: #15232f;
-  --rr-brand-ink-700: #2a4150;
-  --rr-brand-ink-500: #4f6270;
-  --rr-brand-accent-700: #08586e;
-  --rr-brand-accent-500: #0b6d88;
-  --rr-brand-accent-300: #2f93ab;
-  --rr-brand-glow-200: #9ad2dd;
-  --rr-brand-canvas-100: #f4f8f9;
+  --rr-brand-ink-900: #0d1117;
+  --rr-brand-ink-700: #30363d;
+  --rr-brand-ink-500: #57606a;
+  --rr-brand-accent-700: #1f6feb;
+  --rr-brand-accent-500: #2f81f7;
+  --rr-brand-accent-300: #79c0ff;
+  --rr-brand-glow-200: #d0d7de;
+  --rr-brand-canvas-100: #f6f8fa;
+  --rr-panel-surface: var(--overlay-bgColor, var(--bgColor-default, #ffffff));
+  --rr-panel-surface-muted: var(--bgColor-muted, #f6f8fa);
+  --rr-panel-surface-raised: color-mix(
+    in srgb,
+    var(--rr-panel-surface) 82%,
+    var(--rr-panel-surface-muted) 18%
+  );
+  --rr-panel-border: color-mix(in srgb, var(--borderColor-default, #d0d7de) 86%, transparent);
+  --rr-panel-border-strong: color-mix(
+    in srgb,
+    var(--borderColor-emphasis, #8c959f) 84%,
+    transparent
+  );
+  --rr-panel-text: var(--fgColor-default, #1f2328);
+  --rr-panel-muted: var(--fgColor-muted, #656d76);
+  --rr-panel-highlight: rgba(255, 255, 255, 0.72);
+  --rr-panel-shadow: rgba(15, 23, 42, 0.12);
   font-family: var(--fontStack-sansSerif, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
-  background: var(--bgColor-muted, #f6f8fa);
-  color: var(--fgColor-default, #1f2328);
-  border: 1px solid var(--borderColor-default, #d0d7de);
-  padding: 10px;
+  background: var(--rr-panel-surface-muted);
+  color: var(--rr-panel-text);
+  border: 1px solid var(--rr-panel-border);
+  padding: 12px;
+}
+
+:root[data-color-mode="dark"] #${PANEL_ID} {
+  --rr-panel-border: rgba(240, 246, 252, 0.14);
+  --rr-panel-border-strong: rgba(240, 246, 252, 0.22);
+  --rr-panel-highlight: rgba(240, 246, 252, 0.08);
+  --rr-panel-shadow: rgba(1, 4, 9, 0.42);
 }
 
 #${PANEL_ID}.roger-panel--inline {
@@ -435,8 +535,7 @@ function ensurePanelStyles(rootDocument) {
 
 #${PANEL_ID}.roger-panel--inline .roger-panel-heading,
 #${PANEL_ID}.roger-panel--inline .roger-panel-subheading,
-#${PANEL_ID}.roger-panel--inline .roger-panel-badge,
-#${PANEL_ID}.roger-panel--inline .roger-panel-build {
+#${PANEL_ID}.roger-panel--inline .roger-panel-badge {
   display: none;
 }
 
@@ -458,14 +557,24 @@ function ensurePanelStyles(rootDocument) {
   width: 100%;
   max-width: 100%;
   margin: 0;
-  border-radius: 12px;
-  border-color: rgba(125, 136, 158, 0.42);
+  border-radius: 14px;
+  border-color: var(--rr-panel-border-strong);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(244, 247, 251, 0.96) 52%, rgba(235, 240, 247, 0.98) 100%),
-    linear-gradient(135deg, rgba(160, 170, 187, 0.16), rgba(255, 255, 255, 0) 36%, rgba(109, 117, 132, 0.12) 100%);
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--rr-panel-surface) 92%, white 8%) 0%,
+      var(--rr-panel-surface-raised) 52%,
+      color-mix(in srgb, var(--rr-panel-surface) 74%, var(--rr-panel-surface-muted) 26%) 100%
+    ),
+    linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.14),
+      rgba(255, 255, 255, 0) 38%,
+      rgba(148, 163, 184, 0.18) 100%
+    );
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.9),
-    0 12px 30px rgba(31, 35, 40, 0.08);
+    inset 0 1px 0 var(--rr-panel-highlight),
+    0 18px 38px var(--rr-panel-shadow);
 }
 
 #${RAIL_SLOT_ID} {
@@ -530,32 +639,52 @@ function ensurePanelStyles(rootDocument) {
 
 #${PANEL_ID} .roger-panel-heading {
   margin: 0;
-  font-size: 20px;
-  line-height: 1.3;
+  font-size: 23px;
+  line-height: 1.15;
   font-weight: 700;
   letter-spacing: -0.02em;
-  color: var(--fgColor-default, #1f2328);
+  color: var(--rr-panel-text);
 }
 
 #${PANEL_ID} .roger-panel-subheading {
   margin: 4px 0 0 0;
   font-size: 12px;
   line-height: 1.4;
-  color: var(--fgColor-muted, #656d76);
+  color: var(--rr-panel-muted);
+  font-family: var(
+    --fontStack-monospace,
+    ui-monospace,
+    SFMono-Regular,
+    SF Mono,
+    Menlo,
+    Consolas,
+    monospace
+  );
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 #${PANEL_ID} .roger-panel-brandbar {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-  margin: 0 0 12px 0;
+  gap: 14px;
+  margin: 0 0 14px 0;
 }
 
 #${PANEL_ID} .roger-panel-brandmark {
   display: inline-flex;
-  align-items: center;
-  gap: 10px;
+  align-items: flex-start;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#${PANEL_ID} .roger-panel-heading-group {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
 }
 
 #${PANEL_ID} .rr-brand-chip {
@@ -563,8 +692,12 @@ function ensurePanelStyles(rootDocument) {
   align-items: center;
   gap: 6px;
   border-radius: 999px;
-  border: 1px solid var(--rr-brand-glow-200);
-  background: linear-gradient(110deg, #ffffff 0%, var(--rr-brand-canvas-100) 100%);
+  border: 1px solid var(--rr-panel-border-strong);
+  background: linear-gradient(
+    120deg,
+    color-mix(in srgb, var(--rr-panel-surface) 86%, white 14%) 0%,
+    color-mix(in srgb, var(--rr-panel-surface-raised) 92%, white 8%) 100%
+  );
   color: var(--rr-brand-ink-700);
   font-size: 11px;
   line-height: 1;
@@ -572,15 +705,13 @@ function ensurePanelStyles(rootDocument) {
   letter-spacing: 0.01em;
   padding: 4px 9px;
   margin: 0;
+  box-shadow: inset 0 1px 0 var(--rr-panel-highlight);
 }
 
-#${PANEL_ID} .rr-brand-chip::before {
-  content: "";
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--rr-brand-accent-500);
-  box-shadow: 0 0 0 3px rgba(11, 109, 136, 0.14);
+#${PANEL_ID} .roger-panel-brandicon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
 }
 
 #${PANEL_ID}.roger-panel--inline .rr-brand-chip {
@@ -597,31 +728,76 @@ function ensurePanelStyles(rootDocument) {
 }
 
 #${PANEL_ID} .roger-panel-button-row {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+  align-items: stretch;
 }
 
 #${PANEL_ID}.roger-panel--inline .roger-panel-button-row {
   display: inline-flex;
-  grid-template-columns: none;
+  flex-wrap: nowrap;
   gap: 6px;
 }
 
 #${PANEL_ID} .roger-panel-button {
-  border: 1px solid var(--button-default-borderColor-rest, var(--borderColor-default, #d0d7de));
-  background: var(--button-default-bgColor-rest, var(--bgColor-default, #ffffff));
-  color: var(--button-default-fgColor-rest, var(--fgColor-default, #1f2328));
-  border-radius: 6px;
-  padding: 6px 8px;
+  flex: 1 1 calc(50% - 4px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  border: 1px solid var(--rr-panel-border-strong);
+  background: linear-gradient(
+    180deg,
+    color-mix(
+      in srgb,
+      var(--button-default-bgColor-rest, var(--rr-panel-surface)) 84%,
+      white 16%
+    ),
+    color-mix(
+      in srgb,
+      var(--button-default-bgColor-rest, var(--rr-panel-surface-raised)) 92%,
+      var(--rr-panel-surface-muted) 8%
+    )
+  );
+  color: var(--button-default-fgColor-rest, var(--rr-panel-text));
+  border-radius: 8px;
+  padding: 8px 12px;
   font-size: 12px;
   line-height: 1.25;
+  font-weight: 600;
+  text-align: center;
+  white-space: normal;
   cursor: pointer;
+  box-shadow:
+    inset 0 1px 0 var(--rr-panel-highlight),
+    0 1px 2px rgba(15, 23, 42, 0.08);
+  transition:
+    border-color 120ms ease,
+    background 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease;
 }
 
 #${PANEL_ID} .roger-panel-button:hover:not(:disabled) {
-  background: var(--button-default-bgColor-hover, var(--bgColor-emphasis, #e9ecef));
-  border-color: var(--button-default-borderColor-hover, var(--borderColor-emphasis, #8c959f));
+  border-color: color-mix(in srgb, var(--rr-panel-border-strong) 78%, var(--rr-brand-accent-300) 22%);
+  background: linear-gradient(
+    180deg,
+    color-mix(
+      in srgb,
+      var(--button-default-bgColor-hover, var(--rr-panel-surface-raised)) 84%,
+      white 16%
+    ),
+    color-mix(
+      in srgb,
+      var(--button-default-bgColor-hover, var(--rr-panel-surface-raised)) 92%,
+      var(--rr-panel-surface-muted) 8%
+    )
+  );
+  box-shadow:
+    inset 0 1px 0 var(--rr-panel-highlight),
+    0 6px 18px rgba(15, 23, 42, 0.12);
+  transform: translateY(-1px);
 }
 
 #${PANEL_ID} .roger-panel-button:disabled {
@@ -637,14 +813,32 @@ function ensurePanelStyles(rootDocument) {
 }
 
 #${PANEL_ID} .roger-panel-button.roger-panel-button--primary {
-  border-color: var(--rr-brand-accent-500);
+  flex-basis: 100%;
+  order: -1;
+  border-color: color-mix(in srgb, var(--rr-brand-accent-700) 88%, black 12%);
   background:
     linear-gradient(
       180deg,
-      color-mix(in srgb, var(--rr-brand-accent-500) 92%, white 8%),
+      color-mix(in srgb, var(--rr-brand-accent-500) 88%, white 12%),
       var(--rr-brand-accent-700)
     );
   color: #ffffff;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 8px 22px rgba(31, 111, 235, 0.24);
+}
+
+#${PANEL_ID} .roger-panel-button.roger-panel-button--secondary {
+  color: var(--rr-panel-text);
+}
+
+#${PANEL_ID} .roger-panel-button.roger-panel-button--tertiary {
+  color: var(--rr-panel-muted);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--rr-panel-surface-raised) 86%, white 14%),
+    color-mix(in srgb, var(--rr-panel-surface-raised) 94%, var(--rr-panel-surface-muted) 6%)
+  );
 }
 
 #${PANEL_ID} .roger-panel-button.roger-panel-button--primary:hover:not(:disabled) {
@@ -658,14 +852,22 @@ function ensurePanelStyles(rootDocument) {
 }
 
 #${PANEL_ID}.roger-panel--inline .roger-panel-button {
+  flex: 0 1 auto;
   padding: 0 12px;
   min-height: 28px;
+  white-space: nowrap;
 }
 
 #${PANEL_ID} .roger-panel-status {
+  display: block;
   margin: 10px 0 0 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--rr-panel-border);
+  background: color-mix(in srgb, var(--rr-panel-surface) 92%, var(--rr-panel-surface-muted) 8%);
   font-size: 12px;
   line-height: 1.35;
+  color: var(--rr-panel-muted);
 }
 
 #${PANEL_ID}.roger-panel--inline .roger-panel-status {
@@ -679,8 +881,8 @@ function ensurePanelStyles(rootDocument) {
   margin: 0;
   padding: 8px 10px;
   border: 1px solid var(--borderColor-default, #d0d7de);
-  border-radius: 6px;
-  background: var(--overlay-bgColor, #ffffff);
+  border-radius: 10px;
+  background: var(--rr-panel-surface, var(--overlay-bgColor, #ffffff));
   box-shadow: var(--shadow-small, 0 3px 12px rgba(31, 35, 40, 0.12));
 }
 
@@ -688,30 +890,93 @@ function ensurePanelStyles(rootDocument) {
   display: block;
 }
 
-#${PANEL_ID} .roger-panel-build {
-  margin: 8px 0 0 0;
+#${PANEL_ID} .roger-panel-info {
+  position: relative;
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+#${PANEL_ID} .roger-panel-info summary {
+  list-style: none;
+}
+
+#${PANEL_ID} .roger-panel-info summary::-webkit-details-marker {
+  display: none;
+}
+
+#${PANEL_ID} .roger-panel-info-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--rr-panel-border-strong);
+  border-radius: 999px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--rr-panel-surface-raised) 88%, white 12%),
+    color-mix(in srgb, var(--rr-panel-surface) 92%, var(--rr-panel-surface-muted) 8%)
+  );
+  color: var(--rr-panel-text);
+  font-size: 13px;
+  line-height: 1;
+  font-weight: 700;
+  cursor: pointer;
+  user-select: none;
+  box-shadow:
+    inset 0 1px 0 var(--rr-panel-highlight),
+    0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+#${PANEL_ID} .roger-panel-info[open] .roger-panel-info-toggle {
+  border-color: color-mix(in srgb, var(--rr-panel-border-strong) 72%, var(--rr-brand-accent-300) 28%);
+  box-shadow:
+    inset 0 1px 0 var(--rr-panel-highlight),
+    0 0 0 3px color-mix(in srgb, var(--rr-brand-accent-300) 18%, transparent);
+}
+
+#${PANEL_ID} .roger-panel-info-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 30;
+  display: none;
+  width: min(320px, calc(100vw - 48px));
+  margin: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--rr-panel-border-strong);
+  border-radius: 12px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--rr-panel-surface) 92%, white 8%),
+    color-mix(in srgb, var(--rr-panel-surface-raised) 94%, var(--rr-panel-surface-muted) 6%)
+  );
+  box-shadow: 0 18px 36px var(--rr-panel-shadow);
+}
+
+#${PANEL_ID} .roger-panel-info[open] .roger-panel-info-panel {
+  display: block;
+}
+
+#${PANEL_ID} .roger-panel-info-panel p {
+  margin: 0;
   font-size: 11px;
-  line-height: 1.35;
-  color: var(--fgColor-muted, #656d76);
+  line-height: 1.5;
+  color: var(--rr-panel-muted);
 }
 
 #${PANEL_ID}.roger-panel--rail .roger-panel-button-row,
 #${PANEL_ID}.roger-panel--modal .roger-panel-button-row {
-  margin-top: 2px;
+  margin-top: 4px;
 }
 
 #${PANEL_ID}.roger-panel--rail .roger-panel-button,
 #${PANEL_ID}.roger-panel--modal .roger-panel-button {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(239, 243, 248, 0.98));
-  border-color: rgba(129, 139, 156, 0.42);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.92),
-    0 1px 2px rgba(31, 35, 40, 0.04);
+  width: 100%;
 }
 
 #${PANEL_ID} .roger-panel-status--ok {
-  color: var(--fgColor-success, #1a7f37);
+  color: var(--rr-panel-muted);
 }
 
 #${PANEL_ID} .roger-panel-status--error {
@@ -858,8 +1123,20 @@ function createBrandChip(rootDocument) {
   const chip = rootDocument.createElement('span');
   chip.id = BRAND_CHIP_ID;
   chip.className = BRAND_CHIP_CLASS;
-  chip.textContent = 'Roger';
   chip.setAttribute('aria-label', 'Roger identity');
+  const iconUrl = readRuntimeAssetUrl('static/roger-mark.svg');
+  if (iconUrl) {
+    const icon = rootDocument.createElement('img');
+    icon.className = 'roger-panel-brandicon';
+    icon.src = iconUrl;
+    icon.alt = '';
+    icon.setAttribute('aria-hidden', 'true');
+    chip.appendChild(icon);
+  }
+  const label = rootDocument.createElement('span');
+  label.className = 'roger-panel-brandlabel';
+  label.textContent = 'Roger';
+  chip.appendChild(label);
   return chip;
 }
 
@@ -878,6 +1155,7 @@ function createPanel(context, rootDocument) {
   brandMark.appendChild(createBrandChip(rootDocument));
 
   const headingGroup = rootDocument.createElement('div');
+  headingGroup.className = 'roger-panel-heading-group';
 
   const heading = rootDocument.createElement('h3');
   heading.id = HEADING_ID;
@@ -897,8 +1175,38 @@ function createPanel(context, rootDocument) {
   const badge = rootDocument.createElement('p');
   badge.id = BADGE_ID;
   badge.className = 'roger-panel-badge';
-  brandBar.appendChild(badge);
+
+  const info = rootDocument.createElement('details');
+  info.className = 'roger-panel-info';
+
+  const infoToggle = rootDocument.createElement('summary');
+  infoToggle.className = 'roger-panel-info-toggle';
+  infoToggle.textContent = 'i';
+  infoToggle.setAttribute('aria-label', 'Roger launch details');
+
+  const infoPanel = rootDocument.createElement('div');
+  infoPanel.className = 'roger-panel-info-panel';
+  infoPanel.setAttribute('role', 'note');
+
+  const buildLabel = readExtensionBuildLabel();
+  infoToggle.setAttribute(
+    'title',
+    buildLabel
+      ? `Roger launch details. Extension build ${buildLabel}.`
+      : 'Roger launch details. Extension build unavailable.'
+  );
+
+  const infoText = rootDocument.createElement('p');
+  infoText.id = INFO_TEXT_ID;
+  infoText.textContent = DEFAULT_INFO_MESSAGE;
+
+  infoPanel.appendChild(infoText);
+  info.appendChild(infoToggle);
+  info.appendChild(infoPanel);
+
+  brandBar.appendChild(info);
   panel.appendChild(brandBar);
+  panel.appendChild(badge);
 
   const buttonRow = rootDocument.createElement('div');
   buttonRow.className = 'roger-panel-button-row';
@@ -919,17 +1227,8 @@ function createPanel(context, rootDocument) {
   const status = rootDocument.createElement('p');
   status.id = STATUS_ID;
   status.className = 'roger-panel-status roger-panel-status--ok';
-  status.textContent = 'Ready to launch Roger actions for this pull request.';
+  status.hidden = true;
   panel.appendChild(status);
-
-  const buildLabel = readExtensionBuildLabel();
-  if (buildLabel) {
-    const build = rootDocument.createElement('p');
-    build.id = BUILD_ID;
-    build.className = 'roger-panel-build';
-    build.textContent = `Build ${buildLabel}`;
-    panel.appendChild(build);
-  }
 
   return panel;
 }
@@ -989,7 +1288,8 @@ function ensurePanel(context, rootDocument) {
   if (placement.mode === 'modal' && lastPanelMode !== 'modal') {
     const dialog = rootDocument.getElementById(MODAL_DIALOG_ID);
     openModalDialog(dialog);
-    setStatus(MODAL_FALLBACK_STATUS);
+    clearStatus();
+    setInfoMessage(MODAL_FALLBACK_STATUS);
   }
 
   if (placement.mode !== 'modal' && lastPanelMode === 'modal') {
@@ -1034,6 +1334,8 @@ function refreshPanelForCurrentPage(rootDocument) {
     if (panel) {
       applyActionModel(panel, lastAttentionState);
     }
+    clearStatus();
+    setInfoMessage(DEFAULT_INFO_MESSAGE);
     requestStatusMirror(context);
   }
 }
@@ -1094,6 +1396,7 @@ function triggerLaunch(action, context, button) {
       applyActionModel(panel, lastAttentionState);
     }
     clearAttentionBadge();
+    setInfoMessage('Bridge unavailable in browser context. Open Roger locally and run `rr` manually.');
     setStatus('Bridge unavailable in browser context. Open Roger locally and run rr manually.', true, { revealInline: true });
     return;
   }
@@ -1123,6 +1426,7 @@ function triggerLaunch(action, context, button) {
           applyActionModel(panel, lastAttentionState);
         }
         clearAttentionBadge();
+        setInfoMessage(`Bridge error: ${chrome.runtime.lastError.message}`);
         setStatus(`Bridge error: ${chrome.runtime.lastError.message}`, true, { revealInline: true });
         return;
       }
@@ -1133,6 +1437,7 @@ function triggerLaunch(action, context, button) {
           applyActionModel(panel, lastAttentionState);
         }
         clearAttentionBadge();
+        setInfoMessage('No bridge response. Open Roger locally and run `rr` manually.');
         setStatus('No bridge response. Open Roger locally and run rr manually.', true, { revealInline: true });
         return;
       }
@@ -1143,6 +1448,7 @@ function triggerLaunch(action, context, button) {
           applyActionModel(panel, lastAttentionState);
         }
         clearAttentionBadge();
+        setInfoMessage(appendGuidance(response.message, response.guidance));
         setStatus(appendGuidance(response.message, response.guidance), true, { revealInline: true });
         return;
       }
@@ -1153,6 +1459,7 @@ function triggerLaunch(action, context, button) {
           applyActionModel(panel, lastAttentionState);
         }
         clearAttentionBadge();
+        setInfoMessage('Launched via URL fallback. Open Roger locally for authoritative status.');
         setStatus('Launched via URL fallback. Open Roger locally for authoritative status.', false, { revealInline: true });
         return;
       }
@@ -1163,6 +1470,7 @@ function triggerLaunch(action, context, button) {
           applyActionModel(panel, lastAttentionState);
         }
         setAttentionBadge(response.attention_state, response.freshness_label || null);
+        setInfoMessage(appendGuidance(response.message || 'Launch intent dispatched.', response.guidance));
         setStatus(
           appendGuidance(response.message || 'Launch intent dispatched.', response.guidance),
           false,
@@ -1175,6 +1483,7 @@ function triggerLaunch(action, context, button) {
       if (panel) {
         applyActionModel(panel, lastAttentionState);
       }
+      setInfoMessage(appendGuidance(response.message || 'Launch intent dispatched.', response.guidance));
       setStatus(
         appendGuidance(response.message || 'Launch intent dispatched.', response.guidance),
         false,
@@ -1208,8 +1517,10 @@ if (typeof module !== 'undefined' && module.exports) {
     parsePullRequestContext,
     pickInlineAnchorSelector,
     readExtensionBuildLabel,
+    readRuntimeAssetUrl,
     refreshPanelForCurrentPage,
     resolvePanelPlacement,
+    clearStatus,
     setStatus,
   };
 }

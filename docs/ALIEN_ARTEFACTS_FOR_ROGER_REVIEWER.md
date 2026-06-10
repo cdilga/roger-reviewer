@@ -14,9 +14,12 @@ Roger Reviewer is a local-first PR review system with three surfaces:
 - a TUI-first findings workflow
 - a GitHub browser extension for launch/resume/status
 
-It wraps, but does not replace, an underlying OpenCode session. Every review
-must remain resumable in plain OpenCode if Roger-specific layers are unavailable
-or compacted.
+It wraps, but does not replace, an underlying supported harness session. Roger
+currently treats OpenCode as the strongest first-class continuity path,
+feature-gates GitHub Copilot CLI as a bounded Tier B lane, and keeps
+Codex/Gemini/Claude Code truthful as bounded Tier A lanes. Every review must
+still preserve a real plain-OpenCode fallback if Roger-specific layers are
+unavailable or compacted.
 
 The product is review-first, not auto-fix-first. Its primary job is to generate
 high-quality findings, organize them durably, and route approved outputs back to
@@ -38,7 +41,7 @@ GitHub only after human confirmation.
 The smallest useful v1 should include:
 
 - local review session persistence
-- explicit linkage to underlying OpenCode sessions
+- explicit linkage to underlying supported harness sessions
 - staged review prompt execution
 - structured finding capture and state transitions
 - a session-aware CLI
@@ -54,7 +57,7 @@ Use a shared application core with ports-and-adapters boundaries:
 
 - review domain
 - storage and indexing
-- OpenCode session adapter
+- supported harness/session adapter boundary
 - GitHub adapter
 - CLI surface
 - TUI surface
@@ -62,6 +65,15 @@ Use a shared application core with ports-and-adapters boundaries:
 
 The domain layer owns findings, review runs, prompt stages, approval state, and
 reconciliation logic. UI layers should be thin.
+
+## Artefact 4A: Current Provider Truth Snapshot
+
+- OpenCode is the strongest current first-class continuity path and required
+  fallback/reference harness.
+- GitHub Copilot CLI is authoritative `#1` in the product support order, but
+  the live claim is feature-gated bounded Tier B only.
+- Codex, Gemini, and Claude Code are bounded Tier A live-CLI providers only.
+- Pi-Agent remains planning-only and outside the `0.1.0` live CLI surface.
 
 ## Artefact 5: Critical Risks to Challenge
 
@@ -80,7 +92,8 @@ These are the areas an external model should attack hardest:
 - What exact runtime and component model does FrankenTUI expect?
 - What is the best browser-to-local launch mechanism on the target platforms?
 - What do the brain-dump terms `FPs` and `SA` refer to operationally?
-- What is the stable integration boundary with OpenCode?
+- What is the stable integration boundary for supported harnesses, especially
+  OpenCode as the required fallback/reference path?
 - Which credential actions need Keychain in v1 rather than later?
 
 These are open questions, not places to bluff with fake certainty.
@@ -90,7 +103,7 @@ These are open questions, not places to bluff with fake certainty.
 The next architecture decision records should likely cover:
 
 - ADR 1: shared-language/runtime choice
-- ADR 2: OpenCode session boundary
+- ADR 2: harness/session boundary with explicit OpenCode fallback
 - ADR 3: browser extension launch bridge
 - ADR 4: SQLite/FTS baseline and semantic-search deferral
 - ADR 5: outbound approval and posting model
@@ -136,6 +149,7 @@ Focus on:
 - the daemonless requirement
 - the browser extension to local-app bridge
 - OpenCode fallback realism
+- provider-tier truthfulness and continuity-claim discipline
 - structured finding lifecycle
 - approval and posting safety
 - rollout order and hidden blockers

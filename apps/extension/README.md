@@ -11,16 +11,21 @@ Behavior in this slice:
   registration is missing or broken, launch fails closed with setup guidance
 - bounded status mirror: show a badge only when the bridge returns canonical
   Roger attention state plus a truthful freshness indicator
+- findings affordance: keep `View Findings` hidden until bounded local state
+  says findings are the next truthful focus
 - launch-only honesty: if bounded readback is unavailable or stale, the panel
-  hides badges and points users to local Roger (`rr status`) as source of truth
+  hides badges, avoids findings-state claims, and points users to local Roger
+  (`rr status`) as source of truth through secondary disclosure rather than a
+  permanent inline status paragraph
 - GitHub-native entry seam: prefer inline placement in PR header action regions,
   then render a bounded right-rail pane above reviewers when header placement is
   not coherent, and only then fall back to a page-local modal
-- theme-aware visuals: panel, buttons, status text, and badges derive from
+- theme-aware visuals: panel, buttons, feedback text, and badges derive from
   GitHub/Primer CSS variables so light/dark themes stay legible
 - build identity visibility: popup and injected panel surface the packaged
-  extension build label so local reloads are distinguishable from tagged
-  release builds
+  extension build label through a persistent info disclosure so local reloads
+  are distinguishable from tagged release builds without consuming prime card
+  space
 - no posting/approval controls are present in-extension
 
 UX direction under active implementation:
@@ -51,10 +56,28 @@ Chosen direction: **Walkie-Talkie Relay**.
 - shared token sheet (`static/roger-identity.css`) for consistent metallic
   accent/ink/canvas values across extension surfaces
 - popup shell keeps manual-backup semantics with one primary launch action,
-  demoted findings action, and a persistent build/fallback info affordance
+  conditional findings visibility, and a persistent build/fallback info
+  affordance
+- injected panel reuses the compact walkie-talkie mark in its Roger chip and
+  keeps fallback/build explanation inside the same persistent `(i)` disclosure
 
 Identity assets intentionally avoid mutating posting/approval semantics; they
 decorate existing bounded UX rather than widening extension authority.
 
-Load unpacked in Chrome/Brave/Edge using `apps/extension/manifest.template.json`
-as the manifest source.
+For local rebuild/reload loops, prefer Roger's scripted preload path:
+
+```bash
+scripts/extension/prepare_browser_test_env.sh --browser edge --reset-profile
+```
+
+That helper runs Roger's extension setup/doctor flow against the same dedicated
+profile root, then relaunches the browser with the Roger unpacked extension
+preloaded. For quick relaunches against an already-good dedicated profile, the
+lower-level launcher remains available:
+
+```bash
+scripts/extension/launch_preloaded_browser.sh --browser edge --close-existing
+```
+
+Manual `Load unpacked` in Chrome/Brave/Edge remains a fallback, using
+`apps/extension/manifest.template.json` as the manifest source.

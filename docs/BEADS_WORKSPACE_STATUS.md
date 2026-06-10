@@ -1,16 +1,17 @@
 # Beads Workspace Status
 
-As of 2026-04-15, the Roger Reviewer Linux workspace uses a source-built
-`0.1.40.pinned` as the default `br`, and the live workspace trust story is
-clean again after rebuilding `.beads/beads.db` from canonical
-`.beads/issues.jsonl`.
+As of 2026-04-19, the Roger Reviewer wrapper surface targets a managed
+latest-main binary at `br-main.current` rather than a fixed semantic-version
+pin. The last explicitly revalidated fixed-version baseline remained
+`0.1.40`, but the operational path now favors rebuilding current upstream
+`main` and swapping the managed binary in place.
 
 ## Current state
 
 - default automation path now resolves through
-  `~/.local/bin/br -> ~/.local/bin/br-0.1.40.pinned`
-- `scripts/swarm/resolve_br.sh` and `scripts/swarm/br_pinned.sh` now default to
-  `0.1.40`
+  `~/.local/bin/br -> ~/.local/bin/br-main.current`
+- `scripts/swarm/br_safe.sh` is the single supported wrapper surface and now
+  uses the installed `br` on `PATH` rather than a repo-local path-repair layer
 - the latest official upstream release is still `v0.1.39`
   (published `2026-04-14T21:11:16Z`)
 - Roger now pins a locally built `0.1.40` from upstream `main` commit
@@ -131,11 +132,11 @@ so only the direct parity and integrity checks are evaluated.
   only for read-only queue inspection; do not treat `--no-db` as a safe
   mutation path.
 - The active local `br` path is intentional, but it is not a permanent
-  version-policy claim. Reevaluate future upstream versions explicitly rather
-  than assuming `0.1.40` will stay safe forever.
-- Do not replace the default `br` symlink with a newer upstream build unless it
-  has been repro-verified locally against the same fresh-init matrix and a
-  Roger workspace rebuild test.
+  support claim for arbitrary newer builds. Reevaluate future upstream builds
+  explicitly rather than assuming a newer `main` build is safe forever.
+- Do not treat the managed latest-main path as permission to trust a newer
+  upstream build automatically. Revalidate it locally against the same
+  fresh-init matrix and a Roger workspace rebuild test before widening claims.
 - The pre-repair database files were preserved in
   [`.beads/.manual_repair_20260328_2056`](.beads/.manual_repair_20260328_2056)
   for audit and rollback purposes.

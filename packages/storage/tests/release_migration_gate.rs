@@ -235,26 +235,54 @@ fn seed_prior_schema_store(
                 1_710_000_105_i64,
             ],
         )?;
-        conn.execute(
-            "INSERT INTO outbound_draft_items(
-                id, review_session_id, review_run_id, finding_id, draft_batch_id, repo_id,
-                remote_review_target_id, payload_digest, approval_state, anchor_digest,
-                row_version, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?11)",
-            params![
-                "draft-legacy",
-                "session-legacy",
-                "run-legacy",
-                "finding-legacy",
-                "batch-legacy",
-                "owner/repo",
-                "pr-42",
-                "sha256:payload-legacy",
-                "Approved",
-                "anchor-legacy",
-                1_710_000_105_i64,
-            ],
-        )?;
+        if legacy_schema_version >= 14 {
+            // Schema v14+ stores carry the postable payload columns directly
+            // (added and backfilled by 0014_outbound_postable_payload.sql), so a
+            // truthful prior-schema fixture must populate them.
+            conn.execute(
+                "INSERT INTO outbound_draft_items(
+                    id, review_session_id, review_run_id, finding_id, draft_batch_id, repo_id,
+                    remote_review_target_id, payload_digest, approval_state, anchor_digest,
+                    target_locator, body, row_version, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, ?13, ?13)",
+                params![
+                    "draft-legacy",
+                    "session-legacy",
+                    "run-legacy",
+                    "finding-legacy",
+                    "batch-legacy",
+                    "owner/repo",
+                    "pr-42",
+                    "sha256:payload-legacy",
+                    "Approved",
+                    "anchor-legacy",
+                    "github:owner/repo#42/files#thread-1",
+                    "Please double-check the migration gate.",
+                    1_710_000_105_i64,
+                ],
+            )?;
+        } else {
+            conn.execute(
+                "INSERT INTO outbound_draft_items(
+                    id, review_session_id, review_run_id, finding_id, draft_batch_id, repo_id,
+                    remote_review_target_id, payload_digest, approval_state, anchor_digest,
+                    row_version, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?11)",
+                params![
+                    "draft-legacy",
+                    "session-legacy",
+                    "run-legacy",
+                    "finding-legacy",
+                    "batch-legacy",
+                    "owner/repo",
+                    "pr-42",
+                    "sha256:payload-legacy",
+                    "Approved",
+                    "anchor-legacy",
+                    1_710_000_105_i64,
+                ],
+            )?;
+        }
     }
 
     conn.execute(

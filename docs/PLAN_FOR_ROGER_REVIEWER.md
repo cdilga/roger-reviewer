@@ -523,9 +523,9 @@ web-native.
 **Default direction for non-web local layers: Rust**
 - Session-aware `rr` CLI commands should default to Rust
 - App-core, storage, search, and local orchestration should default to Rust
-- Harness integration should keep GitHub Copilot CLI as the golden-path target
-  and OpenCode as the required fallback/reference path, not an OpenCode-only
-  design
+- Harness integration should keep GitHub Copilot CLI as the highest-priority
+  feature-gated bounded Tier B admission lane and OpenCode as the required
+  fallback/reference path, not an OpenCode-only design
 - GitHub adapter logic may shell out to `gh`, but only behind Roger-owned
   adapter boundaries; agent-facing review communication should stay Roger
   mediated, not raw-`gh` driven
@@ -816,9 +816,11 @@ Important consequences:
 
 ## Session Model
 
-Roger should wrap a supported harness session rather than replace it, with
-GitHub Copilot CLI as the canonical first-class provider target and OpenCode as
-the required fallback/reference path in `0.1.x`.
+Roger should wrap a supported harness session rather than replace it. In
+`0.1.x`, OpenCode is the current first-class continuity path and required
+fallback/reference harness, while GitHub Copilot CLI is the highest-priority
+feature-gated bounded Tier B admission lane rather than a default public live
+path.
 
 Required properties:
 
@@ -863,7 +865,7 @@ Not every provider needs equal status in `0.1.0`.
 
 | Provider | Roger role | `0.1.0` drop-in support | `0.1.0` deeper integration | Direction |
 |----------|------------|-------------------------|----------------------------|-----------|
-| GitHub Copilot CLI | Golden-path first-class provider | Not yet | Planned Tier B target | Authoritative `#1` provider target once verified; must land through the same verified-lifecycle and support-claim rules as every other provider |
+| GitHub Copilot CLI | Feature-gated bounded continuity provider | Yes, behind feature gate | Bounded Tier B | Authoritative `#1` provider in the product-support order, but current live claim is feature-gated bounded Tier B only: verified start, `review_readonly` policy posture, locator/session-id reopen, `rr return`, and honest `ResumeBundle` reseed fallback with no default public live claim |
 | OpenCode | First-class continuity fallback and reference harness | Yes | Yes | Authoritative `#2` provider and current strongest landed continuity path |
 | Codex | Secondary bounded review harness | Yes | Bounded | Authoritative `#3` provider; exposed via `rr review --provider codex`; Tier A only today (no locator reopen or `rr return`) |
 | Gemini | Secondary bounded review harness | Yes | Bounded | Authoritative `#4` provider; exposed via `rr review --provider gemini`; keep Tier A live-CLI claims truthful and do not imply locator reopen or `rr return` |
@@ -877,13 +879,15 @@ Rules:
   Codex, Gemini, then Claude Code
 - that support order is a product hierarchy, not permission to widen live
   claims before proof exists
-- OpenCode remains the strongest currently landed continuity path until the
-  Copilot golden path is fully verified
+- OpenCode remains the strongest current first-class continuity path; Copilot
+  is now feature-gated bounded Tier B and still outside the default public live
+  claim
 - Codex, Gemini, and Claude Code may ship as bounded Tier A live-CLI paths
   without implying Tier B reopen/dropout parity
-- GitHub Copilot CLI is active implementation scope, but it should remain out
-  of live support claims until the verified launch, policy, and continuity path
-  are real
+- GitHub Copilot CLI stays feature-gated bounded Tier B only when Roger can
+  enforce the `review_readonly` policy profile, repo-owned hook/instruction
+  assets, verified start, locator/session-id reopen, `rr return`, and honest
+  `ResumeBundle` reseed fallback
 - Pi-Agent is outside the `0.1.0` support order and remains planning-only until
   a later admission spike proves it belongs in the matrix at all
 - other providers should influence the adapter shape, not the `0.1.0`
@@ -934,10 +938,10 @@ Scope rule for this plan:
 
 `0.1.0` provider intent:
 
-- GitHub Copilot CLI is the first-class golden-path provider target and must
-  land through the same contract as every other provider, with verified launch,
-  transaction boundaries, and support-claim discipline as inseparable parts of
-  that provider slice
+- GitHub Copilot CLI currently occupies the feature-gated bounded Tier B lane:
+  verified launch, `review_readonly` policy posture, locator/session-id reopen,
+  `rr return`, and honest `ResumeBundle` reseed fallback without a default
+  public live claim
 - OpenCode should reach Tier B and remains the required fallback/reference path
 - Codex, Gemini, and Claude Code currently expose bounded Tier A paths in the
   live CLI surface and should be documented literally as such
@@ -1052,9 +1056,12 @@ Minimum expectations:
   live-CLI Tier A path: Roger-owned session/run linkage, prompt intake, raw or
   structured result capture as supported, and truthful `ResumeBundle` reseed
   without claiming locator reopen or `rr return`
-- **GitHub Copilot CLI** is active current-scope provider work, but it must not
-  be described as live support until the verified launch path, policy profile,
-  and continuity story are actually implemented
+- **GitHub Copilot CLI** currently holds the feature-gated bounded Tier B slot:
+  Roger may expose it only when the `review_readonly` policy profile,
+  repo-owned hook/instruction assets, verified launch path, locator/session-id
+  reopen, `rr return`, and honest `ResumeBundle` reseed fallback are all
+  present; otherwise it must narrow back to planned-not-live or repair-needed
+  guidance
 - no provider should be allowed to bypass Roger's core session ledger, findings
   normalization, or approval model
 
@@ -1317,8 +1324,12 @@ Required visibility rules:
 
 - Roger should expose a first-class CLI or TUI command family for draft,
   approval, and posting transitions
-- outbound state should be queryable as at least `drafted`,
-  `awaiting_approval`, `approved`, `posted`, `superseded`, and `invalidated`
+- outbound state should be queryable as at least `awaiting_approval`,
+  `approved`, `posted`, `invalidated`, and `failed`; any superseded variant is
+  represented as `invalidated` plus an explicit invalidation reason
+- status, findings, and TUI queue/inspector projections should expose the same
+  outbound-state vocabulary and keep posting readiness visibly elevated rather
+  than blending mutation-capable actions into passive review state
 - refresh, retarget, or repo-snapshot drift must revoke stale approvals before
   posting is available again
 
@@ -2309,6 +2320,16 @@ Accepted `0.1.0` contract:
   registered `rr` binary can complete a Native Messaging request/response round
   trip as a host process rather than relying only on in-process bridge helper
   calls or manifest presence
+- the canonical automated proof shape for the first extension-loaded browser
+  journey should use a Roger-owned automation harness that can load the unpacked
+  extension into a deterministic Chromium runtime rather than treating branded
+  Edge/Chrome side-loading as the primary automated path
+- branded supported browsers such as Edge, Chrome, and Brave still need named
+  launch smoke and operator-stability coverage, but those runs should stay
+  separate from the deterministic extension-loaded E2E lane
+- real GitHub sacrificial-PR rehearsal belongs in operator-stability or
+  release-candidate validation, not in the deterministic integration or
+  heavyweight-E2E lanes that must remain free of real GitHub mutation
 - `rr extension doctor` should fail closed when any of those checks fail and
   return bounded repair guidance (for example rerun `rr extension setup` for
   normal-path recovery, or use low-level bridge commands only for explicit
@@ -2326,9 +2347,11 @@ hardening after `rr-r3dt`):
 
 - the primary PR-page happy path should feel GitHub-native rather than like a
   floating foreign card
-- the happy path should minimize clicks: the core 3-action set (`Start`,
-  `Resume`, `Findings`) should be available directly on the PR page without
-  forcing a toolbar popup or intermediate launcher when page seams are healthy
+- the happy path should minimize clicks, but launch-tier controls must stay
+  truthful: explicit `Start` and `Resume` actions should be available directly
+  on the PR page without forcing a toolbar popup or intermediate launcher when
+  page seams are healthy, while `Findings` should appear only when bounded
+  local state actually indicates findings-ready focus
 - preferred placement order:
   1. attach Roger entry controls into stable PR-page action seams using GitHub-
      native button styling and spacing comparable to first-party actions
@@ -2365,6 +2388,8 @@ hardening after `rr-r3dt`):
     surface the updated review context instead of a dedicated refresh action
   - infer one primary CTA from session and attention state instead of treating
     every action as equally likely
+  - keep launch-only surfaces honest by hiding findings-focused actions when the
+    bridge cannot truthfully confirm findings-ready state
   - continue guided extension setup automatically when browser-side identity
     registration is observed rather than forcing an extra setup or doctor
     command when Roger can finish truthfully
@@ -2460,9 +2485,11 @@ Candidate features that may remain v2:
 
 The extension should mirror the TUI selectively rather than imitate it fully:
 
-- **Review Home** becomes a PR-local launcher card with `start`, `resume`,
-  `findings`, and `open in Roger`, styled to feel native to GitHub and
-  attached inline to the page when a stable host seam exists
+- **Review Home** becomes a PR-local launcher card with explicit `start` and
+  `resume` actions plus a conditional `findings` action when bounded local
+  state says findings are the next truthful focus; richer `open in Roger` or
+  draft/deep-link verbs remain companion-tier follow-ons rather than default
+  launch-tier claims
 - **Session Overview** becomes a compact status badge or popover showing bounded
   counts such as `new`, `needs follow-up`, `drafted`, and `awaiting approval`
 - **Findings Queue** becomes at most a short teaser list or counts plus a local
@@ -2495,7 +2522,7 @@ Rules:
   recovery surfaces
 - when bridge readback is unavailable, the extension should degrade to truthful
   launch and open-local affordances rather than surfacing a cluster of plumbing
-  commands
+  commands or bluffing findings/draft state in the browser surface
 
 ### Capability tiers driven by bridge strength
 

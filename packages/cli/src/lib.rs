@@ -17,7 +17,7 @@ use roger_app_core::{
     WorkerFindingDetailRequest, WorkerFindingListResponse, WorkerFindingSummary,
     WorkerGatewaySnapshot, WorkerGitHubPosture, WorkerMutationPosture, WorkerOperation,
     WorkerOperationRequestEnvelope, WorkerRecallEnvelope, WorkerSearchMemoryRequest,
-    WorkerSearchMemoryResponse, WorkerStatusSnapshot, WorkerTransportKind,
+    WorkerSearchMemoryResponse, WorkerStageResult, WorkerStatusSnapshot, WorkerTransportKind,
     execute_agent_transport_request, execute_explicit_posting_flow, materialize_search_plan,
     outbound_target_tuple_json, route_harness_command, safe_harness_command_bindings,
     validate_outbound_draft_batch_linkage,
@@ -29,7 +29,7 @@ use roger_config::cli_defaults::{
     DEFAULT_OPENCODE_BIN, ENV_COPILOT_BIN, ENV_OPENCODE_BIN, ENV_STORE_ROOT,
 };
 use roger_config::{ResolvedProviderCapability, ResolvedRoutineSurfaceBaseline};
-use roger_github_adapter::GhCliAdapter;
+use roger_github_adapter::{GhCliAdapter, GitHubAdapterError, ReadSafeGitHubAdapter};
 use roger_session_claude::{ClaudeAdapter, ClaudeSessionPath};
 use roger_session_codex::{CodexAdapter, CodexSessionPath};
 use roger_session_copilot as session_copilot;
@@ -38,13 +38,14 @@ use roger_session_opencode::{
     OpenCodeAdapter, OpenCodeReturnPath, OpenCodeSessionPath, rr_return_to_roger_session,
 };
 use roger_storage::{
-    CreateLaunchAttempt, CreateReviewRun, CreateReviewSession, CreateSessionLaunchBinding,
-    FinalizeExistingSessionLaunchAttempt, FinalizeReviewLaunchAttempt, LaunchAttemptAction,
-    LaunchAttemptState, LaunchSurface, OutboundSurfaceProjection, PriorReviewLookupQuery,
-    PriorReviewRetrievalMode, ResolveSessionLaunchBinding, ResolveSessionLocalRoot,
-    ResolveSessionReentry, ReviewLaunchFinalizationError, RogerStore, SessionBindingResolution,
+    CreateLaunchAttempt, CreateMaterializedFinding, CreateReviewRun, CreateReviewSession,
+    CreateSessionLaunchBinding, CreateWorkerStageResult, FinalizeExistingSessionLaunchAttempt,
+    FinalizeReviewLaunchAttempt, LaunchAttemptAction, LaunchAttemptState, LaunchSurface,
+    OutboundSurfaceProjection, PriorReviewLookupQuery, PriorReviewRetrievalMode,
+    ResolveSessionLaunchBinding, ResolveSessionLocalRoot, ResolveSessionReentry,
+    ReviewLaunchFinalizationError, ReviewSessionRecord, RogerStore, SessionBindingResolution,
     SessionFinderEntry, SessionFinderQuery, SessionLaunchBindingRecord, SessionReentryResolution,
-    StorageError, StorageLayout, UpdateLaunchAttempt,
+    StorageError, StorageLayout, UpdateLaunchAttempt, derive_finding_fingerprint,
 };
 use rusqlite::{Connection as SqliteConnection, OpenFlags};
 use serde::{Serialize, de::DeserializeOwned};
@@ -118,7 +119,9 @@ enum CommandKind {
     Resume,
     Return,
     Sessions,
+    Prs,
     Search,
+    Triage,
     Draft,
     Approve,
     Post,
@@ -142,7 +145,9 @@ impl CommandKind {
             (Self::Resume, false) => "rr resume",
             (Self::Return, _) => "rr return",
             (Self::Sessions, _) => "rr sessions",
+            (Self::Prs, _) => "rr prs",
             (Self::Search, _) => "rr search",
+            (Self::Triage, _) => "rr triage",
             (Self::Draft, _) => "rr draft",
             (Self::Approve, _) => "rr approve",
             (Self::Post, _) => "rr post",
@@ -164,7 +169,9 @@ impl CommandKind {
             Self::Resume => "rr.robot.resume.v1",
             Self::Return => "rr.robot.return.v1",
             Self::Sessions => "rr.robot.sessions.v1",
+            Self::Prs => "rr.robot.prs.v1",
             Self::Search => "rr.robot.search.v1",
+            Self::Triage => "rr.robot.triage.v1",
             Self::Draft => "rr.robot.draft.v1",
             Self::Approve => "rr.robot.approve.v1",
             Self::Post => "rr.robot.post.v1",
@@ -231,6 +238,7 @@ struct ParsedArgs {
     session_id: Option<String>,
     draft_finding_ids: Vec<String>,
     draft_all_findings: bool,
+    triage_state: Option<String>,
     batch_id: Option<String>,
     update_channel: String,
     update_version: Option<String>,
@@ -567,7 +575,9 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         "resume" => CommandKind::Resume,
         "return" => CommandKind::Return,
         "sessions" => CommandKind::Sessions,
+        "prs" => CommandKind::Prs,
         "search" => CommandKind::Search,
+        "triage" => CommandKind::Triage,
         "draft" => CommandKind::Draft,
         "approve" => CommandKind::Approve,
         "post" => CommandKind::Post,
@@ -602,6 +612,7 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         session_id: None,
         draft_finding_ids: Vec::new(),
         draft_all_findings: false,
+        triage_state: None,
         batch_id: None,
         update_channel: "stable".to_owned(),
         update_version: None,
@@ -686,6 +697,13 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
             "--all-findings" => {
                 parsed.draft_all_findings = true;
                 i += 1;
+            }
+            "--state" => {
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--state requires a value".to_owned())?;
+                parsed.triage_state = Some(value.clone());
+                i += 2;
             }
             "--batch" => {
                 let value = argv
@@ -901,12 +919,13 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
                 CommandKind::Status
                     | CommandKind::Findings
                     | CommandKind::Sessions
+                    | CommandKind::Prs
                     | CommandKind::Search
                     | CommandKind::RobotDocs
             ) =>
         {
             return Err(
-                "compact format is only supported for status/findings/sessions/search/robot-docs in this slice".to_owned(),
+                "compact format is only supported for status/findings/sessions/prs/search/robot-docs in this slice".to_owned(),
             );
         }
         RobotFormat::Toon
@@ -951,10 +970,16 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         return Err("--install-root is only supported by rr bridge and rr extension".to_owned());
     }
 
-    if parsed.command != CommandKind::Draft
+    if !matches!(parsed.command, CommandKind::Draft | CommandKind::Triage)
         && (parsed.draft_all_findings || !parsed.draft_finding_ids.is_empty())
     {
-        return Err("--finding/--all-findings are only supported by rr draft".to_owned());
+        return Err(
+            "--finding/--all-findings are only supported by rr draft and rr triage".to_owned(),
+        );
+    }
+
+    if parsed.command != CommandKind::Triage && parsed.triage_state.is_some() {
+        return Err("--state is only supported by rr triage".to_owned());
     }
 
     if !matches!(parsed.command, CommandKind::Approve | CommandKind::Post)
@@ -1018,6 +1043,59 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         {
             return Err(
                 "rr update only supports --repo, --channel, --version, --api-root, --download-root, --target, --yes/-y, --dry-run, and --robot".to_owned(),
+            );
+        }
+    }
+
+    if parsed.command == CommandKind::Triage {
+        if parsed.dry_run {
+            return Err("rr triage does not support --dry-run in this slice".to_owned());
+        }
+        if parsed.draft_all_findings {
+            return Err(
+                "rr triage requires explicit --finding ids; --all-findings is not supported"
+                    .to_owned(),
+            );
+        }
+        if parsed.draft_finding_ids.is_empty() {
+            return Err("rr triage requires at least one --finding <id>".to_owned());
+        }
+        let Some(state) = parsed.triage_state.as_deref() else {
+            return Err(
+                "rr triage requires --state <accepted|ignored|needs_follow_up|resolved>".to_owned(),
+            );
+        };
+        if !matches!(
+            state,
+            "accepted" | "ignored" | "needs_follow_up" | "resolved"
+        ) {
+            return Err(format!(
+                "unsupported --state: {state} (expected accepted, ignored, needs_follow_up, or resolved; new and stale are Roger-derived triage states and cannot be set by the operator)"
+            ));
+        }
+        if !parsed.attention_states.is_empty()
+            || parsed.limit.is_some()
+            || parsed.query_text.is_some()
+            || parsed.query_mode.is_some()
+            || parsed.robot_docs_topic.is_some()
+            || parsed.provider != "opencode"
+            || parsed.bridge_command.is_some()
+            || parsed.extension_command.is_some()
+            || parsed.extension_browser.is_some()
+            || parsed.bridge_extension_id.is_some()
+            || parsed.bridge_binary_path.is_some()
+            || parsed.bridge_install_root.is_some()
+            || parsed.bridge_output_dir.is_some()
+            || parsed.update_channel != "stable"
+            || parsed.update_version.is_some()
+            || parsed.update_api_root.is_some()
+            || parsed.update_download_root.is_some()
+            || parsed.update_target.is_some()
+            || parsed.update_yes
+        {
+            return Err(
+                "rr triage only supports --repo, --pr, --session, --finding, --state, and --robot"
+                    .to_owned(),
             );
         }
     }
@@ -1235,6 +1313,43 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         }
     }
 
+    if parsed.command == CommandKind::Prs {
+        if parsed.dry_run {
+            return Err("rr prs does not support --dry-run in this slice".to_owned());
+        }
+        if parsed.pr.is_some()
+            || parsed.session_id.is_some()
+            || !parsed.attention_states.is_empty()
+            || parsed.query_text.is_some()
+            || parsed.query_mode.is_some()
+            || parsed.robot_docs_topic.is_some()
+            || parsed.provider != "opencode"
+            || parsed.bridge_command.is_some()
+            || parsed.extension_command.is_some()
+            || parsed.extension_browser.is_some()
+            || parsed.bridge_extension_id.is_some()
+            || parsed.bridge_binary_path.is_some()
+            || parsed.bridge_install_root.is_some()
+            || parsed.bridge_output_dir.is_some()
+            || parsed.update_channel != "stable"
+            || parsed.update_version.is_some()
+            || parsed.update_api_root.is_some()
+            || parsed.update_download_root.is_some()
+            || parsed.update_target.is_some()
+            || parsed.update_yes
+            || parsed.draft_all_findings
+            || !parsed.draft_finding_ids.is_empty()
+            || parsed.batch_id.is_some()
+            || parsed.agent_operation.is_some()
+            || parsed.agent_task_file.is_some()
+            || parsed.agent_request_file.is_some()
+            || parsed.agent_context_file.is_some()
+            || parsed.agent_capability_file.is_some()
+        {
+            return Err("rr prs only supports --repo, --limit, and --robot".to_owned());
+        }
+    }
+
     Ok(parsed)
 }
 
@@ -1255,7 +1370,9 @@ fn execute_command(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
         CommandKind::Resume => handle_resume(parsed, runtime),
         CommandKind::Return => handle_return(parsed, runtime),
         CommandKind::Sessions => handle_sessions(parsed, runtime),
+        CommandKind::Prs => handle_prs(parsed, runtime),
         CommandKind::Search => handle_search(parsed, runtime),
+        CommandKind::Triage => handle_triage(parsed, runtime),
         CommandKind::Draft => handle_draft(parsed, runtime),
         CommandKind::Approve => handle_approve(parsed, runtime),
         CommandKind::Post => handle_post(parsed, runtime),
@@ -2048,16 +2165,147 @@ fn handle_agent(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             }
         };
 
-    agent_command_response(execute_agent_transport_request(
-        &AgentTransportRequestEnvelope {
-            schema_id: AGENT_TRANSPORT_REQUEST_SCHEMA_V1.to_owned(),
-            review_task: task,
-            worker_context,
-            capability_profile,
-            operation_request: request,
-            gateway_snapshot,
-        },
-    ))
+    let envelope = execute_agent_transport_request(&AgentTransportRequestEnvelope {
+        schema_id: AGENT_TRANSPORT_REQUEST_SCHEMA_V1.to_owned(),
+        review_task: task.clone(),
+        worker_context,
+        capability_profile,
+        operation_request: request.clone(),
+        gateway_snapshot,
+    });
+
+    // An accepted stage result must be durable before Roger reports
+    // acceptance: record the audit row and materialize canonical Finding rows
+    // from the validated findings pack so readback and outbound drafting see
+    // the worker's output.
+    if envelope.status == AgentTransportResponseStatus::Succeeded
+        && request.operation == "worker.submit_stage_result"
+        && let Err(message) = persist_accepted_stage_result(&store, &session, &task, &request)
+    {
+        return agent_error_response(AgentTransportErrorCode::ValidationFailed, message);
+    }
+
+    agent_command_response(envelope)
+}
+
+fn resolve_copilot_home() -> Option<PathBuf> {
+    if let Ok(value) = std::env::var(session_copilot::COPILOT_HOME_ENV) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+    std::env::var("HOME")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(|home| PathBuf::from(home).join(".copilot"))
+}
+
+fn persist_accepted_stage_result(
+    store: &RogerStore,
+    session: &ReviewSessionRecord,
+    task: &ReviewTask,
+    request: &WorkerOperationRequestEnvelope,
+) -> Result<(), String> {
+    let Some(payload) = request.payload.clone() else {
+        return Err("accepted stage result is missing its payload".to_owned());
+    };
+    let mut result: WorkerStageResult = serde_json::from_value(payload)
+        .map_err(|err| format!("failed to decode accepted stage result payload: {err}"))?;
+
+    // The worker-supplied invocation id is unverified; the audit table only
+    // links invocation rows Roger itself recorded, so drop unknown ids rather
+    // than fail the whole acceptance on the foreign key.
+    if let Some(invocation_id) = result.worker_invocation_id.clone() {
+        let known = store
+            .worker_invocations_for_run(&result.review_session_id, &result.review_run_id)
+            .map_err(|err| format!("failed to load worker invocations: {err}"))?
+            .iter()
+            .any(|record| record.id == invocation_id);
+        if !known {
+            result.worker_invocation_id = None;
+        }
+    }
+
+    store
+        .record_worker_stage_result(CreateWorkerStageResult {
+            result: &result,
+            submitted_result_artifact_id: None,
+            structured_findings_pack_artifact_id: None,
+        })
+        .map_err(|err| format!("failed to record accepted worker stage result: {err}"))?;
+
+    let findings = result
+        .structured_findings_pack
+        .as_ref()
+        .and_then(|pack| pack.get("findings"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for finding in &findings {
+        let title = finding
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if title.is_empty() {
+            // Repair posture: an entry without a usable claim title cannot
+            // become a canonical Finding; the raw pack stays in the audit row.
+            continue;
+        }
+        let summary = finding
+            .get("normalized_summary")
+            .or_else(|| finding.get("summary"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let severity = finding
+            .get("severity")
+            .and_then(Value::as_str)
+            .unwrap_or("medium");
+        let confidence = finding
+            .get("confidence")
+            .and_then(Value::as_str)
+            .unwrap_or("medium");
+        let primary_evidence_path = finding
+            .get("code_evidence")
+            .and_then(Value::as_array)
+            .and_then(|entries| entries.first())
+            .and_then(|entry| entry.get("repo_rel_path"))
+            .and_then(Value::as_str);
+        let fingerprint = finding
+            .get("fingerprint")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                derive_finding_fingerprint(
+                    &session.review_target.repository,
+                    session.review_target.pull_request_number,
+                    title,
+                    summary,
+                    primary_evidence_path,
+                )
+            });
+        let finding_id = next_id("finding");
+        store
+            .upsert_materialized_finding(CreateMaterializedFinding {
+                id: &finding_id,
+                session_id: &task.review_session_id,
+                review_run_id: &task.review_run_id,
+                stage: &result.stage,
+                fingerprint: &fingerprint,
+                title,
+                normalized_summary: summary,
+                severity,
+                confidence,
+                triage_state: "new",
+                outbound_state: "not_drafted",
+            })
+            .map_err(|err| format!("failed to materialize finding from stage result: {err}"))?;
+    }
+    Ok(())
 }
 
 fn parse_supported_browser(value: &str) -> Result<SupportedBrowser, String> {
@@ -2850,6 +3098,57 @@ fn handle_doctor(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 (),
             );
         }
+
+        // Repo-level hooks only run once merged into the reviewed repo's
+        // default branch, so verified start relies on the Roger-owned
+        // user-level hooks instead. rr review installs/refreshes them before
+        // every launch; doctor reports their current state truthfully.
+        match resolve_copilot_home() {
+            Some(copilot_home) => {
+                let hook_status = session_copilot::verify_user_level_hooks(&copilot_home);
+                let (status, reason_code) = match hook_status.state {
+                    session_copilot::UserLevelHookState::Installed => ("verified", None),
+                    session_copilot::UserLevelHookState::Missing => {
+                        ("deferred", Some("user_level_hooks_not_installed"))
+                    }
+                    session_copilot::UserLevelHookState::Stale => {
+                        ("deferred", Some("user_level_hooks_stale"))
+                    }
+                };
+                if status != "verified" {
+                    repair_actions.insert(
+                        "run rr review --provider copilot to install/refresh the Roger user-level Copilot hooks"
+                            .to_owned(),
+                        (),
+                    );
+                }
+                push_check(
+                    "copilot_user_level_hooks_installed",
+                    "Roger user-level Copilot hooks are installed and current",
+                    status,
+                    reason_code,
+                    json!({
+                        "config_path": hook_status.config_path,
+                        "script_dir": hook_status.script_dir,
+                        "stale_entries": hook_status.stale_entries,
+                    }),
+                );
+            }
+            None => {
+                push_check(
+                    "copilot_user_level_hooks_installed",
+                    "Roger user-level Copilot hooks are installed and current",
+                    "blocked",
+                    Some("copilot_home_unresolvable"),
+                    json!({}),
+                );
+                repair_actions.insert(
+                    "set COPILOT_HOME or HOME so Roger can manage its user-level Copilot hooks"
+                        .to_owned(),
+                    (),
+                );
+            }
+        }
     }
 
     push_check(
@@ -3198,6 +3497,35 @@ fn extension_profile_launch_hint(
         profile_root.display(),
         package_dir,
         package_dir
+    )
+}
+
+fn shell_quote_arg(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_owned();
+    }
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn extension_guided_browser_script_path(workspace_root: &Path) -> PathBuf {
+    workspace_root.join("scripts/extension/launch_preloaded_browser.sh")
+}
+
+fn extension_guided_browser_command(
+    workspace_root: &Path,
+    browser: &SupportedBrowser,
+    profile_root: &Path,
+    package_dir: &str,
+    start_url: &str,
+) -> String {
+    let script_path = extension_guided_browser_script_path(workspace_root);
+    format!(
+        "{} --browser {} --profile-root {} --package-dir {} --start-url {}",
+        shell_quote_arg(&script_path.to_string_lossy()),
+        shell_quote_arg(supported_browser_label(browser.clone())),
+        shell_quote_arg(&profile_root.to_string_lossy()),
+        shell_quote_arg(package_dir),
+        shell_quote_arg(start_url),
     )
 }
 
@@ -3643,6 +3971,13 @@ fn handle_extension_setup(
         package_dir
     );
     let guided_profile_root = extension_guided_profile_root(runtime, &browser);
+    let guided_browser_command = extension_guided_browser_command(
+        workspace_root,
+        &browser,
+        &guided_profile_root,
+        &package_dir,
+        extension_browser_url(browser.clone()),
+    );
     let profile_hint_step =
         extension_profile_launch_hint(&browser, &guided_profile_root, &package_dir);
 
@@ -3667,6 +4002,10 @@ fn handle_extension_setup(
                     .to_string_lossy()
                     .to_string(),
                 "guided_profile_root": guided_profile_root.to_string_lossy().to_string(),
+                "guided_browser_script_path": extension_guided_browser_script_path(workspace_root)
+                    .to_string_lossy()
+                    .to_string(),
+                "guided_browser_command": guided_browser_command,
                 "registration_event": "browser_profile_identity_registered",
                 "registration_wait_budget_ms": registration_wait_budget_ms,
                 "manual_browser_step": load_step,
@@ -3679,8 +4018,13 @@ fn handle_extension_setup(
                     .to_owned(),
             ],
             repair_actions: vec![
-                load_step,
+                guided_browser_command,
+                format!(
+                    "rerun rr extension setup --browser {} after the guided browser launch",
+                    supported_browser_label(browser.clone())
+                ),
                 profile_hint_step,
+                load_step,
                 "reload the browser extension while rr extension setup is running; if setup exits blocked, rerun rr extension setup"
                     .to_owned(),
                 "if identity is still missing, this build still requires a repair/dev override via RR_BRIDGE_EXTENSION_ID or rr bridge install --extension-id <id>"
@@ -3790,7 +4134,7 @@ fn handle_extension_setup(
     }
     if extension_id_source == "packaged_manifest_key" {
         warnings.push(
-            "Roger derived a deterministic extension id from the packaged manifest key; load or reload the unpacked extension in the target browser profile before the first live PR-page launch."
+            "Roger derived a deterministic extension id from the packaged manifest key; use the guided browser launch command (or manually load/reload the unpacked extension) before the first live PR-page launch."
                 .to_owned(),
         );
     }
@@ -3800,7 +4144,8 @@ fn handle_extension_setup(
         supported_browser_label(browser.clone())
     )];
     if extension_id_source == "packaged_manifest_key" {
-        repair_actions.insert(0, load_step.clone());
+        repair_actions.insert(0, guided_browser_command.clone());
+        repair_actions.insert(1, load_step.clone());
     }
 
     CommandResponse {
@@ -3814,6 +4159,11 @@ fn handle_extension_setup(
             "registration_wait_budget_ms": registration_wait_budget_ms,
             "registration_observed_during_setup_wait": observed_during_setup_wait,
             "manual_browser_step": load_step,
+            "guided_profile_root": guided_profile_root.to_string_lossy().to_string(),
+            "guided_browser_script_path": extension_guided_browser_script_path(workspace_root)
+                .to_string_lossy()
+                .to_string(),
+            "guided_browser_command": guided_browser_command,
             "install_root": install_root.to_string_lossy().to_string(),
             "host_binary": launcher_path.to_string_lossy().to_string(),
             "bridge_host_binary": bridge_binary.to_string_lossy().to_string(),
@@ -3841,6 +4191,14 @@ fn handle_extension_doctor(
         Ok(path) => path,
         Err(err) => return error_response(err),
     };
+    let guided_profile_root = extension_guided_profile_root(runtime, &browser);
+    let guided_browser_command = extension_guided_browser_command(
+        workspace_root,
+        &browser,
+        &guided_profile_root,
+        &package_dir.to_string_lossy(),
+        extension_browser_url(browser.clone()),
+    );
     let discovered_identity = discover_explicit_extension_id(parsed)
         .or_else(|| {
             discover_extension_id_from_browser_profiles(&browser, runtime, &package_dir)
@@ -3936,6 +4294,7 @@ fn handle_extension_doctor(
                 "extension doctor did not observe browser-side extension identity registration"
                     .to_owned(),
                 vec![
+                    guided_browser_command.clone(),
                     format!("rerun rr extension setup --browser {browser_label}"),
                     format!(
                         "open {} and reload the unpacked extension, then rerun setup",
@@ -3996,6 +4355,11 @@ fn handle_extension_doctor(
                 "reason_code": reason_code,
                 "browser": browser_label,
                 "package_dir": package_dir.to_string_lossy().to_string(),
+                "guided_profile_root": guided_profile_root.to_string_lossy().to_string(),
+                "guided_browser_script_path": extension_guided_browser_script_path(workspace_root)
+                    .to_string_lossy()
+                    .to_string(),
+                "guided_browser_command": guided_browser_command,
                 "install_root": install_root.to_string_lossy().to_string(),
                 "checks": checks,
             }),
@@ -4011,6 +4375,11 @@ fn handle_extension_doctor(
             "subcommand": "doctor",
             "browser": browser_label,
             "package_dir": package_dir.to_string_lossy().to_string(),
+            "guided_profile_root": guided_profile_root.to_string_lossy().to_string(),
+            "guided_browser_script_path": extension_guided_browser_script_path(workspace_root)
+                .to_string_lossy()
+                .to_string(),
+            "guided_browser_command": guided_browser_command,
             "install_root": install_root.to_string_lossy().to_string(),
             "extension_id": extension_id,
             "extension_id_source": extension_id_source,
@@ -4926,6 +5295,43 @@ fn launch_copilot_session(
                 std::env::var(ENV_COPILOT_BIN)
                     .unwrap_or_else(|_| session_copilot::DEFAULT_COPILOT_BIN.to_owned())
             });
+
+    // Copilot CLI only honors repo-level .github/hooks once they are merged
+    // into the reviewed repo's default branch, which Roger cannot require of
+    // arbitrary review targets. Verified start depends on the session-start
+    // hook, so install/refresh the Roger-owned user-level hook assets before
+    // every launch and fail closed if that is impossible.
+    if let Some(copilot_home) = resolve_copilot_home() {
+        session_copilot::install_user_level_hooks(&copilot_home).map_err(|err| {
+            CopilotLaunchError {
+                state: LaunchAttemptState::FailedSpawn,
+                reason_code: "user_level_hook_install_failed",
+                detail: format!(
+                    "failed to install Roger user-level Copilot hooks under {}: {err}",
+                    copilot_home.display()
+                ),
+                repair_actions: vec![format!(
+                    "repair filesystem permissions for {} and re-run rr review",
+                    copilot_home.display()
+                )],
+                extra_data: json!({
+                    "copilot_home": copilot_home.to_string_lossy(),
+                }),
+            }
+        })?;
+    } else {
+        return Err(CopilotLaunchError {
+            state: LaunchAttemptState::FailedSpawn,
+            reason_code: "copilot_home_unresolvable",
+            detail: "cannot resolve the Copilot home directory for Roger hook installation"
+                .to_owned(),
+            repair_actions: vec![
+                "set COPILOT_HOME or HOME so Roger can install its user-level Copilot hooks"
+                    .to_owned(),
+            ],
+            extra_data: json!({}),
+        });
+    }
 
     let output = ProcessCommand::new(&copilot_binary_path)
         .args(command.iter().skip(1))
@@ -7256,6 +7662,259 @@ fn handle_sessions(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
     }
 }
 
+const PRS_QUEUE_DEFAULT_PROVIDER: &str = "opencode";
+
+/// Derive the truthful review-queue state for one open PR from the joined
+/// local session state. Outbound evidence (posted/drafted) wins over the
+/// persisted attention state; unrecognized attention states are surfaced
+/// as-is instead of being guessed into a bucket.
+fn derive_prs_queue_state(
+    attention_state: &str,
+    draft_count: i64,
+    posted_action_count: i64,
+) -> String {
+    if posted_action_count > 0 {
+        return "posted".to_owned();
+    }
+    if draft_count > 0 {
+        return "drafted".to_owned();
+    }
+    match attention_state {
+        "awaiting_user_input" | "refresh_recommended" | "review_failed"
+        | "outbound_approval_required" => "needs_attention".to_owned(),
+        "review_launched" | "review_resumed" | "awaiting_return" | "returned_to_roger" => {
+            "in_review".to_owned()
+        }
+        other => other.to_owned(),
+    }
+}
+
+fn prs_queue_next_command(roger_state: &str, pr_number: u64) -> String {
+    if roger_state == "not_started" {
+        format!("rr review --pr {pr_number} --provider {PRS_QUEUE_DEFAULT_PROVIDER}")
+    } else {
+        format!("rr resume --pr {pr_number}")
+    }
+}
+
+fn handle_prs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
+    let Some(repository) = resolve_repository(parsed.repo.clone(), &runtime.cwd) else {
+        return blocked_response(
+            "repo context inference failed; rr prs needs a concrete repository".to_owned(),
+            vec![
+                "pass --repo owner/repo".to_owned(),
+                "or run rr prs inside a git repo with a GitHub remote.origin.url".to_owned(),
+            ],
+            json!({"reason_code": "repo_context_missing"}),
+        );
+    };
+
+    let Some((owner, repo_name)) = repository.split_once('/') else {
+        return blocked_response(
+            format!("repository slug is not in owner/repo form: {repository}"),
+            vec!["pass --repo owner/repo".to_owned()],
+            json!({"reason_code": "repo_slug_invalid", "repository": repository}),
+        );
+    };
+
+    let store = match open_store_or_response(runtime, "rr prs") {
+        Ok(store) => store,
+        Err(response) => return response,
+    };
+
+    let limit = parsed.limit.unwrap_or(25).min(100);
+    let adapter = GhCliAdapter::new();
+    let open_prs = match adapter.list_open_pull_requests(owner, repo_name, limit) {
+        Ok(mut open_prs) => {
+            open_prs.truncate(limit);
+            open_prs
+        }
+        Err(GitHubAdapterError::GhNotFound) => {
+            return blocked_response(
+                "rr prs requires the GitHub CLI (gh), which was not found or not executable"
+                    .to_owned(),
+                vec![
+                    "install the GitHub CLI (gh)".to_owned(),
+                    "run gh auth login to authenticate".to_owned(),
+                ],
+                json!({
+                    "reason_code": "gh_unavailable",
+                    "adapter_error": GitHubAdapterError::GhNotFound.to_string(),
+                    "repository": repository,
+                }),
+            );
+        }
+        Err(err @ GitHubAdapterError::GhCommandFailed { .. }) => {
+            return blocked_response(
+                format!("rr prs could not list open pull requests for {repository}: {err}"),
+                vec![
+                    "run gh auth status to verify GitHub CLI authentication".to_owned(),
+                    "run gh auth login if gh is not authenticated".to_owned(),
+                    format!("verify the repository slug {repository} is correct and reachable"),
+                ],
+                json!({
+                    "reason_code": "gh_command_failed",
+                    "adapter_error": err.to_string(),
+                    "repository": repository,
+                }),
+            );
+        }
+        Err(err) => {
+            return error_response(format!(
+                "failed to list open pull requests for {repository}: {err}"
+            ));
+        }
+    };
+
+    let mut items = Vec::with_capacity(open_prs.len());
+    for pr in &open_prs {
+        let sessions = match store.session_finder(SessionFinderQuery {
+            repository: Some(repository.clone()),
+            pull_request_number: Some(pr.number),
+            attention_states: Vec::new(),
+            limit: 1,
+        }) {
+            Ok(sessions) => sessions,
+            Err(err) => {
+                return error_response(format!(
+                    "failed to resolve local session state for PR #{}: {err}",
+                    pr.number
+                ));
+            }
+        };
+
+        let (roger_state, session_id) = match sessions.first() {
+            Some(entry) => {
+                let overview = match store.session_overview(&entry.session_id) {
+                    Ok(overview) => overview,
+                    Err(err) => {
+                        return error_response(format!(
+                            "failed to load session overview for {}: {err}",
+                            entry.session_id
+                        ));
+                    }
+                };
+                (
+                    derive_prs_queue_state(
+                        &entry.attention_state,
+                        overview.draft_count,
+                        overview.posted_action_count,
+                    ),
+                    Some(entry.session_id.clone()),
+                )
+            }
+            None => ("not_started".to_owned(), None),
+        };
+
+        let next_command = prs_queue_next_command(&roger_state, pr.number);
+        items.push(json!({
+            "pr_number": pr.number,
+            "title": pr.title,
+            "author": pr.author,
+            "is_draft": pr.is_draft,
+            "head_ref": pr.head_ref,
+            "updated_at": pr.updated_at,
+            "url": pr.url,
+            "roger_state": roger_state,
+            "session_id": session_id,
+            "next_command": next_command,
+        }));
+    }
+
+    let count = items.len();
+    let outcome = if count == 0 {
+        OutcomeKind::Empty
+    } else {
+        OutcomeKind::Complete
+    };
+    let message = if count == 0 {
+        format!("no open pull requests found for {repository}")
+    } else {
+        format!("loaded {count} open pull requests for {repository}")
+    };
+
+    CommandResponse {
+        outcome,
+        data: json!({
+            "repository": repository,
+            "items": items,
+            "count": count,
+            "filters_applied": {
+                "repository": repository,
+                "limit": limit,
+            }
+        }),
+        warnings: Vec::new(),
+        repair_actions: Vec::new(),
+        message,
+    }
+}
+
+fn render_prs_table(data: &Value) -> String {
+    let Some(items) = data.get("items").and_then(Value::as_array) else {
+        return String::new();
+    };
+    if items.is_empty() {
+        return String::new();
+    }
+
+    let header = ["PR", "STATE", "DRAFT", "AUTHOR", "UPDATED", "TITLE", "NEXT"];
+    let mut rows = Vec::with_capacity(items.len());
+    for item in items {
+        let text = |key: &str| {
+            item.get(key)
+                .and_then(Value::as_str)
+                .unwrap_or("-")
+                .to_owned()
+        };
+        rows.push([
+            item.get("pr_number")
+                .and_then(Value::as_u64)
+                .map(|number| format!("#{number}"))
+                .unwrap_or_else(|| "-".to_owned()),
+            text("roger_state"),
+            if item.get("is_draft").and_then(Value::as_bool) == Some(true) {
+                "yes".to_owned()
+            } else {
+                "no".to_owned()
+            },
+            text("author"),
+            text("updated_at"),
+            text("title"),
+            text("next_command"),
+        ]);
+    }
+
+    let mut widths = header.map(str::len);
+    for row in &rows {
+        for (index, cell) in row.iter().enumerate() {
+            widths[index] = widths[index].max(cell.len());
+        }
+    }
+
+    let render_row = |cells: &[String]| {
+        let mut line = String::new();
+        for (index, cell) in cells.iter().enumerate() {
+            if index > 0 {
+                line.push_str("  ");
+            }
+            if index + 1 == cells.len() {
+                line.push_str(cell);
+            } else {
+                line.push_str(&format!("{cell:<width$}", width = widths[index]));
+            }
+        }
+        line.push('\n');
+        line
+    };
+
+    let mut table = render_row(&header.map(str::to_owned));
+    for row in &rows {
+        table.push_str(&render_row(row.as_slice()));
+    }
+    table
+}
+
 fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let Some(query_text) = parsed
         .query_text
@@ -9044,6 +9703,7 @@ fn handle_robot_docs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRespon
                 json!({"command": "rr init --robot", "purpose": "bootstrap Roger-owned local store and marker state; provider auth/install preflight remains a separate follow-up surface"}),
                 json!({"command": "rr doctor --provider <name> --robot", "purpose": "provider-aware preflight for local bootstrap, binary presence, policy/profile resolution, and deferred first-launch checks"}),
                 json!({"command": "rr sessions --robot", "purpose": "global session finder"}),
+                json!({"command": "rr prs --robot", "purpose": "read-only review queue of open pull requests joined with local Roger session state"}),
                 json!({"command": "rr findings --robot", "purpose": "structured findings list"}),
                 json!({"command": "rr search --query <text> --query-mode recall --robot", "purpose": "prior-review lookup"}),
                 json!({"command": "rr draft --session <id> --finding <finding-id> --robot", "purpose": "materialize local outbound drafts bound to the current review target without posting to GitHub"}),
@@ -9167,8 +9827,10 @@ fn handle_robot_docs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRespon
                 json!({"command": "rr init", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr doctor", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr sessions", "required_formats": ["json"], "optional_formats": ["compact"]}),
+                json!({"command": "rr prs", "required_formats": ["json"], "optional_formats": ["compact"]}),
                 json!({"command": "rr findings", "required_formats": ["json"], "optional_formats": ["compact"]}),
                 json!({"command": "rr search", "required_formats": ["json"], "optional_formats": ["compact"]}),
+                json!({"command": "rr triage", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr draft", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr approve", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr post", "required_formats": ["json"], "optional_formats": []}),
@@ -9194,6 +9856,28 @@ fn handle_robot_docs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRespon
                 json!({"command": "rr robot-docs commands", "required_formats": ["json"], "optional_formats": ["compact"]}),
                 json!({"command": "rr robot-docs schemas", "required_formats": ["json"], "optional_formats": ["compact"]}),
                 json!({"command": "rr robot-docs workflows", "required_formats": ["json"], "optional_formats": ["compact"]}),
+                json!({
+                    "command": "rr agent <operation>",
+                    "surface": "dedicated_worker_transport",
+                    "separate_from_robot": true,
+                    "required_formats": ["json"],
+                    "optional_formats": [],
+                    "request_schema_id": AGENT_TRANSPORT_REQUEST_SCHEMA_V1,
+                    "response_schema_id": AGENT_TRANSPORT_RESPONSE_SCHEMA_V1,
+                    "supported_operations": [
+                        "worker.get_review_context",
+                        "worker.search_memory",
+                        "worker.list_findings",
+                        "worker.get_finding_detail",
+                        "worker.get_artifact_excerpt",
+                        "worker.get_status",
+                        "worker.submit_stage_result",
+                        "worker.request_clarification",
+                        "worker.request_memory_review",
+                        "worker.propose_follow_up"
+                    ],
+                    "notes": "rr agent is the dedicated in-session worker transport; it rejects --robot and is not part of the operator robot shortlist"
+                }),
             ],
             "0.1.0",
         ),
@@ -9205,7 +9889,9 @@ fn handle_robot_docs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRespon
                 json!({"command": "rr resume", "schema_id": "rr.robot.resume.v1"}),
                 json!({"command": "rr return", "schema_id": "rr.robot.return.v1"}),
                 json!({"command": "rr sessions", "schema_id": "rr.robot.sessions.v1"}),
+                json!({"command": "rr prs", "schema_id": "rr.robot.prs.v1"}),
                 json!({"command": "rr search", "schema_id": "rr.robot.search.v1"}),
+                json!({"command": "rr triage", "schema_id": "rr.robot.triage.v1"}),
                 json!({"command": "rr draft", "schema_id": "rr.robot.draft.v1"}),
                 json!({"command": "rr approve", "schema_id": "rr.robot.approve.v1"}),
                 json!({"command": "rr post", "schema_id": "rr.robot.post.v1"}),
@@ -9222,10 +9908,11 @@ fn handle_robot_docs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRespon
         "workflows" => (
             vec![
                 json!({"name": "resume_loop", "steps": ["rr sessions --robot", "rr resume --session <id> --robot", "rr findings --session <id> --robot"], "notes": "There is no standalone refresh action. Readback surfaces expose persisted attention state and repair guidance; re-entry surfaces remain the place where Roger can safely reconcile stale review context."}),
+                json!({"name": "review_queue", "steps": ["rr prs --robot", "rr review --pr <n> --provider <p> --robot"], "notes": "rr prs is read-only: it lists open pull requests via the GitHub adapter and joins each one with persisted local Roger session state. It never posts to GitHub and never mutates sessions or the store."}),
                 json!({"name": "search_followup", "steps": ["rr search --query <text> --query-mode recall --robot", "rr status --session <id> --robot"]}),
-                json!({"name": "local_outbound_draft", "steps": ["rr findings --session <id> --robot", "rr draft --session <id> --finding <finding-id> [--finding <finding-id>] --robot", "rr status --session <id> --robot"], "notes": "rr draft materializes local Roger-owned draft batches only. It does not approve or post anything to GitHub, and it fails closed if the session target or persisted review state is stale."}),
-                json!({"name": "local_outbound_approve", "steps": ["rr findings --session <id> --robot", "rr draft --session <id> --finding <finding-id> [--finding <finding-id>] --robot", "rr approve --session <id> --batch <draft-batch-id> --robot", "rr status --session <id> --robot"], "notes": "rr approve records a local approval token for one exact stored batch payload and target tuple. It remains local-only and blocks when drift or invalidation revoked approval eligibility."}),
-                json!({"name": "local_outbound_post", "steps": ["rr findings --session <id> --robot", "rr draft --session <id> --finding <finding-id> [--finding <finding-id>] --robot", "rr approve --session <id> --batch <draft-batch-id> --robot", "rr post --session <id> --batch <draft-batch-id> --robot", "rr status --session <id> --robot"], "notes": "rr post executes only one exact approved stored batch on the bound target. It re-verifies approval and payload binding before posting, records immutable posting lineage, and surfaces partial failures explicitly."}),
+                json!({"name": "local_outbound_draft", "steps": ["rr findings --session <id> --robot", "rr triage --session <id> --finding <finding-id> --state accepted --robot", "rr draft --session <id> --finding <finding-id> [--finding <finding-id>] --robot", "rr status --session <id> --robot"], "notes": "rr draft materializes local Roger-owned draft batches only. It requires findings triaged to accepted (record the decision with rr triage first), does not approve or post anything to GitHub, and fails closed if the session target or persisted review state is stale."}),
+                json!({"name": "local_outbound_approve", "steps": ["rr findings --session <id> --robot", "rr triage --session <id> --finding <finding-id> --state accepted --robot", "rr draft --session <id> --finding <finding-id> [--finding <finding-id>] --robot", "rr approve --session <id> --batch <draft-batch-id> --robot", "rr status --session <id> --robot"], "notes": "rr approve records a local approval token for one exact stored batch payload and target tuple. It remains local-only and blocks when drift or invalidation revoked approval eligibility."}),
+                json!({"name": "local_outbound_post", "steps": ["rr findings --session <id> --robot", "rr triage --session <id> --finding <finding-id> --state accepted --robot", "rr draft --session <id> --finding <finding-id> [--finding <finding-id>] --robot", "rr approve --session <id> --batch <draft-batch-id> --robot", "rr post --session <id> --batch <draft-batch-id> --robot", "rr status --session <id> --robot"], "notes": "rr post executes only one exact approved stored batch on the bound target. It re-verifies approval and payload binding before posting, records immutable posting lineage, and surfaces partial failures explicitly."}),
                 json!({
                     "name": "inside_roger_safe_subset",
                     "context": "inside_roger",
@@ -9258,6 +9945,143 @@ fn handle_robot_docs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRespon
         warnings: Vec::new(),
         repair_actions: Vec::new(),
         message: format!("robot docs loaded for topic {topic}"),
+    }
+}
+
+fn handle_triage(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
+    let store = match open_store_or_response(runtime, "rr triage") {
+        Ok(store) => store,
+        Err(response) => return response,
+    };
+
+    let binding_context = LaunchBindingContext::for_cwd(&runtime.cwd);
+    let repository = resolve_repository(parsed.repo.clone(), &runtime.cwd);
+    let resolution = match store.resolve_session_reentry_with_context(
+        ResolveSessionReentry {
+            explicit_session_id: parsed.session_id.clone(),
+            repository,
+            pull_request_number: parsed.pr,
+            source_surface: LaunchSurface::Cli,
+            ui_target: Some(cli_config::UI_TARGET.to_owned()),
+            instance_preference: Some(cli_config::INSTANCE_PREFERENCE.to_owned()),
+        },
+        binding_context.storage_local_root(),
+    ) {
+        Ok(resolution) => resolution,
+        Err(err) => return error_response(format!("failed to resolve triage context: {err}")),
+    };
+
+    let (session, _binding) = match resolution {
+        SessionReentryResolution::Resolved { session, binding } => (session, binding),
+        SessionReentryResolution::PickerRequired { reason, candidates } => {
+            return blocked_picker_response(reason, candidates);
+        }
+    };
+
+    // Validated against the operator-settable vocabulary in parse_args; new/stale
+    // are Roger-derived states and are rejected before this handler runs.
+    let triage_state = match parsed.triage_state.as_deref() {
+        Some(state) => state,
+        None => {
+            return error_response(
+                "rr triage reached its handler without a validated --state value".to_owned(),
+            );
+        }
+    };
+
+    let mut finding_ids = parsed.draft_finding_ids.clone();
+    finding_ids.sort();
+    finding_ids.dedup();
+
+    let mut selected_findings = Vec::with_capacity(finding_ids.len());
+    let mut unknown_finding_ids = Vec::new();
+    for finding_id in &finding_ids {
+        match store.materialized_finding(finding_id) {
+            Ok(Some(record)) if record.session_id == session.id => selected_findings.push(record),
+            Ok(_) => unknown_finding_ids.push(finding_id.clone()),
+            Err(err) => {
+                return error_response(format!("failed to load finding {finding_id}: {err}"));
+            }
+        }
+    }
+
+    if !unknown_finding_ids.is_empty() {
+        return blocked_response(
+            "rr triage could not bind every requested finding to the resolved session".to_owned(),
+            vec![format!(
+                "inspect rr findings --session {} --robot for the current finding ids",
+                session.id
+            )],
+            json!({
+                "reason_code": "unknown_finding_ids",
+                "session_id": session.id,
+                "unknown_finding_ids": unknown_finding_ids,
+            }),
+        );
+    }
+
+    let mut updated_findings = Vec::with_capacity(selected_findings.len());
+    for finding in &selected_findings {
+        match store.update_finding_triage_state(&finding.id, triage_state) {
+            Ok(updated) => updated_findings.push(updated),
+            Err(err) => {
+                return error_response(format!(
+                    "failed to update triage state for finding {}: {err}",
+                    finding.id
+                ));
+            }
+        }
+    }
+
+    let warnings = provider_support_warning(&session.provider, "rr triage")
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let lines = updated_findings
+        .iter()
+        .map(|finding| {
+            format!(
+                "{} triage_state={} outbound_state={} row_version={} {}",
+                finding.id,
+                finding.triage_state,
+                finding.outbound_state,
+                finding.row_version,
+                finding.title
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    CommandResponse {
+        outcome: OutcomeKind::Complete,
+        data: json!({
+            "session_id": session.id.clone(),
+            "triage_state": triage_state,
+            "count": updated_findings.len(),
+            "items": updated_findings
+                .iter()
+                .map(|finding| {
+                    json!({
+                        "id": finding.id.clone(),
+                        "title": finding.title.clone(),
+                        "triage_state": finding.triage_state.clone(),
+                        "outbound_state": finding.outbound_state.clone(),
+                        "row_version": finding.row_version,
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "mutation_guard": {
+                "github_posture": "blocked",
+                "local_only": true,
+            },
+            "queryable_surfaces": {
+                "findings_command": format!("rr findings --session {} --robot", session.id),
+                "status_command": format!("rr status --session {}", session.id),
+            },
+        }),
+        warnings,
+        repair_actions: Vec::new(),
+        message: lines,
     }
 }
 
@@ -11475,6 +12299,12 @@ fn render_output(parsed: &ParsedArgs, mut response: CommandResponse) -> CliRunRe
     stdout.push_str(&response.message);
     stdout.push('\n');
 
+    if parsed.command == CommandKind::Prs
+        && !matches!(response.outcome, OutcomeKind::Blocked | OutcomeKind::Error)
+    {
+        stdout.push_str(&render_prs_table(&response.data));
+    }
+
     if matches!(
         parsed.command,
         CommandKind::Init
@@ -12476,6 +13306,27 @@ fn compact_data(command: CommandKind, data: Value) -> Value {
                 })
                 .unwrap_or_default(),
         }),
+        CommandKind::Prs => json!({
+            "repository": data.get("repository").cloned().unwrap_or(Value::Null),
+            "count": data.get("count").cloned().unwrap_or(Value::Null),
+            "items": data
+                .get("items")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|item| {
+                            json!({
+                                "pr_number": item.get("pr_number").cloned().unwrap_or(Value::Null),
+                                "roger_state": item.get("roger_state").cloned().unwrap_or(Value::Null),
+                                "session_id": item.get("session_id").cloned().unwrap_or(Value::Null),
+                                "next_command": item.get("next_command").cloned().unwrap_or(Value::Null),
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        }),
         CommandKind::Search => json!({
             "query": data.get("query").cloned().unwrap_or(Value::Null),
             "requested_query_mode": data.get("requested_query_mode").cloned().unwrap_or(Value::Null),
@@ -12527,7 +13378,7 @@ fn next_id(prefix: &str) -> String {
 }
 
 fn usage_text() -> &'static str {
-    "Usage:\n  rr agent <operation> --task-file <path> [--request-file <path>] [--context-file <path>] [--capability-file <path>]\n  rr init [--robot]\n  rr doctor [--provider opencode|codex|gemini|claude|copilot|pi-agent] [--robot]\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude|copilot] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--query-mode auto|exact_lookup|recall|related_context|candidate_audit|promotion_review] [--repo owner/repo] [--limit <n>] [--robot]\n  rr draft [--repo owner/repo] [--pr <number>] [--session <id>] (--finding <id>... | --all-findings) [--robot]\n  rr approve [--repo owner/repo] [--pr <number>] [--session <id>] --batch <draft-batch-id> [--robot]\n  rr post [--repo owner/repo] [--pr <number>] [--session <id>] --batch <draft-batch-id> [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--yes|-y] [--dry-run] [--robot]\n  rr bridge export-contracts [--robot]\n  rr bridge verify-contracts [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge install [--extension-id <id>] [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr extension setup [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr extension doctor [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr extension uninstall [--install-root <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n\nAgent transport:\n  - rr agent is the dedicated in-session worker transport; it is separate from --robot\n  - current live rr agent operations cover context/status/search/finding/artifact reads, advisory clarification or follow-up proposals, and worker.submit_stage_result\n  - rr agent emits rr.agent.response.v1 envelopes over the canonical worker operation response payload instead of reusing the --robot surface\n\nProvider support in 0.1.0:\n  - opencode is the first-class tier-b continuity path; rr resume can reopen and rr return is supported\n  - codex, gemini, and claude are bounded tier-a providers; start/reseed/raw-capture only, no locator reopen or rr return\n  - copilot is feature-gated bounded tier-b support; enable with RR_ENABLE_COPILOT_PROVIDER=1 for verified start, locator/session-id reopen, rr return, and honest ResumeBundle reseed fallback\n  - pi-agent is not part of the 0.1.0 live CLI surface\n\nBootstrap notes:\n  - rr init bootstraps Roger-owned local store state only and records a local init marker\n  - rr init does not verify provider auth/install readiness\n  - rr doctor verifies local bootstrap and provider prerequisites but defers auth proof to first launch\n\nOutbound notes:\n  - rr draft materializes Roger-owned local draft batches only; it does not approve or post to GitHub\n  - rr approve records a local approval token for one exact stored batch payload and target tuple; it does not post to GitHub\n  - rr post executes only one exact Roger-approved stored batch on the bound target and returns a truthful success/partial/failure envelope\n  - draft selection is explicit in this slice: pass one or more --finding ids or --all-findings, then approve with --batch\n  - stale persisted review state fails closed before Roger derives or approves outbound payloads\n\nUpdate notes:\n  - default rr update apply prompts for confirmation on interactive TTY\n  - pass --yes|-y for non-interactive apply confirmation; --robot apply requires --yes|-y\n  - --dry-run and --robot without --yes are non-mutating metadata checks\n  - local/unpublished builds fail closed; migration-capable updates are deferred in 0.1.x"
+    "Usage:\n  rr agent <operation> --task-file <path> [--request-file <path>] [--context-file <path>] [--capability-file <path>]\n  rr init [--robot]\n  rr doctor [--provider opencode|codex|gemini|claude|copilot|pi-agent] [--robot]\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude|copilot] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr prs [--repo owner/repo] [--limit <n>] [--robot]\n  rr search --query <text> [--query-mode auto|exact_lookup|recall|related_context|candidate_audit|promotion_review] [--repo owner/repo] [--limit <n>] [--robot]\n  rr triage [--repo owner/repo] [--pr <number>] [--session <id>] --finding <id>... --state <state> [--robot]\n  rr draft [--repo owner/repo] [--pr <number>] [--session <id>] (--finding <id>... | --all-findings) [--robot]\n  rr approve [--repo owner/repo] [--pr <number>] [--session <id>] --batch <draft-batch-id> [--robot]\n  rr post [--repo owner/repo] [--pr <number>] [--session <id>] --batch <draft-batch-id> [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--yes|-y] [--dry-run] [--robot]\n  rr bridge export-contracts [--robot]\n  rr bridge verify-contracts [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge install [--extension-id <id>] [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr extension setup [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr extension doctor [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr extension uninstall [--install-root <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n\nAgent transport:\n  - rr agent is the dedicated in-session worker transport; it is separate from --robot\n  - current live rr agent operations cover context/status/search/finding/artifact reads, advisory clarification or follow-up proposals, and worker.submit_stage_result\n  - rr agent emits rr.agent.response.v1 envelopes over the canonical worker operation response payload instead of reusing the --robot surface\n\nProvider support in 0.1.0:\n  - opencode is the first-class tier-b continuity path; rr resume can reopen and rr return is supported\n  - codex, gemini, and claude are bounded tier-a providers; start/reseed/raw-capture only, no locator reopen or rr return\n  - copilot is feature-gated bounded tier-b support; enable with RR_ENABLE_COPILOT_PROVIDER=1 for verified start, locator/session-id reopen, rr return, and honest ResumeBundle reseed fallback\n  - pi-agent is not part of the 0.1.0 live CLI surface\n\nBootstrap notes:\n  - rr init bootstraps Roger-owned local store state only and records a local init marker\n  - rr init does not verify provider auth/install readiness\n  - rr doctor verifies local bootstrap and provider prerequisites but defers auth proof to first launch\n\nOutbound notes:\n  - rr triage records the operator's local triage decision; rr draft only accepts findings triaged to accepted\n  - rr triage --state accepts accepted, ignored, needs_follow_up, or resolved; new and stale are Roger-derived\n  - rr draft materializes Roger-owned local draft batches only; it does not approve or post to GitHub\n  - rr approve records a local approval token for one exact stored batch payload and target tuple; it does not post to GitHub\n  - rr post executes only one exact Roger-approved stored batch on the bound target and returns a truthful success/partial/failure envelope\n  - draft selection is explicit in this slice: pass one or more --finding ids or --all-findings, then approve with --batch\n  - stale persisted review state fails closed before Roger derives or approves outbound payloads\n\nUpdate notes:\n  - default rr update apply prompts for confirmation on interactive TTY\n  - pass --yes|-y for non-interactive apply confirmation; --robot apply requires --yes|-y\n  - --dry-run and --robot without --yes are non-mutating metadata checks\n  - local/unpublished builds fail closed; migration-capable updates are deferred in 0.1.x"
 }
 
 #[cfg(test)]
@@ -12580,6 +13431,82 @@ mod tests {
     }
 
     #[test]
+    fn prs_queue_state_derivation_matrix() {
+        // (attention_state, draft_count, posted_action_count, expected)
+        let cases: &[(&str, i64, i64, &str)] = &[
+            // outbound evidence wins over attention state
+            ("awaiting_user_input", 0, 1, "posted"),
+            ("review_launched", 2, 3, "posted"),
+            ("refresh_recommended", 1, 0, "drafted"),
+            ("awaiting_return", 4, 0, "drafted"),
+            // needs_attention bucket
+            ("awaiting_user_input", 0, 0, "needs_attention"),
+            ("refresh_recommended", 0, 0, "needs_attention"),
+            ("review_failed", 0, 0, "needs_attention"),
+            ("outbound_approval_required", 0, 0, "needs_attention"),
+            // in_review bucket
+            ("review_launched", 0, 0, "in_review"),
+            ("review_resumed", 0, 0, "in_review"),
+            ("awaiting_return", 0, 0, "in_review"),
+            ("returned_to_roger", 0, 0, "in_review"),
+            // ambiguous derivation surfaces the persisted state as-is
+            ("some_future_state", 0, 0, "some_future_state"),
+            ("", 0, 0, ""),
+        ];
+
+        for (attention_state, draft_count, posted_action_count, expected) in cases {
+            assert_eq!(
+                derive_prs_queue_state(attention_state, *draft_count, *posted_action_count),
+                *expected,
+                "attention_state={attention_state} draft_count={draft_count} posted_action_count={posted_action_count}"
+            );
+        }
+    }
+
+    #[test]
+    fn prs_queue_next_command_routes_by_state() {
+        assert_eq!(
+            prs_queue_next_command("not_started", 42),
+            "rr review --pr 42 --provider opencode"
+        );
+        for state in [
+            "in_review",
+            "needs_attention",
+            "drafted",
+            "posted",
+            "some_future_state",
+        ] {
+            assert_eq!(prs_queue_next_command(state, 7), "rr resume --pr 7");
+        }
+    }
+
+    #[test]
+    fn prs_table_renders_aligned_header_and_rows() {
+        let data = json!({
+            "items": [
+                {
+                    "pr_number": 42,
+                    "title": "Fix widget alignment",
+                    "author": "dev",
+                    "is_draft": false,
+                    "updated_at": "2026-06-02T10:00:00Z",
+                    "roger_state": "not_started",
+                    "session_id": null,
+                    "next_command": "rr review --pr 42 --provider opencode",
+                },
+            ],
+        });
+        let table = render_prs_table(&data);
+        let lines: Vec<&str> = table.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("PR"), "header row: {}", lines[0]);
+        assert!(lines[0].contains("STATE"));
+        assert!(lines[1].contains("#42"));
+        assert!(lines[1].contains("not_started"));
+        assert!(lines[1].ends_with("rr review --pr 42 --provider opencode"));
+    }
+
+    #[test]
     fn repository_lookup_is_cached_per_repo_path() {
         if let Ok(mut cache) = git_lookup_cache().lock() {
             cache.clear();
@@ -12623,6 +13550,7 @@ mod tests {
         let root = tmp.path().join("workspace");
         let generated = root.join("apps/extension/src/generated/bridge.ts");
         let extension_src = root.join("apps/extension/src");
+        let guided_browser_script = root.join("scripts/extension/launch_preloaded_browser.sh");
         let background = extension_src.join("background/main.js");
         let content = extension_src.join("content/main.js");
         let manifest_template = root.join("apps/extension/manifest.template.json");
@@ -12633,6 +13561,12 @@ mod tests {
         fs::create_dir_all(background.parent().expect("background parent"))
             .expect("mkdir background");
         fs::create_dir_all(content.parent().expect("content parent")).expect("mkdir content");
+        fs::create_dir_all(
+            guided_browser_script
+                .parent()
+                .expect("guided browser script parent"),
+        )
+        .expect("mkdir guided browser script parent");
         fs::create_dir_all(&static_root).expect("mkdir static");
         fs::create_dir_all(&assets_root).expect("mkdir assets");
         fs::create_dir_all(bridge_src.parent().expect("bridge src parent"))
@@ -12679,6 +13613,22 @@ mod tests {
         )
         .expect("write manifest template");
         fs::write(static_root.join(".gitkeep"), "").expect("write static marker");
+        fs::write(
+            &guided_browser_script,
+            "#!/usr/bin/env bash\nset -euo pipefail\necho guided-browser\n",
+        )
+        .expect("write guided browser script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(&guided_browser_script)
+                .expect("guided browser metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&guided_browser_script, permissions)
+                .expect("chmod guided browser script");
+        }
 
         let runtime = CliRuntime {
             cwd: root.clone(),
@@ -12891,17 +13841,26 @@ mod tests {
         persist_extension_id(runtime, extension_id).expect("persist extension identity");
     }
 
+    // One shared lock for every test that mutates or depends on ambient
+    // process env (HOME, RR_STORE_ROOT, RR_EXTENSION_PROFILE_ROOT). Separate
+    // per-test locks do not serialize against each other, and discovery tests
+    // that need the env to stay clean must hold the same lock as mutators.
+    static SHARED_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn shared_env_guard() -> std::sync::MutexGuard<'static, ()> {
+        SHARED_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    // Caller must hold shared_env_guard() for the duration of its test; this
+    // helper mutates RR_STORE_ROOT and restores it before returning.
     fn register_extension_identity_via_bridge(
         runtime: &CliRuntime,
         browser: &str,
         extension_id: &str,
     ) {
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _env_guard = ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env lock");
-
         let previous_store_root = std::env::var_os("RR_STORE_ROOT");
         // SAFETY: tests serialize RR_STORE_ROOT mutation via ENV_LOCK and restore it before return.
         unsafe {
@@ -13422,6 +14381,7 @@ mod tests {
 
     #[test]
     fn extension_setup_uses_packaged_manifest_key_before_browser_registration() {
+        let _env_guard = shared_env_guard();
         let (tmp, runtime, _generated) = setup_bridge_workspace();
         let install_root = tmp.path().join("install-root");
         let result = run(
@@ -13452,6 +14412,18 @@ mod tests {
                 .unwrap_or_default()
                 .contains("open edge://extensions")
         );
+        assert!(
+            payload["data"]["guided_browser_command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("scripts/extension/launch_preloaded_browser.sh")
+        );
+        assert!(
+            payload["data"]["guided_browser_command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("--browser 'edge'")
+        );
         let warnings = payload["warnings"]
             .as_array()
             .expect("warnings should be an array");
@@ -13469,12 +14441,20 @@ mod tests {
                 .first()
                 .and_then(|value| value.as_str())
                 .unwrap_or_default()
+                .contains("launch_preloaded_browser.sh")
+        );
+        assert!(
+            repair_actions
+                .get(1)
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
                 .contains("open edge://extensions")
         );
     }
 
     #[test]
     fn extension_setup_and_doctor_succeed_with_discovered_identity() {
+        let _env_guard = shared_env_guard();
         let (tmp, runtime, _generated) = setup_bridge_workspace();
         let install_root = tmp.path().join("install-root");
         write_extension_profile_discovery_state(
@@ -13541,6 +14521,7 @@ mod tests {
 
     #[test]
     fn extension_setup_and_doctor_succeed_after_bridge_registration_event() {
+        let _env_guard = shared_env_guard();
         let (tmp, runtime, _generated) = setup_bridge_workspace();
         let install_root = tmp.path().join("install-root");
         let extension_id = "abcdefghijklmnopabcdefghijklmnop";
@@ -13605,6 +14586,7 @@ mod tests {
 
     #[test]
     fn extension_setup_prefers_browser_profile_identity_over_stale_store_registry() {
+        let _env_guard = shared_env_guard();
         let (tmp, runtime, _generated) = setup_bridge_workspace();
         let install_root = tmp.path().join("install-root");
         let stale_store_id = "abcdefghijklmnopabcdefghijklmnop";
@@ -13653,11 +14635,7 @@ mod tests {
 
     #[test]
     fn extension_setup_with_explicit_profile_root_ignores_default_profile_stale_identity() {
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _env_guard = ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env lock");
+        let _env_guard = shared_env_guard();
 
         let (tmp, runtime, _generated) = setup_bridge_workspace();
         let install_root = tmp.path().join("install-root");
@@ -13665,9 +14643,8 @@ mod tests {
         let fake_home = tmp.path().join("fake-home");
 
         let stale_default_id = "bcdefghijklmnopabcdefghijklmnopa";
-        let default_pref = fake_home.join(
-            "Library/Application Support/Microsoft Edge/Default/Secure Preferences",
-        );
+        let default_pref =
+            fake_home.join("Library/Application Support/Microsoft Edge/Default/Secure Preferences");
         fs::create_dir_all(default_pref.parent().expect("default pref parent"))
             .expect("create default pref parent");
         let package_dir = runtime
@@ -13753,6 +14730,7 @@ mod tests {
 
     #[test]
     fn extension_setup_and_doctor_ignore_store_registry_without_browser_registration() {
+        let _env_guard = shared_env_guard();
         let (tmp, runtime, _generated) = setup_bridge_workspace();
         let install_root = tmp.path().join("install-root");
         write_extension_identity_state(&runtime, "abcdefghijklmnopabcdefghijklmnop");
@@ -13812,6 +14790,7 @@ mod tests {
 
     #[test]
     fn extension_doctor_prefers_browser_profile_identity_over_stale_store_registry() {
+        let _env_guard = shared_env_guard();
         let (tmp, runtime, _generated) = setup_bridge_workspace();
         let install_root = tmp.path().join("install-root");
         let stale_store_id = "abcdefghijklmnopabcdefghijklmnop";
@@ -13874,6 +14853,7 @@ mod tests {
 
     #[test]
     fn extension_doctor_distinguishes_registration_missing_from_manifest_missing() {
+        let _env_guard = shared_env_guard();
         let (tmp, runtime, _generated) = setup_bridge_workspace();
         let install_root = tmp.path().join("install-root");
 
@@ -13899,6 +14879,12 @@ mod tests {
         assert_eq!(
             blocked_registration_payload["data"]["reason_code"],
             "extension_registration_missing"
+        );
+        assert!(
+            blocked_registration_payload["data"]["guided_browser_command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("launch_preloaded_browser.sh")
         );
 
         let pack = run(
@@ -13939,6 +14925,7 @@ mod tests {
 
     #[test]
     fn extension_setup_discovers_identity_from_guided_profile_preferences() {
+        let _env_guard = shared_env_guard();
         let (tmp, runtime, _generated) = setup_bridge_workspace();
         let install_root = tmp.path().join("install-root");
         let extension_id = "abcdefghijklmnopabcdefghijklmnop";

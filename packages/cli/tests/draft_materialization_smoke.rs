@@ -200,7 +200,7 @@ fn draft_robot_materializes_grouped_batch_and_status_findings_surface_it() {
     assert!(
         drafts
             .iter()
-            .all(|draft| draft.target_locator.contains("github:owner/repo#42"))
+            .all(|draft| draft.target_locator == "github:issue-comment:owner/repo#42")
     );
     assert!(
         drafts

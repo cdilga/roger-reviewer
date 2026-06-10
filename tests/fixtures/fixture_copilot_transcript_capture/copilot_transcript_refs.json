@@ -1,0 +1,40 @@
+{
+  "schema_id": "fixture-copilot-transcript-capture.v1",
+  "records": [
+    {
+      "id": "transcript_capture_nominal",
+      "session_id": "cp-live-001",
+      "artifact_refs": [
+        "artifacts/copilot/cp-live-001/transcript.ndjson"
+      ],
+      "expected": {
+        "raw_capture_present": true,
+        "transcript_lookup_state": "available"
+      }
+    },
+    {
+      "id": "transcript_capture_missing_file",
+      "session_id": "cp-missing-404",
+      "artifact_refs": [
+        "artifacts/copilot/cp-missing-404/transcript.ndjson"
+      ],
+      "expected": {
+        "raw_capture_present": false,
+        "transcript_lookup_state": "missing",
+        "reason_code": "transcript_artifact_missing"
+      }
+    },
+    {
+      "id": "transcript_capture_truncated_payload",
+      "session_id": "cp-truncated-007",
+      "artifact_refs": [
+        "artifacts/copilot/cp-truncated-007/transcript.ndjson"
+      ],
+      "expected": {
+        "raw_capture_present": true,
+        "transcript_lookup_state": "degraded",
+        "reason_code": "transcript_payload_truncated"
+      }
+    }
+  ]
+}

@@ -2,6 +2,7 @@ id = "int_cli_provider_surface_truth"
 budget_id = "INT-CLI-TRUTH-01"
 family = "int_cli"
 flow_ids = ["F01.2", "F09"]
+invariant_ids = ["INV-PROVIDER-001"]
 fixture_families = []
 support_tier = "provider_surface_truth"
 support_status = "bounded"

@@ -4,6 +4,7 @@ members = [
   "packages/config",
   "packages/app-core",
   "packages/prompt-engine",
+  "packages/session-copilot",
   "packages/session-codex",
   "packages/session-gemini",
   "packages/session-opencode",
@@ -24,6 +25,7 @@ license = "MIT"
 version = "0.1.0"
 
 [workspace.dependencies]
+base64 = "0.22.1"
 hex = "0.4.3"
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }

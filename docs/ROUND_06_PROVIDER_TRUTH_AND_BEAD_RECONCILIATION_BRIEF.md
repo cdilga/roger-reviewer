@@ -1,8 +1,10 @@
 # Round 06 Provider Truth And Bead Reconciliation Brief
 
-Status: historical gap-inventory brief from 2026-04-14. The live graph has
-since widened substantially; use this as rationale and reconciliation context,
-not as a current snapshot of `br ready`.
+Status: historical gap-inventory brief from 2026-04-14. Accepted provider and
+launch truth was merged back into `PLAN_FOR_ROGER_REVIEWER.md` and the owning
+support contracts on 2026-04-17. The live graph has since widened
+substantially; use this as rationale and reconciliation context, not as a
+current snapshot of `br ready`.
 Audience: Roger maintainers and implementers preparing the next cohesive bead-shaping pass
 Scope: provider truthfulness, review-worker boundary hardening, lifecycle hardening, Copilot admission, and graph widening needed before the next implementation wave
 
@@ -28,6 +30,9 @@ Round 05 also explicitly treats the provider-parity side-plan as the active foll
 The current graph still does **not** reflect that full program.
 
 This round exists because the next bead-shaping wave should not assume the provider-parity/Copilot critique is already fully captured just because parts of it were merged into the canonical plan.
+
+That merge-back step is now complete; this brief remains historical context for
+why the graph had to widen, not an active authority packet.
 
 ---
 
@@ -213,9 +218,9 @@ We have some prior narrowing work, but the repo still shows active drift between
 
 This needs one explicit claim-audit group rather than scattered spot fixes.
 
-### W5. Add GitHub Copilot CLI as the first-class golden-path provider
+### W5. Add GitHub Copilot CLI as the first-class provider-admission lane
 
-Status: missing from the graph
+Status at the time of this brief: missing from the graph
 
 The provider side-plan contains a real implementation program here. The live bead graph currently contains none of it.
 

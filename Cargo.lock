@@ -9,6 +9,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
 name = "bitflags"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -282,6 +288,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 name = "roger-app-core"
 version = "0.1.0"
 dependencies = [
+ "roger-config",
  "serde",
  "serde_json",
  "thiserror",
@@ -301,11 +308,14 @@ dependencies = [
 name = "roger-cli"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "roger-app-core",
  "roger-bridge",
  "roger-config",
+ "roger-github-adapter",
  "roger-session-claude",
  "roger-session-codex",
+ "roger-session-copilot",
  "roger-session-gemini",
  "roger-session-opencode",
  "roger-storage",
@@ -321,6 +331,11 @@ dependencies = [
 [[package]]
 name = "roger-config"
 version = "0.1.0"
+dependencies = [
+ "roger-session-copilot",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "roger-github-adapter"
@@ -369,6 +384,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "roger-session-copilot"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "roger-session-gemini"
 version = "0.1.0"
 dependencies = [
@@ -397,6 +422,7 @@ name = "roger-storage"
 version = "0.1.0"
 dependencies = [
  "roger-app-core",
+ "roger-session-copilot",
  "rusqlite",
  "serde",
  "serde_json",

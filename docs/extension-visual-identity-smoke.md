@@ -11,12 +11,13 @@ Identity rationale and narrowed alternatives are tracked in:
 
 - popup shell renders the new Roger mark and wordmark assets
 - shared identity token sheet is imported by popup HTML
-- popup preserves manual-backup messaging and the bounded 3-action set with
-  revised hierarchy/copy:
-  `Start Review in Roger`, `Resume Existing Review`, `View Findings`
+- popup preserves manual-backup messaging and explicit action grammar:
+  `Start Review in Roger`, `Resume Existing Review`, and a conditional
+  `View Findings` action that only appears when bounded local state justifies it
 - popup info affordance remains details-based and discloses build/fallback copy
   without restoring the old inline build/version row
-- identity assets are present as static artifacts for future in-page reuse
+- identity assets are present as static artifacts and the in-page chip can reuse
+  the compact walkie-talkie mark
 
 ## Automated Command
 
@@ -42,8 +43,10 @@ In one supported browser (Chrome, Brave, or Edge):
 1. Load the unpacked extension.
 2. Open the popup on a GitHub PR tab.
 3. Verify mark + wordmark render in the popup header.
-4. Verify action copy/hierarchy remains:
-   Start Review in Roger, Resume Existing Review, View Findings.
+4. Verify action copy/hierarchy remains explicit:
+   Start Review in Roger and Resume Existing Review should always be present on
+   a PR tab; View Findings should appear only when bounded local state is
+   findings-ready.
 5. Expand the info affordance and verify build/fallback details render.
 6. Open popup on a non-PR tab and confirm manual-backup guidance still appears.
 

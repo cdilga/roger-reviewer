@@ -20,24 +20,42 @@ Register with MCP Agent Mail immediately, introduce yourself to the other active
 
 Frankenterm (`ft`) is the default observer path for swarm sessions. If `ft` is missing, install it with `./scripts/swarm/install_frankenterm.sh` unless the run is intentionally degraded (`--no-ft`). Keep limits explicit in status notes: `ft` only sees panes discoverable through WezTerm CLI; tmux-internal panes not surfaced by WezTerm stay outside `ft` visibility.
 
-Use `br ready` as the source of truth for what is truly unblocked. Use `bv --robot-triage` or `bv --robot-next` only to rank or understand the queue, then verify the bead with `br show <id>` before claiming it. If `bv` points at something blocked, trust `br ready` and choose a different bead.
+Use `br ready` as the default source of truth for what
+is truly unblocked. It runs native trust checks first, routes healthy DB-backed
+reads through safe flags, and falls back to `--no-db` read inspection when the
+workspace DB is degraded. Use `bv --robot-triage` or `bv --robot-next` only to
+rank or understand the queue, then verify the bead with
+`br show <id>` before claiming it. If `bv` points at
+something blocked, trust the `br ready` result and choose a different
+bead.
+When `./scripts/swarm/check_beads_trust.sh` reports `TRUST_STATUS=pass` and
+`br doctor` is clean, treat the bead workspace as currently trustworthy. Do not
+keep relitigating old `br` corruption history or avoid bead work because of
+stale trauma. Use the current trust check, not historical fear, as the gate.
 
 If `br` reports `database is busy`, that is lock contention, not "no work".
 Back off briefly and retry before deciding the queue is empty.
 For scripted or bulk mutation paths (`create`/`update`/`close`/`sync`), prefer
-`./scripts/swarm/br_pinned.sh ...` over raw `br ...`; the wrapper serializes
-mutating calls behind a repo-local advisory lock and injects a longer
-`--lock-timeout` unless one is already set.
-If standard `br` reads or claims still fail after a few retries, switch to the
-direct fallback path for queue truth and claiming:
+`br ...` first. On healthy workspaces the Roger-safe front door
+serializes mutating calls behind a repo-local advisory lock, injects a longer
+`--lock-timeout` unless one is already set, runs a post-mutation trust check,
+and rebuilds the DB family from canonical `issues.jsonl` automatically if it
+detects real corruption rather than simple lock contention.
+Treat the managed latest-main binary surface as authoritative for ordinary
+swarm work. The default binary now resolves through
+`~/.local/bin/br -> ~/.local/bin/br-main.current`. Do not bypass to older
+fixed-version pins or ad hoc release artefacts unless you are in an explicit
+repro or binary-validation lane.
+If standard queue commands still fail after a few retries, switch to the direct
+fallback path for queue truth and claiming:
 
-1. `br ready --no-daemon`
-2. `br show <id> --no-daemon`
+1. `br ready`
+2. `br show <id>`
 3. `br update <id> --status in_progress --no-daemon`
 
-Use the first clean `--no-daemon` result as authoritative rather than parking
-on a busy DB. Announce in Agent Mail when you had to fall back so other workers
-know the queue view came from the direct path.
+Use the first clean result as authoritative rather than parking on a busy or
+corrupt DB. Announce in Agent Mail when you had to fall back so other workers
+know the queue view came from the degraded path.
 For scripted queue-inspection reads (`ready/list/show`), prefer `--no-auto-import --no-auto-flush` so read paths do not trigger hidden write-side repair under contention.
 If the busy error is specifically a snapshot conflict (`SQLITE_BUSY_SNAPSHOT`
 or `snapshot conflict on pages ...`), a long-lived reader such as `bv` may be
@@ -49,7 +67,18 @@ holding a stale snapshot after checkpoint/repair work. In that case:
    trusting DB-backed `br` reads again
 3. do not use `--no-db` for claiming, closing, syncing, or any other mutation
    path; move back to DB-backed `br update/close/sync` only after the stale
-   reader is gone
+   reader is gone or the workspace has been repaired
+
+If `check_beads_trust.sh` or `br` reports native SQLite corruption, do
+not keep mutating the live DB family. Repair with:
+
+```bash
+./scripts/swarm/rebuild_beads_db_safe.sh --install
+```
+
+That script rebuilds a fresh DB from canonical `issues.jsonl` using a safe
+import-only path, validates it with native `sqlite3`, and only then swaps it
+into the live `.beads/` directory without touching `issues.jsonl`.
 
 For launch preflight and prerequisites, treat transient `br doctor` sqlite lock
 signals as retry-class, and treat preserved recovery-artifact warnings, sidecar
@@ -62,6 +91,16 @@ That audit is the pre-launch pass for missing-leaf discovery, dependency sanity,
 and acceptance-clarity checks so workers do not rediscover those issues mid-run.
 
 Do not treat any launcher text as a bead assignment. You must choose work yourself from the live backlog.
+If the operator or a pane-specific nudge names a bead, treat that as an
+immediate priority override for the current checkpoint, not as a permanent
+restriction on the pane. The normal model is one bead at a time: finish or
+truthfully block the current bead, then return to the live queue and claim the
+next safe slice.
+Inside a worker pane, do not use `ntm spawn`, `ntm create`, `ntm add`, or any
+other command that creates a new suite, pane set, or worktree. Spawning and
+re-orchestration are operator actions outside the worker loop. Worker progress
+means finishing or truthfully unblocking beads in the existing swarm, not
+creating more orchestration surface.
 
 You are explicitly allowed to shape the backlog when the next safe slice is missing. If the graph is too narrow, the current bead is too large, or a blocker needs to be isolated, create or update beads yourself instead of waiting for a human. Valid autonomy includes:
 
@@ -78,6 +117,19 @@ contract that will be required to close it. Name the cheapest truthful layer:
 `unit`, `prop`, `int`, `accept`, `e2e`, or manual `smoke`, and record the
 expected suite or command. Do not close a bead on smoke alone unless smoke is
 explicitly the correct layer for that bead.
+
+Almost every implementation bead should add or update automated tests in the
+same slice. Default to unit or parameterized tests for local rules, reducers,
+serializers, invalidation logic, and shaping logic. Use narrow integration
+tests for real boundaries such as storage, migrations, adapters, CLI/TUI
+controller seams, prompt execution, and bridge envelopes. If the real remaining
+gap is a missing integration or budget-approved E2E proof, either implement it
+when it is still one truthful slice or create or claim the follow-on testing
+bead immediately instead of closing early.
+Do not treat a successful validation pass as the end of the pane's mission in a
+persistent swarm. Tests and closeout are one checkpoint in the loop; once that
+checkpoint is truthful and durable, return immediately to Agent Mail plus
+`br ready` and keep consuming the next safe bead.
 
 CI-sensitive closeout categories require remote evidence in closeout notes:
 
@@ -113,10 +165,14 @@ When you pick work:
    dependency correction, support-claim correction, or adjacent clearly-bounded
    follow-on work. Complete that work if it remains one truthful slice;
    otherwise bead it immediately and leave explicit notes.
-5. Run the validation required by that bead's contract before closing it.
-6. Record the exact validation command or suite result in the bead close reason
+5. Add or update the tests required by that bead's validation contract unless
+   you have an explicit no-test rationale naming why deterministic lower-layer
+   proof would be untruthful.
+6. Run the validation required by that bead's contract before closing it.
+7. Record the exact validation command or suite result in the bead close reason
    or notes. Do not imply broader coverage than what actually ran.
-7. If you change bead state or notes, run `br sync --flush-only`.
+8. If you change bead state or notes, run
+   `br sync --flush-only`.
 
 ## Remote CI failure ownership protocol
 
@@ -160,10 +216,12 @@ Minimum rehearsal evidence before closing a fresh-eyes workflow bead:
 1. at least one linked repair bead id from the rehearsal, and
 2. one linked test-follow-up decision (test added or explicit no-test decision).
 
-When `br ready` is empty but useful work still obviously exists, do not stop at "queue empty". Instead:
+When `br ready` is empty but useful work still
+obviously exists, do not stop at "queue empty". Instead:
 
 1. run `./scripts/swarm/audit_bead_batch.sh --limit 20 --strict` and follow its queue-repair playbook
-2. inspect the active frontier with `br blocked`, `br show`, and `bv --robot-triage`
+2. inspect the active frontier with `br blocked`,
+   `br show <id>`, and `bv --robot-triage`
 3. identify the narrowest safe next slice or missing contract
 4. create, split, or update the relevant bead if that is the honest next step
 5. claim that new or clarified bead yourself, or announce it for another agent to claim
@@ -188,11 +246,35 @@ For swarm execution workflow, do not use pull requests as the unit of agent work
 
 Roger the product may review GitHub PRs, but the swarm building Roger should not default to a PR-based delivery workflow.
 
+Local commits are allowed and often useful even in a dirty shared worktree.
+Do not treat unrelated in-progress changes elsewhere in `git status` as a
+blanket reason to avoid committing your own finished slice.
+
+Commit rule:
+
+1. inspect `git status --short`
+2. if your owned work is isolated to owned files or a clean, separable hunk
+   set, stage only those paths or hunks
+3. make a narrow local commit for the validated slice
+4. leave unrelated changes unstaged
+
+Only withhold a local commit when:
+
+1. your owned changes overlap materially with someone else's edits in the same
+   file or hunk and cannot be staged truthfully without sweeping their work
+2. the slice is still missing required validation or an honest closeout note
+3. the user explicitly asked for a no-commit posture
+
+If overlap is the blocker, say so explicitly in Agent Mail or bead notes. Do
+not hide behind generic "the worktree is dirty" language when the real issue is
+specific hunk overlap or missing validation.
+
 If you need CPU-heavy cargo builds or tests and `rch` is available, prefer `rch exec -- <command>`. If `rch` is installed locally without a worker fleet, it may fail open to local execution; do not sit idle waiting for remote capacity that is not actually configured.
 
 Re-read `AGENTS.md` after every compaction or long interruption so the
 operating rules stay fresh. Reopen the canonical plan sections relevant to your
-active bead before continuing, then re-check live queue truth with `br ready`
+active bead before continuing, then re-check live queue truth with
+`br ready`
 instead of resuming from memory alone. The durable state lives in beads and
 Agent Mail, so use them continuously.
 

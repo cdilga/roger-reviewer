@@ -169,6 +169,7 @@ Stable `data` fields:
 - `attention`
 - `findings`
 - `drafts`
+- `outbound`
 - `continuity`
 
 Example:
@@ -214,6 +215,16 @@ Example:
   }
 }
 ```
+
+Outbound projection contract for `rr status` and `rr findings`:
+
+- `data.outbound.state_counts` (status) and `items[*].outbound_state` (findings)
+  use the same canonical labels:
+  `awaiting_approval`, `approved`, `posted`, `invalidated`, `failed`
+- superseded outcomes are projected as `invalidated` plus an explicit
+  invalidation reason field, not as a separate top-level outbound state
+- `data.outbound.posting_gate.visibly_elevated` remains required so
+  mutation-capable posting actions cannot masquerade as passive read-only state
 
 ### `rr sessions`
 
@@ -368,6 +379,15 @@ inventory explicitly enough that automation can distinguish:
 - live CLI-exposed review providers
 - planned-but-not-live provider targets
 - providers that are out of scope for the live `0.1.0` surface
+
+`rr robot-docs guide` and `rr robot-docs workflows` should route bootstrap and
+preflight through shipped commands only:
+
+- `rr init` for Roger-local bootstrap
+- `rr doctor --provider <provider>` for local + provider preflight
+- explicit wording that provider auth may still be deferred to first launch
+
+They must not imply legacy or unimplemented bootstrap/preflight commands.
 
 `rr robot-docs commands` may mirror that truth on the `rr review --dry-run`
 entry using fields such as `supported_providers`,

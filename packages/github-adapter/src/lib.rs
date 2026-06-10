@@ -69,6 +69,18 @@ pub enum PullRequestState {
     Merged,
 }
 
+/// A single open pull request row from the read-safe PR listing surface.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenPullRequest {
+    pub number: u64,
+    pub title: String,
+    pub author: String,
+    pub is_draft: bool,
+    pub head_ref: String,
+    pub updated_at: String,
+    pub url: String,
+}
+
 /// A file changed in the PR with its diff status.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrChangedFile {
@@ -122,6 +134,14 @@ pub trait ReadSafeGitHubAdapter {
             head_commit: meta.head_commit.clone(),
         }
     }
+
+    /// List open pull requests for a repository (read-only).
+    fn list_open_pull_requests(
+        &self,
+        owner: &str,
+        repo: &str,
+        limit: usize,
+    ) -> Result<Vec<OpenPullRequest>>;
 
     /// List files changed in a PR.
     fn list_changed_files(
@@ -257,7 +277,9 @@ impl GitHubPostingTarget {
             let (repo_slug, pr) = parse_repo_and_pr(repo_and_pr)?;
             let (owner, repo) = parse_repo_slug(&repo_slug)?;
             if thread_id.trim().is_empty() {
-                return Err(GitHubAdapterError::UnsupportedPostingTarget(locator.to_owned()));
+                return Err(GitHubAdapterError::UnsupportedPostingTarget(
+                    locator.to_owned(),
+                ));
             }
             return Ok(Self::ReviewThreadReply {
                 owner,
@@ -267,7 +289,9 @@ impl GitHubPostingTarget {
             });
         }
 
-        Err(GitHubAdapterError::UnsupportedPostingTarget(locator.to_owned()))
+        Err(GitHubAdapterError::UnsupportedPostingTarget(
+            locator.to_owned(),
+        ))
     }
 
     fn matches_review_target(&self, target: &ReviewTarget) -> bool {
@@ -365,8 +389,8 @@ fn failed_posting_result(
 }
 
 fn extract_issue_comment_remote_identifier(response: &str) -> Result<String> {
-    let raw: serde_json::Value =
-        serde_json::from_str(response).map_err(|e| GitHubAdapterError::ParseError(e.to_string()))?;
+    let raw: serde_json::Value = serde_json::from_str(response)
+        .map_err(|e| GitHubAdapterError::ParseError(e.to_string()))?;
     if let Some(identifier) = raw
         .get("html_url")
         .and_then(|value| value.as_str())
@@ -386,8 +410,8 @@ fn extract_issue_comment_remote_identifier(response: &str) -> Result<String> {
 }
 
 fn extract_thread_reply_remote_identifier(response: &str) -> Result<String> {
-    let raw: serde_json::Value =
-        serde_json::from_str(response).map_err(|e| GitHubAdapterError::ParseError(e.to_string()))?;
+    let raw: serde_json::Value = serde_json::from_str(response)
+        .map_err(|e| GitHubAdapterError::ParseError(e.to_string()))?;
     let comment = raw
         .get("data")
         .and_then(|value| value.get("addPullRequestReviewThreadReply"))
@@ -472,6 +496,55 @@ impl ReadSafeGitHubAdapter for GhCliAdapter {
             changed_files: raw["changedFiles"].as_u64().unwrap_or(0),
             fetched_at: now_ts(),
         })
+    }
+
+    fn list_open_pull_requests(
+        &self,
+        owner: &str,
+        repo: &str,
+        limit: usize,
+    ) -> Result<Vec<OpenPullRequest>> {
+        let repo_slug = format!("{owner}/{repo}");
+        let limit_str = limit.max(1).to_string();
+
+        let json_str = self.run_gh([
+            "pr",
+            "list",
+            "--repo",
+            &repo_slug,
+            "--state",
+            "open",
+            "--limit",
+            &limit_str,
+            "--json",
+            "number,title,headRefName,updatedAt,author,isDraft,url",
+        ])?;
+
+        let raw: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|e| GitHubAdapterError::ParseError(e.to_string()))?;
+
+        let entries = raw.as_array().ok_or_else(|| {
+            GitHubAdapterError::ParseError("expected a JSON array of pull requests".to_owned())
+        })?;
+
+        let mut result = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let author = entry["author"]
+                .get("login")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_owned();
+            result.push(OpenPullRequest {
+                number: entry["number"].as_u64().unwrap_or(0),
+                title: entry["title"].as_str().unwrap_or("").to_owned(),
+                author,
+                is_draft: entry["isDraft"].as_bool().unwrap_or(false),
+                head_ref: entry["headRefName"].as_str().unwrap_or("").to_owned(),
+                updated_at: entry["updatedAt"].as_str().unwrap_or("").to_owned(),
+                url: entry["url"].as_str().unwrap_or("").to_owned(),
+            });
+        }
+        Ok(result)
     }
 
     fn list_changed_files(
@@ -583,14 +656,19 @@ impl OutboundPostingAdapter for GhCliAdapter {
 
         let mut results = Vec::with_capacity(drafts.len());
         for draft in drafts {
-            let validation = validate_outbound_draft_batch_linkage(batch, std::slice::from_ref(draft));
+            let validation =
+                validate_outbound_draft_batch_linkage(batch, std::slice::from_ref(draft));
             if !validation.valid {
                 let code = validation
                     .issues
                     .first()
                     .map(|issue| issue.reason_code.as_str())
                     .unwrap_or("batch_binding_invalid");
-                results.push(failed_posting_result(draft, PostingFailureClass::Permanent, code));
+                results.push(failed_posting_result(
+                    draft,
+                    PostingFailureClass::Permanent,
+                    code,
+                ));
                 continue;
             }
 
@@ -625,9 +703,7 @@ impl OutboundPostingAdapter for GhCliAdapter {
                     "-f".to_owned(),
                     format!("body={}", draft.body),
                 ]),
-                GitHubPostingTarget::ReviewThreadReply {
-                    thread_id, ..
-                } => self.run_gh(vec![
+                GitHubPostingTarget::ReviewThreadReply { thread_id, .. } => self.run_gh(vec![
                     "api".to_owned(),
                     "graphql".to_owned(),
                     "-f".to_owned(),
@@ -689,6 +765,7 @@ impl OutboundPostingAdapter for GhCliAdapter {
 #[derive(Clone, Debug, Default)]
 pub struct StubGitHubAdapter {
     pub prs: HashMap<(String, String, u64), PullRequestMetadata>,
+    pub open_prs: HashMap<(String, String), Vec<OpenPullRequest>>,
     pub files: HashMap<(String, String, u64), Vec<PrChangedFile>>,
     pub existing_paths: HashMap<(String, String, String), Vec<String>>,
     pub gh_available: bool,
@@ -705,6 +782,13 @@ impl StubGitHubAdapter {
     pub fn add_pr(&mut self, meta: PullRequestMetadata) {
         self.prs
             .insert((meta.owner.clone(), meta.repo.clone(), meta.number), meta);
+    }
+
+    pub fn add_open_pr(&mut self, owner: &str, repo: &str, pr: OpenPullRequest) {
+        self.open_prs
+            .entry((owner.to_owned(), repo.to_owned()))
+            .or_default()
+            .push(pr);
     }
 
     pub fn add_files(&mut self, owner: &str, repo: &str, pr: u64, files: Vec<PrChangedFile>) {
@@ -734,6 +818,24 @@ impl ReadSafeGitHubAdapter for StubGitHubAdapter {
                 repo: repo.to_owned(),
                 pr: pr_number,
             })
+    }
+
+    fn list_open_pull_requests(
+        &self,
+        owner: &str,
+        repo: &str,
+        limit: usize,
+    ) -> Result<Vec<OpenPullRequest>> {
+        if !self.gh_available {
+            return Err(GitHubAdapterError::GhNotFound);
+        }
+        let mut entries = self
+            .open_prs
+            .get(&(owner.to_owned(), repo.to_owned()))
+            .cloned()
+            .unwrap_or_default();
+        entries.truncate(limit.max(1));
+        Ok(entries)
     }
 
     fn list_changed_files(
@@ -886,6 +988,110 @@ mod tests {
         let mut stub = StubGitHubAdapter::new();
         stub.gh_available = false;
         assert!(!stub.check_gh_available().unwrap());
+    }
+
+    fn sample_open_pr(number: u64, title: &str) -> OpenPullRequest {
+        OpenPullRequest {
+            number,
+            title: title.to_owned(),
+            author: "dev".to_owned(),
+            is_draft: false,
+            head_ref: format!("feature-{number}"),
+            updated_at: "2026-06-01T00:00:00Z".to_owned(),
+            url: format!("https://github.com/example/test-repo/pull/{number}"),
+        }
+    }
+
+    #[test]
+    fn stub_list_open_pull_requests_respects_limit_and_order() {
+        let mut stub = StubGitHubAdapter::new();
+        stub.add_open_pr("example", "test-repo", sample_open_pr(7, "First"));
+        stub.add_open_pr("example", "test-repo", sample_open_pr(9, "Second"));
+
+        let all = stub
+            .list_open_pull_requests("example", "test-repo", 10)
+            .unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].number, 7);
+
+        let limited = stub
+            .list_open_pull_requests("example", "test-repo", 1)
+            .unwrap();
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].title, "First");
+    }
+
+    #[test]
+    fn stub_list_open_pull_requests_fails_closed_when_gh_unavailable() {
+        let mut stub = StubGitHubAdapter::new();
+        stub.gh_available = false;
+        let err = stub
+            .list_open_pull_requests("example", "test-repo", 10)
+            .unwrap_err();
+        assert!(matches!(err, GitHubAdapterError::GhNotFound));
+    }
+
+    #[test]
+    fn gh_cli_list_open_pull_requests_parses_gh_pr_list_payload() {
+        let runner = Arc::new(MockGhRunner::new(vec![(
+            vec![
+                "pr".to_owned(),
+                "list".to_owned(),
+                "--repo".to_owned(),
+                "example/test-repo".to_owned(),
+                "--state".to_owned(),
+                "open".to_owned(),
+                "--limit".to_owned(),
+                "25".to_owned(),
+                "--json".to_owned(),
+                "number,title,headRefName,updatedAt,author,isDraft,url".to_owned(),
+            ],
+            Ok(r#"[
+                {"number":42,"title":"Fix widget alignment","headRefName":"fix/widget","updatedAt":"2026-06-02T10:00:00Z","author":{"login":"dev"},"isDraft":false,"url":"https://github.com/example/test-repo/pull/42"},
+                {"number":43,"title":"Draft refactor","headRefName":"chore/refactor","updatedAt":"2026-06-01T09:00:00Z","author":{"login":"other"},"isDraft":true,"url":"https://github.com/example/test-repo/pull/43"}
+            ]"#
+            .to_owned()),
+        )]));
+        let adapter = GhCliAdapter::with_runner("gh".to_owned(), runner);
+
+        let prs = adapter
+            .list_open_pull_requests("example", "test-repo", 25)
+            .unwrap();
+        assert_eq!(prs.len(), 2);
+        assert_eq!(prs[0].number, 42);
+        assert_eq!(prs[0].author, "dev");
+        assert!(!prs[0].is_draft);
+        assert_eq!(prs[1].number, 43);
+        assert!(prs[1].is_draft);
+        assert_eq!(prs[1].head_ref, "chore/refactor");
+        assert_eq!(prs[1].updated_at, "2026-06-01T09:00:00Z");
+    }
+
+    #[test]
+    fn gh_cli_list_open_pull_requests_surfaces_gh_failure() {
+        let runner = Arc::new(MockGhRunner::new(vec![(
+            vec![
+                "pr".to_owned(),
+                "list".to_owned(),
+                "--repo".to_owned(),
+                "example/test-repo".to_owned(),
+                "--state".to_owned(),
+                "open".to_owned(),
+                "--limit".to_owned(),
+                "25".to_owned(),
+                "--json".to_owned(),
+                "number,title,headRefName,updatedAt,author,isDraft,url".to_owned(),
+            ],
+            Err(GitHubAdapterError::GhCommandFailed {
+                stderr: "gh: To get started with GitHub CLI, please run: gh auth login".to_owned(),
+            }),
+        )]));
+        let adapter = GhCliAdapter::with_runner("gh".to_owned(), runner);
+
+        let err = adapter
+            .list_open_pull_requests("example", "test-repo", 25)
+            .unwrap_err();
+        assert!(matches!(err, GitHubAdapterError::GhCommandFailed { .. }));
     }
 
     #[test]
@@ -1096,9 +1302,15 @@ mod tests {
             .post_approved_draft_batch(&sample_review_target(), &batch, &drafts)
             .unwrap();
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].status, roger_app_core::PostingAdapterItemStatus::Posted);
+        assert_eq!(
+            results[0].status,
+            roger_app_core::PostingAdapterItemStatus::Posted
+        );
         assert_eq!(results[0].remote_identifier.as_deref(), Some("73"));
-        assert_eq!(results[1].status, roger_app_core::PostingAdapterItemStatus::Failed);
+        assert_eq!(
+            results[1].status,
+            roger_app_core::PostingAdapterItemStatus::Failed
+        );
         assert_eq!(
             results[1].failure_code.as_deref(),
             Some("retryable:service_unavailable")
@@ -1132,7 +1344,10 @@ mod tests {
             .post_approved_draft_batch(&sample_review_target(), &batch, &drafts)
             .unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].status, roger_app_core::PostingAdapterItemStatus::Failed);
+        assert_eq!(
+            results[0].status,
+            roger_app_core::PostingAdapterItemStatus::Failed
+        );
         assert_eq!(
             results[0].failure_code.as_deref(),
             Some("permanent:validation_failed")
@@ -1155,7 +1370,10 @@ mod tests {
             .post_approved_draft_batch(&sample_review_target(), &batch, &[draft])
             .unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].status, roger_app_core::PostingAdapterItemStatus::Failed);
+        assert_eq!(
+            results[0].status,
+            roger_app_core::PostingAdapterItemStatus::Failed
+        );
         assert_eq!(
             results[0].failure_code.as_deref(),
             Some("permanent:payload_digest_mismatch")

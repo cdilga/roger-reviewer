@@ -1,0 +1,79 @@
+{
+  "schema_id": "fixture-copilot-launch-resume.v1",
+  "double_protocol": "copilot-cli-deterministic",
+  "cases": [
+    {
+      "id": "launch_review_verified_session_id",
+      "launch_intent": "start_review",
+      "command": [
+        "copilot",
+        "--interactive",
+        "<roger-seed-prompt>"
+      ],
+      "stub_output": {
+        "stdout_lines": [
+          "Copilot CLI ready",
+          "session_id=cp-live-001"
+        ],
+        "exit_code": 0
+      },
+      "expected": {
+        "provider": "copilot",
+        "verified_session_id": "cp-live-001",
+        "launch_attempt_state": "verified_started",
+        "continuity_quality": "degraded"
+      }
+    },
+    {
+      "id": "resume_stale_locator_reseed",
+      "launch_intent": "resume_review",
+      "preconditions": [
+        "session_locator.session_id=cp-stale-404",
+        "resume_bundle.profile=reseed_resume"
+      ],
+      "command": [
+        "copilot",
+        "--interactive",
+        "<roger-reseed-prompt>"
+      ],
+      "stub_output": {
+        "stdout_lines": [
+          "Reseeded from Roger bundle",
+          "session_id=cp-reseed-002"
+        ],
+        "exit_code": 0
+      },
+      "expected": {
+        "provider": "copilot",
+        "verified_session_id": "cp-reseed-002",
+        "launch_attempt_state": "verified_reseeded",
+        "continuity_quality": "degraded"
+      }
+    },
+    {
+      "id": "resume_live_locator_reopen",
+      "launch_intent": "resume_review",
+      "preconditions": [
+        "session_locator.session_id=cp-live-001"
+      ],
+      "command": [
+        "copilot",
+        "--resume",
+        "cp-live-001"
+      ],
+      "stub_output": {
+        "stdout_lines": [
+          "Resumed existing Copilot session",
+          "session_id=cp-live-001"
+        ],
+        "exit_code": 0
+      },
+      "expected": {
+        "provider": "copilot",
+        "verified_session_id": "cp-live-001",
+        "launch_attempt_state": "verified_reopened",
+        "continuity_quality": "usable"
+      }
+    }
+  ]
+}

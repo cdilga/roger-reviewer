@@ -92,7 +92,10 @@ Suite file and module names must use the prefix families defined in
 | `int_github_` | draft invalidation, payload rendering, partial post |
 | `int_search_` | prior-review lookup, lexical-only degrade |
 | `accept_opencode_` | OpenCode provider-claim acceptance |
-| `accept_bounded_provider_` | bounded live-CLI provider-claim acceptance (`codex`, `claude`, `gemini`; later `copilot`) |
+| `accept_codex_` | Codex bounded Tier A provider-claim acceptance |
+| `accept_gemini_` | Gemini bounded Tier A provider-claim acceptance |
+| `accept_claude_` | Claude Code bounded Tier A provider-claim acceptance |
+| `accept_copilot_` | GitHub Copilot CLI feature-gated bounded Tier B provider-claim acceptance |
 | `e2e_` | one of the six approved heavyweight multi-boundary product journeys |
 | `smoke_` | manual or release-lane smoke |
 
@@ -215,8 +218,20 @@ suite_family = "accept_opencode_"
 notes = "Primary consumer for locator-reopen and stale-locator reseed cases"
 
 [[fixture.allowed_consumers]]
-suite_family = "accept_bounded_provider_"
-notes = "Bounded-provider reseed cases only"
+suite_family = "accept_codex_"
+notes = "Codex bounded-provider reseed cases only"
+
+[[fixture.allowed_consumers]]
+suite_family = "accept_gemini_"
+notes = "Gemini bounded-provider reseed cases only"
+
+[[fixture.allowed_consumers]]
+suite_family = "accept_claude_"
+notes = "Claude Code bounded-provider reseed cases only"
+
+[[fixture.allowed_consumers]]
+suite_family = "accept_copilot_"
+notes = "Copilot feature-gated bounded-provider reseed cases only"
 
 [[fixture.allowed_consumers]]
 suite_family = "int_harness_"

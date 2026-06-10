@@ -36,8 +36,9 @@ Examples:
   $(basename "$0") -- --cod-only --limit 4
 
 Notes:
-  - Use \`--check\` to observe repo-scoped \`ntm status\` + \`ntm activity\`
-    without mutating assignments.
+  - Use \`--check\` to observe repo-scoped \`ntm status\`, \`ntm activity\`,
+    \`ntm health\`, and \`scripts/swarm/observe_swarm.sh --json\` without
+    mutating assignments.
   - This does not restart crashed panes by itself. Pair it with
     \`ntm spawn ... --auto-restart\` for new swarms, or use
     \`ntm respawn <session>\` if a live session has dead panes.
@@ -59,6 +60,14 @@ status_json() {
 
 activity_json() {
   ntm activity "$SESSION_NAME" --json
+}
+
+health_json() {
+  ntm health "$SESSION_NAME" --json
+}
+
+observe_json() {
+  "${SCRIPT_DIR}/observe_swarm.sh" --session "$SESSION_NAME" --json
 }
 
 require_repo_scoped_session() {
@@ -148,10 +157,14 @@ require_repo_scoped_session "$status_payload"
 
 if [[ "$CHECK_ONLY" -eq 1 ]]; then
   activity_payload="$(activity_json)"
+  health_payload="$(health_json)"
+  observe_payload="$(observe_json)"
   printf 'Session scope check passed for %s\n' "$SESSION_NAME"
   printf 'Project root: %s\n' "$PROJECT_ROOT"
   printf 'Status JSON:\n%s\n' "$status_payload"
   printf 'Activity JSON:\n%s\n' "$activity_payload"
+  printf 'Health JSON:\n%s\n' "$health_payload"
+  printf 'Observe JSON:\n%s\n' "$observe_payload"
   exit 0
 fi
 

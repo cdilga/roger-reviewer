@@ -8,7 +8,7 @@ use roger_storage::{
     ResolveSessionLaunchBinding, ResumeLedgerResolution, RogerStore, StorageError,
 };
 use serde::{Deserialize, Serialize};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenCodeAdapter {
@@ -180,15 +180,28 @@ impl HarnessAdapter for OpenCodeAdapter {
     }
 
     fn reopen_by_locator(&self, locator: &SessionLocator) -> Result<()> {
-        let status = Command::new(&self.binary_path)
+        let child = Command::new(&self.binary_path)
             .arg("--session")
             .arg(&locator.session_id)
-            .status()
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|e| {
                 AppError::HarnessError(format!("failed to invoke {}: {}", self.binary_path, e))
             })?;
+        let output = child.wait_with_output().map_err(|e| {
+            AppError::HarnessError(format!("failed to wait for {}: {}", self.binary_path, e))
+        })?;
+        let filtered_stderr = filter_opencode_stderr(&String::from_utf8_lossy(&output.stderr));
+        if !filtered_stderr.trim().is_empty() {
+            eprint!("{filtered_stderr}");
+            if !filtered_stderr.ends_with('\n') {
+                eprintln!();
+            }
+        }
 
-        if !status.success() {
+        if !output.status.success() {
             return Err(AppError::HarnessError(format!(
                 "failed to reopen opencode session {}",
                 locator.session_id
@@ -401,6 +414,21 @@ fn classify_reopen_error(error: &AppError) -> ResumeAttemptOutcome {
         ResumeAttemptOutcome::MissingHarnessState
     } else {
         ResumeAttemptOutcome::ReopenUnavailable
+    }
+}
+
+fn filter_opencode_stderr(stderr: &str) -> String {
+    let filtered = stderr
+        .lines()
+        .filter(|line| !line.contains("Unrecognized key: mcpServers"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if filtered.is_empty() {
+        filtered
+    } else if stderr.ends_with('\n') {
+        format!("{filtered}\n")
+    } else {
+        filtered
     }
 }
 
@@ -821,5 +849,33 @@ mod tests {
         assert_eq!(outcome.continuity_quality, ContinuityQuality::Degraded);
         assert_eq!(harness.reseed_calls.get(), 1);
         assert_eq!(harness.return_calls.get(), 1);
+    }
+
+    #[test]
+    fn real_adapter_filters_legacy_mcpservers_warning() {
+        let temp = tempdir().expect("tempdir");
+        let binary_path = temp.path().join("opencode");
+        let script = r#"#!/bin/sh
+if [ "$1" = "--session" ]; then
+  echo "Unrecognized key: mcpServers" >&2
+  exit 0
+fi
+exit 0
+"#;
+        std::fs::write(&binary_path, script).expect("write stub binary");
+        let mut perms = std::fs::metadata(&binary_path)
+            .expect("metadata")
+            .permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o755);
+        }
+        std::fs::set_permissions(&binary_path, perms).expect("chmod stub binary");
+
+        let adapter = OpenCodeAdapter::with_binary(binary_path.to_string_lossy().to_string());
+        adapter
+            .reopen_by_locator(&sample_locator("oc-filtered"))
+            .expect("legacy warning should not fail reopen");
     }
 }

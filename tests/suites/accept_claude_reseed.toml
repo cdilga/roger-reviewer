@@ -1,0 +1,13 @@
+id = "accept_claude_reseed"
+budget_id = "ACCEPT-CLAUDE-01"
+family = "accept_claude"
+flow_ids = ["F01", "F03"]
+invariant_ids = ["INV-SESSION-002", "INV-PROVIDER-001"]
+fixture_families = ["fixture_resumebundle_stale_locator"]
+support_tier = "claude_tier_a"
+support_status = "bounded"
+degraded = true
+bounded = true
+tier = "acceptance"
+preserve_failure_artifacts = true
+artifact_retention = "on_failure"

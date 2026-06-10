@@ -1,0 +1,15 @@
+[fixture]
+family = "fixture_copilot_transcript_capture"
+description = "Deterministic Copilot transcript and artifact-reference fixture family used to validate raw capture retention and lookup continuity."
+
+[[fixture.allowed_consumers]]
+suite_family = "int_storage_"
+notes = "Artifact persistence and transcript-reference linkage checks."
+
+[[fixture.allowed_consumers]]
+suite_family = "int_harness_"
+notes = "Provider raw-capture projection and transcript metadata normalization."
+
+[fixture.degraded_conditions]
+missing_transcript_file = "Transcript artifact reference exists but file is absent; Roger must surface explicit missing-artifact guidance."
+truncated_transcript = "Transcript payload is truncated; parser must preserve partial evidence with degraded classification."

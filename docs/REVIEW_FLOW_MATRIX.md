@@ -80,7 +80,7 @@ Purpose:
 - Primary artifact: global session index / session query result
 - Happy path: user opens the session finder, searches by repo, PR, attention
   state, or recency, and jumps directly into the chosen session
-- Common variants: filter to `awaiting_user_input`, `awaiting_approval`, active
+- Common variants: filter to `awaiting_user_input`, `awaiting_outbound_approval`, active
   only, or recent only
 - Failure/recovery: session no longer resumable, target repo unavailable
   locally, multiple same-PR instances still require disambiguation
@@ -243,6 +243,9 @@ Purpose:
 - Primary artifact: `OutboundDraft` and `PostedAction`
 - Happy path: user reviews local drafts, edits or batches them, explicitly
   approves, and Roger posts via the adapter
+- Required state progression: draft projection remains explicit as
+  `awaiting_approval -> approved -> posted`, with `invalidated` and `failed`
+  recovery edges surfaced without hiding mutation elevation
 - Common variants: split one draft into several comments, merge several findings
   into one comment, reject a draft while keeping the finding
 - Failure/recovery: partial post failure, remote thread invalid, approval

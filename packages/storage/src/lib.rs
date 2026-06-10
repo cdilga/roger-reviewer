@@ -3300,6 +3300,49 @@ impl RogerStore {
             })
     }
 
+    pub fn update_finding_triage_state(
+        &self,
+        finding_id: &str,
+        triage_state: &str,
+    ) -> Result<MaterializedFindingRecord> {
+        let now = time::now_ts();
+        let updated = self.conn.execute(
+            "UPDATE findings
+            SET triage_state = ?1,
+                updated_at = ?2,
+                row_version = row_version + 1
+            WHERE id = ?3",
+            params![triage_state, now, finding_id],
+        )?;
+        if updated == 0 {
+            return Err(StorageError::NotFound {
+                entity: "finding",
+                id: finding_id.to_owned(),
+            });
+        }
+        let record = self
+            .materialized_finding(finding_id)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "finding",
+                id: finding_id.to_owned(),
+            })?;
+        self.conn.execute(
+            "INSERT INTO finding_decision_events (
+                id, finding_id, triage_state, outbound_state, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                // The row_version suffix keeps the event id unique even when an
+                // earlier decision event for this finding landed in the same second.
+                format!("fde-{finding_id}-{now}-r{}", record.row_version),
+                finding_id,
+                triage_state,
+                record.outbound_state,
+                now
+            ],
+        )?;
+        Ok(record)
+    }
+
     pub fn materialized_finding(
         &self,
         finding_id: &str,
@@ -6768,18 +6811,14 @@ fn binding_local_root_stale_reason(
 ) -> Option<String> {
     if let Some(worktree_root) = local_root.worktree_root {
         return match binding.worktree_root.as_deref() {
-            Some(bound_worktree_root)
-                if Path::new(bound_worktree_root) == Path::new(worktree_root) =>
-            {
+            Some(bound_worktree_root) if paths_equivalent(bound_worktree_root, worktree_root) => {
                 None
             }
             Some(bound_worktree_root) => Some(format!(
                 "binding worktree root mismatch: expected current worktree {worktree_root}, found {bound_worktree_root}"
             )),
             None => match binding.cwd.as_deref() {
-                Some(bound_cwd) if Path::new(bound_cwd).starts_with(Path::new(worktree_root)) => {
-                    None
-                }
+                Some(bound_cwd) if path_is_within(bound_cwd, worktree_root) => None,
                 Some(bound_cwd) => Some(format!(
                     "binding cwd is outside current worktree root: expected current worktree {worktree_root}, found {bound_cwd}"
                 )),
@@ -6790,16 +6829,12 @@ fn binding_local_root_stale_reason(
 
     if let Some(cwd) = local_root.cwd {
         return match binding.worktree_root.as_deref() {
-            Some(bound_worktree_root)
-                if Path::new(cwd).starts_with(Path::new(bound_worktree_root)) =>
-            {
-                None
-            }
+            Some(bound_worktree_root) if path_is_within(cwd, bound_worktree_root) => None,
             Some(bound_worktree_root) => Some(format!(
                 "current cwd {cwd} is outside binding worktree root {bound_worktree_root}"
             )),
             None => match binding.cwd.as_deref() {
-                Some(bound_cwd) if Path::new(bound_cwd) == Path::new(cwd) => None,
+                Some(bound_cwd) if paths_equivalent(bound_cwd, cwd) => None,
                 Some(bound_cwd) => Some(format!(
                     "binding cwd mismatch: expected current cwd {cwd}, found {bound_cwd}"
                 )),
@@ -6809,6 +6844,20 @@ fn binding_local_root_stale_reason(
     }
 
     None
+}
+
+fn normalize_local_root_path(path: &str) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path))
+}
+
+fn paths_equivalent(left: &str, right: &str) -> bool {
+    normalize_local_root_path(left) == normalize_local_root_path(right)
+}
+
+fn path_is_within(path: &str, container: &str) -> bool {
+    let normalized_path = normalize_local_root_path(path);
+    let normalized_container = normalize_local_root_path(container);
+    normalized_path.starts_with(&normalized_container)
 }
 
 fn count_for_session(conn: &Connection, table: &str, session_id: &str) -> Result<i64> {
@@ -6823,6 +6872,38 @@ fn artifact_relative_path(digest: &str) -> PathBuf {
 
 fn sha256_prefixed(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+/// Derive a deterministic `FindingFingerprint` from normalized issue identity
+/// inputs per the finding fingerprint contract: canonical review target
+/// identity, normalized claim text, and an optional primary code-evidence
+/// discriminator. Volatile wording is reduced by lowercasing and collapsing
+/// whitespace; raw line numbers are deliberately excluded.
+pub fn derive_finding_fingerprint(
+    repository: &str,
+    pull_request_number: u64,
+    title: &str,
+    normalized_summary: &str,
+    primary_evidence_path: Option<&str>,
+) -> String {
+    fn normalize(text: &str) -> String {
+        text.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"finding_fingerprint.v1\x1f");
+    hasher.update(repository.trim().to_lowercase().as_bytes());
+    hasher.update(b"\x1f");
+    hasher.update(pull_request_number.to_string().as_bytes());
+    hasher.update(b"\x1f");
+    hasher.update(normalize(title).as_bytes());
+    hasher.update(b"\x1f");
+    hasher.update(normalize(normalized_summary).as_bytes());
+    hasher.update(b"\x1f");
+    hasher.update(primary_evidence_path.unwrap_or("").trim().as_bytes());
+    format!("fp-{:x}", hasher.finalize())
 }
 
 #[cfg(test)]
@@ -6852,6 +6933,52 @@ mod tests {
                 .policy()
                 .select_storage(1),
             ArtifactStorageKind::DerivedSidecar
+        );
+    }
+}
+
+#[cfg(test)]
+mod finding_fingerprint_tests {
+    use super::derive_finding_fingerprint;
+
+    #[test]
+    fn fingerprint_is_deterministic_and_whitespace_insensitive() {
+        let a = derive_finding_fingerprint(
+            "owner/repo",
+            42,
+            "Null result ignored",
+            "The refresh path drops a null adapter result.",
+            Some("packages/cli/src/lib.rs"),
+        );
+        let b = derive_finding_fingerprint(
+            "Owner/Repo",
+            42,
+            "  Null   result ignored ",
+            "the refresh   path drops a null adapter result.",
+            Some("packages/cli/src/lib.rs"),
+        );
+        assert_eq!(a, b);
+        assert!(a.starts_with("fp-"));
+    }
+
+    #[test]
+    fn fingerprint_separates_targets_and_claims() {
+        let base = derive_finding_fingerprint("owner/repo", 42, "t", "s", None);
+        assert_ne!(
+            base,
+            derive_finding_fingerprint("owner/repo", 43, "t", "s", None)
+        );
+        assert_ne!(
+            base,
+            derive_finding_fingerprint("owner/other", 42, "t", "s", None)
+        );
+        assert_ne!(
+            base,
+            derive_finding_fingerprint("owner/repo", 42, "t2", "s", None)
+        );
+        assert_ne!(
+            base,
+            derive_finding_fingerprint("owner/repo", 42, "t", "s", Some("a/b.rs"))
         );
     }
 }

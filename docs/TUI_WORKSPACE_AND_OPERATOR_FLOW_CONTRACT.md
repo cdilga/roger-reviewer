@@ -195,8 +195,15 @@ Rules:
 - draft materialization, approval, and posting must not look visually equivalent
   to navigation
 - the TUI should expose a clear draft queue and approval path
+- queue rows and inspector detail should project the same outbound-state
+  vocabulary: `awaiting_approval`, `approved`, `posted`, `invalidated`,
+  `failed`
+- superseded draft outcomes should surface as `invalidated` with a visible
+  reason code rather than inventing a separate queue-state noun
 - mutation-capable actions should be separated from triage, browsing, and
   informational views
+- posting readiness should remain visibly elevated and never be inferred from
+  stale queue state after refresh or selection changes
 - invalidation or drift that blocks posting must be visible in the same
   workspace
 

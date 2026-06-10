@@ -63,10 +63,12 @@ ${BASE_PROMPT}
 
 Persistent swarm identity rules:
 - Your Agent Mail identity for this swarm is exactly \`${AGENT_NAME}\`. Reuse that exact name. Do not invent a new identity.
-- Start each cycle with Agent Mail inbox + ack checks, then \`br ready -> br show -> claim -> reserve files\`.
-- Do not take a bead because a launcher hinted at one. Use \`br ready\` for queue truth (\`bv\` only for ranking context).
+- Start each cycle with Agent Mail inbox + ack checks, then \`./scripts/swarm/br_safe.sh ready -> ./scripts/swarm/br_safe.sh show -> claim -> reserve files\`.
+- Treat the guarded \`br\` surface as authoritative: use \`./scripts/swarm/br_safe.sh\` for both reads and mutations, and do not fall back to older fixed-version pins or ad hoc release artefacts unless you are in an explicit repro lane.
+- Do not take a bead because a launcher hinted at one. Use \`./scripts/swarm/br_safe.sh ready\` for queue truth (\`bv\` only for ranking context).
 - If \`br\` reports \`database is busy\`, back off and retry before concluding queue state.
-- Record exact validation commands on bead close and run \`br sync --flush-only\` after bead state/note changes.
+- If \`./scripts/swarm/br_safe.sh\` reports degraded trust, use its read fallback for queue inspection and repair the workspace with \`./scripts/swarm/rebuild_beads_db_safe.sh --install\` before DB-backed mutations.
+- Record exact validation commands on bead close and run \`./scripts/swarm/br_safe.sh sync --flush-only\` after bead state/note changes.
 - This invocation is cycle ${cycle}. Work autonomously until you reach a durable checkpoint, then stop cleanly.
 - Before stopping, make sure bead status, file reservations, Agent Mail, and validation evidence reflect reality.
 - When this cycle ends, exit instead of waiting at an interactive prompt. The launcher will invoke you again.

@@ -12,6 +12,10 @@
 .claude/skills/*
 !.claude/skills/roger-inside-roger-agent/
 !.claude/skills/roger-inside-roger-agent/SKILL.md
+!.claude/skills/roger-review-driver/
+!.claude/skills/roger-review-driver/SKILL.md
+!.claude/skills/roger-copilot-harness/
+!.claude/skills/roger-copilot-harness/SKILL.md
 .roger/
 
 # Local reference clones are useful during planning, but the initial repo

@@ -179,7 +179,7 @@ Important Roger-specific note:
 Local verification for the pinned-repo expectation:
 
 ```bash
-./scripts/swarm/resolve_br.sh --print-path
+./scripts/swarm/br_safe.sh --print-path
 readlink ~/.local/bin/br 2>/dev/null || command -v br
 ```
 

@@ -29,9 +29,11 @@ fn robot_docs_schemas_and_commands_advertise_rr_draft() {
     let schema_items = schemas_payload["data"]["items"]
         .as_array()
         .expect("schema items");
-    assert!(schema_items.iter().any(|item| {
-        item["command"] == "rr draft" && item["schema_id"] == "rr.robot.draft.v1"
-    }));
+    assert!(
+        schema_items.iter().any(|item| {
+            item["command"] == "rr draft" && item["schema_id"] == "rr.robot.draft.v1"
+        })
+    );
 
     let commands = run_rr(&["robot-docs", "commands", "--robot"]);
     assert_eq!(commands.exit_code, 0, "{}", commands.stderr);
@@ -39,7 +41,11 @@ fn robot_docs_schemas_and_commands_advertise_rr_draft() {
     let command_items = commands_payload["data"]["items"]
         .as_array()
         .expect("command items");
-    assert!(command_items.iter().any(|item| item["command"] == "rr draft"));
+    assert!(
+        command_items
+            .iter()
+            .any(|item| item["command"] == "rr draft")
+    );
 }
 
 #[test]
@@ -47,13 +53,12 @@ fn robot_docs_workflows_advertise_local_outbound_draft_loop() {
     let workflows = run_rr(&["robot-docs", "workflows", "--robot"]);
     assert_eq!(workflows.exit_code, 0, "{}", workflows.stderr);
     let payload = parse_robot_payload(&workflows.stdout);
-    let workflow_items = payload["data"]["items"]
-        .as_array()
-        .expect("workflow items");
+    let workflow_items = payload["data"]["items"].as_array().expect("workflow items");
     let draft_workflow = workflow_items
         .iter()
         .find(|item| item["name"] == "local_outbound_draft")
         .expect("local outbound draft workflow");
     let steps = draft_workflow["steps"].as_array().expect("workflow steps");
-    assert!(steps.iter().any(|step| step == "rr draft --session <id> --finding <finding-id> [--finding <finding-id>] --robot"));
+    assert!(steps.iter().any(|step| step
+        == "rr draft --session <id> --finding <finding-id> [--finding <finding-id>] --robot"));
 }

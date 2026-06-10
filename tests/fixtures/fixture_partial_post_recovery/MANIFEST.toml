@@ -1,0 +1,11 @@
+[fixture]
+family = "fixture_partial_post_recovery"
+description = "Partial-post recovery fixture covering mixed posted/failed item results plus duplicate-result fail-closed replay protection."
+
+[[fixture.allowed_consumers]]
+suite_family = "int_github_"
+notes = "Owns partial-post recovery, duplicate-post prevention, and retry-path proof for outbound recovery suites."
+
+[fixture.degraded_conditions]
+partial_post = "One draft posts successfully while a second fails with a retryable error and must remain repairable."
+duplicate_result = "Adapter returns the same draft id twice; Roger must fail closed instead of risking duplicate posting."

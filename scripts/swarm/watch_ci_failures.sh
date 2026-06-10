@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 INGEST_SCRIPT="${ROOT_DIR}/scripts/swarm/ingest_failed_actions_runs.py"
 DEFAULT_CONFIG="${ROOT_DIR}/.github/ci-failure-intake.json"
 DEFAULT_STATE="${ROOT_DIR}/.beads/ci-failure-intake-state.json"
-DEFAULT_BR_BIN="${ROOT_DIR}/scripts/swarm/br_pinned.sh"
+DEFAULT_BR_BIN="${ROOT_DIR}/scripts/swarm/br_safe.sh"
 
 POLL_SECONDS="${CI_FAILURE_POLL_SECONDS:-300}"
 CONFIG_PATH="${CI_FAILURE_INTAKE_CONFIG:-${DEFAULT_CONFIG}}"
@@ -29,7 +29,7 @@ Options:
   --per-page N             Number of failed runs to fetch each poll. Default: 30
   --once                   Run one ingestion pass and exit
   --dry-run                Do not mutate beads or state
-  --br-binary PATH         br wrapper/binary path. Default: scripts/swarm/br_pinned.sh
+  --br-binary PATH         br wrapper/binary path. Default: scripts/swarm/br_safe.sh
   -h, --help               Show this help
 EOF
 }

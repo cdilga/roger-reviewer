@@ -7,8 +7,20 @@ suite_family = "int_cli_"
 notes = "Primary consumer for rr-y0a degraded CLI acceptance coverage."
 
 [[fixture.allowed_consumers]]
+suite_family = "accept_codex_"
+notes = "Can seed bounded-support acceptance checks where Codex remains tier-a in 0.1.0."
+
+[[fixture.allowed_consumers]]
 suite_family = "accept_gemini_"
 notes = "Can seed bounded-support acceptance checks where Gemini remains tier-a in 0.1.0."
+
+[[fixture.allowed_consumers]]
+suite_family = "accept_claude_"
+notes = "Can seed bounded-support acceptance checks where Claude Code remains tier-a in 0.1.0."
+
+[[fixture.allowed_consumers]]
+suite_family = "accept_copilot_"
+notes = "Can seed feature-gated bounded-support acceptance checks where Copilot remains tier-a only."
 
 [fixture.degraded_conditions]
 unsupported_review_provider = "rr review with --provider!=opencode must fail closed with blocked outcome and explicit supported_provider guidance."

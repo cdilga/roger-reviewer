@@ -1,0 +1,35 @@
+{
+  "schema_id": "fixture-copilot-policy-failure.v1",
+  "cases": [
+    {
+      "id": "policy_violation_blocked_tool_use",
+      "session_id": "cp-live-001",
+      "hook": "pre-tool-use",
+      "payload": {
+        "command": "gh pr comment 123 --body test",
+        "policy_result": "blocked"
+      },
+      "expected": {
+        "outcome": "blocked",
+        "reason_code": "policy_violation",
+        "launch_attempt_state": "failed",
+        "failure_evidence_retained": true
+      }
+    },
+    {
+      "id": "missing_policy_digest_fails_closed",
+      "session_id": "cp-live-001",
+      "hook": "session-start",
+      "payload": {
+        "policy_result": "allowed",
+        "policy_digest": ""
+      },
+      "expected": {
+        "outcome": "blocked",
+        "reason_code": "policy_digest_missing",
+        "launch_attempt_state": "failed",
+        "failure_evidence_retained": true
+      }
+    }
+  ]
+}

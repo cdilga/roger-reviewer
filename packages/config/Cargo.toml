@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+roger-session-copilot = { path = "../session-copilot" }
 serde.workspace = true
 
 [dev-dependencies]

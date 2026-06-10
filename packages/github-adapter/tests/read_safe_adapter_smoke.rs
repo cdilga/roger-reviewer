@@ -47,7 +47,9 @@ fn resolve_pr_target_not_found_returns_error() {
     let adapter = StubGitHubAdapter::new();
     let result = adapter.resolve_pr("acme", "widgets", 999);
     assert!(result.is_err());
-    let err = result.err().expect("unknown PR should return TargetNotFound");
+    let err = result
+        .err()
+        .expect("unknown PR should return TargetNotFound");
     assert!(matches!(err, GitHubAdapterError::TargetNotFound { .. }));
     if let GitHubAdapterError::TargetNotFound { owner, repo, pr } = err {
         assert_eq!(owner, "acme");

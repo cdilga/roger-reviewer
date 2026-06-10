@@ -1,0 +1,12 @@
+{
+  "name": "roger-popup-render-harness",
+  "private": true,
+  "description": "DOM-backed popup render harness for Roger Reviewer extension surfaces",
+  "scripts": {
+    "render": "node ./popup_render_harness.cjs",
+    "test": "node --test ./popup_render_harness.test.cjs"
+  },
+  "dependencies": {
+    "jsdom": "26.1.0"
+  }
+}

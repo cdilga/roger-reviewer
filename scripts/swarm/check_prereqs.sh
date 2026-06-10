@@ -3,7 +3,6 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd "${SCRIPT_DIR}/../.." && pwd)
-BR_RESOLVER="${SCRIPT_DIR}/resolve_br.sh"
 PREFLIGHT_SCRIPT="${SCRIPT_DIR}/preflight_swarm.sh"
 DEFAULT_SESSION_NAME="$(basename "$PROJECT_ROOT" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//')"
 
@@ -34,6 +33,18 @@ require_command() {
     echo "Missing required command: $cmd" >&2
     exit 1
   fi
+}
+
+agent_mail_tmux_session_name() {
+  if tmux has-session -t agent-mail 2>/dev/null; then
+    printf 'agent-mail\n'
+    return 0
+  fi
+  if tmux has-session -t mcp-agent-mail 2>/dev/null; then
+    printf 'mcp-agent-mail\n'
+    return 0
+  fi
+  return 1
 }
 
 is_transient_lock_output() {
@@ -146,12 +157,9 @@ echo "swarm preflight:"
   --opencode "$OPENCODE_COUNT"
 echo
 
-if [[ ! -x "$BR_RESOLVER" ]]; then
-  echo "Missing required script: $BR_RESOLVER" >&2
-  exit 1
-fi
-if ! BR_BIN="$("$BR_RESOLVER" --quiet --print-path)"; then
-  echo "Unable to resolve vetted br path for this workspace." >&2
+BR_BIN="${RR_BR_BIN:-$(command -v br 2>/dev/null || true)}"
+if [[ -z "${BR_BIN}" || ! -x "${BR_BIN}" ]]; then
+  echo "Unable to find a usable br binary on PATH for this workspace." >&2
   exit 1
 fi
 
@@ -168,9 +176,11 @@ if (( OPENCODE_COUNT > 0 )); then
   require_command opencode
 fi
 
+AGENT_MAIL_SESSION="$(agent_mail_tmux_session_name || true)"
+
 if ! curl -fsS http://127.0.0.1:8765/health/readiness >/dev/null; then
   echo "Agent Mail is not ready on http://127.0.0.1:8765." >&2
-  echo "Start or inspect it with: tmux attach -t mcp-agent-mail" >&2
+  echo "Start or inspect it with: tmux attach -t ${AGENT_MAIL_SESSION:-agent-mail}" >&2
   exit 1
 fi
 
@@ -183,8 +193,8 @@ echo
 
 echo "Agent Mail readiness: OK"
 
-if tmux has-session -t mcp-agent-mail 2>/dev/null; then
-  echo "Agent Mail tmux session: mcp-agent-mail"
+if [[ -n "$AGENT_MAIL_SESSION" ]]; then
+  echo "Agent Mail tmux session: $AGENT_MAIL_SESSION"
 else
   echo "Agent Mail tmux session: not found (am still exists if you need to restart it)"
 fi

@@ -50,6 +50,13 @@ SCRIPT_UNDER_TEST="${WORKDIR}/check_ci_closeout_evidence.sh"
 cp "${SCRIPT_DIR}/check_ci_closeout_evidence.sh" "$SCRIPT_UNDER_TEST"
 chmod +x "$SCRIPT_UNDER_TEST"
 
+cat >"${WORKDIR}/br_safe.sh" <<'BRSAFE'
+#!/usr/bin/env bash
+set -euo pipefail
+exec br "$@"
+BRSAFE
+chmod +x "${WORKDIR}/br_safe.sh"
+
 export PATH="${FAKE_BIN}:$PATH"
 
 printf 'Scenario 1: CI-sensitive bead without remote evidence fails...\n'

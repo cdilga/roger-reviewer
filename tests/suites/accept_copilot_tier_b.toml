@@ -1,0 +1,18 @@
+id = "accept_copilot_tier_b"
+budget_id = "ACCEPT-COPILOT-01"
+family = "accept_copilot"
+flow_ids = ["F01", "F03"]
+invariant_ids = ["INV-SESSION-002", "INV-HARNESS-002", "INV-PROVIDER-001"]
+fixture_families = [
+  "fixture_copilot_launch_resume",
+  "fixture_copilot_hook_stream",
+  "fixture_copilot_policy_failure",
+  "fixture_copilot_crash_recovery",
+]
+support_tier = "copilot_tier_b_feature_gated"
+support_status = "bounded"
+degraded = true
+bounded = true
+tier = "acceptance"
+preserve_failure_artifacts = true
+artifact_retention = "on_failure"

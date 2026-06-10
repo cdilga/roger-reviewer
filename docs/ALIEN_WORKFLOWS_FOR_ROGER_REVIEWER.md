@@ -149,6 +149,9 @@ strongest ideas through Roger's own primitives and constraints:
 - repo-first scoped evidence
 - no daemon as the architecture center
 - OpenCode fallback must stay real
+- provider support claims must stay literal: OpenCode as the strongest current
+  continuity path, feature-gated Copilot bounded Tier B, and
+  Codex/Gemini/Claude Code bounded Tier A
 - approval-gated GitHub posting
 
 Write a self-contained proposal document named

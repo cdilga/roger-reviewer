@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt::{Display, Formatter};
 use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -23,6 +24,8 @@ pub enum SuiteFamily {
     AcceptOpencode,
     AcceptCodex,
     AcceptGemini,
+    AcceptClaude,
+    AcceptCopilot,
     E2e,
     Smoke,
 }
@@ -42,6 +45,8 @@ impl SuiteFamily {
             Self::AcceptOpencode => "accept_opencode_",
             Self::AcceptCodex => "accept_codex_",
             Self::AcceptGemini => "accept_gemini_",
+            Self::AcceptClaude => "accept_claude_",
+            Self::AcceptCopilot => "accept_copilot_",
             Self::E2e => "e2e_",
             Self::Smoke => "smoke_",
         }
@@ -158,6 +163,8 @@ impl SuiteMetadata {
             SuiteFamily::AcceptOpencode
                 | SuiteFamily::AcceptCodex
                 | SuiteFamily::AcceptGemini
+                | SuiteFamily::AcceptClaude
+                | SuiteFamily::AcceptCopilot
                 | SuiteFamily::IntBridge
                 | SuiteFamily::IntHarness
         ) && !self.preserve_failure_artifacts
@@ -440,6 +447,19 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     fs::write(path, bytes).map_err(|err| err.to_string())
 }
 
+fn write_browser_launch_preamble(
+    transcript: &mut File,
+    browser_binary: &Path,
+    launch_args: &[String],
+) -> Result<(), String> {
+    writeln!(transcript, "browser_binary={}", browser_binary.display())
+        .map_err(|err| err.to_string())?;
+    for arg in launch_args {
+        writeln!(transcript, "{arg}").map_err(|err| err.to_string())?;
+    }
+    transcript.flush().map_err(|err| err.to_string())
+}
+
 fn blocked_browser_harness_report(
     config: &BrowserHarnessConfig,
     artifacts: &BrowserHarnessArtifacts,
@@ -533,8 +553,9 @@ pub fn run_browser_harness(config: &BrowserHarnessConfig) -> Result<BrowserHarne
         );
     }
 
-    let transcript_file =
+    let mut transcript_file =
         File::create(&artifacts.browser_launch_transcript_path).map_err(|err| err.to_string())?;
+    write_browser_launch_preamble(&mut transcript_file, &config.browser_binary, &launch_args)?;
     let transcript_stderr = transcript_file.try_clone().map_err(|err| err.to_string())?;
     let mut child = match Command::new(&config.browser_binary)
         .args(&launch_args)
@@ -703,6 +724,47 @@ mod tests {
             err.contains("must preserve failure artifacts"),
             "expected explicit failure-artifact error, got: {err}"
         );
+    }
+
+    #[test]
+    fn claude_acceptance_family_has_expected_prefix_and_validation() {
+        let suite = sample_suite(
+            "accept_claude_reseed",
+            SuiteFamily::AcceptClaude,
+            SuiteTier::Acceptance,
+        );
+        assert_eq!(suite.family.prefix(), "accept_claude_");
+        assert!(suite.validate().is_ok());
+    }
+
+    #[test]
+    fn copilot_acceptance_family_has_expected_prefix_and_validation() {
+        let suite = sample_suite(
+            "accept_copilot_tier_b",
+            SuiteFamily::AcceptCopilot,
+            SuiteTier::Acceptance,
+        );
+        assert_eq!(suite.family.prefix(), "accept_copilot_");
+        assert!(suite.validate().is_ok());
+    }
+
+    #[test]
+    fn bounded_acceptance_families_require_failure_artifacts() {
+        for (id, family) in [
+            ("accept_gemini_reseed", SuiteFamily::AcceptGemini),
+            ("accept_claude_reseed", SuiteFamily::AcceptClaude),
+            ("accept_copilot_tier_b", SuiteFamily::AcceptCopilot),
+        ] {
+            let mut suite = sample_suite(id, family, SuiteTier::Acceptance);
+            suite.preserve_failure_artifacts = false;
+            let err = suite
+                .validate()
+                .expect_err("bounded acceptance family must fail closed");
+            assert!(
+                err.contains("must preserve failure artifacts"),
+                "expected explicit failure-artifact error for {id}, got: {err}"
+            );
+        }
     }
 
     #[test]

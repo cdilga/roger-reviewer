@@ -4,16 +4,16 @@ use roger_app_core::tui_shell::{
     DraftReviewDecision, FindingDetail, FindingListRow, LocalDraftReviewEntry, MinimalTuiShell,
     ReadOnlySessionSnapshot, SessionChrome, SupervisorSnapshot,
 };
-use roger_bridge::{handle_bridge_intent, BridgeLaunchIntent, BridgePreflight};
-use roger_cli::{run, CliRuntime};
+use roger_bridge::{BridgeLaunchIntent, BridgePreflight, handle_bridge_intent};
+use roger_cli::{CliRuntime, run};
 use roger_storage::{CreateMaterializedFinding, RogerStore, UpsertMemoryItem};
 use roger_validation::{discover_suite_metadata, failure_artifact_paths};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use tempfile::{tempdir, TempDir};
+use tempfile::{TempDir, tempdir};
 
 const PACKAGED_MANIFEST_KEY_EXTENSION_ID: &str = "djbjigobohmlljboggckmhhnoeldinlp";
 
@@ -51,11 +51,7 @@ fn rr_binary_hint() -> Option<PathBuf> {
     }
 
     let local = workspace_root().join("target/debug/rr");
-    if local.exists() {
-        Some(local)
-    } else {
-        None
-    }
+    if local.exists() { Some(local) } else { None }
 }
 
 fn write_rr_host(runtime: &CliRuntime) -> (TempDir, PathBuf) {

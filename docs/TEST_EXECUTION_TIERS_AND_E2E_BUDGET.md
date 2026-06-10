@@ -189,7 +189,9 @@ Current implementation status:
 
 - `E2E-01` is implemented as
   `packages/cli/tests/e2e_core_review_happy_path.rs`
-- `E2E-02` through `E2E-06` are budget-approved scenario slots only and do not
+- `E2E-04` is implemented as
+  `packages/cli/tests/e2e_refresh_draft_reconciliation.rs`
+- `E2E-02`, `E2E-03`, and `E2E-06` are budget-approved scenario slots only and do not
   count as functional coverage until executable suites land and run
 - `docs/AUTOMATED_E2E_BUDGET.json` is also the machine-readable mapping source
   for persona ids, flow ids, invariant ids, current executable suite ids,
@@ -248,6 +250,22 @@ Bridge smoke rule:
 
 These are explicitly integration plus smoke guards, not heavyweight E2Es.
 
+Official browser-automation shape:
+
+- the implemented heavyweight browser journey (`E2E-05`) uses a deterministic
+  extension-loaded automation harness, with the unpacked extension exercised in
+  a persistent Chromium runtime rather than in a branded browser side-load path
+- supported-browser smokes for Chrome, Brave, and Edge remain separate release
+  and operator-stability evidence; they defend support claims for those
+  browsers, not the canonical extension-loaded automation lane
+- deterministic `integration` and `e2e` runs should continue to avoid real
+  GitHub network mutation; use Roger-owned doubles for the outbound GitHub
+  boundary unless a later operator-stability or release-candidate run is
+  explicitly proving the live sacrificial-PR path
+- live GitHub rehearsal should be modeled as operator-stability or
+  release-candidate evidence, not as a prerequisite for every deterministic
+  browser E2E run
+
 Chrome/Brave-specific execution is required when:
 
 - Native Messaging host registration logic changes
@@ -282,6 +300,35 @@ Shared-source coverage without a fresh Edge run is sufficient only when:
 - `int_bridge_*` suites remain green and the latest passing
   `SMOKE-BRIDGE-EDGE-01` artifact remains representative
 
+### First-Class Provider Smoke Classification
+
+`SMOKE-OPENCODE-01` is the named suite id for first-class OpenCode continuity
+smoke.
+
+Provider smoke rule:
+
+- `SMOKE-OPENCODE-01` defends the real-provider part of Roger's OpenCode
+  continuity claim: locator reopen when available, truthful reseed when stale,
+  intentional dropout to bare OpenCode, and `rr return`
+- it is explicitly integration plus smoke evidence, not a heavyweight E2E
+- Codex, Gemini, Claude Code, and feature-gated Copilot do not get per-provider
+  real-provider smoke in `0.1.0`; bounded, non-first-class wording stays on
+  acceptance and integration proof until a later bead widens the public claim
+
+OpenCode-specific execution is required when:
+
+- OpenCode support wording changes in release notes, README, or matrix docs
+- locator reopen, reseed, dropout, or `rr return` behavior changes
+- provider launch capture or transcript-linkage behavior changes materially
+
+Shared-source coverage without a fresh OpenCode smoke run is sufficient only
+when:
+
+- the change is docs-only or limited to deterministic shared code with no
+  OpenCode continuity behavior delta
+- `accept_opencode_*` and `int_cli_opencode_transactional_*` remain green and
+  the latest passing `SMOKE-OPENCODE-01` artifact remains representative
+
 ## Budget File
 
 The machine-readable budget for automated heavyweight E2Es lives in
@@ -304,6 +351,14 @@ Contract:
   workflow is proven
 - each new heavyweight E2E must add a justification entry instead of quietly
   raising the count
+
+Audit entrypoints:
+
+- `cargo run -q -p roger-validation -- guard-e2e-budget tests/suites docs/AUTOMATED_E2E_BUDGET.json`
+  is the machine-readable budget audit entrypoint
+- `cargo run -q -p roger-validation -- plan release tests/suites target/test-artifacts`
+  is the machine-readable release-proof entrypoint for the current smoke and
+  rehearsal catalog
 
 ## Growth Rules
 
