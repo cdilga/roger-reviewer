@@ -79,32 +79,34 @@ override automatically.
 
 The local-first path is the primary Roger experience.
 
-### 1. Bootstrap local Roger state
+### 1. Run provider-aware preflight
 
-```bash
-rr init
-```
-
-### 2. Run provider-aware preflight
+Roger's local store bootstraps automatically on first use, so there is no
+required init step (`rr init` remains available as an explicit, idempotent
+bootstrap).
 
 ```bash
 rr doctor --provider opencode
 ```
 
-### 3. Start a review
+### 2. Start a review
 
 ```bash
 rr review --pr 123 --provider opencode
 ```
 
-### 4. Inspect what Roger found
+### 3. Inspect what Roger found
 
 ```bash
 rr status
 rr findings
+rr tui
 ```
 
-### 5. Continue the same review later
+`rr tui` opens the keyboard-driven review cockpit: sessions, findings triage,
+draft approval queue, timeline, and prior-review search in one place.
+
+### 4. Continue the same review later
 
 ```bash
 rr resume --pr 123
@@ -123,9 +125,10 @@ path: Roger can start a review, reopen by locator or session id, return with
 or unusable, but Copilot remains outside the default public live claim. The
 browser companion is optional.
 
-`rr init` only bootstraps Roger-owned local state. `rr doctor` verifies local
-bootstrap and provider prerequisites, but auth remains a deferred first-launch
-check; run `rr review`/`rr resume` to verify auth/path fail-closed behavior.
+The Roger store lives at `~/.roger` (one canonical store per profile; override
+with `RR_STORE_ROOT`). `rr doctor` verifies local bootstrap and provider
+prerequisites, but auth remains a deferred first-launch check; run
+`rr review`/`rr resume` to verify auth/path fail-closed behavior.
 
 Roger reconciles stale review state when you re-enter through `rr review`,
 `rr resume`, or `rr return`. `rr status` and `rr findings` are persisted
@@ -144,7 +147,8 @@ artifacts, see [docs/DEV_MACHINE_ONBOARDING.md](docs/DEV_MACHINE_ONBOARDING.md).
 | `rr prs` | List open pull requests as a review queue joined with local Roger state |
 | `rr review --pr 123 --provider opencode` | Start a review for a pull request |
 | `rr resume --pr 123` | Re-enter the existing review for that pull request |
-| `rr init` | Bootstrap the local Roger store and marker state |
+| `rr tui` | Open the local review cockpit (sessions, findings, drafts, timeline, search) |
+| `rr init` | Optional explicit bootstrap; the store auto-creates on first use |
 | `rr doctor --provider opencode` | Run local + provider preflight checks with fail-closed guidance |
 | `rr status` | Show the current session, attention state, and next step |
 | `rr findings` | Inspect the structured findings Roger has materialized |
@@ -156,6 +160,7 @@ artifacts, see [docs/DEV_MACHINE_ONBOARDING.md](docs/DEV_MACHINE_ONBOARDING.md).
 | `rr search --query "auth"` | Search prior local review memory and evidence |
 | `rr return --pr 123` | Rebind a dropped-out bare OpenCode or feature-gated Copilot session back to Roger |
 | `rr update` | Self-update `rr` from the latest published GitHub release |
+| `rr extension fetch` | Download and verify the published extension package for this release |
 | `rr extension setup --browser edge` | Set up the optional browser companion |
 | `rr extension doctor --browser edge` | Verify the browser companion path |
 
@@ -272,6 +277,13 @@ Roger's browser companion is optional and bounded.
 - supported `0.1.0` bridge: Native Messaging only
 - normal setup path: `rr extension setup --browser <edge|chrome|brave>`
 - verification path: `rr extension doctor --browser <edge|chrome|brave>`
+- installed (non-dev) hosts: the installer unpacks the release extension
+  package into `~/.roger/bridge/extension-package/<version>/`, and
+  `rr extension fetch` re-downloads and checksum-verifies it on demand; no
+  Roger source checkout is required
+- browser truth note: branded Google Chrome 137+ ignores `--load-extension`,
+  so Chrome needs one manual "Load unpacked" pass via `chrome://extensions`;
+  Edge and Brave still honor the flag-based launch
 - the browser lane is for launch, resume, and bounded mirror convenience;
   approval and posting stay local and explicit
 

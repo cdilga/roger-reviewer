@@ -801,6 +801,84 @@ fn rr_binary_native_host_path_returns_bridge_response_for_launch_intents() {
 }
 
 #[test]
+fn rr_binary_native_host_answers_status_probe_from_persisted_state() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = CliRuntime {
+        cwd: temp.path().to_path_buf(),
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: "opencode".to_owned(),
+    };
+
+    // Probe with no session: the host must answer an empty object so the
+    // extension degrades honestly to launch-only mode.
+    let probe = serde_json::json!({
+        "type": "roger_bridge_status",
+        "owner": "owner",
+        "repo": "repo",
+        "pr_number": 42,
+    });
+    let wire = {
+        let json = serde_json::to_vec(&probe).expect("serialize probe");
+        let mut wire = Vec::with_capacity(4 + json.len());
+        wire.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        wire.extend_from_slice(&json);
+        wire
+    };
+    let output = run_rr_process_with_stdin(&[], &runtime, &wire);
+    assert!(output.status.success(), "status probe must exit 0");
+    let len = u32::from_le_bytes([
+        output.stdout[0],
+        output.stdout[1],
+        output.stdout[2],
+        output.stdout[3],
+    ]) as usize;
+    let reply: Value =
+        serde_json::from_slice(&output.stdout[4..4 + len]).expect("decode probe reply");
+    assert_eq!(reply, serde_json::json!({}), "no session -> empty mirror");
+
+    // Seed a findings_ready session and probe again: the host must mirror the
+    // persisted attention state with a freshness measure.
+    {
+        let store = RogerStore::open(&runtime.store_root).expect("open store");
+        store
+            .create_review_session(roger_storage::CreateReviewSession {
+                id: "session-probe-1",
+                review_target: &ReviewTarget {
+                    repository: "owner/repo".to_owned(),
+                    pull_request_number: 42,
+                    base_ref: "main".to_owned(),
+                    head_ref: "feature".to_owned(),
+                    base_commit: "aaa".to_owned(),
+                    head_commit: "bbb".to_owned(),
+                },
+                provider: "opencode",
+                session_locator: None,
+                resume_bundle_artifact_id: None,
+                continuity_state: "resume:usable",
+                attention_state: "findings_ready",
+                launch_profile_id: Some("profile-open-pr"),
+            })
+            .expect("seed session");
+    }
+    let output = run_rr_process_with_stdin(&[], &runtime, &wire);
+    assert!(output.status.success(), "status probe must exit 0");
+    let len = u32::from_le_bytes([
+        output.stdout[0],
+        output.stdout[1],
+        output.stdout[2],
+        output.stdout[3],
+    ]) as usize;
+    let reply: Value =
+        serde_json::from_slice(&output.stdout[4..4 + len]).expect("decode probe reply");
+    assert_eq!(reply["attention_state"], "findings_ready");
+    assert_eq!(reply["session_id"], "session-probe-1");
+    assert!(
+        reply["freshness_seconds"].as_i64().expect("freshness") < 60,
+        "fresh seed must report low freshness: {reply}"
+    );
+}
+
+#[test]
 fn rr_binary_native_host_path_handles_all_primary_launch_actions_without_hanging() {
     let temp = tempdir().expect("tempdir");
     let runtime = CliRuntime {
@@ -1231,6 +1309,16 @@ fn resume_blocks_with_picker_when_repo_match_is_ambiguous() {
         run_rr(&["review", "--pr", "43", "--robot"], &runtime).exit_code,
         0
     );
+
+    // The two seeded sessions must tie on every inference dimension for the
+    // picker contract to apply; real inserts can cross a second boundary and
+    // make updated_at a legitimate tiebreaker, so pin it deterministically.
+    {
+        let conn =
+            rusqlite::Connection::open(runtime.store_root.join("roger.db")).expect("open store db");
+        conn.execute("UPDATE review_sessions SET updated_at = 1700000000", [])
+            .expect("pin session updated_at");
+    }
 
     let resume = run_rr(&["resume", "--robot"], &runtime);
     assert_eq!(resume.exit_code, 3, "{}", resume.stderr);

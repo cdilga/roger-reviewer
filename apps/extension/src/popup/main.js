@@ -112,9 +112,22 @@ function buildStatusMessage(context) {
   };
 }
 
+const BRIDGE_DISCONNECT_GUIDANCE =
+  'Native bridge unreachable. Run `rr extension setup --browser <edge|chrome|brave>`, then `rr extension doctor --browser <edge|chrome|brave>`, and reload this page.';
+
+function normalizeGuidanceText(guidance) {
+  if (Array.isArray(guidance)) {
+    return guidance
+      .filter((entry) => typeof entry === 'string' && entry.trim().length > 0)
+      .map((entry) => entry.trim())
+      .join(' ');
+  }
+  return typeof guidance === 'string' ? guidance.trim() : '';
+}
+
 function appendGuidance(message, guidance) {
   const base = typeof message === 'string' ? message.trim() : '';
-  const extra = typeof guidance === 'string' ? guidance.trim() : '';
+  const extra = normalizeGuidanceText(guidance);
 
   if (!base) {
     return extra;
@@ -338,7 +351,10 @@ async function handleActionClick(action, context, button) {
     setSubtitle(feedback.message, feedback.isError);
     applyActionModel(feedback.attentionState);
   } catch (error) {
-    setSubtitle(`Bridge error: ${String(error?.message || error)}`, true);
+    setSubtitle(
+      appendGuidance(`Bridge error: ${String(error?.message || error)}`, BRIDGE_DISCONNECT_GUIDANCE),
+      true
+    );
   } finally {
     button.disabled = false;
     button.textContent = previousLabel;
@@ -411,6 +427,8 @@ if (typeof document !== 'undefined' && typeof chrome !== 'undefined') {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     ACTIONS,
+    BRIDGE_DISCONNECT_GUIDANCE,
+    appendGuidance,
     NON_PR_SUBTITLE,
     PR_SUBTITLE,
     FINDINGS_VISIBLE_ATTENTION_STATES,

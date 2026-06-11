@@ -129,7 +129,7 @@ fn runtime_for(workspace: PathBuf, store_root: PathBuf) -> CliRuntime {
 }
 
 #[test]
-fn rr_doctor_fails_closed_when_store_is_missing() {
+fn rr_doctor_reports_missing_store_as_auto_bootstrap_pending() {
     let temp = tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     init_git_repo(&workspace);
@@ -151,20 +151,33 @@ fn rr_doctor_fails_closed_when_store_is_missing() {
         )
     });
 
-    assert_eq!(result.exit_code, 3, "{}", result.stderr);
+    // A missing store on a fresh machine is the expected auto-bootstrap
+    // state, not an error: rr init is optional and every store-backed
+    // command bootstraps on first use.
     let payload = parse_robot(&result.stdout);
-    assert_eq!(payload["outcome"], "blocked");
     assert_eq!(payload["data"]["provider"], "opencode");
 
     let store_root_check = check_by_id(&payload, "store_root_present");
-    assert_eq!(store_root_check["status"], "blocked");
-    assert_eq!(store_root_check["reason_code"], "store_root_missing");
+    assert_eq!(store_root_check["status"], "deferred");
+    assert_eq!(
+        store_root_check["reason_code"],
+        "store_auto_bootstrap_pending"
+    );
+    let db_check = check_by_id(&payload, "store_db_readable");
+    assert_eq!(db_check["status"], "deferred");
+    assert_eq!(db_check["reason_code"], "store_auto_bootstrap_pending");
     assert!(
-        payload["repair_actions"]
+        !payload["repair_actions"]
             .as_array()
             .expect("repair actions")
             .iter()
-            .any(|item| item.as_str().unwrap_or_default().contains("run rr init"))
+            .any(|item| {
+                item.as_str()
+                    .unwrap_or_default()
+                    .contains("run rr init to bootstrap")
+            }),
+        "fresh-machine doctor must not demand rr init: {}",
+        payload["repair_actions"]
     );
 }
 

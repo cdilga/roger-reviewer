@@ -292,7 +292,9 @@ fn provider_support_truth_guard_matches_live_cli_help_and_docs() {
     // marked as the dedicated worker transport and explicitly separate from
     // the --robot operator surface; a bare unmarked entry is a doctrine bug.
     assert!(
-        command_items.iter().all(|item| item["command"] != "rr agent"),
+        command_items
+            .iter()
+            .all(|item| item["command"] != "rr agent"),
         "bare rr agent must not appear as an ordinary --robot command"
     );
     for item in command_items

@@ -17,10 +17,10 @@ use roger_app_core::{
     WorkerFindingDetailRequest, WorkerFindingListResponse, WorkerFindingSummary,
     WorkerGatewaySnapshot, WorkerGitHubPosture, WorkerMutationPosture, WorkerOperation,
     WorkerOperationRequestEnvelope, WorkerRecallEnvelope, WorkerSearchMemoryRequest,
-    WorkerSearchMemoryResponse, WorkerStageResult, WorkerStatusSnapshot, WorkerTransportKind,
-    execute_agent_transport_request, execute_explicit_posting_flow, materialize_search_plan,
-    outbound_target_tuple_json, route_harness_command, safe_harness_command_bindings,
-    validate_outbound_draft_batch_linkage,
+    WorkerSearchMemoryResponse, WorkerStageOutcome, WorkerStageResult, WorkerStatusSnapshot,
+    WorkerTransportKind, execute_agent_transport_request, execute_explicit_posting_flow,
+    materialize_search_plan, outbound_target_tuple_json, route_harness_command,
+    safe_harness_command_bindings, validate_outbound_draft_batch_linkage,
 };
 use roger_bridge::{
     NativeHostManifest, SupportedBrowser, SupportedOs, native_host_install_path_for,
@@ -82,7 +82,13 @@ impl CliRuntime {
         let store_root = std::env::var(ENV_STORE_ROOT)
             .ok()
             .map(PathBuf::from)
-            .unwrap_or_else(|| cwd.join(".roger"));
+            .unwrap_or_else(|| {
+                // One canonical store per profile: every surface (CLI from any
+                // directory, browser-launched native host, TUI) must read the
+                // same truth, so the default is HOME-based, not cwd-based.
+                let home = std::env::var("HOME").ok();
+                roger_config::cli_defaults::default_store_root_from(home.as_deref(), &cwd)
+            });
         let opencode_bin =
             std::env::var(ENV_OPENCODE_BIN).unwrap_or_else(|_| DEFAULT_OPENCODE_BIN.to_owned());
         Self {
@@ -131,6 +137,7 @@ enum CommandKind {
     RobotDocs,
     Findings,
     Status,
+    Tui,
 }
 
 impl CommandKind {
@@ -157,6 +164,7 @@ impl CommandKind {
             (Self::RobotDocs, _) => "rr robot-docs",
             (Self::Findings, _) => "rr findings",
             (Self::Status, _) => "rr status",
+            (Self::Tui, _) => "rr tui",
         }
     }
 
@@ -181,6 +189,7 @@ impl CommandKind {
             Self::RobotDocs => "rr.robot.robot_docs.v1",
             Self::Findings => "rr.robot.findings.v1",
             Self::Status => "rr.robot.status.v1",
+            Self::Tui => "rr.robot.tui.v1",
         }
     }
 }
@@ -198,6 +207,7 @@ enum BridgeCommandKind {
 enum ExtensionCommandKind {
     Setup,
     Doctor,
+    Fetch,
     Uninstall,
 }
 
@@ -229,6 +239,7 @@ struct ParsedArgs {
     bridge_command: Option<BridgeCommandKind>,
     extension_command: Option<ExtensionCommandKind>,
     extension_browser: Option<SupportedBrowser>,
+    extension_package_dir: Option<PathBuf>,
     bridge_extension_id: Option<String>,
     bridge_binary_path: Option<PathBuf>,
     bridge_install_root: Option<PathBuf>,
@@ -587,6 +598,7 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         "robot-docs" => CommandKind::RobotDocs,
         "findings" => CommandKind::Findings,
         "status" => CommandKind::Status,
+        "tui" => CommandKind::Tui,
         "-h" | "--help" | "help" => {
             return Err("help requested".to_owned());
         }
@@ -603,6 +615,7 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         bridge_command: None,
         extension_command: None,
         extension_browser: None,
+        extension_package_dir: None,
         bridge_extension_id: None,
         bridge_binary_path: None,
         bridge_install_root: None,
@@ -843,6 +856,13 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
                 parsed.extension_browser = Some(parse_supported_browser(value)?);
                 i += 2;
             }
+            "--package-dir" => {
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--package-dir requires a value".to_owned())?;
+                parsed.extension_package_dir = Some(PathBuf::from(value));
+                i += 2;
+            }
             "--robot" => {
                 parsed.robot = true;
                 i += 1;
@@ -889,6 +909,7 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
                         parsed.extension_command = match positional {
                             "setup" => Some(ExtensionCommandKind::Setup),
                             "doctor" => Some(ExtensionCommandKind::Doctor),
+                            "fetch" => Some(ExtensionCommandKind::Fetch),
                             "uninstall" => Some(ExtensionCommandKind::Uninstall),
                             other => {
                                 return Err(format!("unknown extension subcommand: {other}"));
@@ -949,7 +970,13 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
     }
 
     if parsed.command == CommandKind::Extension && parsed.extension_command.is_none() {
-        return Err("rr extension requires a subcommand: setup, doctor, or uninstall".to_owned());
+        return Err(
+            "rr extension requires a subcommand: setup, doctor, fetch, or uninstall".to_owned(),
+        );
+    }
+
+    if parsed.command != CommandKind::Extension && parsed.extension_package_dir.is_some() {
+        return Err("--package-dir is only supported by rr extension".to_owned());
     }
 
     if parsed.command != CommandKind::Search && parsed.query_mode.is_some() {
@@ -1004,16 +1031,18 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         );
     }
 
+    let extension_fetch_scope = parsed.command == CommandKind::Extension
+        && parsed.extension_command == Some(ExtensionCommandKind::Fetch);
     if parsed.command != CommandKind::Update
         && (parsed.update_channel != "stable"
-            || parsed.update_version.is_some()
             || parsed.update_api_root.is_some()
-            || parsed.update_download_root.is_some()
             || parsed.update_target.is_some()
-            || parsed.update_yes)
+            || parsed.update_yes
+            || (!extension_fetch_scope
+                && (parsed.update_version.is_some() || parsed.update_download_root.is_some())))
     {
         return Err(
-            "--channel/--version/--api-root/--download-root/--target/--yes are update-only flags"
+            "--channel/--version/--api-root/--download-root/--target/--yes are update-only flags (--version/--download-root are also accepted by rr extension fetch)"
                 .to_owned(),
         );
     }
@@ -1350,6 +1379,42 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         }
     }
 
+    if parsed.command == CommandKind::Tui {
+        if parsed.dry_run {
+            return Err("rr tui does not support --dry-run".to_owned());
+        }
+        if !parsed.attention_states.is_empty()
+            || parsed.limit.is_some()
+            || parsed.query_text.is_some()
+            || parsed.query_mode.is_some()
+            || parsed.robot_docs_topic.is_some()
+            || parsed.provider != "opencode"
+            || parsed.bridge_command.is_some()
+            || parsed.extension_command.is_some()
+            || parsed.extension_browser.is_some()
+            || parsed.bridge_extension_id.is_some()
+            || parsed.bridge_binary_path.is_some()
+            || parsed.bridge_install_root.is_some()
+            || parsed.bridge_output_dir.is_some()
+            || parsed.update_channel != "stable"
+            || parsed.update_version.is_some()
+            || parsed.update_api_root.is_some()
+            || parsed.update_download_root.is_some()
+            || parsed.update_target.is_some()
+            || parsed.update_yes
+            || parsed.draft_all_findings
+            || !parsed.draft_finding_ids.is_empty()
+            || parsed.batch_id.is_some()
+            || parsed.agent_operation.is_some()
+            || parsed.agent_task_file.is_some()
+            || parsed.agent_request_file.is_some()
+            || parsed.agent_context_file.is_some()
+            || parsed.agent_capability_file.is_some()
+        {
+            return Err("rr tui only supports --repo, --pr, and --session".to_owned());
+        }
+    }
+
     Ok(parsed)
 }
 
@@ -1382,6 +1447,7 @@ fn execute_command(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
         CommandKind::RobotDocs => handle_robot_docs(parsed, runtime),
         CommandKind::Findings => handle_findings(parsed, runtime),
         CommandKind::Status => handle_status(parsed, runtime),
+        CommandKind::Tui => handle_tui(parsed, runtime),
     }
 }
 
@@ -2188,6 +2254,43 @@ fn handle_agent(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     agent_command_response(envelope)
 }
 
+/// Answer a companion-tier bounded status probe from the browser extension.
+///
+/// Read-only by contract: resolve the newest session for the probe's
+/// repo#pr from persisted state and report its attention state plus
+/// freshness. States outside the extension's canonical decision-needing set
+/// (or anything unresolvable) return an empty object so the extension
+/// degrades honestly to launch-only mode instead of bluffing.
+pub fn answer_bridge_status_probe(
+    runtime: &CliRuntime,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+) -> Value {
+    let Ok(store) = RogerStore::open(&runtime.store_root) else {
+        return json!({});
+    };
+    let repository = format!("{owner}/{repo}");
+    let sessions = store
+        .session_finder(SessionFinderQuery {
+            repository: Some(repository),
+            pull_request_number: Some(pr_number),
+            attention_states: Vec::new(),
+            limit: 1,
+        })
+        .unwrap_or_default();
+    let Some(session) = sessions.first() else {
+        return json!({});
+    };
+    let freshness_seconds = (time::now_ts() - session.updated_at).max(0);
+    json!({
+        "attention_state": session.attention_state,
+        "freshness_seconds": freshness_seconds,
+        "session_id": session.session_id,
+        "provider": session.provider,
+    })
+}
+
 fn resolve_copilot_home() -> Option<PathBuf> {
     if let Ok(value) = std::env::var(session_copilot::COPILOT_HOME_ENV) {
         let trimmed = value.trim();
@@ -2242,6 +2345,7 @@ fn persist_accepted_stage_result(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let mut materialized_count = 0usize;
     for finding in &findings {
         let title = finding
             .get("title")
@@ -2304,6 +2408,35 @@ fn persist_accepted_stage_result(
                 outbound_state: "not_drafted",
             })
             .map_err(|err| format!("failed to materialize finding from stage result: {err}"))?;
+        materialized_count += 1;
+    }
+
+    // A completed pass that materialized findings moves the session into the
+    // canonical findings_ready attention state so operator surfaces (CLI
+    // status, TUI, extension mirror) see that a decision is now waiting.
+    if materialized_count > 0 && result.outcome == WorkerStageOutcome::Completed {
+        let mut row_version = session.row_version;
+        for attempt in 0..2 {
+            match store.update_review_session_attention(
+                &task.review_session_id,
+                row_version,
+                "findings_ready",
+            ) {
+                Ok(_) => break,
+                Err(StorageError::Conflict { .. }) if attempt == 0 => {
+                    row_version = store
+                        .review_session(&task.review_session_id)
+                        .map_err(|err| format!("failed to reload session for attention: {err}"))?
+                        .ok_or_else(|| "session vanished during attention update".to_owned())?
+                        .row_version;
+                }
+                Err(err) => {
+                    return Err(format!(
+                        "failed to mark session findings_ready after accepted stage result: {err}"
+                    ));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -2747,16 +2880,17 @@ fn handle_doctor(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             json!({"path": layout.root.to_string_lossy()}),
         );
     } else {
+        // The store auto-bootstraps on first use of any store-backed command;
+        // a missing store on a fresh machine is expected, not an error.
         push_check(
             "store_root_present",
             "Roger store root exists",
-            "blocked",
-            Some("store_root_missing"),
-            json!({"path": layout.root.to_string_lossy()}),
-        );
-        repair_actions.insert(
-            "run rr init to bootstrap local Roger storage".to_owned(),
-            (),
+            "deferred",
+            Some("store_auto_bootstrap_pending"),
+            json!({
+                "path": layout.root.to_string_lossy(),
+                "guidance": "Roger creates the store automatically on first use; run any review command (or rr init explicitly) to bootstrap now",
+            }),
         );
     }
 
@@ -2817,13 +2951,12 @@ fn handle_doctor(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         push_check(
             "store_db_readable",
             "Roger store database is readable",
-            "blocked",
-            Some("store_db_missing"),
-            json!({"path": layout.db_path.to_string_lossy()}),
-        );
-        repair_actions.insert(
-            "run rr init to create the Roger store database".to_owned(),
-            (),
+            "deferred",
+            Some("store_auto_bootstrap_pending"),
+            json!({
+                "path": layout.db_path.to_string_lossy(),
+                "guidance": "Roger creates the store database automatically on first use; run any review command (or rr init explicitly) to bootstrap now",
+            }),
         );
     }
 
@@ -2845,6 +2978,15 @@ fn handle_doctor(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 label,
                 "verified",
                 None,
+                json!({"path": path.to_string_lossy()}),
+            );
+        } else if !layout.root.is_dir() {
+            // Fresh machine: the whole layout materializes on first use.
+            push_check(
+                id,
+                label,
+                "deferred",
+                Some("store_auto_bootstrap_pending"),
                 json!({"path": path.to_string_lossy()}),
             );
         } else {
@@ -3529,6 +3671,64 @@ fn extension_guided_browser_command(
     )
 }
 
+/// Installed-mode launch guidance when the dev guided-browser script is not
+/// available. Live-tested truth (2026-06): branded Google Chrome >= 137
+/// ignores --load-extension, so Chrome needs one manual "Load unpacked" pass
+/// via chrome://extensions; Edge and Brave still honor the flag-based launch.
+fn extension_inline_browser_launch_guidance(
+    browser: &SupportedBrowser,
+    profile_root: &Path,
+    package_dir: &str,
+    start_url: &str,
+) -> String {
+    let browser_label = supported_browser_label(browser.clone());
+    match browser {
+        SupportedBrowser::Chrome => format!(
+            "branded Google Chrome 137+ ignores --load-extension: open chrome://extensions, enable 'Developer mode', click 'Load unpacked', select {package_dir}, then open {start_url}"
+        ),
+        SupportedBrowser::Edge | SupportedBrowser::Brave => format!(
+            "launch {browser_label} once with --user-data-dir={} --load-extension={} --disable-extensions-except={} {} (Edge/Brave honor flag-based extension load; branded Chrome 137+ does not)",
+            profile_root.display(),
+            package_dir,
+            package_dir,
+            start_url,
+        ),
+    }
+}
+
+/// Builds the guided browser launch surface for setup/doctor output:
+/// dev workspaces use the repo's guided-browser script, installed binaries get
+/// inline flag/manual-load guidance instead of a repo script path that does
+/// not exist on the host.
+fn extension_browser_launch_surface(
+    workspace_root: Option<&Path>,
+    browser: &SupportedBrowser,
+    profile_root: &Path,
+    package_dir: &str,
+    start_url: &str,
+) -> (String, Value, String) {
+    match workspace_root {
+        Some(root) => (
+            extension_guided_browser_command(root, browser, profile_root, package_dir, start_url),
+            Value::String(
+                extension_guided_browser_script_path(root)
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            extension_profile_launch_hint(browser, profile_root, package_dir),
+        ),
+        None => {
+            let inline = extension_inline_browser_launch_guidance(
+                browser,
+                profile_root,
+                package_dir,
+                start_url,
+            );
+            (inline.clone(), Value::Null, inline)
+        }
+    }
+}
+
 fn extension_browser_url(browser: SupportedBrowser) -> &'static str {
     match browser {
         SupportedBrowser::Chrome => "chrome://extensions",
@@ -3884,24 +4084,125 @@ fn resolve_extension_package_dir(workspace_root: &Path) -> Result<PathBuf, Strin
         .join(extension_package_dir_name(&manifest_json)))
 }
 
+fn installed_extension_package_root(store_root: &Path) -> PathBuf {
+    store_root.join("bridge/extension-package")
+}
+
+fn installed_extension_package_dir(store_root: &Path, version: &str) -> PathBuf {
+    installed_extension_package_root(store_root)
+        .join(version)
+        .join("roger-extension-unpacked")
+}
+
+fn installed_extension_package_is_usable(package_dir: &Path) -> bool {
+    package_dir.join("manifest.json").is_file()
+}
+
+/// Resolves the installed-mode extension package directory under the store
+/// root: prefer the exact embedded release version, then the newest fetched
+/// version that still contains an unpacked manifest.
+fn resolve_installed_extension_package_dir(store_root: &Path) -> Option<(PathBuf, &'static str)> {
+    if let Some(version) = option_env!("ROGER_RELEASE_VERSION") {
+        let exact = installed_extension_package_dir(store_root, version);
+        if installed_extension_package_is_usable(&exact) {
+            return Some((exact, "installed_layout_release_version"));
+        }
+    }
+
+    let package_root = installed_extension_package_root(store_root);
+    let mut candidates: Vec<(String, PathBuf)> = Vec::new();
+    if let Ok(entries) = fs::read_dir(&package_root) {
+        for entry in entries.flatten() {
+            let candidate = entry.path().join("roger-extension-unpacked");
+            if installed_extension_package_is_usable(&candidate) {
+                candidates.push((entry.file_name().to_string_lossy().to_string(), candidate));
+            }
+        }
+    }
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    candidates
+        .pop()
+        .map(|(_version, path)| (path, "installed_layout_newest_available"))
+}
+
+#[derive(Clone, Debug)]
+struct ExtensionPackageResolution {
+    package_dir: PathBuf,
+    /// explicit_package_dir | dev_workspace | installed_layout_release_version |
+    /// installed_layout_newest_available
+    source: &'static str,
+}
+
+fn extension_package_missing_response(subcommand: &str, runtime: &CliRuntime) -> CommandResponse {
+    blocked_response(
+        "no Roger extension package is available for this rr install".to_owned(),
+        vec![
+            "run rr extension fetch to download and verify the published extension package for this release".to_owned(),
+            "or run rr extension setup from a Roger dev workspace, which packs the extension from source".to_owned(),
+            "or pass --package-dir <path> pointing at an unpacked Roger extension directory".to_owned(),
+        ],
+        json!({
+            "subcommand": subcommand,
+            "reason_code": "extension_package_missing",
+            "installed_package_root": installed_extension_package_root(&runtime.store_root)
+                .to_string_lossy()
+                .to_string(),
+        }),
+    )
+}
+
+/// Resolution order for the unpacked extension package directory:
+/// 1. explicit --package-dir
+/// 2. dev workspace target/bridge/extension/... when workspace markers exist
+/// 3. installed layout under <store_root>/bridge/extension-package/<version>/
+fn resolve_extension_package_for_doctor(
+    parsed: &ParsedArgs,
+    runtime: &CliRuntime,
+    workspace_root: Option<&Path>,
+) -> Result<ExtensionPackageResolution, CommandResponse> {
+    if let Some(explicit) = parsed.extension_package_dir.as_ref() {
+        return Ok(ExtensionPackageResolution {
+            package_dir: explicit.clone(),
+            source: "explicit_package_dir",
+        });
+    }
+
+    if let Some(workspace_root) = workspace_root {
+        return match resolve_extension_package_dir(workspace_root) {
+            Ok(path) => Ok(ExtensionPackageResolution {
+                package_dir: path,
+                source: "dev_workspace",
+            }),
+            Err(err) => Err(error_response(err)),
+        };
+    }
+
+    match resolve_installed_extension_package_dir(&runtime.store_root) {
+        Some((package_dir, source)) => Ok(ExtensionPackageResolution {
+            package_dir,
+            source,
+        }),
+        None => Err(extension_package_missing_response("doctor", runtime)),
+    }
+}
+
 fn handle_extension(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let Some(subcommand) = parsed.extension_command else {
         return error_response("rr extension missing subcommand".to_owned());
     };
 
-    let Some(workspace_root) = find_workspace_root(&runtime.cwd) else {
-        return blocked_response(
-            "failed to resolve Roger workspace root for extension setup commands".to_owned(),
-            vec![
-                "run rr extension from the Roger repository root (or a child directory)".to_owned(),
-            ],
-            json!({"reason_code": "workspace_root_not_found"}),
-        );
-    };
+    // Installed binaries run outside the Roger repo: workspace markers are a
+    // dev-mode convenience, not a prerequisite for extension setup commands.
+    let workspace_root = find_workspace_root(&runtime.cwd);
 
     match subcommand {
-        ExtensionCommandKind::Setup => handle_extension_setup(parsed, runtime, &workspace_root),
-        ExtensionCommandKind::Doctor => handle_extension_doctor(parsed, runtime, &workspace_root),
+        ExtensionCommandKind::Setup => {
+            handle_extension_setup(parsed, runtime, workspace_root.as_deref())
+        }
+        ExtensionCommandKind::Doctor => {
+            handle_extension_doctor(parsed, runtime, workspace_root.as_deref())
+        }
+        ExtensionCommandKind::Fetch => handle_extension_fetch(parsed, runtime),
         ExtensionCommandKind::Uninstall => handle_extension_uninstall(parsed, runtime),
     }
 }
@@ -3930,38 +4231,373 @@ fn handle_extension_uninstall(parsed: &ParsedArgs, runtime: &CliRuntime) -> Comm
     uninstall
 }
 
+/// Downloads the published extension.zip release asset for this binary's
+/// release version (or an explicit --version), verifies it against the
+/// release checksums manifest, and unpacks it into the installed layout
+/// <store_root>/bridge/extension-package/<version>/roger-extension-unpacked.
+fn handle_extension_fetch(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
+    let repo = parsed
+        .repo
+        .clone()
+        .unwrap_or_else(|| "cdilga/roger-reviewer".to_owned());
+
+    let version = if let Some(raw_version) = parsed.update_version.as_deref() {
+        match normalize_calver_version(raw_version) {
+            Ok(version) => version,
+            Err(err) => {
+                return blocked_response(
+                    format!("invalid --version value: {err}"),
+                    vec!["pass YYYY.MM.DD or YYYY.MM.DD-rc.N".to_owned()],
+                    json!({"subcommand": "fetch", "reason_code": "invalid_version"}),
+                );
+            }
+        }
+    } else if let Some(version) = option_env!("ROGER_RELEASE_VERSION") {
+        version.to_owned()
+    } else {
+        return blocked_response(
+            "rr extension fetch is disabled for local/unpublished builds without embedded release metadata"
+                .to_owned(),
+            vec![
+                "from a Roger dev workspace, run rr extension setup instead; it packs the extension from source via rr bridge pack-extension"
+                    .to_owned(),
+                "or pass --version <YYYY.MM.DD[-rc.N]> to fetch a specific published release's extension package"
+                    .to_owned(),
+            ],
+            json!({"subcommand": "fetch", "reason_code": "local_or_unpublished_build"}),
+        );
+    };
+    let tag = format!("v{version}");
+    let download_root = parsed
+        .update_download_root
+        .clone()
+        .unwrap_or_else(|| format!("https://github.com/{repo}/releases/download"));
+
+    let install_metadata_name = format!("release-install-metadata-{version}.json");
+    let install_metadata_url = format!("{download_root}/{tag}/{install_metadata_name}");
+    let install_metadata_text = match fetch_url_with_curl(&install_metadata_url) {
+        Ok(text) => text,
+        Err(err) => {
+            return blocked_response(
+                format!("failed to fetch install metadata bundle: {err}"),
+                vec![
+                    "confirm the release tag is published".to_owned(),
+                    "or pass --version for a known published CalVer release".to_owned(),
+                ],
+                json!({
+                    "subcommand": "fetch",
+                    "reason_code": "install_metadata_missing",
+                    "url": install_metadata_url,
+                }),
+            );
+        }
+    };
+    let install_metadata: Value = match serde_json::from_str(&install_metadata_text) {
+        Ok(value) => value,
+        Err(err) => {
+            return blocked_response(
+                format!("install metadata bundle is invalid JSON: {err}"),
+                vec!["re-run release verification for this tag".to_owned()],
+                json!({"subcommand": "fetch", "reason_code": "install_metadata_invalid_json"}),
+            );
+        }
+    };
+    if install_metadata.get("schema").and_then(Value::as_str)
+        != Some("roger.release.install-metadata.v1")
+    {
+        return blocked_response(
+            "install metadata schema mismatch; refusing extension fetch".to_owned(),
+            vec!["rebuild release metadata bundle for this tag".to_owned()],
+            json!({"subcommand": "fetch", "reason_code": "install_metadata_schema_mismatch"}),
+        );
+    }
+    let release = install_metadata.get("release").and_then(Value::as_object);
+    if release
+        .and_then(|value| value.get("version"))
+        .and_then(Value::as_str)
+        != Some(version.as_str())
+    {
+        return blocked_response(
+            "install metadata release.version mismatch".to_owned(),
+            vec!["verify release metadata and republish artifacts".to_owned()],
+            json!({"subcommand": "fetch", "reason_code": "install_metadata_version_mismatch"}),
+        );
+    }
+
+    let artifact_stem = release
+        .and_then(|value| value.get("artifact_stem"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("roger-reviewer-{version}"));
+    let checksums_name = install_metadata
+        .get("checksums_name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty() && !name.contains('/') && !name.contains('\\'))
+        .unwrap_or("SHA256SUMS")
+        .to_owned();
+    let archive_name = format!("{artifact_stem}-extension.zip");
+
+    let checksums_fetch =
+        match fetch_checksums_manifest_with_fallback(&download_root, &tag, &checksums_name) {
+            Ok(fetch) => fetch,
+            Err(err) => {
+                return blocked_response(
+                    err.message,
+                    vec!["rebuild/upload checksums for this tag".to_owned()],
+                    json!({
+                        "subcommand": "fetch",
+                        "reason_code": "checksums_missing",
+                        "attempted_urls": err.attempted_urls,
+                    }),
+                );
+            }
+        };
+    let expected_archive_sha =
+        match checksums_entry_for_archive(&checksums_fetch.text, &archive_name) {
+            Ok(value) => value,
+            Err(err) => {
+                return blocked_response(
+                    format!(
+                        "release {tag} does not publish a verifiable extension package asset: {err}"
+                    ),
+                    vec![
+                        "confirm this release shipped the extension lane (extension.zip asset)"
+                            .to_owned(),
+                        "or run rr extension setup from a Roger dev workspace to pack from source"
+                            .to_owned(),
+                    ],
+                    json!({
+                        "subcommand": "fetch",
+                        "reason_code": "extension_asset_missing",
+                        "archive_name": archive_name,
+                        "checksums_url": checksums_fetch.url,
+                    }),
+                );
+            }
+        };
+
+    let version_root = installed_extension_package_root(&runtime.store_root).join(&version);
+    let staging_root = version_root.join(format!(".staging-{}", next_id("extension-fetch")));
+    if let Err(err) = fs::create_dir_all(&staging_root) {
+        return error_response(format!(
+            "failed to create extension fetch staging directory {}: {err}",
+            staging_root.display()
+        ));
+    }
+    let cleanup_staging = |staging_root: &Path| {
+        let _ = fs::remove_dir_all(staging_root);
+    };
+
+    let archive_url = format!("{download_root}/{tag}/{archive_name}");
+    let archive_path = staging_root.join(&archive_name);
+    if let Err(err) = download_url_to_path(&archive_url, &archive_path) {
+        cleanup_staging(&staging_root);
+        return blocked_response(
+            format!("failed to download extension package archive: {err}"),
+            vec!["confirm the release published the extension.zip asset".to_owned()],
+            json!({
+                "subcommand": "fetch",
+                "reason_code": "extension_archive_download_failed",
+                "url": archive_url,
+            }),
+        );
+    }
+    let observed_archive_sha = match sha256_for_file(&archive_path) {
+        Ok(value) => value,
+        Err(err) => {
+            cleanup_staging(&staging_root);
+            return error_response(err);
+        }
+    };
+    if observed_archive_sha != expected_archive_sha.to_ascii_lowercase() {
+        cleanup_staging(&staging_root);
+        return blocked_response(
+            format!(
+                "extension archive checksum mismatch for {archive_name}: expected {}, got {observed_archive_sha}; refusing to install",
+                expected_archive_sha.to_ascii_lowercase()
+            ),
+            vec![
+                "re-run rr extension fetch; if the mismatch persists, the release assets need re-verification"
+                    .to_owned(),
+            ],
+            json!({
+                "subcommand": "fetch",
+                "reason_code": "extension_archive_checksum_mismatch",
+                "archive_name": archive_name,
+                "expected_sha256": expected_archive_sha.to_ascii_lowercase(),
+                "observed_sha256": observed_archive_sha,
+            }),
+        );
+    }
+
+    let staged_unpacked = staging_root.join("roger-extension-unpacked");
+    if let Err(err) = fs::create_dir_all(&staged_unpacked) {
+        cleanup_staging(&staging_root);
+        return error_response(format!(
+            "failed to create staged unpack directory {}: {err}",
+            staged_unpacked.display()
+        ));
+    }
+    if let Err(err) = extract_zip_archive(&archive_path, &staged_unpacked) {
+        cleanup_staging(&staging_root);
+        return error_response(format!("failed to unpack extension archive: {err}"));
+    }
+    if !installed_extension_package_is_usable(&staged_unpacked) {
+        cleanup_staging(&staging_root);
+        return blocked_response(
+            "downloaded extension archive does not contain manifest.json at the package root"
+                .to_owned(),
+            vec!["re-verify the published extension.zip asset for this tag".to_owned()],
+            json!({
+                "subcommand": "fetch",
+                "reason_code": "extension_archive_layout_invalid",
+                "archive_name": archive_name,
+            }),
+        );
+    }
+
+    let package_dir = installed_extension_package_dir(&runtime.store_root, &version);
+    if package_dir.exists() {
+        if let Err(err) = fs::remove_dir_all(&package_dir) {
+            cleanup_staging(&staging_root);
+            return error_response(format!(
+                "failed to replace existing extension package {}: {err}",
+                package_dir.display()
+            ));
+        }
+    }
+    if let Err(err) = fs::rename(&staged_unpacked, &package_dir) {
+        cleanup_staging(&staging_root);
+        return error_response(format!(
+            "failed to move verified extension package into place at {}: {err}",
+            package_dir.display()
+        ));
+    }
+    cleanup_staging(&staging_root);
+
+    let fetch_manifest_path = version_root.join("fetch-manifest.json");
+    let fetch_manifest = json!({
+        "schema": "roger.extension.fetch-manifest.v1",
+        "version": version,
+        "tag": tag,
+        "archive_name": archive_name,
+        "archive_sha256": expected_archive_sha.to_ascii_lowercase(),
+        "archive_url": archive_url,
+        "checksums_url": checksums_fetch.url,
+        "checksums_legacy_fallback": checksums_fetch.legacy_fallback_used,
+        "package_dir": package_dir.to_string_lossy().to_string(),
+        "fetched_at_epoch_seconds": time::now_ts(),
+    });
+    match serde_json::to_vec_pretty(&fetch_manifest) {
+        Ok(mut bytes) => {
+            bytes.push(b'\n');
+            if let Err(err) = fs::write(&fetch_manifest_path, &bytes) {
+                return error_response(format!(
+                    "failed to record extension fetch manifest {}: {err}",
+                    fetch_manifest_path.display()
+                ));
+            }
+        }
+        Err(err) => {
+            return error_response(format!(
+                "failed to serialize extension fetch manifest: {err}"
+            ));
+        }
+    }
+
+    CommandResponse {
+        outcome: OutcomeKind::Complete,
+        data: json!({
+            "subcommand": "fetch",
+            "version": version,
+            "tag": tag,
+            "archive": {
+                "name": archive_name,
+                "sha256": expected_archive_sha.to_ascii_lowercase(),
+                "url": archive_url,
+            },
+            "metadata_urls": {
+                "install_metadata": install_metadata_url,
+                "checksums": checksums_fetch.url,
+            },
+            "checksums_legacy_fallback": checksums_fetch.legacy_fallback_used,
+            "package_dir": package_dir.to_string_lossy().to_string(),
+            "fetch_manifest_path": fetch_manifest_path.to_string_lossy().to_string(),
+        }),
+        warnings: Vec::new(),
+        repair_actions: vec![format!(
+            "run rr extension setup --browser <edge|chrome|brave> to register the fetched package ({})",
+            package_dir.to_string_lossy()
+        )],
+        message: format!("extension package {version} fetched, verified, and installed"),
+    }
+}
+
 fn handle_extension_setup(
     parsed: &ParsedArgs,
     runtime: &CliRuntime,
-    workspace_root: &Path,
+    workspace_root: Option<&Path>,
 ) -> CommandResponse {
     let browser = parsed
         .extension_browser
         .clone()
         .unwrap_or(SupportedBrowser::Chrome);
 
-    let mut pack_parsed = parsed.clone();
-    pack_parsed.command = CommandKind::Bridge;
-    pack_parsed.bridge_command = Some(BridgeCommandKind::PackExtension);
-    pack_parsed.bridge_extension_id = None;
-    pack_parsed.bridge_binary_path = None;
-    let pack = handle_bridge(&pack_parsed, runtime);
-    if pack.outcome != OutcomeKind::Complete {
-        return pack;
-    }
-
-    let package_dir = match pack
-        .data
-        .get("package_dir")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
+    let (package_dir, package_source) = if let Some(explicit) =
+        parsed.extension_package_dir.as_ref()
     {
-        Some(path) => path,
-        None => {
-            return error_response(
-                "extension setup failed to resolve package path from pack-extension output"
-                    .to_owned(),
+        if !installed_extension_package_is_usable(explicit) {
+            return blocked_response(
+                format!(
+                    "--package-dir {} does not contain an unpacked Roger extension (manifest.json missing)",
+                    explicit.display()
+                ),
+                vec![
+                    "pass --package-dir pointing at an unpacked Roger extension directory"
+                        .to_owned(),
+                    "or run rr extension fetch to install the published extension package"
+                        .to_owned(),
+                ],
+                json!({
+                    "subcommand": "setup",
+                    "reason_code": "extension_package_dir_invalid",
+                    "package_dir": explicit.to_string_lossy().to_string(),
+                }),
             );
+        }
+        (
+            explicit.to_string_lossy().to_string(),
+            "explicit_package_dir",
+        )
+    } else if workspace_root.is_some() {
+        let mut pack_parsed = parsed.clone();
+        pack_parsed.command = CommandKind::Bridge;
+        pack_parsed.bridge_command = Some(BridgeCommandKind::PackExtension);
+        pack_parsed.bridge_extension_id = None;
+        pack_parsed.bridge_binary_path = None;
+        let pack = handle_bridge(&pack_parsed, runtime);
+        if pack.outcome != OutcomeKind::Complete {
+            return pack;
+        }
+
+        match pack
+            .data
+            .get("package_dir")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+        {
+            Some(path) => (path, "dev_workspace"),
+            None => {
+                return error_response(
+                    "extension setup failed to resolve package path from pack-extension output"
+                        .to_owned(),
+                );
+            }
+        }
+    } else {
+        match resolve_installed_extension_package_dir(&runtime.store_root) {
+            Some((path, source)) => (path.to_string_lossy().to_string(), source),
+            None => return extension_package_missing_response("setup", runtime),
         }
     };
 
@@ -3971,15 +4607,14 @@ fn handle_extension_setup(
         package_dir
     );
     let guided_profile_root = extension_guided_profile_root(runtime, &browser);
-    let guided_browser_command = extension_guided_browser_command(
-        workspace_root,
-        &browser,
-        &guided_profile_root,
-        &package_dir,
-        extension_browser_url(browser.clone()),
-    );
-    let profile_hint_step =
-        extension_profile_launch_hint(&browser, &guided_profile_root, &package_dir);
+    let (guided_browser_command, guided_browser_script_path_value, profile_hint_step) =
+        extension_browser_launch_surface(
+            workspace_root,
+            &browser,
+            &guided_profile_root,
+            &package_dir,
+            extension_browser_url(browser.clone()),
+        );
 
     let registration_wait_budget_ms = extension_setup_registration_wait_ms();
     let Some((extension_id, extension_id_source, observed_during_setup_wait)) =
@@ -3998,13 +4633,12 @@ fn handle_extension_setup(
                 "reason_code": "extension_registration_missing",
                 "browser": supported_browser_label(browser.clone()),
                 "package_dir": package_dir,
+                "package_source": package_source,
                 "extension_id_registry_path": extension_id_registry_path(&runtime.store_root)
                     .to_string_lossy()
                     .to_string(),
                 "guided_profile_root": guided_profile_root.to_string_lossy().to_string(),
-                "guided_browser_script_path": extension_guided_browser_script_path(workspace_root)
-                    .to_string_lossy()
-                    .to_string(),
+                "guided_browser_script_path": guided_browser_script_path_value,
                 "guided_browser_command": guided_browser_command,
                 "registration_event": "browser_profile_identity_registered",
                 "registration_wait_budget_ms": registration_wait_budget_ms,
@@ -4154,15 +4788,14 @@ fn handle_extension_setup(
             "subcommand": "setup",
             "browser": supported_browser_label(browser.clone()),
             "package_dir": package_dir,
+            "package_source": package_source,
             "extension_id": extension_id,
             "extension_id_source": extension_id_source,
             "registration_wait_budget_ms": registration_wait_budget_ms,
             "registration_observed_during_setup_wait": observed_during_setup_wait,
             "manual_browser_step": load_step,
             "guided_profile_root": guided_profile_root.to_string_lossy().to_string(),
-            "guided_browser_script_path": extension_guided_browser_script_path(workspace_root)
-                .to_string_lossy()
-                .to_string(),
+            "guided_browser_script_path": guided_browser_script_path_value,
             "guided_browser_command": guided_browser_command,
             "install_root": install_root.to_string_lossy().to_string(),
             "host_binary": launcher_path.to_string_lossy().to_string(),
@@ -4179,7 +4812,7 @@ fn handle_extension_setup(
 fn handle_extension_doctor(
     parsed: &ParsedArgs,
     runtime: &CliRuntime,
-    workspace_root: &Path,
+    workspace_root: Option<&Path>,
 ) -> CommandResponse {
     let browser = parsed
         .extension_browser
@@ -4187,18 +4820,22 @@ fn handle_extension_doctor(
         .unwrap_or(SupportedBrowser::Chrome);
     let browser_label = supported_browser_label(browser.clone());
 
-    let package_dir = match resolve_extension_package_dir(workspace_root) {
-        Ok(path) => path,
-        Err(err) => return error_response(err),
-    };
+    let package_resolution =
+        match resolve_extension_package_for_doctor(parsed, runtime, workspace_root) {
+            Ok(resolution) => resolution,
+            Err(response) => return response,
+        };
+    let package_dir = package_resolution.package_dir.clone();
+    let package_source = package_resolution.source;
     let guided_profile_root = extension_guided_profile_root(runtime, &browser);
-    let guided_browser_command = extension_guided_browser_command(
-        workspace_root,
-        &browser,
-        &guided_profile_root,
-        &package_dir.to_string_lossy(),
-        extension_browser_url(browser.clone()),
-    );
+    let (guided_browser_command, guided_browser_script_path_value, _profile_hint_step) =
+        extension_browser_launch_surface(
+            workspace_root,
+            &browser,
+            &guided_profile_root,
+            &package_dir.to_string_lossy(),
+            extension_browser_url(browser.clone()),
+        );
     let discovered_identity = discover_explicit_extension_id(parsed)
         .or_else(|| {
             discover_extension_id_from_browser_profiles(&browser, runtime, &package_dir)
@@ -4355,10 +4992,9 @@ fn handle_extension_doctor(
                 "reason_code": reason_code,
                 "browser": browser_label,
                 "package_dir": package_dir.to_string_lossy().to_string(),
+                "package_source": package_source,
                 "guided_profile_root": guided_profile_root.to_string_lossy().to_string(),
-                "guided_browser_script_path": extension_guided_browser_script_path(workspace_root)
-                    .to_string_lossy()
-                    .to_string(),
+                "guided_browser_script_path": guided_browser_script_path_value,
                 "guided_browser_command": guided_browser_command,
                 "install_root": install_root.to_string_lossy().to_string(),
                 "checks": checks,
@@ -4375,10 +5011,9 @@ fn handle_extension_doctor(
             "subcommand": "doctor",
             "browser": browser_label,
             "package_dir": package_dir.to_string_lossy().to_string(),
+            "package_source": package_source,
             "guided_profile_root": guided_profile_root.to_string_lossy().to_string(),
-            "guided_browser_script_path": extension_guided_browser_script_path(workspace_root)
-                .to_string_lossy()
-                .to_string(),
+            "guided_browser_script_path": guided_browser_script_path_value,
             "guided_browser_command": guided_browser_command,
             "install_root": install_root.to_string_lossy().to_string(),
             "extension_id": extension_id,
@@ -4402,12 +5037,30 @@ fn handle_bridge(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         return error_response("rr bridge missing subcommand".to_owned());
     };
 
-    let Some(workspace_root) = find_workspace_root(&runtime.cwd) else {
-        return blocked_response(
-            "failed to resolve Roger workspace root for bridge contract commands".to_owned(),
-            vec!["run rr bridge from the Roger repository root (or a child directory)".to_owned()],
-            json!({"reason_code": "workspace_root_not_found"}),
-        );
+    // Contract/pack subcommands operate on the dev source tree and still
+    // require workspace markers; host registration (install/uninstall) must
+    // keep working from installed binaries outside the Roger repository.
+    let workspace_root = match find_workspace_root(&runtime.cwd) {
+        Some(root) => root,
+        None if matches!(
+            subcommand,
+            BridgeCommandKind::Install | BridgeCommandKind::Uninstall
+        ) =>
+        {
+            // install/uninstall never touch the generated contract path; a
+            // cwd-rooted placeholder keeps the shared prelude unchanged.
+            runtime.cwd.clone()
+        }
+        None => {
+            return blocked_response(
+                "failed to resolve Roger workspace root for bridge contract commands".to_owned(),
+                vec![
+                    "run rr bridge export-contracts/verify-contracts/pack-extension from the Roger repository root (or a child directory)"
+                        .to_owned(),
+                ],
+                json!({"reason_code": "workspace_root_not_found"}),
+            );
+        }
     };
 
     let generated_path = workspace_root.join("apps/extension/src/generated/bridge.ts");
@@ -5851,6 +6504,21 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         };
     }
 
+    // Launch preflight: a review launch must never claim success when the
+    // provider binary cannot run, and a definitively missing PR must block
+    // loudly instead of registering a session that can never be reviewed.
+    if let Some(binary) = provider_launch_binary_for(runtime, &parsed.provider)
+        && !binary_resolves_locally(&binary)
+    {
+        return provider_binary_missing_response("rr review", &parsed.provider, &binary);
+    }
+
+    let target_verification_warning = match github_review_target_preflight(&repository, pr) {
+        ReviewTargetPreflight::Verified => None,
+        ReviewTargetPreflight::Unverified { warning } => Some(warning),
+        ReviewTargetPreflight::Blocked(response) => return *response,
+    };
+
     let store = match open_store_or_response(runtime, "rr review") {
         Ok(store) => store,
         Err(response) => return response,
@@ -5896,7 +6564,7 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             Some(reason),
         )
     };
-    let (session_locator, session_path, continuity_quality, warnings, bundle_artifact_refs) =
+    let (session_locator, session_path, continuity_quality, mut warnings, bundle_artifact_refs) =
         match parsed.provider.as_str() {
             "opencode" => {
                 let adapter = OpenCodeAdapter::with_binary(runtime.opencode_bin.clone());
@@ -6305,6 +6973,15 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         OutcomeKind::Degraded
     };
 
+    let target_verification = if target_verification_warning.is_some() {
+        "unverified"
+    } else {
+        "verified"
+    };
+    if let Some(warning) = target_verification_warning {
+        warnings.push(warning);
+    }
+
     CommandResponse {
         outcome,
         data: json!({
@@ -6316,6 +6993,7 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             "pull_request": target.pull_request_number,
             "provider": parsed.provider,
             "session_path": session_path,
+            "target_verification": target_verification,
             "continuity_quality": continuity_state_label(&continuity_quality),
             "provider_capability": runtime_provider_capability(runtime, &parsed.provider),
             "routine_surface": runtime_routine_surface_projection(
@@ -6676,6 +7354,15 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             repair_actions: Vec::new(),
             message: "resume plan generated (dry-run)".to_owned(),
         };
+    }
+
+    // Interactive resume actually reopens the provider session; fail closed
+    // and loudly when the provider binary cannot run instead of silently
+    // degrading into a virtual reseed.
+    if let Some(binary) = provider_launch_binary_for(runtime, &session.provider)
+        && !binary_resolves_locally(&binary)
+    {
+        return provider_binary_missing_response("rr resume", &session.provider, &binary);
     }
 
     let attempt_id = next_id("attempt");
@@ -7236,6 +7923,14 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         );
     }
 
+    // rr return drives a real provider reopen; a missing binary must block
+    // loudly instead of silently reseeding or claiming a return happened.
+    if let Some(binary) = provider_launch_binary_for(runtime, &session.provider)
+        && !binary_resolves_locally(&binary)
+    {
+        return provider_binary_missing_response("rr return", &session.provider, &binary);
+    }
+
     let attempt_id = next_id("attempt");
     if let Err(err) = store.create_launch_attempt(CreateLaunchAttempt {
         id: &attempt_id,
@@ -7680,7 +8375,9 @@ fn derive_prs_queue_state(
         return "drafted".to_owned();
     }
     match attention_state {
-        "awaiting_user_input" | "refresh_recommended" | "review_failed"
+        "awaiting_user_input"
+        | "refresh_recommended"
+        | "review_failed"
         | "outbound_approval_required" => "needs_attention".to_owned(),
         "review_launched" | "review_resumed" | "awaiting_return" | "returned_to_roger" => {
             "in_review".to_owned()
@@ -8450,6 +9147,57 @@ fn extract_targz_archive(archive_path: &Path, destination: &Path) -> Result<(), 
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         return Err(format!(
             "tar extraction failed for {} (status {}): {}",
+            archive_path.display(),
+            output.status,
+            if stderr.is_empty() {
+                "no stderr output".to_owned()
+            } else {
+                stderr
+            }
+        ));
+    }
+    Ok(())
+}
+
+fn extract_zip_archive(archive_path: &Path, destination: &Path) -> Result<(), String> {
+    // Prefer unzip; fall back to bsdtar-compatible `tar -xf` (macOS/Windows
+    // tar handle zip archives) so installed hosts without unzip still work.
+    let unzip_result = ProcessCommand::new("unzip")
+        .arg("-q")
+        .arg(archive_path)
+        .arg("-d")
+        .arg(destination)
+        .output();
+    let unzip_failure = match unzip_result {
+        Ok(output) if output.status.success() => return Ok(()),
+        Ok(output) => format!(
+            "unzip failed for {} (status {}): {}",
+            archive_path.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+        Err(err) => format!(
+            "failed to execute unzip for {}: {err}",
+            archive_path.display()
+        ),
+    };
+
+    let output = ProcessCommand::new("tar")
+        .arg("-xf")
+        .arg(archive_path)
+        .arg("-C")
+        .arg(destination)
+        .output()
+        .map_err(|err| {
+            format!(
+                "{unzip_failure}; fallback tar extraction also failed to execute for {}: {err}",
+                archive_path.display()
+            )
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(format!(
+            "{unzip_failure}; fallback tar extraction failed for {} (status {}): {}",
             archive_path.display(),
             output.status,
             if stderr.is_empty() {
@@ -9703,6 +10451,7 @@ fn handle_robot_docs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRespon
                 json!({"command": "rr init --robot", "purpose": "bootstrap Roger-owned local store and marker state; provider auth/install preflight remains a separate follow-up surface"}),
                 json!({"command": "rr doctor --provider <name> --robot", "purpose": "provider-aware preflight for local bootstrap, binary presence, policy/profile resolution, and deferred first-launch checks"}),
                 json!({"command": "rr sessions --robot", "purpose": "global session finder"}),
+                json!({"command": "rr tui", "purpose": "interactive-only operator cockpit; rr tui --robot fails closed — use rr status/findings/sessions --robot for machine-readable state", "interactive_only": true}),
                 json!({"command": "rr prs --robot", "purpose": "read-only review queue of open pull requests joined with local Roger session state"}),
                 json!({"command": "rr findings --robot", "purpose": "structured findings list"}),
                 json!({"command": "rr search --query <text> --query-mode recall --robot", "purpose": "prior-review lookup"}),
@@ -9723,6 +10472,7 @@ fn handle_robot_docs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRespon
                 json!({"command": "rr bridge pack-extension --robot", "purpose": "assemble unpacked browser sideload artifact"}),
                 json!({"command": "rr extension setup --browser <edge|chrome|brave> --robot", "purpose": "guided package/setup flow with fail-closed identity + host checks"}),
                 json!({"command": "rr extension doctor --browser <edge|chrome|brave> --robot", "purpose": "verify package, identity, native host registration, and bridge reachability"}),
+                json!({"command": "rr extension fetch [--version <YYYY.MM.DD[-rc.N]>] --robot", "purpose": "download, checksum-verify, and install the published extension package into the installed layout for hosts outside the Roger dev workspace"}),
                 json!({"command": "rr extension uninstall --robot", "purpose": "guided operator uninstall path for bridge host-registration assets"}),
                 json!({"command": "rr bridge install [--extension-id <id>] --robot", "purpose": "repair/dev host registration override when guided setup cannot discover identity"}),
                 json!({"command": "rr bridge uninstall --robot", "purpose": "repair alias for host-registration asset removal when extension uninstall is unavailable"}),
@@ -9849,6 +10599,7 @@ fn handle_robot_docs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRespon
                 json!({"command": "rr bridge pack-extension", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr extension setup", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr extension doctor", "required_formats": ["json"], "optional_formats": []}),
+                json!({"command": "rr extension fetch", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr extension uninstall", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr bridge install", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr bridge uninstall", "required_formats": ["json"], "optional_formats": []}),
@@ -12047,6 +12798,87 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     }
 }
 
+const TUI_INTERACTIVE_ONLY_MESSAGE: &str = "rr tui requires an interactive terminal";
+
+fn tui_interactive_only_response(reason_code: &str) -> CommandResponse {
+    blocked_response(
+        TUI_INTERACTIVE_ONLY_MESSAGE.to_owned(),
+        vec![
+            "run rr tui from an interactive terminal".to_owned(),
+            "use rr status --robot / rr findings --robot for machine-readable session state"
+                .to_owned(),
+        ],
+        json!({
+            "reason_code": reason_code,
+            "interactive_only": true,
+        }),
+    )
+}
+
+fn handle_tui(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
+    // The cockpit is interactive-only by contract: robot callers fail closed
+    // toward the existing machine-readable surfaces.
+    if parsed.robot {
+        return tui_interactive_only_response("robot_mode_unsupported");
+    }
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return tui_interactive_only_response("non_interactive_terminal");
+    }
+
+    // Same fail-closed store gate (including migration posture guidance) as
+    // every other store-backed command.
+    let store = match open_store_or_response(runtime, "rr tui") {
+        Ok(store) => store,
+        Err(response) => return response,
+    };
+
+    // Same session resolution as rr status; ambiguity does not fail the TUI —
+    // the sessions list is the cockpit's entry screen in that case.
+    let binding_context = LaunchBindingContext::for_cwd(&runtime.cwd);
+    let repository = resolve_repository(parsed.repo.clone(), &runtime.cwd);
+    let initial_session_id = match store.resolve_session_reentry_with_context(
+        ResolveSessionReentry {
+            explicit_session_id: parsed.session_id.clone(),
+            repository: repository.clone(),
+            pull_request_number: parsed.pr,
+            source_surface: LaunchSurface::Tui,
+            ui_target: Some(cli_config::UI_TARGET.to_owned()),
+            instance_preference: Some(cli_config::INSTANCE_PREFERENCE.to_owned()),
+        },
+        binding_context.storage_local_root(),
+    ) {
+        Ok(SessionReentryResolution::Resolved { session, .. }) => Some(session.id),
+        Ok(SessionReentryResolution::PickerRequired { .. }) => None,
+        Err(err) => return error_response(format!("failed to resolve tui session: {err}")),
+    };
+    drop(store);
+
+    match roger_tui::run_cockpit(roger_tui::RogerTuiConfig {
+        store_root: runtime.store_root.clone(),
+        repo: parsed.repo.clone(),
+        pr: parsed.pr,
+        initial_session_id,
+    }) {
+        Ok(roger_tui::TuiExit::Quit) => CommandResponse {
+            outcome: OutcomeKind::Complete,
+            data: json!({
+                "exit": "quit",
+                "queryable_surfaces": {
+                    "status_command": "rr status",
+                    "sessions_command": "rr sessions",
+                },
+            }),
+            warnings: Vec::new(),
+            repair_actions: Vec::new(),
+            message: "rr tui session ended".to_owned(),
+        },
+        Err(roger_tui::TuiError::StoreMigrationBlocked { reason }) => {
+            store_migration_blocked_response("rr tui", &reason)
+        }
+        Err(err) => error_response(format!("rr tui failed: {err}")),
+    }
+}
+
 fn handle_findings(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let store = match open_store_or_response(runtime, "rr findings") {
         Ok(store) => store,
@@ -12325,13 +13157,30 @@ fn render_output(parsed: &ParsedArgs, mut response: CommandResponse) -> CliRunRe
         }
     }
 
+    let failure_outcome = matches!(
+        response.outcome,
+        OutcomeKind::Blocked | OutcomeKind::RepairNeeded | OutcomeKind::Error
+    );
+
     let mut stderr = String::new();
+    if failure_outcome {
+        // Launch/review failures must be loud: one clear line on stderr
+        // naming the reason, so failures are visible even when stdout is
+        // piped, captured, or ignored.
+        stderr.push_str("error: ");
+        stderr.push_str(&response.message);
+        stderr.push('\n');
+    }
     if !response.warnings.is_empty() {
         stderr.push_str(&response.warnings.join("\n"));
         stderr.push('\n');
     }
     if !response.repair_actions.is_empty() {
-        stderr.push_str("Suggested next steps:\n");
+        stderr.push_str(if failure_outcome {
+            "Try:\n"
+        } else {
+            "Suggested next steps:\n"
+        });
         for action in &response.repair_actions {
             stderr.push_str("- ");
             stderr.push_str(action);
@@ -13065,6 +13914,177 @@ fn error_response(message: String) -> CommandResponse {
     }
 }
 
+/// Binary that must exist locally before a launch command may truthfully
+/// claim it launched a provider session.
+///
+/// Scope is intentionally bounded to OpenCode in this slice: tier-a
+/// providers (codex/gemini/claude) use bounded start/reseed semantics that
+/// do not spawn a local binary at `rr review` time, and Copilot already has
+/// its own verified, fail-closed launch path.
+fn provider_launch_binary_for(runtime: &CliRuntime, provider: &str) -> Option<String> {
+    match provider {
+        "opencode" => Some(runtime.opencode_bin.clone()),
+        _ => None,
+    }
+}
+
+fn binary_resolves_locally(binary: &str) -> bool {
+    let candidate = Path::new(binary);
+    if candidate.components().count() > 1 {
+        return candidate.is_file();
+    }
+
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&paths).any(|dir| {
+        if dir.as_os_str().is_empty() {
+            return false;
+        }
+        dir.join(binary).is_file()
+    })
+}
+
+fn provider_binary_missing_response(
+    command_name: &str,
+    provider: &str,
+    binary: &str,
+) -> CommandResponse {
+    let mut repair_actions = vec![format!(
+        "install the {provider} CLI so `{binary}` resolves on PATH"
+    )];
+    if provider == "opencode" {
+        repair_actions.push(format!(
+            "or set {ENV_OPENCODE_BIN} to the full path of the opencode binary"
+        ));
+    }
+    repair_actions.push(format!(
+        "run rr doctor --provider {provider} for full launch preflight detail"
+    ));
+
+    blocked_response(
+        format!(
+            "{command_name} cannot launch provider '{provider}': binary '{binary}' was not found or is not executable"
+        ),
+        repair_actions,
+        json!({
+            "reason_code": "provider_binary_missing",
+            "provider": provider,
+            "binary": binary,
+        }),
+    )
+}
+
+/// Outcome of the best-effort GitHub-side review-target preflight.
+enum ReviewTargetPreflight {
+    /// GitHub confirmed the pull request exists.
+    Verified,
+    /// GitHub truth could not be obtained (gh missing, unauthenticated,
+    /// network failure, or inaccessible repository). The launch proceeds,
+    /// but the gap is surfaced loudly as a warning.
+    Unverified { warning: String },
+    /// GitHub definitively reported the pull request does not exist.
+    Blocked(Box<CommandResponse>),
+}
+
+fn pr_not_found_blocked_response(
+    command_name: &str,
+    repository: &str,
+    pull_request: u64,
+    detail: &str,
+) -> CommandResponse {
+    blocked_response(
+        format!(
+            "{command_name} blocked: pull request {repository}#{pull_request} was not found on GitHub"
+        ),
+        vec![
+            format!("list open pull requests with rr prs --repo {repository}"),
+            format!("or run gh pr list --repo {repository} to verify the PR number"),
+            "pass --repo owner/repo if the inferred repository is wrong".to_owned(),
+        ],
+        json!({
+            "reason_code": "pr_not_found",
+            "repository": repository,
+            "pull_request": pull_request,
+            "detail": detail,
+        }),
+    )
+}
+
+fn first_nonempty_line(text: &str) -> &str {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("unknown gh failure")
+}
+
+/// Best-effort, fail-closed-on-definitive-negative GitHub preflight for
+/// `rr review`. A PR that GitHub definitively reports as missing blocks the
+/// launch; every unverifiable condition proceeds with a loud warning so the
+/// hermetic/offline paths keep working.
+fn github_review_target_preflight(repository: &str, pull_request: u64) -> ReviewTargetPreflight {
+    let Some((owner, repo_name)) = repository.split_once('/') else {
+        return ReviewTargetPreflight::Unverified {
+            warning: format!(
+                "could not verify review target: repository slug '{repository}' is not in owner/repo form"
+            ),
+        };
+    };
+
+    let adapter = GhCliAdapter::new();
+    match adapter.resolve_pr(owner, repo_name, pull_request) {
+        Ok(_) => ReviewTargetPreflight::Verified,
+        Err(GitHubAdapterError::TargetNotFound { .. }) => {
+            ReviewTargetPreflight::Blocked(Box::new(pr_not_found_blocked_response(
+                "rr review",
+                repository,
+                pull_request,
+                "gh reported the pull request target as not found",
+            )))
+        }
+        Err(GitHubAdapterError::GhNotFound) => ReviewTargetPreflight::Unverified {
+            warning: format!(
+                "could not verify {repository}#{pull_request} on GitHub: the GitHub CLI (gh) was not found; install gh and run gh auth login, then re-run rr review for a verified target"
+            ),
+        },
+        Err(GitHubAdapterError::GhCommandFailed { stderr }) => {
+            let lower = stderr.to_ascii_lowercase();
+            let pr_definitively_missing = lower.contains("could not resolve to a pullrequest")
+                || lower.contains("no pull requests found")
+                || (lower.contains("pull request") && lower.contains("not found"));
+            if pr_definitively_missing {
+                return ReviewTargetPreflight::Blocked(Box::new(pr_not_found_blocked_response(
+                    "rr review",
+                    repository,
+                    pull_request,
+                    first_nonempty_line(&stderr),
+                )));
+            }
+
+            let unauthenticated = lower.contains("gh auth login")
+                || lower.contains("not logged in")
+                || lower.contains("authentication");
+            if unauthenticated {
+                return ReviewTargetPreflight::Unverified {
+                    warning: format!(
+                        "could not verify {repository}#{pull_request} on GitHub: gh is not authenticated; run gh auth login, then re-run rr review for a verified target"
+                    ),
+                };
+            }
+
+            ReviewTargetPreflight::Unverified {
+                warning: format!(
+                    "could not verify {repository}#{pull_request} on GitHub: {}",
+                    first_nonempty_line(&stderr)
+                ),
+            }
+        }
+        Err(err) => ReviewTargetPreflight::Unverified {
+            warning: format!("could not verify {repository}#{pull_request} on GitHub: {err}"),
+        },
+    }
+}
+
 fn store_migration_blocked_response(command_name: &str, blocked_reason: &str) -> CommandResponse {
     blocked_response(
         format!("{command_name} blocked by store migration posture: {blocked_reason}"),
@@ -13378,7 +14398,7 @@ fn next_id(prefix: &str) -> String {
 }
 
 fn usage_text() -> &'static str {
-    "Usage:\n  rr agent <operation> --task-file <path> [--request-file <path>] [--context-file <path>] [--capability-file <path>]\n  rr init [--robot]\n  rr doctor [--provider opencode|codex|gemini|claude|copilot|pi-agent] [--robot]\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude|copilot] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr prs [--repo owner/repo] [--limit <n>] [--robot]\n  rr search --query <text> [--query-mode auto|exact_lookup|recall|related_context|candidate_audit|promotion_review] [--repo owner/repo] [--limit <n>] [--robot]\n  rr triage [--repo owner/repo] [--pr <number>] [--session <id>] --finding <id>... --state <state> [--robot]\n  rr draft [--repo owner/repo] [--pr <number>] [--session <id>] (--finding <id>... | --all-findings) [--robot]\n  rr approve [--repo owner/repo] [--pr <number>] [--session <id>] --batch <draft-batch-id> [--robot]\n  rr post [--repo owner/repo] [--pr <number>] [--session <id>] --batch <draft-batch-id> [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--yes|-y] [--dry-run] [--robot]\n  rr bridge export-contracts [--robot]\n  rr bridge verify-contracts [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge install [--extension-id <id>] [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr extension setup [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr extension doctor [--browser edge|chrome|brave] [--install-root <path>] [--robot]\n  rr extension uninstall [--install-root <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n\nAgent transport:\n  - rr agent is the dedicated in-session worker transport; it is separate from --robot\n  - current live rr agent operations cover context/status/search/finding/artifact reads, advisory clarification or follow-up proposals, and worker.submit_stage_result\n  - rr agent emits rr.agent.response.v1 envelopes over the canonical worker operation response payload instead of reusing the --robot surface\n\nProvider support in 0.1.0:\n  - opencode is the first-class tier-b continuity path; rr resume can reopen and rr return is supported\n  - codex, gemini, and claude are bounded tier-a providers; start/reseed/raw-capture only, no locator reopen or rr return\n  - copilot is feature-gated bounded tier-b support; enable with RR_ENABLE_COPILOT_PROVIDER=1 for verified start, locator/session-id reopen, rr return, and honest ResumeBundle reseed fallback\n  - pi-agent is not part of the 0.1.0 live CLI surface\n\nBootstrap notes:\n  - rr init bootstraps Roger-owned local store state only and records a local init marker\n  - rr init does not verify provider auth/install readiness\n  - rr doctor verifies local bootstrap and provider prerequisites but defers auth proof to first launch\n\nOutbound notes:\n  - rr triage records the operator's local triage decision; rr draft only accepts findings triaged to accepted\n  - rr triage --state accepts accepted, ignored, needs_follow_up, or resolved; new and stale are Roger-derived\n  - rr draft materializes Roger-owned local draft batches only; it does not approve or post to GitHub\n  - rr approve records a local approval token for one exact stored batch payload and target tuple; it does not post to GitHub\n  - rr post executes only one exact Roger-approved stored batch on the bound target and returns a truthful success/partial/failure envelope\n  - draft selection is explicit in this slice: pass one or more --finding ids or --all-findings, then approve with --batch\n  - stale persisted review state fails closed before Roger derives or approves outbound payloads\n\nUpdate notes:\n  - default rr update apply prompts for confirmation on interactive TTY\n  - pass --yes|-y for non-interactive apply confirmation; --robot apply requires --yes|-y\n  - --dry-run and --robot without --yes are non-mutating metadata checks\n  - local/unpublished builds fail closed; migration-capable updates are deferred in 0.1.x"
+    "Usage:\n\nReview:\n  rr prs [--repo owner/repo] [--limit <n>] [--robot]\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude|copilot] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr tui [--repo owner/repo] [--pr <number>] [--session <id>]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--query-mode auto|exact_lookup|recall|related_context|candidate_audit|promotion_review] [--repo owner/repo] [--limit <n>] [--robot]\n\nOutbound (explicit, gated):\n  rr triage [--repo owner/repo] [--pr <number>] [--session <id>] --finding <id>... --state <state> [--robot]\n  rr draft [--repo owner/repo] [--pr <number>] [--session <id>] (--finding <id>... | --all-findings) [--robot]\n  rr approve [--repo owner/repo] [--pr <number>] [--session <id>] --batch <draft-batch-id> [--robot]\n  rr post [--repo owner/repo] [--pr <number>] [--session <id>] --batch <draft-batch-id> [--robot]\n\nSetup & health:\n  rr init [--robot]\n  rr doctor [--provider opencode|codex|gemini|claude|copilot|pi-agent] [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--yes|-y] [--dry-run] [--robot]\n  rr extension doctor [--browser edge|chrome|brave] [--install-root <path>] [--package-dir <path>] [--robot]\n  rr extension fetch [--version <YYYY.MM.DD[-rc.N]>] [--download-root <url>] [--repo owner/repo] [--robot]\n  rr extension setup [--browser edge|chrome|brave] [--install-root <path>] [--package-dir <path>] [--robot]\n  rr extension uninstall [--install-root <path>] [--robot]\n\nIntegration & agents (advanced):\n  rr agent <operation> --task-file <path> [--request-file <path>] [--context-file <path>] [--capability-file <path>]\n  rr bridge export-contracts [--robot]\n  rr bridge install [--extension-id <id>] [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr bridge verify-contracts [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n\nAgent transport:\n  - rr agent is the dedicated in-session worker transport; it is separate from --robot\n  - current live rr agent operations cover context/status/search/finding/artifact reads, advisory clarification or follow-up proposals, and worker.submit_stage_result\n  - rr agent emits rr.agent.response.v1 envelopes over the canonical worker operation response payload instead of reusing the --robot surface\n\nProvider support in 0.1.0:\n  - opencode is the first-class tier-b continuity path; rr resume can reopen and rr return is supported\n  - codex, gemini, and claude are bounded tier-a providers; start/reseed/raw-capture only, no locator reopen or rr return\n  - copilot is feature-gated bounded tier-b support; enable with RR_ENABLE_COPILOT_PROVIDER=1 for verified start, locator/session-id reopen, rr return, and honest ResumeBundle reseed fallback\n  - pi-agent is not part of the 0.1.0 live CLI surface\n\nBootstrap notes:\n  - the Roger store bootstraps automatically on first use; rr init stays available as an explicit idempotent bootstrap\n  - rr init bootstraps Roger-owned local store state only and records a local init marker\n  - rr init does not verify provider auth/install readiness\n  - rr doctor verifies local bootstrap and provider prerequisites but defers auth proof to first launch\n\nOutbound notes:\n  - rr triage records the operator's local triage decision; rr draft only accepts findings triaged to accepted\n  - rr triage --state accepts accepted, ignored, needs_follow_up, or resolved; new and stale are Roger-derived\n  - rr draft materializes Roger-owned local draft batches only; it does not approve or post to GitHub\n  - rr approve records a local approval token for one exact stored batch payload and target tuple; it does not post to GitHub\n  - rr post executes only one exact Roger-approved stored batch on the bound target and returns a truthful success/partial/failure envelope\n  - draft selection is explicit in this slice: pass one or more --finding ids or --all-findings, then approve with --batch\n  - stale persisted review state fails closed before Roger derives or approves outbound payloads\n\nExtension notes:\n  - rr extension setup/doctor resolve the unpacked package in order: explicit --package-dir, Roger dev workspace pack output, then the installed layout under <store_root>/bridge/extension-package/<version>/roger-extension-unpacked\n  - rr extension fetch downloads the published extension.zip for this binary's release (or --version), verifies it against the release checksums, and installs it into the installed layout; local/unpublished builds fail closed\n  - branded Google Chrome 137+ ignores --load-extension: load the unpacked package once via chrome://extensions (Developer mode -> Load unpacked); Edge/Brave still honor the flag-based launch\n\nUpdate notes:\n  - default rr update apply prompts for confirmation on interactive TTY\n  - pass --yes|-y for non-interactive apply confirmation; --robot apply requires --yes|-y\n  - --dry-run and --robot without --yes are non-mutating metadata checks\n  - local/unpublished builds fail closed; migration-capable updates are deferred in 0.1.x"
 }
 
 #[cfg(test)]
@@ -15546,5 +16566,549 @@ mod tests {
 
         let err = resolve_update_install_path(&install_path, "rr").expect_err("layout should fail");
         assert!(err.contains("does not match expected release binary"));
+    }
+
+    /// Builds an installed-mode runtime whose cwd has no Roger workspace
+    /// markers, with an unpacked extension package pre-seeded under the
+    /// installed layout <store_root>/bridge/extension-package/<version>/.
+    fn setup_installed_extension_runtime(
+        version: &str,
+    ) -> (tempfile::TempDir, CliRuntime, PathBuf) {
+        let tmp = tempdir().expect("tempdir");
+        let cwd = tmp.path().join("plain-user-dir");
+        fs::create_dir_all(&cwd).expect("create plain cwd");
+        let store_root = tmp.path().join("store");
+        let runtime = CliRuntime {
+            cwd,
+            store_root: store_root.clone(),
+            opencode_bin: "opencode".to_owned(),
+        };
+        let package_dir = installed_extension_package_dir(&store_root, version);
+        fs::create_dir_all(&package_dir).expect("create installed package dir");
+        let manifest = json!({
+            "manifest_version": 3,
+            "name": "Roger Reviewer",
+            "version": "2026.6.1.1000",
+            "key": TEST_EXTENSION_MANIFEST_KEY,
+        });
+        fs::write(
+            package_dir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).expect("serialize manifest") + "\n",
+        )
+        .expect("write installed manifest");
+        (tmp, runtime, package_dir)
+    }
+
+    struct RegistrationWaitOverride {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl RegistrationWaitOverride {
+        // Caller must hold shared_env_guard() for the duration of its test.
+        fn set(value: &str) -> Self {
+            let previous = std::env::var_os("RR_EXTENSION_SETUP_REGISTRATION_WAIT_MS");
+            // SAFETY: tests serialize env mutation via ENV_LOCK and restore on drop.
+            unsafe {
+                std::env::set_var("RR_EXTENSION_SETUP_REGISTRATION_WAIT_MS", value);
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for RegistrationWaitOverride {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                // SAFETY: tests serialize env mutation via ENV_LOCK.
+                Some(value) => unsafe {
+                    std::env::set_var("RR_EXTENSION_SETUP_REGISTRATION_WAIT_MS", value);
+                },
+                None => unsafe {
+                    std::env::remove_var("RR_EXTENSION_SETUP_REGISTRATION_WAIT_MS");
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn extension_setup_and_doctor_resolve_installed_layout_without_workspace_markers() {
+        let _env_guard = shared_env_guard();
+        let _wait = RegistrationWaitOverride::set("1");
+        let (tmp, runtime, package_dir) = setup_installed_extension_runtime("2026.06.01");
+        let install_root = tmp.path().join("install-root");
+
+        let setup = run(
+            &[
+                "extension".to_owned(),
+                "setup".to_owned(),
+                "--browser".to_owned(),
+                "edge".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(setup.exit_code, 0, "{}\n{}", setup.stdout, setup.stderr);
+        let setup_payload = parse_robot(&setup.stdout);
+        assert_eq!(setup_payload["outcome"], "complete");
+        assert_eq!(setup_payload["data"]["subcommand"], "setup");
+        assert_eq!(
+            setup_payload["data"]["package_source"],
+            "installed_layout_newest_available"
+        );
+        assert_eq!(
+            setup_payload["data"]["package_dir"],
+            package_dir.to_string_lossy().to_string()
+        );
+        assert_eq!(
+            setup_payload["data"]["extension_id"],
+            TEST_EXTENSION_MANIFEST_ID
+        );
+        assert!(setup_payload["data"]["guided_browser_script_path"].is_null());
+        let guided_command = setup_payload["data"]["guided_browser_command"]
+            .as_str()
+            .expect("guided browser command");
+        assert!(
+            !guided_command.contains("launch_preloaded_browser.sh"),
+            "installed mode must not reference the dev guided-browser script: {guided_command}"
+        );
+        assert!(
+            guided_command.contains("--load-extension="),
+            "edge guidance should surface flag-based launch: {guided_command}"
+        );
+        let rendered = setup.stdout.to_string();
+        assert!(
+            !rendered.contains("run rr extension from the Roger repository root"),
+            "installed mode must not demand the Roger repository root: {rendered}"
+        );
+
+        let doctor = run(
+            &[
+                "extension".to_owned(),
+                "doctor".to_owned(),
+                "--browser".to_owned(),
+                "edge".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(doctor.exit_code, 0, "{}\n{}", doctor.stdout, doctor.stderr);
+        let doctor_payload = parse_robot(&doctor.stdout);
+        assert_eq!(doctor_payload["outcome"], "complete");
+        assert_eq!(
+            doctor_payload["data"]["package_source"],
+            "installed_layout_newest_available"
+        );
+        assert!(doctor_payload["data"]["guided_browser_script_path"].is_null());
+        assert!(
+            doctor_payload["data"]["checks"]
+                .as_array()
+                .expect("doctor checks")
+                .iter()
+                .all(|entry| entry.get("ok").and_then(Value::as_bool).unwrap_or(false))
+        );
+    }
+
+    #[test]
+    fn extension_chrome_installed_mode_guidance_requires_manual_unpacked_load() {
+        let _env_guard = shared_env_guard();
+        let (tmp, runtime, _package_dir) = setup_installed_extension_runtime("2026.06.01");
+        let install_root = tmp.path().join("install-root");
+
+        let doctor = run(
+            &[
+                "extension".to_owned(),
+                "doctor".to_owned(),
+                "--browser".to_owned(),
+                "chrome".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        let doctor_payload = parse_robot(&doctor.stdout);
+        let guided_command = doctor_payload["data"]["guided_browser_command"]
+            .as_str()
+            .expect("guided browser command");
+        assert!(
+            guided_command.contains("chrome://extensions")
+                && guided_command.contains("Load unpacked"),
+            "Chrome installed-mode guidance must route through chrome://extensions manual load: {guided_command}"
+        );
+        assert!(
+            guided_command.contains("ignores --load-extension"),
+            "Chrome guidance must carry the branded Chrome 137+ flag truth note: {guided_command}"
+        );
+    }
+
+    #[test]
+    fn extension_setup_and_doctor_fail_closed_with_fetch_guidance_when_no_package_exists() {
+        let _env_guard = shared_env_guard();
+        let tmp = tempdir().expect("tempdir");
+        let cwd = tmp.path().join("plain-user-dir");
+        fs::create_dir_all(&cwd).expect("create plain cwd");
+        let runtime = CliRuntime {
+            cwd,
+            store_root: tmp.path().join("store"),
+            opencode_bin: "opencode".to_owned(),
+        };
+
+        for subcommand in ["setup", "doctor"] {
+            let result = run(
+                &[
+                    "extension".to_owned(),
+                    subcommand.to_owned(),
+                    "--browser".to_owned(),
+                    "edge".to_owned(),
+                    "--robot".to_owned(),
+                ],
+                &runtime,
+            );
+            assert_eq!(result.exit_code, 3, "{}\n{}", result.stdout, result.stderr);
+            let payload = parse_robot(&result.stdout);
+            assert_eq!(payload["outcome"], "blocked");
+            assert_eq!(payload["data"]["reason_code"], "extension_package_missing");
+            assert!(
+                payload["repair_actions"]
+                    .as_array()
+                    .expect("repair actions")
+                    .iter()
+                    .any(|action| action
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("rr extension fetch")),
+                "missing-package guidance must name rr extension fetch: {}",
+                result.stdout
+            );
+            assert!(
+                !result
+                    .stdout
+                    .contains("run rr extension from the Roger repository root"),
+                "installed mode must not demand the Roger repository root: {}",
+                result.stdout
+            );
+        }
+    }
+
+    #[test]
+    fn extension_uninstall_works_outside_roger_workspace() {
+        let _env_guard = shared_env_guard();
+        let tmp = tempdir().expect("tempdir");
+        let cwd = tmp.path().join("plain-user-dir");
+        fs::create_dir_all(&cwd).expect("create plain cwd");
+        let runtime = CliRuntime {
+            cwd,
+            store_root: tmp.path().join("store"),
+            opencode_bin: "opencode".to_owned(),
+        };
+        let install_root = tmp.path().join("install-root");
+
+        let result = run(
+            &[
+                "extension".to_owned(),
+                "uninstall".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(result.exit_code, 0, "{}\n{}", result.stdout, result.stderr);
+        let payload = parse_robot(&result.stdout);
+        assert_eq!(payload["outcome"], "complete");
+        assert_eq!(payload["data"]["surface"], "extension");
+    }
+
+    #[test]
+    fn extension_fetch_blocks_for_local_build_without_release_metadata() {
+        let tmp = tempdir().expect("tempdir");
+        let runtime = CliRuntime {
+            cwd: tmp.path().to_path_buf(),
+            store_root: tmp.path().join("store"),
+            opencode_bin: "opencode".to_owned(),
+        };
+
+        let result = run(
+            &[
+                "extension".to_owned(),
+                "fetch".to_owned(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(result.exit_code, 3, "{}\n{}", result.stdout, result.stderr);
+        let payload = parse_robot(&result.stdout);
+        assert_eq!(payload["outcome"], "blocked");
+        assert_eq!(payload["data"]["reason_code"], "local_or_unpublished_build");
+        assert!(
+            payload["repair_actions"]
+                .as_array()
+                .expect("repair actions")
+                .iter()
+                .any(|action| action
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("rr extension setup")),
+            "local-build guidance must point at the dev workspace path: {}",
+            result.stdout
+        );
+    }
+
+    /// Writes a minimal fixture release directory (install metadata,
+    /// SHA256SUMS, extension zip bytes) and returns the file:// download root.
+    fn write_extension_fetch_fixture_release(
+        root: &Path,
+        version: &str,
+        archive_bytes: &[u8],
+        corrupt_checksum: bool,
+    ) -> String {
+        let tag = format!("v{version}");
+        let release_dir = root.join("releases").join(&tag);
+        fs::create_dir_all(&release_dir).expect("create fixture release dir");
+        let artifact_stem = format!("roger-reviewer-{version}");
+        let archive_name = format!("{artifact_stem}-extension.zip");
+        fs::write(release_dir.join(&archive_name), archive_bytes).expect("write fixture zip");
+        let archive_sha = if corrupt_checksum {
+            "0".repeat(64)
+        } else {
+            sha256_hex(archive_bytes)
+        };
+        fs::write(
+            release_dir.join("SHA256SUMS"),
+            format!("{archive_sha}  {archive_name}\n"),
+        )
+        .expect("write fixture checksums");
+        let install_metadata = json!({
+            "schema": "roger.release.install-metadata.v1",
+            "release": {
+                "channel": "stable",
+                "version": version,
+                "tag": tag,
+                "prerelease": false,
+                "artifact_stem": artifact_stem,
+            },
+            "checksums_name": "SHA256SUMS",
+            "core_manifest_name": format!("release-core-manifest-{version}.json"),
+            "targets": [],
+        });
+        fs::write(
+            release_dir.join(format!("release-install-metadata-{version}.json")),
+            serde_json::to_string_pretty(&install_metadata).expect("serialize install metadata"),
+        )
+        .expect("write fixture install metadata");
+        format!("file://{}/releases", root.to_string_lossy())
+    }
+
+    #[test]
+    fn extension_fetch_fails_closed_on_checksum_mismatch_from_fixture_release() {
+        let tmp = tempdir().expect("tempdir");
+        let runtime = CliRuntime {
+            cwd: tmp.path().to_path_buf(),
+            store_root: tmp.path().join("store"),
+            opencode_bin: "opencode".to_owned(),
+        };
+        let version = "2026.06.02";
+        let download_root = write_extension_fetch_fixture_release(
+            tmp.path(),
+            version,
+            b"not-a-real-zip-but-checksum-fails-first",
+            true,
+        );
+
+        let result = run(
+            &[
+                "extension".to_owned(),
+                "fetch".to_owned(),
+                "--version".to_owned(),
+                version.to_owned(),
+                "--download-root".to_owned(),
+                download_root,
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(result.exit_code, 3, "{}\n{}", result.stdout, result.stderr);
+        let payload = parse_robot(&result.stdout);
+        assert_eq!(payload["outcome"], "blocked");
+        assert_eq!(
+            payload["data"]["reason_code"],
+            "extension_archive_checksum_mismatch"
+        );
+        let package_dir = installed_extension_package_dir(&runtime.store_root, version);
+        assert!(
+            !package_dir.exists(),
+            "checksum mismatch must not install a package: {}",
+            package_dir.display()
+        );
+        let version_root = installed_extension_package_root(&runtime.store_root).join(version);
+        if version_root.exists() {
+            let leftovers: Vec<_> = fs::read_dir(&version_root)
+                .expect("read version root")
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .collect();
+            assert!(
+                leftovers.is_empty(),
+                "staging leftovers after fail-closed fetch: {leftovers:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn extension_fetch_blocks_when_release_has_no_extension_asset() {
+        let tmp = tempdir().expect("tempdir");
+        let runtime = CliRuntime {
+            cwd: tmp.path().to_path_buf(),
+            store_root: tmp.path().join("store"),
+            opencode_bin: "opencode".to_owned(),
+        };
+        let version = "2026.06.03";
+        let download_root =
+            write_extension_fetch_fixture_release(tmp.path(), version, b"zip-bytes", false);
+        // Remove the extension entry from the checksums manifest.
+        let checksums_path = tmp
+            .path()
+            .join("releases")
+            .join(format!("v{version}"))
+            .join("SHA256SUMS");
+        fs::write(&checksums_path, "0000  some-other-asset.tar.gz\n")
+            .expect("rewrite checksums without extension entry");
+
+        let result = run(
+            &[
+                "extension".to_owned(),
+                "fetch".to_owned(),
+                "--version".to_owned(),
+                version.to_owned(),
+                "--download-root".to_owned(),
+                download_root,
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(result.exit_code, 3, "{}\n{}", result.stdout, result.stderr);
+        let payload = parse_robot(&result.stdout);
+        assert_eq!(payload["data"]["reason_code"], "extension_asset_missing");
+    }
+
+    fn create_fixture_extension_zip(root: &Path) -> Vec<u8> {
+        let source_dir = root.join("zip-source");
+        fs::create_dir_all(source_dir.join("src")).expect("create zip source tree");
+        let manifest = json!({
+            "manifest_version": 3,
+            "name": "Roger Reviewer",
+            "version": "2026.6.4.1000",
+            "key": TEST_EXTENSION_MANIFEST_KEY,
+        });
+        fs::write(
+            source_dir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).expect("serialize zip manifest") + "\n",
+        )
+        .expect("write zip manifest");
+        fs::write(source_dir.join("src/main.js"), "export const ok = true;\n")
+            .expect("write zip src");
+
+        let archive_path = root.join("fixture-extension.zip");
+        let output = Command::new("python3")
+            .arg("-m")
+            .arg("zipfile")
+            .arg("-c")
+            .arg(&archive_path)
+            .arg("manifest.json")
+            .arg("src")
+            .current_dir(&source_dir)
+            .output()
+            .expect("run python3 zipfile for fixture zip");
+        assert!(
+            output.status.success(),
+            "fixture zip creation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fs::read(&archive_path).expect("read fixture zip bytes")
+    }
+
+    #[test]
+    fn extension_fetch_installs_verified_package_then_doctor_resolves_it() {
+        let _env_guard = shared_env_guard();
+        let tmp = tempdir().expect("tempdir");
+        let cwd = tmp.path().join("plain-user-dir");
+        fs::create_dir_all(&cwd).expect("create plain cwd");
+        let runtime = CliRuntime {
+            cwd,
+            store_root: tmp.path().join("store"),
+            opencode_bin: "opencode".to_owned(),
+        };
+        let version = "2026.06.04";
+        let archive_bytes = create_fixture_extension_zip(tmp.path());
+        let download_root =
+            write_extension_fetch_fixture_release(tmp.path(), version, &archive_bytes, false);
+
+        let fetch = run(
+            &[
+                "extension".to_owned(),
+                "fetch".to_owned(),
+                "--version".to_owned(),
+                version.to_owned(),
+                "--download-root".to_owned(),
+                download_root,
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(fetch.exit_code, 0, "{}\n{}", fetch.stdout, fetch.stderr);
+        let fetch_payload = parse_robot(&fetch.stdout);
+        assert_eq!(fetch_payload["outcome"], "complete");
+        assert_eq!(fetch_payload["data"]["subcommand"], "fetch");
+        let package_dir = PathBuf::from(
+            fetch_payload["data"]["package_dir"]
+                .as_str()
+                .expect("fetched package dir"),
+        );
+        assert_eq!(
+            package_dir,
+            installed_extension_package_dir(&runtime.store_root, version)
+        );
+        assert!(package_dir.join("manifest.json").is_file());
+        assert!(package_dir.join("src/main.js").is_file());
+        let fetch_manifest_path = PathBuf::from(
+            fetch_payload["data"]["fetch_manifest_path"]
+                .as_str()
+                .expect("fetch manifest path"),
+        );
+        assert!(fetch_manifest_path.is_file());
+
+        let install_root = tmp.path().join("install-root");
+        let doctor = run(
+            &[
+                "extension".to_owned(),
+                "doctor".to_owned(),
+                "--browser".to_owned(),
+                "edge".to_owned(),
+                "--install-root".to_owned(),
+                install_root.to_string_lossy().to_string(),
+                "--robot".to_owned(),
+            ],
+            &runtime,
+        );
+        let doctor_payload = parse_robot(&doctor.stdout);
+        assert_eq!(
+            doctor_payload["data"]["package_dir"],
+            package_dir.to_string_lossy().to_string()
+        );
+        assert_eq!(
+            doctor_payload["data"]["package_source"],
+            "installed_layout_newest_available"
+        );
+        let checks = doctor_payload["data"]["checks"]
+            .as_array()
+            .expect("doctor checks");
+        let package_check = checks
+            .iter()
+            .find(|entry| entry["name"] == "extension_package_present")
+            .expect("package presence check");
+        assert_eq!(package_check["ok"], true);
     }
 }

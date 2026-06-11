@@ -184,6 +184,77 @@ impl BridgeResponse {
 ///
 /// Chrome Native Messaging protocol: 4-byte little-endian length prefix
 /// followed by JSON payload.
+/// A bounded status probe from the extension's companion tier. Unlike launch
+/// intents it carries no action; the host answers from persisted local state
+/// only and must never mutate anything.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BridgeStatusProbe {
+    pub owner: String,
+    pub repo: String,
+    pub pr_number: u64,
+}
+
+/// The two native message families the host accepts.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NativeBridgeMessage {
+    Launch(BridgeLaunchIntent),
+    StatusProbe(BridgeStatusProbe),
+}
+
+/// Read one length-prefixed native message and classify it by its `type`
+/// discriminator: `roger_bridge_status` probes are read-only companion-tier
+/// requests; everything else parses as a launch intent.
+pub fn read_native_bridge_message<R: Read>(reader: &mut R) -> Result<NativeBridgeMessage> {
+    let value = read_native_value(reader)?;
+    if value.get("type").and_then(|v| v.as_str()) == Some("roger_bridge_status") {
+        let probe: BridgeStatusProbe = serde_json::from_value(value)
+            .map_err(|e| BridgeError::NativeMessagingReadError(format!(
+                "invalid status probe payload: {e}"
+            )))?;
+        return Ok(NativeBridgeMessage::StatusProbe(probe));
+    }
+    let intent: BridgeLaunchIntent = serde_json::from_value(value).map_err(|e| {
+        BridgeError::NativeMessagingReadError(format!("invalid launch intent payload: {e}"))
+    })?;
+    Ok(NativeBridgeMessage::Launch(intent))
+}
+
+fn read_native_value<R: Read>(reader: &mut R) -> Result<serde_json::Value> {
+    let mut len_buf = [0u8; 4];
+    reader.read_exact(&mut len_buf).map_err(|e| {
+        BridgeError::NativeMessagingReadError(format!("failed to read length prefix: {e}"))
+    })?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    if len > 1_048_576 {
+        return Err(BridgeError::NativeMessagingReadError(format!(
+            "message length {len} exceeds 1MiB limit"
+        )));
+    }
+    let mut body = vec![0u8; len];
+    reader.read_exact(&mut body).map_err(|e| {
+        BridgeError::NativeMessagingReadError(format!("failed to read message body: {e}"))
+    })?;
+    serde_json::from_slice(&body).map_err(|e| {
+        BridgeError::NativeMessagingReadError(format!("invalid message JSON: {e}"))
+    })
+}
+
+/// Write an arbitrary serializable native message (used for status-probe
+/// replies whose shape is owned by the companion-tier readback contract).
+pub fn write_native_value<W: Write>(writer: &mut W, value: &serde_json::Value) -> Result<()> {
+    let json = serde_json::to_vec(value)?;
+    let len = json.len() as u32;
+    writer.write_all(&len.to_le_bytes()).map_err(|e| {
+        BridgeError::NativeMessagingWriteError(format!("failed to write length prefix: {e}"))
+    })?;
+    writer.write_all(&json).map_err(|e| {
+        BridgeError::NativeMessagingWriteError(format!("failed to write message body: {e}"))
+    })?;
+    writer.flush().map_err(|e| {
+        BridgeError::NativeMessagingWriteError(format!("failed to flush message: {e}"))
+    })
+}
+
 pub fn read_native_message<R: Read>(reader: &mut R) -> Result<BridgeLaunchIntent> {
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf).map_err(|e| {

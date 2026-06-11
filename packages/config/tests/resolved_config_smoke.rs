@@ -154,3 +154,23 @@ fn routine_surface_baseline_fails_closed_for_unknown_override_with_stable_error_
     let json = serde_json::to_value(&err).expect("serialize config error");
     assert_eq!(json["reason_code"], "provider_override_unknown");
 }
+
+#[test]
+fn resolved_config_store_root_prefers_home_profile_over_cwd() {
+    let resolved = resolve_cli_config_from_lookup(Path::new("/tmp/roger"), |key| match key {
+        "HOME" => Some("/home/reviewer".to_owned()),
+        _ => None,
+    });
+    let json = serde_json::to_value(&resolved).expect("serialize resolved config");
+    assert_eq!(json["store_root"]["value"], "/home/reviewer/.roger");
+    assert_eq!(json["store_root"]["provenance"]["layer"], "built_in");
+
+    let overridden = resolve_cli_config_from_lookup(Path::new("/tmp/roger"), |key| match key {
+        "HOME" => Some("/home/reviewer".to_owned()),
+        "RR_STORE_ROOT" => Some("/explicit/store".to_owned()),
+        _ => None,
+    });
+    let json = serde_json::to_value(&overridden).expect("serialize resolved config");
+    assert_eq!(json["store_root"]["value"], "/explicit/store");
+    assert_eq!(json["store_root"]["provenance"]["layer"], "env_repair");
+}

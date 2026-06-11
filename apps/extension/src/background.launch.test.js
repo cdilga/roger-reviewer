@@ -149,6 +149,80 @@ for (const action of ['start_review', 'resume_review', 'show_findings']) {
   });
 }
 
+test('handleLaunchMessage preserves message and session id even without a fresh bounded mirror', async () => {
+  // The panel renders a persistent success status line from message +
+  // session_id, so the envelope must carry both even when the bridge omits
+  // attention_state/generated_at and no bounded mirror can be normalized.
+  const chromeStub = {
+    runtime: {
+      lastError: null,
+      onMessage: { addListener: () => {} },
+      sendNativeMessage(_host, _intent, callback) {
+        callback({
+          ok: true,
+          action: 'start_review',
+          message: 'rr review completed for acme/widgets#42.',
+          guidance: null,
+          session_id: 'session-42',
+        });
+      },
+    },
+  };
+
+  await withChromeStub(chromeStub, async () => {
+    const response = await handleLaunchMessage({
+      intent: {
+        action: 'start_review',
+        owner: 'acme',
+        repo: 'widgets',
+        pr_number: 42,
+      },
+    });
+
+    assert.equal(response.ok, true);
+    assert.equal(response.mode, 'native_messaging');
+    assert.match(response.message, /rr review completed for acme\/widgets#42\./);
+    assert.equal(response.session_id, 'session-42');
+    assert.equal(response.attention_state, undefined);
+  });
+});
+
+test('handleLaunchMessage failure envelopes keep message and guidance for persistent panel errors', async () => {
+  const chromeStub = {
+    runtime: {
+      lastError: null,
+      onMessage: { addListener: () => {} },
+      sendNativeMessage(_host, _intent, callback) {
+        callback({
+          ok: false,
+          action: 'start_review',
+          message: 'Roger bridge preflight failed.',
+          guidance: 'Roger data directory not found. Run `rr init` to set up.',
+          failure_kind: 'preflight_failed',
+        });
+      },
+    },
+  };
+
+  await withChromeStub(chromeStub, async () => {
+    const response = await handleLaunchMessage({
+      intent: {
+        action: 'start_review',
+        owner: 'acme',
+        repo: 'widgets',
+        pr_number: 42,
+      },
+    });
+
+    assert.equal(response.ok, false);
+    assert.equal(response.message, 'Roger bridge preflight failed.');
+    assert.equal(
+      response.guidance,
+      'Roger data directory not found. Run `rr init` to set up.'
+    );
+  });
+});
+
 test('handleLaunchMessage keeps degraded bridge launch outcome explicit', async () => {
   const generatedAt = new Date(Date.now() - 1_000).toISOString();
   const chromeStub = {

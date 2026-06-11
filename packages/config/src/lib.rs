@@ -21,6 +21,20 @@ pub mod cli_defaults {
     pub const DEFAULT_ISOLATION_MODE: &str = "current_checkout";
     pub const DEFAULT_PROMPT_CONTRACT_VERSION: &str = "prompt_preset_contract.v1";
     pub const DEFAULT_HOOK_CONTRACT_VERSION: &str = "none";
+
+    /// One canonical Roger store per profile: the default store root is
+    /// HOME-based so every surface (CLI from any directory, browser-launched
+    /// native host, TUI) reads the same truth. The cwd fallback exists only
+    /// for environments with no resolvable HOME.
+    pub fn default_store_root_from(
+        home: Option<&str>,
+        cwd: &std::path::Path,
+    ) -> std::path::PathBuf {
+        match home.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(home) => std::path::Path::new(home).join(".roger"),
+            None => cwd.join(".roger"),
+        }
+    }
 }
 
 const RESOLVED_CONFIG_SCHEMA_VERSION: u32 = 1;
@@ -306,8 +320,11 @@ where
     let store_root = lookup(cli_defaults::ENV_STORE_ROOT)
         .map(|value| ResolvedValue::env(value, cli_defaults::ENV_STORE_ROOT, true))
         .unwrap_or_else(|| {
+            let home = lookup("HOME");
             ResolvedValue::built_in(
-                cwd.join(".roger").to_string_lossy().into_owned(),
+                cli_defaults::default_store_root_from(home.as_deref(), cwd)
+                    .to_string_lossy()
+                    .into_owned(),
                 "store.root",
             )
         });

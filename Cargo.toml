@@ -12,6 +12,7 @@ members = [
   "packages/github-adapter",
   "packages/storage",
   "packages/test-harness",
+  "packages/tui",
   "packages/validation",
   "packages/worktree-manager",
 ]

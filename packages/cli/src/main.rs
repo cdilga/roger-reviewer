@@ -2,8 +2,8 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use roger_bridge::{
-    BridgePreflight, BridgeResponse, handle_bridge_intent, read_native_message,
-    write_native_message,
+    BridgePreflight, BridgeResponse, NativeBridgeMessage, handle_bridge_intent,
+    read_native_bridge_message, write_native_message, write_native_value,
 };
 use roger_cli::{CliRuntime, run};
 
@@ -18,10 +18,28 @@ fn run_native_host_mode(runtime: &CliRuntime) -> i32 {
     let preflight = BridgePreflight::check(&binary_path, &runtime.store_root);
 
     let mut stdin = std::io::stdin().lock();
-    let intent = read_native_message(&mut stdin);
+    let message = read_native_bridge_message(&mut stdin);
 
-    let response = match intent {
-        Ok(intent) => handle_bridge_intent(&intent, &preflight, &binary_path),
+    let mut stdout = std::io::stdout().lock();
+    let response = match message {
+        Ok(NativeBridgeMessage::StatusProbe(probe)) => {
+            // Companion-tier bounded readback: read-only, store-backed, and
+            // empty when nothing truthful can be mirrored.
+            let reply = roger_cli::answer_bridge_status_probe(
+                runtime,
+                &probe.owner,
+                &probe.repo,
+                probe.pr_number,
+            );
+            if let Err(err) = write_native_value(&mut stdout, &reply) {
+                eprintln!("native messaging write failed: {err}");
+                return 1;
+            }
+            return 0;
+        }
+        Ok(NativeBridgeMessage::Launch(intent)) => {
+            handle_bridge_intent(&intent, &preflight, &binary_path)
+        }
         Err(err) => BridgeResponse::failure(
             "native_messaging_host",
             "Invalid bridge request",
@@ -29,7 +47,6 @@ fn run_native_host_mode(runtime: &CliRuntime) -> i32 {
         ),
     };
 
-    let mut stdout = std::io::stdout().lock();
     if let Err(err) = write_native_message(&mut stdout, &response) {
         eprintln!("native messaging write failed: {err}");
         return 1;

@@ -11,9 +11,10 @@ use roger_app_core::{
     ResumeAttemptOutcome, ResumeBundle, ResumeDecision, ResumeSessionState, ReviewTarget,
     ReviewTaskKind, SessionLocator, Surface, WorkerInvocation, WorkerInvocationOutcomeState,
     WorkerStageOutcome, WorkerStageResult, WorkerToolCallEvent, WorkerToolCallOutcomeState,
-    WorkerTransportKind, decide_resume_strategy, outbound_target_tuple_json, time,
-    validate_outbound_draft_batch_linkage,
+    WorkerTransportKind, decide_resume_strategy, evaluate_outbound_approval_gate,
+    outbound_target_tuple_json, time, validate_outbound_draft_batch_linkage,
 };
+use roger_app_core::{OutboundApprovalGateDecision, OutboundApprovalGateInput};
 use rusqlite::{
     Connection, OptionalExtension, Row, params, params_from_iter,
     types::{Type, Value},
@@ -132,6 +133,14 @@ fn projected_outbound_state_from_finding_state(raw: &str) -> &'static str {
 
 fn is_mutation_elevated_surface_state(state: &str) -> bool {
     state == "approved"
+}
+
+/// Project a stored outbound draft batch onto the canonical operator-facing
+/// outbound-state vocabulary (`awaiting_approval`, `approved`, `posted`,
+/// `invalidated`, `failed`). Read-only surfaces reuse this instead of
+/// re-deriving the vocabulary from `ApprovalState` variants.
+pub fn projected_outbound_batch_state(batch: &OutboundDraftBatch) -> &'static str {
+    projected_outbound_state_from_approval_state(approval_state_str(&batch.approval_state))
 }
 
 fn approval_state_str(state: &ApprovalState) -> &'static str {
@@ -835,6 +844,18 @@ pub struct MaterializedFindingRecord {
     pub triage_state: String,
     pub outbound_state: String,
     pub row_version: i64,
+}
+
+/// One immutable triage/outbound decision-history event for a finding,
+/// projected from the `finding_decision_events` table (read-only surface for
+/// the TUI inspector and audit views).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindingDecisionEventRecord {
+    pub id: String,
+    pub finding_id: String,
+    pub triage_state: String,
+    pub outbound_state: String,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -1544,6 +1565,20 @@ pub struct PriorReviewLookupResult {
     pub evidence_hits: Vec<PriorReviewEvidenceHit>,
     pub promoted_memory: Vec<PriorReviewMemoryHit>,
     pub tentative_candidates: Vec<PriorReviewMemoryHit>,
+}
+
+/// Outcome of the shared in-process batch-approval path
+/// ([`RogerStore::approve_outbound_batch_for_session`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutboundBatchApproval {
+    Approved {
+        approval: OutboundApprovalToken,
+        draft_count: usize,
+        already_recorded: bool,
+    },
+    Blocked {
+        reason_code: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3320,12 +3355,12 @@ impl RogerStore {
                 id: finding_id.to_owned(),
             });
         }
-        let record = self
-            .materialized_finding(finding_id)?
-            .ok_or_else(|| StorageError::NotFound {
-                entity: "finding",
-                id: finding_id.to_owned(),
-            })?;
+        let record =
+            self.materialized_finding(finding_id)?
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "finding",
+                    id: finding_id.to_owned(),
+                })?;
         self.conn.execute(
             "INSERT INTO finding_decision_events (
                 id, finding_id, triage_state, outbound_state, created_at
@@ -3525,6 +3560,30 @@ impl RogerStore {
         Ok(evidence_rows)
     }
 
+    /// Read-only decision-event history for one finding, oldest first.
+    pub fn finding_decision_events_for_finding(
+        &self,
+        finding_id: &str,
+    ) -> Result<Vec<FindingDecisionEventRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, finding_id, triage_state, outbound_state, created_at
+            FROM finding_decision_events
+            WHERE finding_id = ?1
+            ORDER BY created_at ASC, rowid ASC",
+        )?;
+        let rows = stmt.query_map(params![finding_id], |row| {
+            Ok(FindingDecisionEventRecord {
+                id: row.get(0)?,
+                finding_id: row.get(1)?,
+                triage_state: row.get(2)?,
+                outbound_state: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
+    }
+
     pub fn create_outbound_draft(&self, input: CreateOutboundDraft<'_>) -> Result<()> {
         let now = time::now_ts();
         self.conn.execute(
@@ -3658,6 +3717,47 @@ impl RogerStore {
             )
             .optional()
             .map_err(StorageError::from)
+    }
+
+    /// Read-only listing of every outbound draft batch bound to a review
+    /// session, oldest first. Surfaces (TUI drafts queue, status projections)
+    /// use this to project the canonical batch approval-state vocabulary
+    /// without re-deriving it.
+    pub fn outbound_draft_batches_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<OutboundDraftBatch>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, review_session_id, review_run_id, repo_id, remote_review_target_id,
+                payload_digest, approval_state, approved_at, invalidated_at,
+                invalidation_reason_code, row_version
+             FROM outbound_draft_batches
+             WHERE review_session_id = ?1
+             ORDER BY rowid ASC",
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            let approval_state: String = row.get(6)?;
+            Ok(OutboundDraftBatch {
+                id: row.get(0)?,
+                review_session_id: row.get(1)?,
+                review_run_id: row.get(2)?,
+                repo_id: row.get(3)?,
+                remote_review_target_id: row.get(4)?,
+                payload_digest: row.get(5)?,
+                approval_state: parse_approval_state(&approval_state)
+                    .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?,
+                approved_at: row.get(7)?,
+                invalidated_at: row.get(8)?,
+                invalidation_reason_code: row.get(9)?,
+                row_version: row.get(10)?,
+            })
+        })?;
+
+        let mut batches = Vec::new();
+        for row in rows {
+            batches.push(row?);
+        }
+        Ok(batches)
     }
 
     pub fn store_outbound_draft_item(&self, draft: &OutboundDraft) -> Result<()> {
@@ -3867,6 +3967,100 @@ impl RogerStore {
             )
             .optional()
             .map_err(StorageError::from)
+    }
+
+    /// Approve one exact stored outbound draft batch through the same
+    /// fail-closed gate and storage writes `rr approve` uses.
+    ///
+    /// This is the single in-process approval path shared by approval-capable
+    /// surfaces (CLI, TUI elevation flow). It never bypasses payload-digest or
+    /// target-tuple binding: gate evaluation happens through
+    /// `roger_app_core::evaluate_outbound_approval_gate` and token persistence
+    /// goes through [`RogerStore::store_outbound_approval_token`], which
+    /// re-verifies the binding.
+    pub fn approve_outbound_batch_for_session(
+        &self,
+        session_id: &str,
+        batch_id: &str,
+    ) -> Result<OutboundBatchApproval> {
+        let blocked = |reason_code: &str| {
+            Ok(OutboundBatchApproval::Blocked {
+                reason_code: reason_code.to_owned(),
+            })
+        };
+
+        let Some(session) = self.review_session(session_id)? else {
+            return blocked("missing_local_state");
+        };
+        if session.attention_state == "refresh_recommended" {
+            return blocked("stale_local_state");
+        }
+        let Some(run) = self.latest_review_run(session_id)? else {
+            return blocked("missing_local_state");
+        };
+        let Some(batch) = self.outbound_draft_batch(batch_id)? else {
+            return blocked("missing_local_state");
+        };
+        let drafts = self.outbound_draft_items_for_batch(batch_id)?;
+        let has_posted_action = !self.posted_actions_for_batch(batch_id)?.is_empty();
+        let existing_approval = self.approval_token_for_batch(batch_id)?;
+
+        let expected_remote_review_target_id =
+            format!("pr-{}", session.review_target.pull_request_number);
+        let decision = evaluate_outbound_approval_gate(OutboundApprovalGateInput {
+            session_id,
+            latest_run_id: &run.id,
+            expected_repo_id: &session.review_target.repository,
+            expected_remote_review_target_id: &expected_remote_review_target_id,
+            batch: &batch,
+            drafts: &drafts,
+            existing_approval: existing_approval.as_ref(),
+            has_posted_action,
+        });
+        if let OutboundApprovalGateDecision::Blocked { reason_code } = decision {
+            return Ok(OutboundBatchApproval::Blocked { reason_code });
+        }
+
+        let batch_already_approved = matches!(&batch.approval_state, ApprovalState::Approved);
+        let approval_needs_insert = existing_approval.is_none();
+        let approval = existing_approval.unwrap_or_else(|| OutboundApprovalToken {
+            id: format!("approval-{batch_id}-{}", time::now_ts()),
+            draft_batch_id: batch.id.clone(),
+            payload_digest: batch.payload_digest.clone(),
+            target_tuple_json: outbound_target_tuple_json(&batch),
+            approved_at: time::now_ts(),
+            revoked_at: None,
+        });
+
+        for draft in &drafts {
+            if matches!(&draft.approval_state, ApprovalState::Approved) {
+                continue;
+            }
+            let mut approved_draft = draft.clone();
+            approved_draft.approval_state = ApprovalState::Approved;
+            approved_draft.row_version += 1;
+            self.store_outbound_draft_item(&approved_draft)?;
+        }
+
+        if approval_needs_insert {
+            self.store_outbound_approval_token(&approval)?;
+        }
+
+        if !batch_already_approved || batch.approved_at != Some(approval.approved_at) {
+            let mut approved_batch = batch.clone();
+            approved_batch.approval_state = ApprovalState::Approved;
+            approved_batch.approved_at = Some(approval.approved_at);
+            approved_batch.invalidated_at = None;
+            approved_batch.invalidation_reason_code = None;
+            approved_batch.row_version += 1;
+            self.store_outbound_draft_batch(&approved_batch)?;
+        }
+
+        Ok(OutboundBatchApproval::Approved {
+            approval,
+            draft_count: drafts.len(),
+            already_recorded: batch_already_approved,
+        })
     }
 
     pub fn store_posted_batch_action(&self, action: &PostedAction) -> Result<()> {
@@ -4976,6 +5170,31 @@ impl RogerStore {
                 },
             )
             .optional()
+            .map_err(StorageError::from)
+    }
+
+    /// All review runs for one session, newest first (read-only timeline
+    /// surface for the TUI history screen).
+    pub fn review_runs_for_session(&self, session_id: &str) -> Result<Vec<ReviewRunRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, run_kind, repo_snapshot, continuity_quality,
+                session_locator_artifact_id, created_at
+            FROM review_runs
+            WHERE session_id = ?1
+            ORDER BY created_at DESC, rowid DESC",
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok(ReviewRunRecord {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                run_kind: row.get(2)?,
+                repo_snapshot: row.get(3)?,
+                continuity_quality: row.get(4)?,
+                session_locator_artifact_id: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(StorageError::from)
     }
 

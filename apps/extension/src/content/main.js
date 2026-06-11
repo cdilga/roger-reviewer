@@ -165,11 +165,22 @@ function readRuntimeAssetUrl(relativePath) {
   }
 }
 
-let inlineStatusResetTimer = null;
+const BRIDGE_DISCONNECT_GUIDANCE =
+  'Native bridge unreachable. Run `rr extension setup --browser <edge|chrome|brave>`, then `rr extension doctor --browser <edge|chrome|brave>`, and reload this page.';
+
+function normalizeGuidanceText(guidance) {
+  if (Array.isArray(guidance)) {
+    return guidance
+      .filter((entry) => typeof entry === 'string' && entry.trim().length > 0)
+      .map((entry) => entry.trim())
+      .join(' ');
+  }
+  return typeof guidance === 'string' ? guidance.trim() : '';
+}
 
 function appendGuidance(message, guidance) {
   const base = typeof message === 'string' ? message.trim() : '';
-  const extra = typeof guidance === 'string' ? guidance.trim() : '';
+  const extra = normalizeGuidanceText(guidance);
 
   if (!base) {
     return extra;
@@ -237,19 +248,12 @@ function setStatus(message, isError = false, options = {}) {
   );
   statusNode.classList.add(isError ? 'roger-panel-status--error' : 'roger-panel-status--ok');
 
+  // Status messages are deliberately persistent: they stay visible until the
+  // next action or a newer truthful state supersedes them. An earlier
+  // auto-hide timer here made launch failures silently disappear after 4.5s.
   const panel = statusNode.parentElement;
   if (panel?.classList?.contains('roger-panel--inline') && options.revealInline) {
     statusNode.classList.add('roger-panel-status--inline-visible');
-    if (inlineStatusResetTimer !== null && typeof clearTimeout === 'function') {
-      clearTimeout(inlineStatusResetTimer);
-    }
-    if (typeof setTimeout === 'function') {
-      inlineStatusResetTimer = setTimeout(() => {
-        statusNode.classList.remove('roger-panel-status--inline-visible');
-        statusNode.hidden = true;
-        inlineStatusResetTimer = null;
-      }, 4500);
-    }
   }
 }
 
@@ -291,6 +295,10 @@ function setAttentionBadge(attentionState, freshnessLabel) {
   badge.style.color = style.color;
 }
 
+// Bounded status mirroring updates the badge, action model, and info text.
+// It deliberately never touches the action status line: that line is owned by
+// launch actions and must stay visible until the next action supersedes it.
+// (A clearStatus() here used to wipe fresh launch results back to null.)
 function requestStatusMirror(context) {
   const panel = typeof document !== 'undefined' ? document.getElementById(PANEL_ID) : null;
 
@@ -300,7 +308,6 @@ function requestStatusMirror(context) {
       applyActionModel(panel, lastAttentionState);
     }
     clearAttentionBadge();
-    clearStatus();
     setInfoMessage('Launch-only mode. Open Roger locally (`rr status`) for authoritative detail.');
     return;
   }
@@ -321,7 +328,6 @@ function requestStatusMirror(context) {
           applyActionModel(panel, lastAttentionState);
         }
         clearAttentionBadge();
-        clearStatus();
         setInfoMessage('Launch-only mode. Open Roger locally (`rr status`) for authoritative detail.');
         return;
       }
@@ -332,7 +338,6 @@ function requestStatusMirror(context) {
           applyActionModel(panel, lastAttentionState);
         }
         clearAttentionBadge();
-        clearStatus();
         setInfoMessage('No bounded status response. Open Roger locally (`rr status`) for authoritative detail.');
         return;
       }
@@ -343,7 +348,6 @@ function requestStatusMirror(context) {
           applyActionModel(panel, lastAttentionState);
         }
         clearAttentionBadge();
-        clearStatus();
         setInfoMessage(appendGuidance(response.message, response.guidance));
         return;
       }
@@ -354,7 +358,6 @@ function requestStatusMirror(context) {
           applyActionModel(panel, lastAttentionState);
         }
         clearAttentionBadge();
-        clearStatus();
         setInfoMessage(
           appendGuidance(
             response.message || 'Launch-only mode. Open Roger locally for authoritative detail.',
@@ -369,7 +372,6 @@ function requestStatusMirror(context) {
         applyActionModel(panel, lastAttentionState);
       }
       setAttentionBadge(response.attention_state, response.freshness_label || null);
-      clearStatus();
       setInfoMessage(
         appendGuidance(response.message || 'Mirroring bounded Roger status.', response.guidance)
       );
@@ -1387,6 +1389,22 @@ function bootstrapRogerPanel() {
   registerNavigationHooks(document);
 }
 
+function formatLaunchSuccessStatus(response) {
+  const base = appendGuidance(
+    response?.message || 'Launch intent dispatched.',
+    response?.guidance
+  );
+  const sessionId =
+    typeof response?.session_id === 'string' && response.session_id.trim().length > 0
+      ? response.session_id.trim()
+      : null;
+
+  if (sessionId && !base.includes(sessionId)) {
+    return `${base} (session ${sessionId})`;
+  }
+  return base;
+}
+
 function triggerLaunch(action, context, button) {
   const panel = typeof document !== 'undefined' ? document.getElementById(PANEL_ID) : null;
 
@@ -1426,8 +1444,12 @@ function triggerLaunch(action, context, button) {
           applyActionModel(panel, lastAttentionState);
         }
         clearAttentionBadge();
-        setInfoMessage(`Bridge error: ${chrome.runtime.lastError.message}`);
-        setStatus(`Bridge error: ${chrome.runtime.lastError.message}`, true, { revealInline: true });
+        const disconnectStatus = appendGuidance(
+          `Bridge error: ${chrome.runtime.lastError.message}`,
+          BRIDGE_DISCONNECT_GUIDANCE
+        );
+        setInfoMessage(disconnectStatus);
+        setStatus(disconnectStatus, true, { revealInline: true });
         return;
       }
 
@@ -1437,8 +1459,12 @@ function triggerLaunch(action, context, button) {
           applyActionModel(panel, lastAttentionState);
         }
         clearAttentionBadge();
-        setInfoMessage('No bridge response. Open Roger locally and run `rr` manually.');
-        setStatus('No bridge response. Open Roger locally and run rr manually.', true, { revealInline: true });
+        const noResponseStatus = appendGuidance(
+          'No bridge response.',
+          BRIDGE_DISCONNECT_GUIDANCE
+        );
+        setInfoMessage(noResponseStatus);
+        setStatus(noResponseStatus, true, { revealInline: true });
         return;
       }
 
@@ -1470,12 +1496,9 @@ function triggerLaunch(action, context, button) {
           applyActionModel(panel, lastAttentionState);
         }
         setAttentionBadge(response.attention_state, response.freshness_label || null);
-        setInfoMessage(appendGuidance(response.message || 'Launch intent dispatched.', response.guidance));
-        setStatus(
-          appendGuidance(response.message || 'Launch intent dispatched.', response.guidance),
-          false,
-          { revealInline: true }
-        );
+        const successStatus = formatLaunchSuccessStatus(response);
+        setInfoMessage(successStatus);
+        setStatus(successStatus, false, { revealInline: true });
         return;
       }
 
@@ -1483,12 +1506,11 @@ function triggerLaunch(action, context, button) {
       if (panel) {
         applyActionModel(panel, lastAttentionState);
       }
-      setInfoMessage(appendGuidance(response.message || 'Launch intent dispatched.', response.guidance));
-      setStatus(
-        appendGuidance(response.message || 'Launch intent dispatched.', response.guidance),
-        false,
-        { revealInline: true }
-      );
+      const successStatus = formatLaunchSuccessStatus(response);
+      setInfoMessage(successStatus);
+      setStatus(successStatus, false, { revealInline: true });
+      // Refresh the bounded badge/action model; this must not clear the
+      // launch result status line we just rendered.
       requestStatusMirror(context);
     }
   );
@@ -1502,6 +1524,10 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     appendGuidance,
     BRAND_CHIP_CLASS,
+    BRIDGE_DISCONNECT_GUIDANCE,
+    formatLaunchSuccessStatus,
+    requestStatusMirror,
+    triggerLaunch,
     GITHUB_ACTION_BUTTON_CLASS,
     INLINE_ANCHOR_SELECTORS,
     MODAL_FALLBACK_STATUS,

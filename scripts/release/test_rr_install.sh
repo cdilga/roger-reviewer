@@ -56,8 +56,26 @@ EOF
   local archive_sha
   archive_sha="$(sha256_file "${release_dir}/${archive_name}")"
 
+  # Extension lane asset: a real zip whose checksum is published alongside the
+  # core archive, mirroring the release layout.
+  local extension_source="${TMP_DIR}/extension-source-${version}"
+  mkdir -p "${extension_source}/src"
+  cat >"${extension_source}/manifest.json" <<'EOF'
+{
+  "manifest_version": 3,
+  "name": "Roger Reviewer",
+  "version": "0.0.0.1"
+}
+EOF
+  echo "export const ok = true;" >"${extension_source}/src/main.js"
+  local extension_archive="${release_dir}/${artifact_stem}-extension.zip"
+  (cd "${extension_source}" && python3 -m zipfile -c "${extension_archive}" manifest.json src)
+  local extension_sha
+  extension_sha="$(sha256_file "${extension_archive}")"
+
   cat >"${release_dir}/${published_checksums_name}" <<EOF
 ${archive_sha}  ${archive_name}
+${extension_sha}  ${artifact_stem}-extension.zip
 EOF
 
   if [[ "${ambiguous}" == "1" ]]; then
@@ -151,7 +169,8 @@ build_actual_rr_binary() {
 make_release_payload "2026.04.01" 0
 
 INSTALL_DIR="${TMP_DIR}/install/bin"
-bash "${INSTALL_SCRIPT}" \
+STORE_ROOT_0401="${TMP_DIR}/store-0401"
+RR_STORE_ROOT="${STORE_ROOT_0401}" bash "${INSTALL_SCRIPT}" \
   --version "2026.04.01" \
   --download-root "${DOWNLOAD_ROOT}" \
   --install-dir "${INSTALL_DIR}" \
@@ -159,13 +178,18 @@ bash "${INSTALL_SCRIPT}" \
 
 [[ -x "${INSTALL_DIR}/rr" ]] || { echo "install did not create executable rr" >&2; exit 1; }
 [[ "$("${INSTALL_DIR}/rr")" == "rr smoke ok" ]] || { echo "installed rr smoke output mismatch" >&2; exit 1; }
+[[ -f "${STORE_ROOT_0401}/bridge/extension-package/2026.04.01/roger-extension-unpacked/manifest.json" ]] || {
+  echo "install did not unpack the extension package into the installed layout" >&2
+  exit 1
+}
 
 REAL_RR_SOURCE="${TMP_DIR}/rr-real"
 build_actual_rr_binary "${REAL_RR_SOURCE}"
 make_release_payload "2026.04.06" 0 "${TARGET}" "SHA256SUMS" "SHA256SUMS" "${REAL_RR_SOURCE}"
 
 REAL_INSTALL_DIR="${TMP_DIR}/real-install/bin"
-bash "${INSTALL_SCRIPT}" \
+REAL_STORE="${TMP_DIR}/real-store"
+RR_STORE_ROOT="${REAL_STORE}" bash "${INSTALL_SCRIPT}" \
   --version "2026.04.06" \
   --download-root "${DOWNLOAD_ROOT}" \
   --install-dir "${REAL_INSTALL_DIR}" \
@@ -174,8 +198,17 @@ bash "${INSTALL_SCRIPT}" \
 REAL_RR="${REAL_INSTALL_DIR}/rr"
 [[ -x "${REAL_RR}" ]] || { echo "real install did not create executable rr" >&2; exit 1; }
 
+# The installer auto-bootstraps the Roger store via `rr init --robot`.
+[[ -f "${REAL_STORE}/bootstrap/init-marker.v1.json" ]] || {
+  echo "install did not auto-bootstrap the Roger store via rr init" >&2
+  exit 1
+}
+[[ -f "${REAL_STORE}/bridge/extension-package/2026.04.06/roger-extension-unpacked/manifest.json" ]] || {
+  echo "real install did not unpack the extension package into the installed layout" >&2
+  exit 1
+}
+
 REAL_WORKSPACE="${TMP_DIR}/real-workspace"
-REAL_STORE="${TMP_DIR}/real-store"
 mkdir -p "${REAL_WORKSPACE}" "${REAL_STORE}"
 git -C "${REAL_WORKSPACE}" init >/dev/null
 

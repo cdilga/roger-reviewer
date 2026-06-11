@@ -3008,6 +3008,115 @@ pub struct OutboundPostGateInput<'a> {
     pub reconfirmed_finding_ids: &'a HashSet<String>,
 }
 
+/// Pure approval gate input mirroring the fail-closed checks `rr approve`
+/// enforces before binding a local approval token to one exact stored batch
+/// payload and target tuple. Every approval surface (CLI, TUI elevation flow)
+/// must pass this gate; none may bypass payload-digest binding.
+pub struct OutboundApprovalGateInput<'a> {
+    pub session_id: &'a str,
+    pub latest_run_id: &'a str,
+    pub expected_repo_id: &'a str,
+    pub expected_remote_review_target_id: &'a str,
+    pub batch: &'a OutboundDraftBatch,
+    pub drafts: &'a [OutboundDraft],
+    pub existing_approval: Option<&'a OutboundApprovalToken>,
+    pub has_posted_action: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutboundApprovalGateDecision {
+    ApprovalAllowed,
+    Blocked { reason_code: String },
+}
+
+/// Evaluate whether a stored outbound draft batch may be approved right now.
+///
+/// The checks and reason codes mirror the `rr approve` contract:
+/// session/run/target binding, posted-action immutability, linkage and
+/// payload-digest validation, invalidation state, item approvability, and
+/// existing-token consistency.
+pub fn evaluate_outbound_approval_gate(
+    input: OutboundApprovalGateInput<'_>,
+) -> OutboundApprovalGateDecision {
+    let blocked = |reason_code: &str| OutboundApprovalGateDecision::Blocked {
+        reason_code: reason_code.to_owned(),
+    };
+
+    if input.batch.review_session_id != input.session_id {
+        return blocked("approval_invalidated:local_state_drift");
+    }
+    if input.batch.review_run_id != input.latest_run_id {
+        return blocked("approval_invalidated:local_state_drift");
+    }
+    if input.batch.repo_id != input.expected_repo_id
+        || input.batch.remote_review_target_id != input.expected_remote_review_target_id
+    {
+        return blocked("approval_invalidated:target_drift");
+    }
+    if input.has_posted_action {
+        return blocked("existing_posted_action");
+    }
+    if input.drafts.is_empty() {
+        return blocked("missing_local_state");
+    }
+
+    let validation = validate_outbound_draft_batch_linkage(input.batch, input.drafts);
+    if !validation.valid {
+        return OutboundApprovalGateDecision::Blocked {
+            reason_code: format!(
+                "approval_invalidated:{}",
+                approval_invalidation_reason_for_linkage_issues(&validation)
+            ),
+        };
+    }
+
+    if input.batch.invalidated_at.is_some()
+        || matches!(&input.batch.approval_state, ApprovalState::Invalidated)
+    {
+        return OutboundApprovalGateDecision::Blocked {
+            reason_code: format!(
+                "approval_invalidated:{}",
+                input
+                    .batch
+                    .invalidation_reason_code
+                    .as_deref()
+                    .unwrap_or("unspecified")
+            ),
+        };
+    }
+
+    if input.drafts.iter().any(|draft| {
+        !matches!(
+            &draft.approval_state,
+            ApprovalState::Drafted | ApprovalState::Approved
+        )
+    }) {
+        return blocked("stale_local_state");
+    }
+
+    if let Some(approval) = input.existing_approval {
+        if approval.revoked_at.is_some() {
+            return blocked("approval_revoked");
+        }
+        if approval.payload_digest != input.batch.payload_digest {
+            return blocked("approval_payload_digest_mismatch");
+        }
+        if approval.target_tuple_json != outbound_target_tuple_json(input.batch) {
+            return blocked("approval_target_tuple_mismatch");
+        }
+    }
+
+    if !matches!(
+        &input.batch.approval_state,
+        ApprovalState::Drafted | ApprovalState::Approved
+    ) {
+        return blocked("stale_local_state");
+    }
+
+    OutboundApprovalGateDecision::ApprovalAllowed
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PostingAdapterItemStatus {

@@ -1,0 +1,25 @@
+[package]
+name = "roger-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+# ftui 0.4.0 is the latest published FrankenTUI facade. Its terminal backends
+# are: (a) crossterm compat (feature-gated; disallowed by Roger dependency
+# policy) and (b) the native `ftui-tty` backend, whose 0.4.0 release was never
+# published to crates.io (ftui-runtime 0.4.0's `native-backend` feature fails
+# dependency resolution). Roger therefore keeps ftui as the runtime/render
+# kernel and supplies its own minimal raw-mode event source (termios via libc
+# only) through `Program::with_event_source`, ftui's documented entry point
+# for alternative backends.
+ftui = "0.4.0"
+libc = "0.2"
+roger-app-core = { path = "../app-core" }
+roger-storage = { path = "../storage" }
+
+[dev-dependencies]
+tempfile.workspace = true

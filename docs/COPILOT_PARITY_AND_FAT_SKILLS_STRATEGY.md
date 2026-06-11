@@ -13,12 +13,12 @@ Roger set out to solve five problems. As of June 2026, GitHub has natively shipp
 | Roger's problem | Native answer (June 2026) | Verdict |
 |---|---|---|
 | Provider parity / harness abstraction (5 session adapter crates, tier system) | **agentskills spec (SKILL.md)** adopted by Copilot CLI, code review, cloud agent, desktop app, VS Code — and already used by Claude Code, Codex, Cursor, Gemini CLI | **Dissolved.** Skills *are* the portability layer. The problem roger spends the most code on no longer needs solving. |
-| Worktree / parallel session isolation (worktree-manager crate) | **Copilot desktop app**: managed git worktrees, ~10 parallel sessions/repo, fully automated lifecycle; "My Work" dashboard | **Dissolved.** Native is better than roger's. |
+| Worktree / parallel session isolation (worktree-manager crate) | **Copilot app** (desktop): one managed worktree per session, fully automated lifecycle; sessions can also run in-place (no worktree) or in cloud sandboxes; "My Work" dashboard | **Mostly dissolved** — but worktree location is a non-configurable global path, there are no resource controls or documented system requirements, so a capacity-aware setup skill is needed (see §5.2 skill 8). |
 | Session continuity (ResumeBundle, locator reopen, `rr return`, Tier A/B/C) | Copilot CLI `--resume`, auto-compaction, desktop session persistence; cloud agent remembers prior session context on `@copilot` mentions | **Mostly dissolved.** Weaker guarantees than roger's transactional model, but good enough in practice. |
 | Durable, structured, searchable findings (SQLite + Tantivy + fingerprints) | Nothing native. Copilot reviews are ephemeral PR comments. | **Keep — as a skill + a tiny file-based ledger** (~300 lines of script, not 7K LOC of Rust). |
 | Explicit approval gates before posting (draft → approve → post, fail-closed) | Nothing native. Copilot code review is comment-only and can never approve/block; agents post directly. | **Keep — as a skill-enforced protocol.** This is roger's genuinely original idea and your differentiator as a *trusted* reviewer: **you** hold the approve/request-changes verdict; no native agent ever gets it. |
 
-**Recommendation:** Stop building the harness. Extract roger's two durable ideas — the findings ledger and the approval gate — into a suite of ~6 fat skills (each carrying full doctrine + small scripts), run them on whatever harness is at hand (Copilot CLI, Claude Code, Copilot desktop, cloud agent), and layer the native machinery (auto-review rulesets, Agent Merge, "Fix with Copilot", mission control) around them. Estimated effort: **1–2 days** vs. roger's ~12 weeks to v0.2.0.
+**Recommendation:** Stop building the harness. Extract roger's two durable ideas — the findings ledger and the approval gate — into a suite of ~8 fat skills (each carrying full doctrine + small scripts), run them on whatever harness is at hand (Copilot CLI, Claude Code, Copilot app, cloud agent), and layer the native machinery (auto-review rulesets, Agent Merge, "Fix with Copilot") around them. Two of the eight skills exist specifically because the native tooling has setup gaps: **repo onboarding** (bootstrapping the pipeline per repository) and **machine-capacity probing** (the Copilot app documents zero system requirements, has no session caps, and puts worktrees in a non-configurable global path — weak machines need an explicit strategy). Estimated effort: **2–3 days** vs. roger's ~12 weeks to v0.2.0.
 
 ---
 
@@ -60,11 +60,28 @@ Sources: GitHub docs/blog/changelog; dates noted. Key recent events: Agent HQ (O
 - **Programmatic mode:** `copilot -p "<prompt>"` with `--silent`, `--available-tools`/`--excluded-tools`, per-tool permission gating — i.e., scriptable review pipelines with tool allowlists (the same idea as roger's `review_readonly` policy profile, natively).
 - Scheduled tasks (`/every`, `/after`), session `--resume`.
 
-### 3.4 Copilot desktop app (technical preview, Jun 2, 2026)
-- Desktop **control center for parallel agent sessions in managed git worktrees** (~10/repo, automated lifecycle) — Windows/macOS/Linux, Pro and up.
-- **"My Work" dashboard:** sessions, issues, PRs, automations across repos; start a session from a PR.
-- **Agent Merge:** watches CI + required reviewers, addresses review comments and failing checks, merges when your conditions are met — explicitly will not bypass human approval on protected branches.
-- Local + cloud sandboxes; Plan / Interactive / Autopilot modes; same session model as mission control on github.com.
+### 3.4 GitHub Copilot app (desktop — technical preview May 14, 2026; expanded to all paid plans at Build, Jun 2)
+
+*This section was re-verified against primary sources only (github.blog, docs.github.com, github/app repo) on 2026-06-10. Verdicts noted where the docs are silent.*
+
+**Confirmed:**
+- Desktop control center built **on top of Copilot CLI** (shared session truth: CLI sessions appear in My Work). macOS / Linux / Windows (incl. arm64). Pro, Pro+, **Max**, Business, Enterprise (orgs must enable preview features + Copilot CLI).
+- **Parallel agent sessions, one managed git worktree per session** — "the app handles every worktree for you: no manual setup, no cleanup, no branch juggling." Sessions can alternatively run **in-place in your local repository (no worktree)** or **in a cloud sandbox** — chosen at session start. Deleted sessions force-remove worktrees but snapshot uncommitted work to a recovery ref.
+- **"My Work" dashboard** with a default **Review requests** section, editable filter sections (`label:bug` etc.), sessions/issues/PRs/automations across repos.
+- **Full in-app PR review loop:** click a PR → overview (summary, CI checks, review activity) → Files changed diff → **Create session** → leave inline review comments or ask the agent to change things → **submit a Review** — plus per-comment **Fix** and **Fix failing checks** buttons.
+- **Agent Merge:** "prompts the workspace's Copilot session to read your pull request, fix what is blocking it, and merge it **as soon as GitHub allows**. It runs in the background, survives app restarts, and turns itself off once your pull request is merged."
+- **Session modes** Interactive / Plan / Autopilot, per-session model + reasoning-effort selection; pause/resume.
+- **Skills (SKILL.md), MCP servers, and global instructions configurable in app Settings**; repo/CLI-configured skills and MCP servers are inherited automatically; respects `AGENTS.md`/`CLAUDE.md`.
+- **Automations:** scheduled/on-demand; with "Run in the cloud" they execute in GitHub-hosted cloud sandboxes "even when your computer is off." Cloud sandboxes are metered (Azure Container Apps-based); local sandboxing is free, with restricted FS/network.
+- Review-adjacent extras: **rubber duck agent** (cross-model critic of plans/implementations), **`/security-review`** skill, **quick chats** (explore a PR with *no* worktree), **`/chronicle`** (query your session history — e.g. "summarize this week's reviews"), agentic integrated browser for verifying UI changes.
+
+**Documented-by-silence gaps (these matter for adoption):**
+- **No system requirements anywhere** — prerequisites are literally "Git installed" + a Copilot subscription. No RAM/disk/CPU guidance; the app's own changelog patched "sluggishness when multiple concurrent sessions are streaming."
+- **Worktree location is a centralized global path and is NOT configurable** — open, unanswered feature requests (github/app #407, #482, #734). On small disks or monorepos, N sessions = N full working copies in a place you don't choose.
+- **No concurrent-session cap or resource controls.** The widely-cited "~10 sessions per repo" figure appears only in third-party blogs — unverified.
+- **Local sessions surviving window close: undocumented.** Only the cloud paths (cloud sessions/automations, Agent Merge) are documented as machine-independent or background-persistent.
+- **No documented protected-branch guarantee for Agent Merge** ("as soon as GitHub allows" implies rule compliance but is never stated outright).
+- **No documented link to mission control / Agent HQ** — the app does not (per docs) steer cloud *coding agent* sessions; its session model is the CLI's. `.github/agents` custom agents are documented for the cloud agent, not the app.
 
 ### 3.5 Agent HQ / mission control
 - Multi-agent orchestration on github.com: **Claude and Codex run natively** (public preview Feb 2026, Pro+/Enterprise); assign one issue to several agents and compare PRs; Slack/Linear/Jira integrations.
@@ -130,7 +147,7 @@ Finding schema (direct descendant of roger's domain model, minus the ceremony):
 
 Fingerprints use rule + path + *hunk-relative* anchor (not absolute line) so they survive rebases — same trick as roger's, ~40 lines of Python.
 
-### 5.2 The skill suite (6 skills)
+### 5.2 The skill suite (8 skills)
 
 #### 1. `review-queue` — morning triage
 - **Trigger:** "what should I review", start of day, `/review-queue`.
@@ -179,6 +196,30 @@ Fingerprints use rule + path + *hunk-relative* anchor (not absolute line) so the
   - **Second opinions:** assign the same risky change to Claude and Codex via Agent HQ, compare findings.
   - **Schedules:** `copilot /every morning` → `review-queue` digest; pairs with GitHub scheduled Slack reminders.
 
+#### 7. `review-onboard` — bootstrap the pipeline for a repo (especially a new one)
+- **Trigger:** "set me up to review in this repo", first review request from an unfamiliar repo, `/review-onboard`.
+- **Does (idempotent — safe to re-run, reports what's already in place):**
+  1. **Preflight (the `rr doctor` idea, as a skill):** `gh auth status` + scopes, `copilot --version`, git identity, your permission level on the repo (`gh api repos/{owner}/{repo} --jq .permissions`), whether you're in CODEOWNERS and for which paths, whether Copilot code review auto-request rulesets exist, whether `.github/copilot-instructions.md` / `instructions/` / `skills/` / `AGENTS.md` exist.
+  2. **Ledger bootstrap:** create `~/reviews/<org>/<repo>/`, seed `memory/<org>/<repo>.md` from a quick repo survey (language/framework, test command, CI shape, hot paths, recent churn, who the frequent authors are).
+  3. **Repo profile:** write `~/reviews/<org>/<repo>/profile.json` — clone size, monorepo or not, build/test cost, flaky-CI notes, default review tier (skim/full), which checklists from `pr-review` apply. `pr-review` and `review-queue` read this so per-repo behavior is data, not re-derivation.
+  4. **Propose (never auto-apply) repo-side improvements:** a PR adding `pr-review` doctrine to `.github/skills/`, an auto-review ruleset, a starter `copilot-instructions.md` — each going through your normal approval. For repos where you lack admin, it generates the ask for whoever does.
+  5. **Wire the app/CLI:** add the repo to Copilot app projects (or `gh repo clone` + `/add-dir` for CLI), confirm skills/MCP inheritance, run one smoke `pr-review` on a recent closed PR and diff its findings against the human review that actually happened — a calibration check before you trust it live.
+- **Fat content:** the full preflight checklist with remediation steps per failure, the repo-survey question list, the calibration protocol, and templates for the repo-side PRs.
+
+#### 8. `review-capacity` — machine-capability probing and worktree/session strategy
+- **Why this exists:** the Copilot app documents **no system requirements**, offers **no session cap or resource controls**, and puts every session's worktree in a **non-configurable centralized path** (open issues github/app #407/#482/#734). A monorepo on a 256 GB laptop will fall over before any documented limit does. Roger's `worktree-manager` was solving a real problem; natively, *you* are the resource governor — so encode that governance in a skill.
+- **Trigger:** during `review-onboard`, "can this machine handle parallel reviews?", before fanning out sessions, `/review-capacity`.
+- **Does:**
+  1. **Probe:** free disk on the volume holding the app's worktree path, RAM (total/free), CPU cores, repo working-copy size (`du` of `.git` + checkout), whether the repo needs heavy toolchains to be useful in review (node_modules, target/, virtualenvs — a worktree that can't run tests is half a worktree).
+  2. **Compute a session budget:** e.g. `min(disk_free / (checkout_size × safety 2.5), max(1, RAM_GB / 4), cores − 2)` — formula lives in the skill and is tuned by experience; writes the result to `profile.json` as `max_parallel_sessions` and `preferred_isolation`.
+  3. **Pick the strategy ladder per machine class:**
+     - **Strong machine:** worktree sessions in the app, up to the budget; periodic worktree-debt audit (`git worktree list` across repos + stale-session cleanup nudges, since the app exposes no cleanup command).
+     - **Modest machine:** 1 worktree session + **in-place (no-worktree) sessions** and **quick chats** for the rest — both confirmed app features; serialize full reviews via `review-queue` order instead of parallelizing.
+     - **Weak machine / huge monorepo:** push parallelism to the **cloud** — cloud sandbox sessions (`copilot --cloud`), cloud automations for the scheduled digest, cloud agent for delegate-tier reviews; local machine only triages ledgers and approves. Note cloud sandboxes are metered — the skill states the rates and asks before fan-out.
+     - **Shared/partial-clone tricks** for monorepos: `git clone --filter=blob:none` review copies, sparse-checkout worktrees created manually (outside the app) when you need tests but can't afford full checkouts.
+  4. **Background-work honesty:** local-session persistence after window close is *undocumented* — so anything that must survive (overnight delegate reviews, Agent Merge babysitting, scheduled digests) gets routed to the documented background paths: cloud automations, Agent Merge, or a scheduled `copilot -p` via cron/launchd. The skill never claims background behavior the platform doesn't document (roger's truthfulness rule, kept).
+- **Fat content:** the probe script (~80 lines), the budget formula with rationale, the strategy ladder, the metered-cost table, and the worktree-debt audit script.
+
 ### 5.3 What survives from roger (the "minimal parts")
 
 | Keep | Form |
@@ -211,7 +252,7 @@ A day in the loop:
 1. **07:00 (automated):** scheduled `copilot -p` run of `review-queue` → digest: "9 PRs awaiting you: 4 skim-approve candidates, 3 full reviews, 2 delegate."
 2. **First pass already done:** org ruleset auto-requested Copilot code review on all of them (running *your* skills from `.github/skills/`), so every PR arrives pre-annotated in your taxonomy.
 3. **Skim tier:** for the 4 small/low-risk PRs, `pr-review` confirms native findings + delta, `review-post` drafts "approve" — you eyeball drafts, say yes, done in minutes *with a real Approve, which no agent could give*.
-4. **Full tier:** open 3 Copilot desktop sessions (managed worktrees, parallel) each running `pr-review`; triage their findings ledgers as they land; `review-post` per PR.
+4. **Full tier:** open parallel Copilot app sessions — worktree, in-place, or cloud-sandbox per your `review-capacity` budget — each running `pr-review`; triage their findings ledgers as they land; `review-post` per PR.
 5. **Delegate tier:** `review-delegate` sends 2 PRs to cloud sessions / a Claude second-opinion run; results land as ledger findings for later triage.
 6. **Rework loop:** request-changes verdicts trigger "Fix with Copilot" handoffs to authors; when they push, `re-review` shows you only the delta and resolved/stale bookkeeping.
 7. **Tail:** Agent Merge babysits approved PRs through CI and merge queue.
@@ -225,16 +266,19 @@ Net effect vs. roger-as-planned: same safety invariants (nothing posts unapprove
 
 1. **Day 1 morning:** `findings-ledger` (schema + fingerprint + ledger scripts) and `pr-review` v1 — port the prompt-engine stage text and the alien-artifact decision rules. Test on one real PR via Copilot CLI and via Claude Code (portability check).
 2. **Day 1 afternoon:** `review-post` with the halt-for-approval protocol + `gh api` batched-review script + drift refusal. This is the piece to get exactly right.
-3. **Day 2:** `re-review` (delta + reconcile), `review-queue` (gh search + your heuristics).
-4. **Week 1, at work:** drop `pr-review` doctrine into a pilot repo's `.github/skills/`, enable the auto-review ruleset, compare native first-pass quality before/after.
-5. **Week 2:** `review-memory` + `review-delegate`; get Copilot desktop app preview installed; wire the scheduled morning digest.
-6. **Ongoing:** archive roger active development; keep the repo as the doctrine source and a fallback if GitHub regresses (see risks).
+3. **Day 2:** `review-onboard` (preflight + ledger bootstrap + repo profile + calibration run — this is also how every later skill gets a consistent per-repo footing) and `review-capacity` (probe script + session budget written into the repo profile). Run both against this machine and one work repo before anything else depends on them.
+4. **Day 3:** `re-review` (delta + reconcile), `review-queue` (gh search + your heuristics, reading `profile.json` for per-repo tiering).
+5. **Week 1, at work:** `review-onboard` your top 3 repos; drop `pr-review` doctrine into a pilot repo's `.github/skills/`, enable the auto-review ruleset, compare native first-pass quality before/after.
+6. **Week 2:** `review-memory` + `review-delegate`; install the Copilot app technical preview, let `review-capacity` decide worktree vs. in-place vs. cloud strategy for it; wire the scheduled morning digest (cloud automation if your machine shouldn't carry it).
+7. **Ongoing:** archive roger active development; keep the repo as the doctrine source and a fallback if GitHub regresses (see risks).
 
 ---
 
 ## 8. Risks and honest caveats
 
-- **Preview churn.** Skills-in-code-review, the desktop app, and Agent Merge are all ≤6 months old, some in technical preview. Mitigation: everything load-bearing (ledger, gate, doctrine) lives in *your* files and the open agentskills spec — if GitHub regresses, the skills still run in Claude Code/OpenCode against `gh`. This is roger's "real harness fallback" principle, kept.
+- **Preview churn.** Skills-in-code-review, the Copilot app, and Agent Merge are all ≤6 months old, some in technical preview. Mitigation: everything load-bearing (ledger, gate, doctrine) lives in *your* files and the open agentskills spec — if GitHub regresses, the skills still run in Claude Code/OpenCode against `gh`. This is roger's "real harness fallback" principle, kept.
+- **The Copilot app is resource-blind (verified 2026-06-10).** No documented system requirements, no concurrent-session cap or controls, worktrees in a centralized non-configurable path (open issues github/app #407/#482/#734), local background execution undocumented, and the unverified "~10 sessions" figure floating around third-party blogs should not be trusted. Mitigation is exactly skill 8 (`review-capacity`): probe, budget, and fall back to in-place sessions, quick chats, or cloud sandboxes (metered) on constrained machines.
+- **Agent Merge's protected-branch behavior is implied, not guaranteed.** Docs say it merges "as soon as GitHub allows" and tracks required reviewers, but never state it cannot bypass approval rules. Treat branch protection rules — not Agent Merge's manners — as the actual guarantee: keep required-review counts on, and only enable Agent Merge on branches where the rules already encode your policy.
 - **Skill-level gates are advisory unless tool-gated.** A skill saying "don't post" is weaker than roger's compiled state machine. Mitigation: `--excluded-tools` / permission profiles for review sessions, and the posting script as the only path (it checks for the approval marker). Accept that this is 95% of the guarantee for 1% of the code.
 - **Cost.** AI Credits billing (Jun 2026): each auto-review burns credits + Actions minutes; cloud fan-out multiplies it. Watch the org meter the first month; the effort-tier config helps.
 - **Work-org constraints.** Org policies gate skills/MCP for code review, the desktop preview, and Claude/Codex on Agent HQ (Pro+/Enterprise). The local-CLI lane (skills 1–5) needs nothing org-approved beyond a Copilot seat — start there.

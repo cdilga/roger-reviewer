@@ -23,6 +23,7 @@ Environment overrides:
   RR_INSTALL_API_ROOT
   RR_INSTALL_DOWNLOAD_ROOT
   RR_INSTALL_DIR
+  RR_STORE_ROOT          Roger store root for the extension package (default: $HOME/.roger)
 EOF
 }
 
@@ -437,6 +438,9 @@ fi
 
 archive_url="${download_root}/${tag}/${archive_name}"
 archive_path="${tmp_dir}/${archive_name}"
+store_root="${RR_STORE_ROOT:-${HOME}/.roger}"
+extension_archive_name="roger-reviewer-${version}-extension.zip"
+extension_archive_url="${download_root}/${tag}/${extension_archive_name}"
 
 if [[ "$dry_run" -eq 1 ]]; then
   cat <<EOF
@@ -445,10 +449,12 @@ rr-install dry-run
   tag:          ${tag}
   target:       ${target}
   install_dir:  ${install_dir}
+  store_root:   ${store_root}
   install_metadata_url: ${install_metadata_url}
   manifest_url: ${manifest_url}
   checksums_url:${checksums_url}
   archive_url:  ${archive_url}
+  extension_archive_url: ${extension_archive_url}
 EOF
   exit 0
 fi
@@ -475,6 +481,61 @@ cp "$binary_source" "$install_path"
 chmod +x "$install_path"
 
 echo "Installed rr ${version} to ${install_path}"
+
+# Extension package (optional release lane asset): checksum-verify against the
+# same release checksums manifest and unpack into the installed layout so
+# `rr extension setup` works without the Roger dev repository.
+if extension_sha="$(read_checksums_entry "$checksums_path" "$extension_archive_name" 2>/dev/null)"; then
+  extension_archive_path="${tmp_dir}/${extension_archive_name}"
+  if ! curl -fsSL "$extension_archive_url" -o "$extension_archive_path"; then
+    die "failed to download extension package: ${extension_archive_url}"
+  fi
+  actual_extension_sha="$(sha256_file "$extension_archive_path")"
+  if [[ "${actual_extension_sha,,}" != "${extension_sha,,}" ]]; then
+    die "extension package checksum mismatch for ${extension_archive_name}"
+  fi
+  extension_package_dir="${store_root}/bridge/extension-package/${version}/roger-extension-unpacked"
+  rm -rf "$extension_package_dir"
+  mkdir -p "$extension_package_dir"
+  python3 - "$extension_archive_path" "$extension_package_dir" <<'PY'
+import sys
+import zipfile
+
+archive, destination = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(archive) as zf:
+    zf.extractall(destination)
+PY
+  echo "Installed extension package ${version} to ${extension_package_dir}"
+else
+  echo "Note: release ${tag} does not publish ${extension_archive_name}; skipping extension package install (run 'rr extension fetch' later if needed)."
+fi
+
+# Auto-bootstrap the Roger store; never fail the install on bootstrap issues.
+if "$install_path" init --robot >/dev/null 2>&1; then
+  echo "Bootstrapped Roger store via 'rr init --robot'."
+else
+  echo "Warning: 'rr init --robot' bootstrap failed; run it manually after install." >&2
+fi
+
 if [[ ":$PATH:" != *":${install_dir}:"* ]]; then
-  echo "Note: ${install_dir} is not currently on PATH."
+  shell_name="$(basename "${SHELL:-sh}")"
+  case "$shell_name" in
+    zsh) rc_file="\$HOME/.zshrc" ;;
+    bash) rc_file="\$HOME/.bashrc" ;;
+    *) rc_file="your shell rc file" ;;
+  esac
+  cat <<EOF
+
+==> ${install_dir} is not on your PATH.
+
+To use 'rr' in this shell, run:
+
+  export PATH="${install_dir}:\$PATH"
+
+To make it permanent (${shell_name}), run:
+
+  echo 'export PATH="${install_dir}:\$PATH"' >> ${rc_file}
+
+then open a new terminal (or source the rc file).
+EOF
 fi

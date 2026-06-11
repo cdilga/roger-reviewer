@@ -263,6 +263,15 @@ fn rr_agent_stage_result_returns_acceptance_payload() {
     assert_eq!(findings[0].outbound_state, "not_drafted");
     assert!(!findings[0].fingerprint.is_empty());
 
+    // A completed pass with materialized findings must surface as the
+    // canonical findings_ready attention state so every operator surface
+    // (CLI status, TUI, extension mirror) sees a decision is waiting.
+    let session = store
+        .review_session(&task.review_session_id)
+        .expect("load session")
+        .expect("session exists");
+    assert_eq!(session.attention_state, "findings_ready");
+
     let listed = run_rr(
         &[
             "findings",
@@ -282,10 +291,7 @@ fn rr_agent_stage_result_returns_acceptance_payload() {
         .as_array()
         .expect("findings items");
     assert_eq!(items.len(), 1);
-    assert_eq!(
-        items[0]["title"],
-        "Approval token survives stale refresh"
-    );
+    assert_eq!(items[0]["title"], "Approval token survives stale refresh");
 }
 
 #[test]

@@ -4,6 +4,10 @@ const assert = require('node:assert/strict');
 const {
   appendGuidance,
   BRAND_CHIP_CLASS,
+  BRIDGE_DISCONNECT_GUIDANCE,
+  formatLaunchSuccessStatus,
+  requestStatusMirror,
+  triggerLaunch,
   GITHUB_ACTION_BUTTON_CLASS,
   MODAL_FALLBACK_STATUS,
   MODAL_OPEN_BUTTON_LABEL,
@@ -435,6 +439,289 @@ test('parsePullRequestContext extracts owner/repo/pr from PR URL path', () => {
   } finally {
     global.window = originalWindow;
   }
+});
+
+function createStatusClassList() {
+  const classes = new Set();
+  return {
+    classes,
+    add(...names) {
+      for (const name of names) {
+        classes.add(name);
+      }
+    },
+    remove(...names) {
+      for (const name of names) {
+        classes.delete(name);
+      }
+    },
+    contains(name) {
+      return classes.has(name);
+    },
+  };
+}
+
+function makePanelDom({ inline = false } = {}) {
+  const panel = {
+    classList: {
+      contains(name) {
+        return inline && name === 'roger-panel--inline';
+      },
+    },
+    querySelectorAll() {
+      return [];
+    },
+  };
+  const statusNode = {
+    textContent: '',
+    hidden: true,
+    parentElement: panel,
+    classList: createStatusClassList(),
+  };
+  const badge = { textContent: '', style: {} };
+  const infoNode = { textContent: '' };
+  const documentStub = {
+    getElementById(id) {
+      switch (id) {
+        case 'roger-reviewer-panel':
+          return panel;
+        case 'roger-reviewer-status':
+          return statusNode;
+        case 'roger-reviewer-attention-badge':
+          return badge;
+        case 'roger-reviewer-info-text':
+          return infoNode;
+        default:
+          return null;
+      }
+    },
+  };
+
+  return { badge, documentStub, infoNode, panel, statusNode };
+}
+
+function makeChromeStub({ launchResponse, statusResponse, launchLastError = null } = {}) {
+  const stub = {
+    runtime: {
+      lastError: null,
+      sendMessage(payload, callback) {
+        if (payload?.type === 'roger_bridge_launch') {
+          if (launchLastError) {
+            stub.runtime.lastError = { message: launchLastError };
+            callback(undefined);
+            stub.runtime.lastError = null;
+            return;
+          }
+          callback(launchResponse);
+          return;
+        }
+        if (payload?.type === 'roger_bridge_status') {
+          callback(statusResponse);
+        }
+      },
+    },
+  };
+  return stub;
+}
+
+function withPanelGlobals({ documentStub, chromeStub }, fn) {
+  const previousDocument = global.document;
+  const previousChrome = global.chrome;
+  global.document = documentStub;
+  global.chrome = chromeStub;
+  try {
+    return fn();
+  } finally {
+    global.document = previousDocument;
+    global.chrome = previousChrome;
+  }
+}
+
+const TEST_CONTEXT = { owner: 'acme', repo: 'widgets', pr_number: 42 };
+const LAUNCH_ONLY_STATUS_RESPONSE = {
+  ok: true,
+  mode: 'launch_only',
+  message:
+    'Launch-only bridge mode. This browser surface can start Roger actions, but it does not own live local session state.',
+  guidance: 'Open Roger locally (`rr status` or `rr findings`) for authoritative session state.',
+};
+
+test('launch failure renders a persistent error status with bridge message and guidance', () => {
+  const dom = makePanelDom();
+  const chromeStub = makeChromeStub({
+    launchResponse: {
+      ok: false,
+      mode: 'bridge_preflight_failed',
+      action: 'start_review',
+      message: 'Roger bridge preflight failed.',
+      guidance: 'Roger data directory not found. Run `rr init` to set up.',
+      failure_kind: 'preflight_failed',
+    },
+    statusResponse: LAUNCH_ONLY_STATUS_RESPONSE,
+  });
+  const button = { disabled: false, textContent: 'Start Review in Roger' };
+
+  withPanelGlobals({ documentStub: dom.documentStub, chromeStub }, () => {
+    triggerLaunch('start_review', TEST_CONTEXT, button);
+
+    assert.equal(dom.statusNode.hidden, false);
+    assert.match(dom.statusNode.textContent, /Roger bridge preflight failed\./);
+    assert.match(dom.statusNode.textContent, /Run `rr init` to set up\./);
+    assert.equal(dom.statusNode.classList.contains('roger-panel-status--error'), true);
+    assert.equal(button.disabled, false);
+
+    // A subsequent unrelated bounded-status re-render must not clear the error.
+    requestStatusMirror(TEST_CONTEXT);
+    assert.equal(dom.statusNode.hidden, false);
+    assert.match(dom.statusNode.textContent, /Roger bridge preflight failed\./);
+    assert.match(dom.statusNode.textContent, /Run `rr init` to set up\./);
+  });
+});
+
+test('launch failure status keeps guidance lists readable', () => {
+  assert.equal(
+    appendGuidance('Launch blocked.', [
+      'Run `rr extension setup --browser chrome`.',
+      'Then run `rr extension doctor --browser chrome`.',
+    ]),
+    'Launch blocked. Run `rr extension setup --browser chrome`. Then run `rr extension doctor --browser chrome`.'
+  );
+});
+
+test('bridge disconnect renders a persistent error status with setup guidance', () => {
+  const dom = makePanelDom();
+  const chromeStub = makeChromeStub({
+    launchLastError: 'Native host has exited.',
+    statusResponse: LAUNCH_ONLY_STATUS_RESPONSE,
+  });
+  const button = { disabled: false, textContent: 'Start Review in Roger' };
+
+  withPanelGlobals({ documentStub: dom.documentStub, chromeStub }, () => {
+    triggerLaunch('start_review', TEST_CONTEXT, button);
+
+    assert.equal(dom.statusNode.hidden, false);
+    assert.match(dom.statusNode.textContent, /Bridge error: Native host has exited\./);
+    assert.match(dom.statusNode.textContent, /rr extension setup/);
+    assert.match(dom.statusNode.textContent, /rr extension doctor/);
+    assert.equal(dom.statusNode.classList.contains('roger-panel-status--error'), true);
+
+    requestStatusMirror(TEST_CONTEXT);
+    assert.equal(dom.statusNode.hidden, false);
+    assert.match(dom.statusNode.textContent, /rr extension setup/);
+  });
+});
+
+test('missing bridge response renders a persistent error status with setup guidance', () => {
+  const dom = makePanelDom();
+  const chromeStub = makeChromeStub({
+    launchResponse: undefined,
+    statusResponse: LAUNCH_ONLY_STATUS_RESPONSE,
+  });
+  const button = { disabled: false, textContent: 'Start Review in Roger' };
+
+  withPanelGlobals({ documentStub: dom.documentStub, chromeStub }, () => {
+    triggerLaunch('start_review', TEST_CONTEXT, button);
+
+    assert.equal(dom.statusNode.hidden, false);
+    assert.match(dom.statusNode.textContent, /No bridge response\./);
+    assert.match(dom.statusNode.textContent, /rr extension setup/);
+    assert.match(dom.statusNode.textContent, /rr extension doctor/);
+    assert.equal(dom.statusNode.classList.contains('roger-panel-status--error'), true);
+  });
+});
+
+test('launch success persists a truthful status line that the status mirror does not clear', () => {
+  const dom = makePanelDom();
+  const chromeStub = makeChromeStub({
+    launchResponse: {
+      ok: true,
+      mode: 'native_messaging',
+      action: 'start_review',
+      message: 'rr review completed for acme/widgets#42.',
+      session_id: 'session-42',
+    },
+    statusResponse: LAUNCH_ONLY_STATUS_RESPONSE,
+  });
+  const button = { disabled: false, textContent: 'Start Review in Roger' };
+
+  withPanelGlobals({ documentStub: dom.documentStub, chromeStub }, () => {
+    // triggerLaunch internally chains requestStatusMirror after the generic
+    // success path; the launch-only mirror envelope must not wipe the line.
+    triggerLaunch('start_review', TEST_CONTEXT, button);
+
+    assert.equal(dom.statusNode.hidden, false);
+    assert.match(dom.statusNode.textContent, /rr review completed for acme\/widgets#42\./);
+    assert.match(dom.statusNode.textContent, /session-42/);
+    assert.equal(dom.statusNode.classList.contains('roger-panel-status--ok'), true);
+
+    // A later unrelated bounded-status re-render must also leave it intact.
+    requestStatusMirror(TEST_CONTEXT);
+    assert.equal(dom.statusNode.hidden, false);
+    assert.match(dom.statusNode.textContent, /rr review completed for acme\/widgets#42\./);
+    assert.match(dom.statusNode.textContent, /session-42/);
+  });
+});
+
+test('inline launch success status does not auto-clear on a timer', () => {
+  const dom = makePanelDom({ inline: true });
+  const chromeStub = makeChromeStub({
+    launchResponse: {
+      ok: true,
+      mode: 'native_messaging',
+      action: 'start_review',
+      message: 'rr review completed for acme/widgets#42.',
+      session_id: 'session-42',
+    },
+    statusResponse: LAUNCH_ONLY_STATUS_RESPONSE,
+  });
+  const button = { disabled: false, textContent: 'Start Review in Roger' };
+
+  const scheduled = [];
+  const previousSetTimeout = global.setTimeout;
+  global.setTimeout = (...args) => {
+    scheduled.push(args);
+    return 0;
+  };
+
+  try {
+    withPanelGlobals({ documentStub: dom.documentStub, chromeStub }, () => {
+      triggerLaunch('start_review', TEST_CONTEXT, button);
+    });
+  } finally {
+    global.setTimeout = previousSetTimeout;
+  }
+
+  assert.equal(dom.statusNode.hidden, false);
+  assert.equal(dom.statusNode.classList.contains('roger-panel-status--inline-visible'), true);
+  assert.equal(
+    scheduled.length,
+    0,
+    'launch status must stay visible until the next action, never auto-clear on a timer'
+  );
+});
+
+test('formatLaunchSuccessStatus derives a truthful durable success line', () => {
+  assert.equal(
+    formatLaunchSuccessStatus({
+      message: 'rr review completed for acme/widgets#42.',
+      session_id: 'session-42',
+    }),
+    'rr review completed for acme/widgets#42. (session session-42)'
+  );
+  // Does not duplicate the session id when the bridge message already names it.
+  assert.equal(
+    formatLaunchSuccessStatus({
+      message: 'Resume `rr status --session session-42` locally.',
+      session_id: 'session-42',
+    }),
+    'Resume `rr status --session session-42` locally.'
+  );
+  assert.equal(formatLaunchSuccessStatus({}), 'Launch intent dispatched.');
+});
+
+test('disconnect guidance names rr extension setup and doctor', () => {
+  assert.match(BRIDGE_DISCONNECT_GUIDANCE, /rr extension setup/);
+  assert.match(BRIDGE_DISCONNECT_GUIDANCE, /rr extension doctor/);
 });
 
 test('setStatus toggles status classes for readable ok/error states', () => {

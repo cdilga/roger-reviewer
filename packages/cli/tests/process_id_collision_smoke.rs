@@ -41,12 +41,29 @@ fn parse_payload(stdout: &[u8]) -> Value {
     serde_json::from_slice(stdout).expect("parse robot payload")
 }
 
-fn run_rr(rr_bin: &Path, repo: &Path, store: &Path, args: &[&str]) -> (i32, Value, String) {
+fn write_opencode_stub(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = dir.join("opencode-stub");
+    fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write opencode stub");
+    let mut perms = fs::metadata(&path).expect("stub metadata").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).expect("chmod opencode stub");
+    path
+}
+
+fn run_rr(
+    rr_bin: &Path,
+    repo: &Path,
+    store: &Path,
+    opencode_bin: &Path,
+    args: &[&str],
+) -> (i32, Value, String) {
     let output = Command::new(rr_bin)
         .args(args)
         .current_dir(repo)
         .env("RR_STORE_ROOT", store)
-        .env("RR_OPENCODE_BIN", "opencode")
+        .env("RR_OPENCODE_BIN", opencode_bin)
         .output()
         .expect("run rr");
 
@@ -104,6 +121,7 @@ fn rapid_process_reviews_do_not_collide_on_generated_ids() {
     let store = tmp.path().join("store");
     init_repo(&repo);
     fs::create_dir_all(&store).expect("create store");
+    let opencode_bin = write_opencode_stub(tmp.path());
 
     // Ensure both invocations happen early in the same second.
     wait_for_fresh_second_window(850);
@@ -112,6 +130,7 @@ fn rapid_process_reviews_do_not_collide_on_generated_ids() {
         Path::new(&rr_bin),
         &repo,
         &store,
+        &opencode_bin,
         &["review", "--pr", "2", "--provider", "opencode", "--robot"],
     );
     assert_eq!(first_status, 0, "{first_stderr}");
@@ -122,6 +141,7 @@ fn rapid_process_reviews_do_not_collide_on_generated_ids() {
         Path::new(&rr_bin),
         &repo,
         &store,
+        &opencode_bin,
         &["review", "--pr", "3", "--provider", "opencode", "--robot"],
     );
     assert_eq!(second_status, 0, "{second_stderr}");

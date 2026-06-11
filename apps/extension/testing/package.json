@@ -7,6 +7,9 @@
     "test": "node --test ./popup_render_harness.test.cjs"
   },
   "dependencies": {
-    "jsdom": "26.1.0"
+    "jsdom": "29.1.1"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

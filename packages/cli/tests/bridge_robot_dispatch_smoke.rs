@@ -52,6 +52,17 @@ fn prepend_path(dir: &Path) -> OsString {
     value
 }
 
+fn write_opencode_stub(dir: &Path) -> PathBuf {
+    let path = dir.join("opencode-stub");
+    fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write opencode stub");
+    let mut perms = fs::metadata(&path)
+        .expect("opencode metadata")
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).expect("chmod opencode stub");
+    path
+}
+
 fn write_gh_status_stub(dir: &Path) -> PathBuf {
     let path = dir.join("gh");
     let script = r#"#!/bin/sh
@@ -124,11 +135,12 @@ fn native_host_bridge_dispatches_real_robot_review_and_status() {
     let stub_dir = temp.path().join("bin");
     fs::create_dir_all(&stub_dir).expect("create stub dir");
     write_gh_status_stub(&stub_dir);
+    let opencode_bin = write_opencode_stub(&stub_dir);
 
     let runtime = CliRuntime {
         cwd: temp.path().to_path_buf(),
         store_root: temp.path().join("roger-store"),
-        opencode_bin: "opencode".to_owned(),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
     };
     fs::create_dir_all(&runtime.store_root).expect("create store root");
 
@@ -180,11 +192,12 @@ fn native_host_bridge_dispatches_when_browser_passes_extension_origin_arg() {
     let stub_dir = temp.path().join("bin");
     fs::create_dir_all(&stub_dir).expect("create stub dir");
     write_gh_status_stub(&stub_dir);
+    let opencode_bin = write_opencode_stub(&stub_dir);
 
     let runtime = CliRuntime {
         cwd: temp.path().to_path_buf(),
         store_root: temp.path().join("roger-store"),
-        opencode_bin: "opencode".to_owned(),
+        opencode_bin: opencode_bin.to_string_lossy().to_string(),
     };
     fs::create_dir_all(&runtime.store_root).expect("create store root");
 

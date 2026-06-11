@@ -19,6 +19,7 @@ roger-session-codex = { path = "../session-codex" }
 roger-session-gemini = { path = "../session-gemini" }
 roger-session-opencode = { path = "../session-opencode" }
 roger-storage = { path = "../storage" }
+roger-tui = { path = "../tui" }
 base64.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

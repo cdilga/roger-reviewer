@@ -171,6 +171,7 @@ The minimum command surface for `0.1.0` is:
 - `rr bridge pack-extension`
 - `rr extension setup`
 - `rr extension doctor`
+- `rr extension fetch`
 - `rr extension uninstall`
 
 Command roles:
@@ -193,6 +194,19 @@ Command roles:
   separate `rr-bridge` binary
 - `extension doctor` verifies that the extension package, extension identity,
   local host registration, and bridge reachability are present and truthful
+- `extension fetch` is the installed-mode package acquisition path: it
+  downloads the published `<artifact-stem>-extension.zip` release asset for the
+  running binary's release version (or an explicit `--version`), verifies it
+  against the release checksums manifest, fails closed on any mismatch, and
+  unpacks it into the installed layout
+  `<store_root>/bridge/extension-package/<version>/roger-extension-unpacked`
+  with a recorded `fetch-manifest.json`; local/unpublished builds fail closed
+  toward the dev workspace pack path
+- `extension setup` / `extension doctor` resolve the unpacked package in a
+  fixed order: explicit `--package-dir`, then the dev workspace pack output,
+  then the installed layout; they fail closed naming `rr extension fetch`
+  only when none of these exists, and never require running from the Roger
+  repository root on installed hosts
 - `extension setup` / `extension doctor` do not by themselves prove that Roger
   can service browser launches; the contract also requires at least one named
   validation layer that spawns the registered `rr` host binary and proves a

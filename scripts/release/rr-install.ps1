@@ -350,6 +350,59 @@ try {
     Copy-Item -Path $binarySource -Destination $installPath -Force
 
     Write-Output "Installed rr $Version to $installPath"
+
+    # Extension package (optional release lane asset): checksum-verify against
+    # the same release checksums manifest and unpack into the installed layout
+    # so `rr extension setup` works without the Roger dev repository.
+    $storeRoot = if ($env:RR_STORE_ROOT) { $env:RR_STORE_ROOT } else { Join-Path $env:USERPROFILE ".roger" }
+    $extensionArchiveName = "roger-reviewer-$Version-extension.zip"
+    $extensionSha = $null
+    try {
+        $extensionSha = Read-ChecksumsEntry -ChecksumsPath $checksumsPath -ArchiveName $extensionArchiveName
+    }
+    catch {
+        Write-Output "Note: release $tag does not publish $extensionArchiveName; skipping extension package install (run 'rr extension fetch' later if needed)."
+    }
+    if ($extensionSha) {
+        $extensionUrl = "$DownloadRoot/$tag/$extensionArchiveName"
+        $extensionArchivePath = Join-Path $tmpDir $extensionArchiveName
+        Save-UrlToFile -Uri $extensionUrl -OutFile $extensionArchivePath
+        $extensionObservedSha = (Get-FileHash -Algorithm SHA256 -Path $extensionArchivePath).Hash.ToLowerInvariant()
+        if ($extensionObservedSha -ne $extensionSha) {
+            Fail "extension package checksum mismatch for $extensionArchiveName"
+        }
+        $extensionPackageDir = Join-Path $storeRoot "bridge\extension-package\$Version\roger-extension-unpacked"
+        if (Test-Path -Path $extensionPackageDir) {
+            Remove-Item -Path $extensionPackageDir -Recurse -Force
+        }
+        New-Item -ItemType Directory -Path $extensionPackageDir -Force | Out-Null
+        Expand-Archive -Path $extensionArchivePath -DestinationPath $extensionPackageDir -Force
+        Write-Output "Installed extension package $Version to $extensionPackageDir"
+    }
+
+    # Auto-bootstrap the Roger store; never fail the install on bootstrap issues.
+    try {
+        & $installPath init --robot | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Output "Bootstrapped Roger store via 'rr init --robot'."
+        }
+        else {
+            Write-Warning "'rr init --robot' bootstrap exited with code $LASTEXITCODE; run it manually after install."
+        }
+    }
+    catch {
+        Write-Warning "'rr init --robot' bootstrap failed; run it manually after install."
+    }
+
+    $pathEntries = ($env:Path -split ';') | Where-Object { $_ }
+    if ($pathEntries -notcontains $InstallDir) {
+        Write-Output ""
+        Write-Output "==> $InstallDir is not on your PATH."
+        Write-Output "To use 'rr' in this session, run:"
+        Write-Output "  `$env:Path = `"$InstallDir;`" + `$env:Path"
+        Write-Output "To make it permanent for your user, run:"
+        Write-Output "  [Environment]::SetEnvironmentVariable('Path', `"$InstallDir;`" + [Environment]::GetEnvironmentVariable('Path', 'User'), 'User')"
+    }
 }
 finally {
     Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue

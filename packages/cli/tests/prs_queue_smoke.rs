@@ -326,8 +326,7 @@ fn prs_robot_joins_open_prs_with_local_session_state() {
 #[test]
 fn prs_joins_in_review_and_drafted_states_truthfully() {
     let temp = tempdir().expect("tempdir");
-    let (_guard, _log_path) =
-        install_fake_gh(&temp, FakeGhMode::ListPayload(TWO_OPEN_PRS_PAYLOAD));
+    let (_guard, _log_path) = install_fake_gh(&temp, FakeGhMode::ListPayload(TWO_OPEN_PRS_PAYLOAD));
     let repo = init_repo(&temp);
     let runtime = CliRuntime {
         cwd: repo,
@@ -405,8 +404,7 @@ fn prs_passes_explicit_repo_and_limit_to_gh() {
 #[test]
 fn prs_human_output_renders_compact_aligned_table() {
     let temp = tempdir().expect("tempdir");
-    let (_guard, _log_path) =
-        install_fake_gh(&temp, FakeGhMode::ListPayload(TWO_OPEN_PRS_PAYLOAD));
+    let (_guard, _log_path) = install_fake_gh(&temp, FakeGhMode::ListPayload(TWO_OPEN_PRS_PAYLOAD));
     let repo = init_repo(&temp);
     let runtime = CliRuntime {
         cwd: repo,
@@ -449,8 +447,7 @@ fn prs_human_output_renders_compact_aligned_table() {
 #[test]
 fn prs_robot_compact_format_projects_queue_essentials() {
     let temp = tempdir().expect("tempdir");
-    let (_guard, _log_path) =
-        install_fake_gh(&temp, FakeGhMode::ListPayload(TWO_OPEN_PRS_PAYLOAD));
+    let (_guard, _log_path) = install_fake_gh(&temp, FakeGhMode::ListPayload(TWO_OPEN_PRS_PAYLOAD));
     let repo = init_repo(&temp);
     let runtime = CliRuntime {
         cwd: repo,
@@ -529,9 +526,7 @@ fn prs_fails_closed_and_surfaces_gh_auth_error_truthfully() {
     let temp = tempdir().expect("tempdir");
     let (_guard, _log_path) = install_fake_gh(
         &temp,
-        FakeGhMode::FailWithStderr(
-            "gh: To get started with GitHub CLI, please run: gh auth login",
-        ),
+        FakeGhMode::FailWithStderr("gh: To get started with GitHub CLI, please run: gh auth login"),
     );
     let repo = init_repo(&temp);
     let runtime = CliRuntime {
@@ -667,7 +662,10 @@ fn usage_and_robot_docs_advertise_rr_prs() {
         .expect("review_queue workflow entry");
     assert_eq!(
         review_queue["steps"],
-        serde_json::json!(["rr prs --robot", "rr review --pr <n> --provider <p> --robot"])
+        serde_json::json!([
+            "rr prs --robot",
+            "rr review --pr <n> --provider <p> --robot"
+        ])
     );
 }
 
