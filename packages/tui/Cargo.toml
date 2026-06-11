@@ -17,11 +17,13 @@ doctest = false
 # only) through `Program::with_event_source`, ftui's documented entry point
 # for alternative backends.
 ftui = "0.4.0"
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 roger-app-core = { path = "../app-core" }
 roger-storage = { path = "../storage" }
+
+# The raw-mode event source is termios-based; interactive support is
+# unix-only and rr tui fails closed on Windows.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true
