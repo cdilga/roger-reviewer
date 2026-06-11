@@ -488,8 +488,13 @@ echo "Installed rr ${version} to ${install_path}"
 if extension_sha="$(read_checksums_entry "$checksums_path" "$extension_archive_name" 2>/dev/null)"; then
   extension_archive_path="${tmp_dir}/${extension_archive_name}"
   if ! curl -fsSL "$extension_archive_url" -o "$extension_archive_path"; then
-    die "failed to download extension package: ${extension_archive_url}"
+    # The browser companion is an optional lane: a missing/unreachable
+    # extension asset must not fail the core install. Integrity failures on a
+    # *downloaded* asset stay fatal below.
+    echo "Warning: could not download optional extension package (${extension_archive_url}); skipping. Run 'rr extension fetch' later if you want the browser companion." >&2
+    extension_archive_path=""
   fi
+  if [[ -n "$extension_archive_path" ]]; then
   actual_extension_sha="$(sha256_file "$extension_archive_path")"
   if [[ "${actual_extension_sha,,}" != "${extension_sha,,}" ]]; then
     die "extension package checksum mismatch for ${extension_archive_name}"
@@ -506,6 +511,7 @@ with zipfile.ZipFile(archive) as zf:
     zf.extractall(destination)
 PY
   echo "Installed extension package ${version} to ${extension_package_dir}"
+  fi
 else
   echo "Note: release ${tag} does not publish ${extension_archive_name}; skipping extension package install (run 'rr extension fetch' later if needed)."
 fi
