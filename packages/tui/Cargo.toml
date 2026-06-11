@@ -17,6 +17,8 @@ doctest = false
 # only) through `Program::with_event_source`, ftui's documented entry point
 # for alternative backends.
 ftui = "0.4.0"
+
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 roger-app-core = { path = "../app-core" }
 roger-storage = { path = "../storage" }

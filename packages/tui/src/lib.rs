@@ -15,9 +15,11 @@
 //! Search/Recall. Clarify-in-place and the session chat lane are out of this
 //! slice and surface as bounded hints.
 
+#[cfg(unix)]
 mod app;
 mod backend;
 mod model;
+#[cfg(unix)]
 mod tty;
 mod view;
 
@@ -98,14 +100,26 @@ pub fn run_cockpit(config: RogerTuiConfig) -> Result<TuiExit, TuiError> {
     let model = CockpitModel::bootstrap(&mut backend, config.initial_session_id.as_deref())
         .map_err(TuiError::Storage)?;
 
-    run_ftui_program(app::CockpitApp::new(model, backend))
-        .map_err(|err| TuiError::Terminal(err.to_string()))?;
-
-    Ok(TuiExit::Quit)
+    #[cfg(unix)]
+    {
+        run_ftui_program(app::CockpitApp::new(model, backend))
+            .map_err(|err| TuiError::Terminal(err.to_string()))?;
+        Ok(TuiExit::Quit)
+    }
+    // The interactive event source is termios-based; Windows support is a
+    // bounded gap, not a degraded imitation. Fail closed with honest guidance.
+    #[cfg(not(unix))]
+    {
+        let _ = model;
+        Err(TuiError::Terminal(
+            "rr tui interactive mode is not yet supported on Windows; use the rr command surface (or WSL) instead".to_owned(),
+        ))
+    }
 }
 
 /// Drive the cockpit through the ftui runtime with the Roger-owned raw-mode
 /// TTY event source (see `tty.rs` for why ftui's own backends are not used).
+#[cfg(unix)]
 fn run_ftui_program(cockpit: app::CockpitApp) -> std::io::Result<()> {
     use ftui::runtime::{BackendFeatures, Program, ProgramConfig};
     use ftui::{TerminalCapabilities, TerminalWriter};
