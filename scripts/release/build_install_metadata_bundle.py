@@ -21,7 +21,10 @@ ALLOWED_MIGRATION_POLICIES = {
 ALLOWED_MIGRATION_CLASS_MAX_AUTO = {"class_a", "class_b", "none"}
 DEFAULT_STORE_COMPATIBILITY = {
     "envelope_version": 1,
-    "store_schema_version": 10,
+    # store_schema_version is derived from the migrations directory at build
+    # time (see _derive_store_schema_version); a stale hardcoded value here
+    # silently breaks `rr update` apply with a false downgrade classification.
+    "store_schema_version": None,
     "min_supported_store_schema": 0,
     "auto_migrate_from": 0,
     "migration_policy": "binary_only",
@@ -29,6 +32,29 @@ DEFAULT_STORE_COMPATIBILITY = {
     "sidecar_generation": "v1",
     "backup_required": True,
 }
+
+DEFAULT_MIGRATIONS_DIR = "packages/storage/migrations"
+
+
+def _derive_store_schema_version(migrations_dir: str) -> Tuple[Optional[int], List[str]]:
+    """Highest NNNN_*.sql migration number = the schema this build produces."""
+    import os
+    import re
+
+    if not os.path.isdir(migrations_dir):
+        return None, [
+            f"migrations directory not found for schema derivation: {migrations_dir}"
+        ]
+    versions = []
+    for name in os.listdir(migrations_dir):
+        match = re.match(r"^(\d{4})_.+\.sql$", name)
+        if match:
+            versions.append(int(match.group(1)))
+    if not versions:
+        return None, [
+            f"no NNNN_*.sql migrations found under {migrations_dir} for schema derivation"
+        ]
+    return max(versions), []
 
 
 def _parse_args() -> argparse.Namespace:
@@ -49,6 +75,11 @@ def _parse_args() -> argparse.Namespace:
         "--output",
         required=True,
         help="Path to output install metadata JSON.",
+    )
+    parser.add_argument(
+        "--migrations-dir",
+        default=DEFAULT_MIGRATIONS_DIR,
+        help="Storage migrations directory used to derive store_schema_version.",
     )
     return parser.parse_args()
 
@@ -114,9 +145,16 @@ def _collect_targets(core_manifest: dict) -> Tuple[List[dict], List[str]]:
     return normalized, errors
 
 
-def _normalize_store_compatibility(raw: object) -> Tuple[Optional[dict], List[str]]:
+def _normalize_store_compatibility(
+    raw: object, migrations_dir: str
+) -> Tuple[Optional[dict], List[str]]:
     if raw is None:
-        return dict(DEFAULT_STORE_COMPATIBILITY), []
+        derived, errors = _derive_store_schema_version(migrations_dir)
+        if errors:
+            return None, errors
+        defaults = dict(DEFAULT_STORE_COMPATIBILITY)
+        defaults["store_schema_version"] = derived
+        return defaults, []
     if not isinstance(raw, dict):
         return None, ["core manifest store_compatibility must be an object"]
 
@@ -256,7 +294,7 @@ def main() -> int:
     targets, target_errors = _collect_targets(core_manifest)
     errors.extend(target_errors)
     store_compatibility, compatibility_errors = _normalize_store_compatibility(
-        core_manifest.get("store_compatibility")
+        core_manifest.get("store_compatibility"), args.migrations_dir
     )
     errors.extend(compatibility_errors)
 
