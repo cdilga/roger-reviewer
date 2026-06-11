@@ -118,6 +118,11 @@ create_release_payload() {
 
   tar -czf "${release_dir}/${archive_name}" -C "${payload_root}" "${payload_dir}"
   local archive_sha
+# The rehearsal metadata must declare the schema the binary under test
+# actually embeds; derive it from the migrations directory like the real
+# release metadata builder does.
+store_schema_version="$(ls "${ROOT_DIR}/packages/storage/migrations" | grep -oE '^[0-9]{4}' | sort -n | tail -1 | sed 's/^0*//')"
+
   archive_sha="$(sha256_file "${release_dir}/${archive_name}")"
 
   cat >"${release_dir}/SHA256SUMS" <<EOF
@@ -147,7 +152,7 @@ EOF
   ],
   "store_compatibility": {
     "envelope_version": 1,
-    "store_schema_version": 10,
+    "store_schema_version": ${store_schema_version},
     "min_supported_store_schema": 0,
     "auto_migrate_from": 0,
     "migration_policy": "binary_only",

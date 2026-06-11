@@ -9499,7 +9499,10 @@ struct MigrationPreflight {
 fn embedded_store_compatibility_envelope() -> StoreCompatibilityEnvelope {
     StoreCompatibilityEnvelope {
         envelope_version: 1,
-        store_schema_version: 10,
+        // Derived from the storage crate so the embedded envelope can never
+        // drift from the schema this binary actually produces (a stale
+        // hardcoded value here silently bricks rr update apply).
+        store_schema_version: roger_storage::CURRENT_SCHEMA_VERSION,
         min_supported_store_schema: 0,
         auto_migrate_from: 0,
         migration_policy: "binary_only".to_owned(),
