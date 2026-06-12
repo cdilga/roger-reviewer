@@ -14,6 +14,7 @@ const {
   describeLaunchResponse,
   parsePullRequestContextFromUrl,
   resolveAttentionState,
+  resolveSessionCount,
   SUPPORTED_ACTIONS,
   routePopupAction,
 } = require('./main.js');
@@ -102,6 +103,48 @@ test('deriveActionModel promotes findings only for findings-ready state', () => 
   assert.equal(RESUME_PRIMARY_ATTENTION_STATES.has('awaiting_outbound_approval'), true);
   assert.equal(approvalModel.primaryActionId, 'resume_review');
   assert.equal(approvalModel.visibleActions.has('show_findings'), false);
+});
+
+test('popup deriveActionModel hides resume when no local session exists', () => {
+  const model = deriveActionModel(null, 0);
+  assert.equal(model.primaryActionId, 'start_review');
+  assert.equal(model.visibleActions.has('start_review'), true);
+  assert.equal(model.visibleActions.has('resume_review'), false);
+  assert.equal(model.visibleActions.has('show_findings'), false);
+});
+
+test('popup deriveActionModel promotes resume when sessions exist and labels counts', () => {
+  const single = deriveActionModel(null, 1);
+  assert.equal(single.primaryActionId, 'resume_review');
+  assert.equal(single.visibleActions.has('resume_review'), true);
+  assert.equal(single.resumeLabel, 'Resume Existing Review');
+
+  const multiple = deriveActionModel(null, 4);
+  assert.equal(multiple.primaryActionId, 'resume_review');
+  assert.equal(multiple.resumeLabel, 'Resume Existing Review (4)');
+
+  const findings = deriveActionModel('findings_ready', 2);
+  assert.equal(findings.primaryActionId, 'show_findings');
+  assert.equal(findings.visibleActions.has('resume_review'), true);
+  assert.equal(findings.resumeLabel, 'Resume Existing Review (2)');
+});
+
+test('popup deriveActionModel keeps legacy both-buttons model when count is unknown', () => {
+  for (const unknownCount of [null, undefined, -3, Number.NaN]) {
+    const model = deriveActionModel(null, unknownCount);
+    assert.equal(model.primaryActionId, 'start_review');
+    assert.equal(model.visibleActions.has('resume_review'), true);
+    assert.equal(model.resumeLabel, 'Resume Existing Review');
+  }
+});
+
+test('resolveSessionCount only trusts finite non-negative numeric counts', () => {
+  assert.equal(resolveSessionCount({ session_count: 0 }), 0);
+  assert.equal(resolveSessionCount({ session_count: 3 }), 3);
+  assert.equal(resolveSessionCount({ session_count: -1 }), null);
+  assert.equal(resolveSessionCount({ session_count: 'two' }), null);
+  assert.equal(resolveSessionCount({}), null);
+  assert.equal(resolveSessionCount(null), null);
 });
 
 test('buildLaunchMessage emits canonical launch payload', () => {

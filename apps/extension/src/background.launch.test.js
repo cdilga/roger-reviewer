@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { handleLaunchMessage } = require('./background/main.js');
+const { handleLaunchMessage, handleStatusMessage } = require('./background/main.js');
 
 function withChromeStub(stub, fn) {
   const previousChrome = global.chrome;
@@ -359,6 +359,90 @@ for (const [label, bridgeResponse, expectedMode] of [
     });
   });
 }
+
+test('native status probe relays zero-session inventory as no_local_session', async () => {
+  const chromeStub = {
+    runtime: {
+      lastError: null,
+      onMessage: { addListener: () => {} },
+      sendNativeMessage(_host, _intent, callback) {
+        callback({ ok: true, session_count: 0 });
+      },
+    },
+  };
+
+  await withChromeStub(chromeStub, async () => {
+    const response = await handleStatusMessage({
+      intent: { owner: 'acme', repo: 'widgets', pr_number: 42 },
+    });
+
+    assert.equal(response.ok, true);
+    assert.equal(response.mode, 'no_local_session');
+    assert.equal(response.session_count, 0);
+    assert.equal(response.attention_state, undefined);
+  });
+});
+
+test('native status probe relays multi-session inventory without a fresh attention claim', async () => {
+  const chromeStub = {
+    runtime: {
+      lastError: null,
+      onMessage: { addListener: () => {} },
+      sendNativeMessage(_host, _intent, callback) {
+        callback({
+          ok: true,
+          session_count: 2,
+          sessions: [
+            { session_id: 'session-1', provider: 'claude', attention_state: 'findings_ready' },
+            { session_id: 'session-2', provider: 'codex', attention_state: 'review_failed' },
+          ],
+        });
+      },
+    },
+  };
+
+  await withChromeStub(chromeStub, async () => {
+    const response = await handleStatusMessage({
+      intent: { owner: 'acme', repo: 'widgets', pr_number: 42 },
+    });
+
+    assert.equal(response.ok, true);
+    assert.equal(response.mode, 'session_inventory');
+    assert.equal(response.session_count, 2);
+    assert.equal(response.sessions.length, 2);
+    assert.equal(response.attention_state, undefined);
+  });
+});
+
+test('native status probe still mirrors fresh bounded attention with inventory attached', async () => {
+  const chromeStub = {
+    runtime: {
+      lastError: null,
+      onMessage: { addListener: () => {} },
+      sendNativeMessage(_host, _intent, callback) {
+        callback({
+          ok: true,
+          attention_state: 'findings_ready',
+          freshness_seconds: 12,
+          session_count: 1,
+          sessions: [{ session_id: 'session-1', provider: 'claude' }],
+        });
+      },
+    },
+  };
+
+  await withChromeStub(chromeStub, async () => {
+    const response = await handleStatusMessage({
+      intent: { owner: 'acme', repo: 'widgets', pr_number: 42 },
+    });
+
+    assert.equal(response.ok, true);
+    assert.equal(response.mode, 'bounded_status');
+    assert.equal(response.attention_state, 'findings_ready');
+    assert.equal(response.session_count, 1);
+    assert.equal(response.sessions.length, 1);
+  });
+});
 
 test('handleLaunchMessage rejects refresh_review as a browser action', async () => {
   const chromeStub = {

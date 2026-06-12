@@ -5,9 +5,12 @@ const {
   buildRegistrationIntent,
   detectBrowserLabel,
   MAX_MIRROR_FRESHNESS_SECONDS,
+  MAX_SESSION_INVENTORY_ENTRIES,
   handleStatusMessage,
   launchOnlyStatusEnvelope,
   normalizeBoundedStatus,
+  normalizeStatusEnvelope,
+  parseSessionInventory,
   registerRuntimeIdentity,
 } = require('./background/main.js');
 
@@ -108,6 +111,126 @@ test('normalizeBoundedStatus preserves repair guidance for stale mirrored state'
     response.guidance,
     'Run `rr resume --session session-42` locally before trusting stale findings.'
   );
+});
+
+test('normalizeBoundedStatus passes durable session inventory through fresh bounded status', () => {
+  const response = normalizeBoundedStatus({
+    ok: true,
+    attention_state: 'findings_ready',
+    freshness_seconds: 30,
+    session_count: 2,
+    sessions: [
+      {
+        session_id: 'session-1',
+        provider: 'claude',
+        attention_state: 'findings_ready',
+        updated_at: '2026-06-12T00:00:00Z',
+      },
+      { session_id: 'session-2', provider: 'codex' },
+    ],
+  });
+
+  assert.ok(response);
+  assert.equal(response.mode, 'bounded_status');
+  assert.equal(response.attention_state, 'findings_ready');
+  assert.equal(response.session_count, 2);
+  assert.equal(response.sessions.length, 2);
+  assert.equal(response.sessions[0].session_id, 'session-1');
+  assert.equal(response.sessions[1].provider, 'codex');
+});
+
+test('normalizeStatusEnvelope reports no_local_session for zero-session probes', () => {
+  const response = normalizeStatusEnvelope({ ok: true, session_count: 0 });
+
+  assert.ok(response);
+  assert.equal(response.ok, true);
+  assert.equal(response.mode, 'no_local_session');
+  assert.equal(response.session_count, 0);
+  assert.equal(response.attention_state, undefined);
+  assert.equal(response.freshness_seconds, undefined);
+  assert.match(response.message, /no local roger review session/i);
+});
+
+test('normalizeStatusEnvelope reports session_inventory when attention claim is stale', () => {
+  const response = normalizeStatusEnvelope({
+    ok: true,
+    attention_state: 'findings_ready',
+    freshness_seconds: MAX_MIRROR_FRESHNESS_SECONDS + 1,
+    session_count: 2,
+    sessions: [
+      { session_id: 'session-1', provider: 'claude', attention_state: 'findings_ready' },
+      { session_id: 'session-2', provider: 'codex', attention_state: 'awaiting_user_input' },
+    ],
+  });
+
+  assert.ok(response);
+  assert.equal(response.ok, true);
+  assert.equal(response.mode, 'session_inventory');
+  assert.equal(response.session_count, 2);
+  assert.equal(response.sessions.length, 2);
+  // No top-level attention claim may survive: it is stale, not fresh truth.
+  assert.equal(response.attention_state, undefined);
+  assert.equal(response.freshness_seconds, undefined);
+  assert.match(response.message, /no fresh attention claim/i);
+  const combined = `${response.message} ${response.guidance}`.toLowerCase();
+  assert.doesNotMatch(combined, /ready to post/);
+});
+
+test('normalizeStatusEnvelope keeps genuinely-unknown responses null for launch-only fallback', () => {
+  assert.equal(normalizeStatusEnvelope(null), null);
+  assert.equal(normalizeStatusEnvelope({ ok: true }), null);
+  assert.equal(normalizeStatusEnvelope({ ok: true, session_count: -1 }), null);
+  assert.equal(normalizeStatusEnvelope({ ok: true, session_count: 'two' }), null);
+});
+
+test('parseSessionInventory sanitizes malformed entries and caps the session list', () => {
+  const inventory = parseSessionInventory({
+    session_count: 9,
+    sessions: [
+      { session_id: 'session-1' },
+      { provider: 'claude' },
+      'session-3',
+      null,
+      { session_id: 'session-4' },
+      { session_id: 'session-5' },
+      { session_id: 'session-6' },
+      { session_id: 'session-7' },
+      { session_id: 'session-8' },
+    ],
+  });
+
+  assert.equal(inventory.session_count, 9);
+  assert.ok(inventory.sessions.length <= MAX_SESSION_INVENTORY_ENTRIES);
+  for (const session of inventory.sessions) {
+    assert.equal(typeof session.session_id, 'string');
+  }
+});
+
+test('handleStatusMessage surfaces durable session inventory modes from the probe', async () => {
+  const intentPayload = {
+    intent: { owner: 'octo', repo: 'roger-reviewer', pr_number: 42 },
+  };
+
+  const emptyResponse = await handleStatusMessage(intentPayload, async () =>
+    normalizeStatusEnvelope({ ok: true, session_count: 0 })
+  );
+  assert.equal(emptyResponse.mode, 'no_local_session');
+  assert.equal(emptyResponse.session_count, 0);
+
+  const inventoryResponse = await handleStatusMessage(intentPayload, async () =>
+    normalizeStatusEnvelope({
+      ok: true,
+      session_count: 3,
+      sessions: [
+        { session_id: 'session-1' },
+        { session_id: 'session-2' },
+        { session_id: 'session-3' },
+      ],
+    })
+  );
+  assert.equal(inventoryResponse.mode, 'session_inventory');
+  assert.equal(inventoryResponse.session_count, 3);
+  assert.equal(inventoryResponse.sessions.length, 3);
 });
 
 test('handleStatusMessage rejects malformed status request payload', async () => {

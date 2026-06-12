@@ -11,6 +11,7 @@ const {
   GITHUB_ACTION_BUTTON_CLASS,
   MODAL_FALLBACK_STATUS,
   MODAL_OPEN_BUTTON_LABEL,
+  RESUME_ACTION_LABEL,
   applyActionModel,
   applyPanelModeStyles,
   clearStatus,
@@ -287,6 +288,58 @@ test('deriveActionModel maps canonical attention states to expected primary acti
   }
 });
 
+test('deriveActionModel hides resume entirely when no local session exists', () => {
+  const model = deriveActionModel(null, 0);
+  assert.equal(model.primaryActionId, 'start_review');
+  assert.equal(model.visibleActions.has('start_review'), true);
+  assert.equal(model.visibleActions.has('resume_review'), false);
+  assert.equal(model.visibleActions.has('show_findings'), false);
+  assert.equal(model.sessionCount, 0);
+});
+
+test('deriveActionModel promotes resume to primary when one session exists', () => {
+  const model = deriveActionModel(null, 1);
+  assert.equal(model.primaryActionId, 'resume_review');
+  assert.equal(model.visibleActions.has('start_review'), true);
+  assert.equal(model.visibleActions.has('resume_review'), true);
+  assert.equal(model.visibleActions.has('show_findings'), false);
+  assert.equal(model.resumeLabel, RESUME_ACTION_LABEL);
+});
+
+test('deriveActionModel labels resume with the count when multiple sessions exist', () => {
+  const model = deriveActionModel(null, 3);
+  assert.equal(model.primaryActionId, 'resume_review');
+  assert.equal(model.visibleActions.has('resume_review'), true);
+  assert.equal(model.resumeLabel, `${RESUME_ACTION_LABEL} (3)`);
+});
+
+test('deriveActionModel keeps legacy both-buttons surface when session count is unknown', () => {
+  for (const unknownCount of [null, undefined, -1, Number.NaN, 'two']) {
+    const model = deriveActionModel(null, unknownCount);
+    assert.equal(model.primaryActionId, 'start_review');
+    assert.equal(model.visibleActions.has('start_review'), true);
+    assert.equal(model.visibleActions.has('resume_review'), true);
+    assert.equal(model.resumeLabel, RESUME_ACTION_LABEL);
+    assert.equal(model.sessionCount, null);
+  }
+});
+
+test('deriveActionModel still promotes fresh findings over session-derived resume primary', () => {
+  const model = deriveActionModel('findings_ready', 2);
+  assert.equal(model.primaryActionId, 'show_findings');
+  assert.equal(model.visibleActions.has('show_findings'), true);
+  assert.equal(model.visibleActions.has('resume_review'), true);
+  assert.equal(model.resumeLabel, `${RESUME_ACTION_LABEL} (2)`);
+});
+
+test('deriveActionModel ignores resume-primary attention claims when zero sessions exist', () => {
+  // Defensive truthfulness: an attention claim without any durable session
+  // must not resurrect a resume button that has nothing to resume.
+  const model = deriveActionModel('refresh_recommended', 0);
+  assert.equal(model.visibleActions.has('resume_review'), false);
+  assert.equal(model.primaryActionId, 'start_review');
+});
+
 test('applyActionModel toggles visibility and primary emphasis on action buttons', () => {
   const buttonStates = new Map();
   const makeButton = (actionId) => {
@@ -461,15 +514,43 @@ function createStatusClassList() {
   };
 }
 
+function makeActionButton(actionId, label) {
+  const classes = new Set();
+  return {
+    dataset: { action: actionId },
+    hidden: false,
+    disabled: false,
+    textContent: label,
+    classList: {
+      toggle(className, enabled) {
+        if (enabled) {
+          classes.add(className);
+        } else {
+          classes.delete(className);
+        }
+      },
+      contains(name) {
+        return classes.has(name);
+      },
+    },
+    setAttribute() {},
+  };
+}
+
 function makePanelDom({ inline = false } = {}) {
+  const actionButtons = [
+    makeActionButton('start_review', 'Start Review in Roger'),
+    makeActionButton('resume_review', 'Resume Existing Review'),
+    makeActionButton('show_findings', 'View Findings'),
+  ];
   const panel = {
     classList: {
       contains(name) {
         return inline && name === 'roger-panel--inline';
       },
     },
-    querySelectorAll() {
-      return [];
+    querySelectorAll(selector) {
+      return selector === 'button[data-action]' ? actionButtons : [];
     },
   };
   const statusNode = {
@@ -497,7 +578,11 @@ function makePanelDom({ inline = false } = {}) {
     },
   };
 
-  return { badge, documentStub, infoNode, panel, statusNode };
+  return { actionButtons, badge, documentStub, infoNode, panel, statusNode };
+}
+
+function findActionButton(dom, actionId) {
+  return dom.actionButtons.find((button) => button.dataset.action === actionId);
 }
 
 function makeChromeStub({ launchResponse, statusResponse, launchLastError = null } = {}) {
@@ -775,4 +860,162 @@ test('setStatus toggles status classes for readable ok/error states', () => {
   } finally {
     global.document = originalDocument;
   }
+});
+
+test('status mirror with zero-session inventory hides resume and invites a first review', () => {
+  const dom = makePanelDom();
+  const chromeStub = makeChromeStub({
+    statusResponse: {
+      ok: true,
+      mode: 'no_local_session',
+      session_count: 0,
+      message: 'No local Roger review session exists for this pull request yet.',
+    },
+  });
+
+  withPanelGlobals({ documentStub: dom.documentStub, chromeStub }, () => {
+    requestStatusMirror(TEST_CONTEXT);
+
+    assert.equal(findActionButton(dom, 'start_review').hidden, false);
+    assert.equal(
+      findActionButton(dom, 'start_review').classList.contains('roger-panel-button--primary'),
+      true
+    );
+    assert.equal(findActionButton(dom, 'resume_review').hidden, true);
+    assert.equal(findActionButton(dom, 'show_findings').hidden, true);
+    assert.match(dom.infoNode.textContent, /No Roger review exists for this PR yet — start one\./);
+    // The mirror owns badge + info only; the action status line stays untouched.
+    assert.equal(dom.statusNode.hidden, true);
+    assert.equal(dom.statusNode.textContent, '');
+  });
+});
+
+test('status mirror with single-session inventory promotes resume as primary', () => {
+  const dom = makePanelDom();
+  const chromeStub = makeChromeStub({
+    statusResponse: {
+      ok: true,
+      mode: 'session_inventory',
+      session_count: 1,
+      sessions: [{ session_id: 'session-1', provider: 'claude' }],
+    },
+  });
+
+  withPanelGlobals({ documentStub: dom.documentStub, chromeStub }, () => {
+    requestStatusMirror(TEST_CONTEXT);
+
+    const resumeButton = findActionButton(dom, 'resume_review');
+    assert.equal(resumeButton.hidden, false);
+    assert.equal(resumeButton.classList.contains('roger-panel-button--primary'), true);
+    assert.equal(resumeButton.textContent, RESUME_ACTION_LABEL);
+    assert.equal(findActionButton(dom, 'start_review').hidden, false);
+    assert.equal(findActionButton(dom, 'show_findings').hidden, true);
+    assert.match(dom.infoNode.textContent, /1 local Roger review session for this PR\./);
+    assert.match(dom.infoNode.textContent, /rr status/);
+  });
+});
+
+test('status mirror with multi-session inventory labels resume with the count', () => {
+  const dom = makePanelDom();
+  const chromeStub = makeChromeStub({
+    statusResponse: {
+      ok: true,
+      mode: 'session_inventory',
+      session_count: 3,
+      sessions: [
+        { session_id: 'session-1' },
+        { session_id: 'session-2' },
+        { session_id: 'session-3' },
+      ],
+    },
+  });
+
+  withPanelGlobals({ documentStub: dom.documentStub, chromeStub }, () => {
+    requestStatusMirror(TEST_CONTEXT);
+
+    const resumeButton = findActionButton(dom, 'resume_review');
+    assert.equal(resumeButton.hidden, false);
+    assert.equal(resumeButton.classList.contains('roger-panel-button--primary'), true);
+    assert.equal(resumeButton.textContent, `${RESUME_ACTION_LABEL} (3)`);
+    assert.match(dom.infoNode.textContent, /3 local Roger review sessions for this PR\./);
+  });
+});
+
+test('status mirror with launch-only envelope keeps the legacy both-buttons surface', () => {
+  const dom = makePanelDom();
+  const chromeStub = makeChromeStub({ statusResponse: LAUNCH_ONLY_STATUS_RESPONSE });
+
+  withPanelGlobals({ documentStub: dom.documentStub, chromeStub }, () => {
+    requestStatusMirror(TEST_CONTEXT);
+
+    const resumeButton = findActionButton(dom, 'resume_review');
+    assert.equal(resumeButton.hidden, false);
+    assert.equal(resumeButton.textContent, RESUME_ACTION_LABEL);
+    assert.equal(
+      findActionButton(dom, 'start_review').classList.contains('roger-panel-button--primary'),
+      true
+    );
+    assert.equal(resumeButton.classList.contains('roger-panel-button--primary'), false);
+  });
+});
+
+test('bounded findings_ready status with inventory still promotes show_findings', () => {
+  const dom = makePanelDom();
+  const chromeStub = makeChromeStub({
+    statusResponse: {
+      ok: true,
+      mode: 'bounded_status',
+      attention_state: 'findings_ready',
+      freshness_seconds: 10,
+      freshness_label: '10s old',
+      session_count: 2,
+      sessions: [{ session_id: 'session-1' }, { session_id: 'session-2' }],
+      message: 'Mirroring bounded Roger attention state from local companion.',
+    },
+  });
+
+  withPanelGlobals({ documentStub: dom.documentStub, chromeStub }, () => {
+    requestStatusMirror(TEST_CONTEXT);
+
+    const findingsButton = findActionButton(dom, 'show_findings');
+    assert.equal(findingsButton.hidden, false);
+    assert.equal(findingsButton.classList.contains('roger-panel-button--primary'), true);
+    const resumeButton = findActionButton(dom, 'resume_review');
+    assert.equal(resumeButton.hidden, false);
+    assert.equal(resumeButton.textContent, `${RESUME_ACTION_LABEL} (2)`);
+    assert.equal(dom.badge.textContent, 'Findings ready (10s old)');
+  });
+});
+
+test('session inventory mirror never clears a persistent launch status line', () => {
+  const dom = makePanelDom();
+  const chromeStub = makeChromeStub({
+    launchResponse: {
+      ok: false,
+      mode: 'bridge_preflight_failed',
+      action: 'start_review',
+      message: 'Roger bridge preflight failed.',
+      guidance: 'Roger data directory not found. Run `rr init` to set up.',
+      failure_kind: 'preflight_failed',
+    },
+    statusResponse: {
+      ok: true,
+      mode: 'no_local_session',
+      session_count: 0,
+    },
+  });
+  const button = { disabled: false, textContent: 'Start Review in Roger' };
+
+  withPanelGlobals({ documentStub: dom.documentStub, chromeStub }, () => {
+    triggerLaunch('start_review', TEST_CONTEXT, button);
+
+    assert.equal(dom.statusNode.hidden, false);
+    assert.match(dom.statusNode.textContent, /Roger bridge preflight failed\./);
+
+    // New truthful inventory modes must obey the same persistence rule.
+    requestStatusMirror(TEST_CONTEXT);
+    assert.equal(dom.statusNode.hidden, false);
+    assert.match(dom.statusNode.textContent, /Roger bridge preflight failed\./);
+    assert.equal(findActionButton(dom, 'resume_review').hidden, true);
+  });
 });

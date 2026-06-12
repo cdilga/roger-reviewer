@@ -13,6 +13,7 @@ const CANONICAL_ATTENTION_STATES = new Set([
   'review_failed',
 ]);
 const MAX_MIRROR_FRESHNESS_SECONDS = 300;
+const MAX_SESSION_INVENTORY_ENTRIES = 5;
 const BRIDGE_FAILURE_MODE_BY_KIND = Object.freeze({
   preflight_failed: 'bridge_preflight_failed',
   cli_spawn_failed: 'bridge_cli_spawn_failed',
@@ -166,6 +167,39 @@ function parseFreshnessSeconds(response) {
   return null;
 }
 
+// Session EXISTENCE is durable local truth (unlike the freshness-bounded
+// attention claim), so inventory fields are parsed and passed through
+// independently of the 300s attention freshness window.
+function parseSessionInventory(response) {
+  if (!response || typeof response !== 'object') {
+    return null;
+  }
+
+  const rawCount = response.session_count;
+  if (typeof rawCount !== 'number' || !Number.isFinite(rawCount) || rawCount < 0) {
+    return null;
+  }
+
+  const sessionCount = Math.floor(rawCount);
+  const sessions = Array.isArray(response.sessions)
+    ? response.sessions
+        .filter(
+          (entry) => entry && typeof entry === 'object' && typeof entry.session_id === 'string'
+        )
+        .slice(0, MAX_SESSION_INVENTORY_ENTRIES)
+        .map((entry) => ({
+          session_id: entry.session_id,
+          ...(typeof entry.provider === 'string' ? { provider: entry.provider } : {}),
+          ...(typeof entry.attention_state === 'string'
+            ? { attention_state: entry.attention_state }
+            : {}),
+          ...(typeof entry.updated_at === 'string' ? { updated_at: entry.updated_at } : {}),
+        }))
+    : [];
+
+  return { session_count: sessionCount, sessions };
+}
+
 function normalizeBoundedStatus(response) {
   if (!response || typeof response !== 'object') {
     return null;
@@ -185,6 +219,7 @@ function normalizeBoundedStatus(response) {
     typeof response.guidance === 'string' && response.guidance.trim().length > 0
       ? response.guidance.trim()
       : null;
+  const inventory = parseSessionInventory(response);
 
   return {
     ok: true,
@@ -195,7 +230,47 @@ function normalizeBoundedStatus(response) {
     message: 'Mirroring bounded Roger attention state from local companion.',
     guidance: 'Open Roger locally (`rr status`) for full authoritative detail.',
     ...(guidance ? { guidance } : {}),
+    ...(inventory ? inventory : {}),
   };
+}
+
+function sessionInventoryStatusEnvelope(inventory) {
+  if (inventory.session_count === 0) {
+    return {
+      ok: true,
+      mode: 'no_local_session',
+      session_count: 0,
+      message: 'No local Roger review session exists for this pull request yet.',
+      guidance: 'Start a review from this panel, or run `rr review` locally.',
+    };
+  }
+
+  // Sessions exist but the attention claim is missing or stale: report the
+  // durable inventory truth without bluffing any attention fields.
+  return {
+    ok: true,
+    mode: 'session_inventory',
+    session_count: inventory.session_count,
+    sessions: inventory.sessions,
+    message: `${inventory.session_count} local Roger review session(s) exist for this pull request; no fresh attention claim.`,
+    guidance: 'Open Roger locally (`rr status`) for authoritative detail.',
+  };
+}
+
+function normalizeStatusEnvelope(response) {
+  const bounded = normalizeBoundedStatus(response);
+  if (bounded) {
+    return bounded;
+  }
+
+  const inventory = parseSessionInventory(response);
+  if (inventory) {
+    return sessionInventoryStatusEnvelope(inventory);
+  }
+
+  // Genuinely unknown (no/invalid native response): the caller falls back to
+  // launchOnlyStatusEnvelope, the honest degraded case.
+  return null;
 }
 
 function launchOnlyStatusEnvelope(reason = null) {
@@ -226,7 +301,7 @@ function dispatchNativeStatus(intent) {
           return;
         }
 
-        resolve(normalizeBoundedStatus(response));
+        resolve(normalizeStatusEnvelope(response));
       }
     );
   });
@@ -327,6 +402,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     CANONICAL_ATTENTION_STATES,
     MAX_MIRROR_FRESHNESS_SECONDS,
+    MAX_SESSION_INVENTORY_ENTRIES,
     buildRegistrationIntent,
     detectBrowserLabel,
     handleLaunchMessage,
@@ -334,7 +410,10 @@ if (typeof module !== 'undefined' && module.exports) {
     launchOnlyStatusEnvelope,
     nativeUnavailableGuidance,
     normalizeBoundedStatus,
+    normalizeStatusEnvelope,
     parseFreshnessSeconds,
+    parseSessionInventory,
+    sessionInventoryStatusEnvelope,
     registerRuntimeIdentity,
   };
 }

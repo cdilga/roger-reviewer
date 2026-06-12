@@ -834,7 +834,11 @@ fn rr_binary_native_host_answers_status_probe_from_persisted_state() {
     ]) as usize;
     let reply: Value =
         serde_json::from_slice(&output.stdout[4..4 + len]).expect("decode probe reply");
-    assert_eq!(reply, serde_json::json!({}), "no session -> empty mirror");
+    assert_eq!(
+        reply,
+        serde_json::json!({ "session_count": 0 }),
+        "no session -> zero inventory so resume is not offered"
+    );
 
     // Seed a findings_ready session and probe again: the host must mirror the
     // persisted attention state with a freshness measure.
@@ -872,6 +876,8 @@ fn rr_binary_native_host_answers_status_probe_from_persisted_state() {
         serde_json::from_slice(&output.stdout[4..4 + len]).expect("decode probe reply");
     assert_eq!(reply["attention_state"], "findings_ready");
     assert_eq!(reply["session_id"], "session-probe-1");
+    assert_eq!(reply["session_count"], 1);
+    assert_eq!(reply["sessions"][0]["session_id"], "session-probe-1");
     assert!(
         reply["freshness_seconds"].as_i64().expect("freshness") < 60,
         "fresh seed must report low freshness: {reply}"

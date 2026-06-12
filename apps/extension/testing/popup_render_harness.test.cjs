@@ -23,6 +23,7 @@ test('panel render harness mounts the injected card in dark rail mode above revi
   assert.match(result.summary.buildLabel, /Extension build 0\.1\.0-dev\+render-harness\./i);
   assert.equal(result.summary.infoToggleLabel, 'i');
   assert.match(result.summary.infoTooltip, /Extension build 0\.1\.0-dev\+render-harness\./i);
+  assert.match(result.summary.infoText, /1 local Roger review session for this PR/i);
   assert.match(result.summary.infoText, /authoritative detail/i);
   assert.deepEqual(result.summary.visibleActions, ['start_review', 'resume_review']);
   assert.deepEqual(result.summary.transcript.statusRequests[0].intent, {
@@ -31,7 +32,13 @@ test('panel render harness mounts the injected card in dark rail mode above revi
     pr_number: 155408,
   });
   assert.match(result.summary.panelStyleSheetExcerpt, /roger-panel--rail/);
-  assert.match(result.summary.buttons[0].className, /roger-panel-button--primary/);
+  // One durable local session exists, so resuming is the primary intent.
+  const resumeButton = result.summary.buttons.find((button) => button.action === 'resume_review');
+  assert.ok(resumeButton);
+  assert.match(resumeButton.className, /roger-panel-button--primary/);
+  assert.equal(resumeButton.label, 'Resume Existing Review');
+  const startButton = result.summary.buttons.find((button) => button.action === 'start_review');
+  assert.match(startButton.className, /roger-panel-button--secondary/);
   assert.ok(fs.existsSync(result.htmlPath));
   assert.ok(fs.existsSync(result.summaryPath));
 });
@@ -52,5 +59,7 @@ test('popup render harness remains available as a secondary local surface', asyn
 
   assert.equal(result.summary.surface, 'popup');
   assert.match(result.summary.title, /rust-lang\/rust#155408/);
-  assert.deepEqual(result.summary.visibleActions, ['start_review', 'resume_review']);
+  // The idle scenario truthfully reports zero durable local sessions
+  // (session_count: 0), so there is no review to resume and no resume button.
+  assert.deepEqual(result.summary.visibleActions, ['start_review']);
 });

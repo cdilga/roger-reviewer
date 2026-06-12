@@ -148,20 +148,61 @@ function routePopupAction(action, context, dispatch) {
   return dispatch(buildLaunchMessage(action, context));
 }
 
-function deriveActionModel(attentionState) {
-  const visibleActions = new Set(['start_review', 'resume_review']);
+function normalizeSessionCount(sessionCount) {
+  if (
+    typeof sessionCount !== 'number' ||
+    !Number.isFinite(sessionCount) ||
+    sessionCount < 0
+  ) {
+    return null;
+  }
+  return Math.floor(sessionCount);
+}
+
+function resolveSessionCount(response) {
+  if (!response || typeof response !== 'object') {
+    return null;
+  }
+  return normalizeSessionCount(response.session_count);
+}
+
+// Session existence is durable local truth from the status probe:
+// - 0 sessions: there is nothing to resume, so no resume button at all.
+// - >=1 sessions: an existing review makes resuming the likeliest intent.
+// - null/undefined (unknown inventory): keep the legacy both-buttons surface.
+function deriveActionModel(attentionState, sessionCount = null) {
+  const knownSessionCount = normalizeSessionCount(sessionCount);
+  const visibleActions = new Set(['start_review']);
   let primaryActionId = 'start_review';
+
+  if (knownSessionCount === null || knownSessionCount >= 1) {
+    visibleActions.add('resume_review');
+  }
+  if (knownSessionCount !== null && knownSessionCount >= 1) {
+    primaryActionId = 'resume_review';
+  }
 
   if (FINDINGS_VISIBLE_ATTENTION_STATES.has(attentionState)) {
     visibleActions.add('show_findings');
     primaryActionId = 'show_findings';
-  } else if (RESUME_PRIMARY_ATTENTION_STATES.has(attentionState)) {
+  } else if (
+    RESUME_PRIMARY_ATTENTION_STATES.has(attentionState) &&
+    visibleActions.has('resume_review')
+  ) {
     primaryActionId = 'resume_review';
   }
+
+  const resumeBaseLabel = ACTION_LABELS.get('resume_review');
+  const resumeLabel =
+    knownSessionCount !== null && knownSessionCount > 1
+      ? `${resumeBaseLabel} (${knownSessionCount})`
+      : resumeBaseLabel;
 
   return {
     visibleActions,
     primaryActionId,
+    resumeLabel,
+    sessionCount: knownSessionCount,
   };
 }
 
@@ -308,8 +349,8 @@ function setButtonsDisabled(disabled) {
   }
 }
 
-function applyActionModel(attentionState) {
-  const model = deriveActionModel(attentionState);
+function applyActionModel(attentionState, sessionCount = null) {
+  const model = deriveActionModel(attentionState, sessionCount);
   const buttons = document.querySelectorAll('button[data-action]');
   for (const button of buttons) {
     const action = button.dataset.action;
@@ -317,6 +358,9 @@ function applyActionModel(attentionState) {
     const isPrimary = action === model.primaryActionId;
     const isTertiary = action === 'show_findings' && isVisible && !isPrimary;
     button.hidden = !isVisible;
+    if (action === 'resume_review' && button.textContent !== model.resumeLabel) {
+      button.textContent = model.resumeLabel;
+    }
     button.classList.toggle('action-primary', isPrimary && isVisible);
     button.classList.toggle('action-secondary', !isPrimary && !isTertiary && isVisible);
     button.classList.toggle('action-tertiary', isTertiary);
@@ -349,7 +393,7 @@ async function handleActionClick(action, context, button) {
     const response = await routePopupAction(action, context, sendRuntimeMessage);
     const feedback = describeLaunchResponse(response);
     setSubtitle(feedback.message, feedback.isError);
-    applyActionModel(feedback.attentionState);
+    applyActionModel(feedback.attentionState, resolveSessionCount(response));
   } catch (error) {
     setSubtitle(
       appendGuidance(`Bridge error: ${String(error?.message || error)}`, BRIDGE_DISCONNECT_GUIDANCE),
@@ -396,10 +440,10 @@ async function syncPopupActionModel(context) {
   try {
     const response = await sendRuntimeMessage(buildStatusMessage(context));
     const attentionState = resolveAttentionState(response);
-    applyActionModel(attentionState);
+    applyActionModel(attentionState, resolveSessionCount(response));
     return attentionState;
   } catch {
-    applyActionModel(null);
+    applyActionModel(null, null);
     return null;
   }
 }
@@ -441,10 +485,12 @@ if (typeof module !== 'undefined' && module.exports) {
     describeLaunchResponse,
     describeBuildInfo,
     deriveActionModel,
+    normalizeSessionCount,
     parsePullRequestContextFromUrl,
     readExtensionBuildLabel,
     renderBuildLabel,
     resolveAttentionState,
+    resolveSessionCount,
     resolveFindingsKnownEmpty,
     routePopupAction,
     syncPopupActionModel,

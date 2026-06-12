@@ -2276,11 +2276,26 @@ pub fn answer_bridge_status_probe(
             repository: Some(repository),
             pull_request_number: Some(pr_number),
             attention_states: Vec::new(),
-            limit: 1,
+            limit: 6,
         })
         .unwrap_or_default();
+    // Session existence is durable local truth, so the action model can rely
+    // on it regardless of attention freshness: zero sessions means resume is
+    // not a meaningful action for this PR.
+    let session_summaries: Vec<Value> = sessions
+        .iter()
+        .take(5)
+        .map(|session| {
+            json!({
+                "session_id": session.session_id,
+                "provider": session.provider,
+                "attention_state": session.attention_state,
+                "updated_at": session.updated_at,
+            })
+        })
+        .collect();
     let Some(session) = sessions.first() else {
-        return json!({});
+        return json!({ "session_count": 0 });
     };
     let freshness_seconds = (time::now_ts() - session.updated_at).max(0);
     json!({
@@ -2288,6 +2303,8 @@ pub fn answer_bridge_status_probe(
         "freshness_seconds": freshness_seconds,
         "session_id": session.session_id,
         "provider": session.provider,
+        "session_count": sessions.len(),
+        "sessions": session_summaries,
     })
 }
 
@@ -13176,7 +13193,26 @@ fn render_output(parsed: &ParsedArgs, mut response: CommandResponse) -> CliRunRe
             | CommandKind::RobotDocs
     ) || response.outcome == OutcomeKind::Blocked
     {
-        if let Ok(pretty) = serde_json::to_string_pretty(&response.data) {
+        // Session candidates render as a readable table for humans; raw JSON
+        // stays the transport for --robot consumers.
+        let candidates = response.data.get("candidates").and_then(Value::as_array);
+        if let Some(candidates) = candidates.filter(|list| !list.is_empty()) {
+            stdout.push_str("Sessions:\n");
+            for entry in candidates {
+                stdout.push_str(&format!(
+                    "  {}  {}#{}  {}  {}\n",
+                    entry["session_id"].as_str().unwrap_or("?"),
+                    entry["repository"].as_str().unwrap_or("?"),
+                    entry["pull_request"].as_u64().unwrap_or(0),
+                    entry["provider"].as_str().unwrap_or("?"),
+                    entry["attention_state"].as_str().unwrap_or("?"),
+                ));
+            }
+            stdout.push_str("Re-run with --session <id> to pick one.\n");
+        } else if candidates.is_some() {
+            // Zero candidates: the message and repair actions already say
+            // everything a human needs; no JSON blob.
+        } else if let Ok(pretty) = serde_json::to_string_pretty(&response.data) {
             stdout.push_str(&pretty);
             stdout.push('\n');
         }
@@ -13897,6 +13933,17 @@ fn blocked_picker_response(reason: String, candidates: Vec<SessionFinderEntry>) 
         vec!["re-run with --session <id> or pass --pr <number> for a unique match".to_owned()]
     };
 
+    // The message names the actual situation: a picker only exists when
+    // there are candidates to pick from; with zero matches the truthful
+    // message is that no review exists yet.
+    let message = if no_match {
+        "no review session exists for this target yet".to_owned()
+    } else {
+        format!(
+            "multiple review sessions match; pick one with --session <id> ({} candidates)",
+            candidates.len()
+        )
+    };
     CommandResponse {
         outcome: OutcomeKind::Blocked,
         data: json!({
@@ -13915,7 +13962,7 @@ fn blocked_picker_response(reason: String, candidates: Vec<SessionFinderEntry>) 
         }),
         warnings,
         repair_actions,
-        message: "session picker required".to_owned(),
+        message,
     }
 }
 

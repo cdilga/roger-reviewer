@@ -36,9 +36,10 @@ const RAIL_REVIEWERS_SELECTORS = [
   '.discussion-sidebar-item.sidebar-assignee',
 ];
 
+const RESUME_ACTION_LABEL = 'Resume Existing Review';
 const ACTIONS = [
   { id: 'start_review', label: 'Start Review in Roger' },
-  { id: 'resume_review', label: 'Resume Existing Review' },
+  { id: 'resume_review', label: RESUME_ACTION_LABEL },
   { id: 'show_findings', label: 'View Findings' },
 ];
 const FINDINGS_VISIBLE_ATTENTION_STATES = new Set(['findings_ready']);
@@ -79,35 +80,72 @@ const ATTENTION_STYLES = {
   },
 };
 
-function deriveActionModel(attentionState) {
-  const visibleActions = new Set(['start_review', 'resume_review']);
+function normalizeSessionCount(sessionCount) {
+  if (
+    typeof sessionCount !== 'number' ||
+    !Number.isFinite(sessionCount) ||
+    sessionCount < 0
+  ) {
+    return null;
+  }
+  return Math.floor(sessionCount);
+}
+
+// Session existence is durable local truth from the status probe:
+// - 0 sessions: there is nothing to resume, so no resume button at all.
+// - >=1 sessions: an existing review makes resuming the likeliest intent.
+// - null/undefined (launch-only/degraded bridge): we genuinely do not know,
+//   so keep the legacy both-buttons surface; launch failures are loud.
+function deriveActionModel(attentionState, sessionCount = null) {
+  const knownSessionCount = normalizeSessionCount(sessionCount);
+  const visibleActions = new Set(['start_review']);
   let primaryActionId = 'start_review';
+
+  if (knownSessionCount === null || knownSessionCount >= 1) {
+    visibleActions.add('resume_review');
+  }
+  if (knownSessionCount !== null && knownSessionCount >= 1) {
+    primaryActionId = 'resume_review';
+  }
 
   if (FINDINGS_VISIBLE_ATTENTION_STATES.has(attentionState)) {
     visibleActions.add('show_findings');
     primaryActionId = 'show_findings';
-  } else if (RESUME_PRIMARY_ATTENTION_STATES.has(attentionState)) {
+  } else if (
+    RESUME_PRIMARY_ATTENTION_STATES.has(attentionState) &&
+    visibleActions.has('resume_review')
+  ) {
     primaryActionId = 'resume_review';
   }
+
+  const resumeLabel =
+    knownSessionCount !== null && knownSessionCount > 1
+      ? `${RESUME_ACTION_LABEL} (${knownSessionCount})`
+      : RESUME_ACTION_LABEL;
 
   return {
     visibleActions,
     primaryActionId,
+    resumeLabel,
+    sessionCount: knownSessionCount,
   };
 }
 
-function applyActionModel(panel, attentionState) {
+function applyActionModel(panel, attentionState, sessionCount = null) {
   if (!panel || typeof panel.querySelectorAll !== 'function') {
-    return deriveActionModel(attentionState);
+    return deriveActionModel(attentionState, sessionCount);
   }
 
-  const model = deriveActionModel(attentionState);
+  const model = deriveActionModel(attentionState, sessionCount);
   for (const button of panel.querySelectorAll('button[data-action]')) {
     const actionId = button.dataset?.action;
     const isVisible = actionId ? model.visibleActions.has(actionId) : true;
     const isPrimary = actionId === model.primaryActionId;
     const isTertiary = actionId === 'show_findings' && isVisible && !isPrimary;
     button.hidden = !isVisible;
+    if (actionId === 'resume_review' && button.textContent !== model.resumeLabel) {
+      button.textContent = model.resumeLabel;
+    }
     button.classList?.toggle('roger-panel-button--primary', isPrimary && isVisible);
     button.classList?.toggle(
       'roger-panel-button--secondary',
@@ -302,11 +340,16 @@ function setAttentionBadge(attentionState, freshnessLabel) {
 function requestStatusMirror(context) {
   const panel = typeof document !== 'undefined' ? document.getElementById(PANEL_ID) : null;
 
-  if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
-    lastAttentionState = null;
+  const applyMirroredModel = (attentionState, sessionCount) => {
+    lastAttentionState = attentionState;
+    lastSessionCount = normalizeSessionCount(sessionCount);
     if (panel) {
-      applyActionModel(panel, lastAttentionState);
+      applyActionModel(panel, lastAttentionState, lastSessionCount);
     }
+  };
+
+  if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
+    applyMirroredModel(null, null);
     clearAttentionBadge();
     setInfoMessage('Launch-only mode. Open Roger locally (`rr status`) for authoritative detail.');
     return;
@@ -323,40 +366,53 @@ function requestStatusMirror(context) {
     },
     (response) => {
       if (chrome.runtime.lastError) {
-        lastAttentionState = null;
-        if (panel) {
-          applyActionModel(panel, lastAttentionState);
-        }
+        applyMirroredModel(null, null);
         clearAttentionBadge();
         setInfoMessage('Launch-only mode. Open Roger locally (`rr status`) for authoritative detail.');
         return;
       }
 
       if (!response) {
-        lastAttentionState = null;
-        if (panel) {
-          applyActionModel(panel, lastAttentionState);
-        }
+        applyMirroredModel(null, null);
         clearAttentionBadge();
         setInfoMessage('No bounded status response. Open Roger locally (`rr status`) for authoritative detail.');
         return;
       }
 
       if (!response.ok) {
-        lastAttentionState = null;
-        if (panel) {
-          applyActionModel(panel, lastAttentionState);
-        }
+        applyMirroredModel(null, null);
         clearAttentionBadge();
         setInfoMessage(appendGuidance(response.message, response.guidance));
         return;
       }
 
+      // Durable local truth: no review session exists for this PR, so there
+      // is nothing to resume and the panel must not pretend otherwise.
+      if (response.mode === 'no_local_session') {
+        applyMirroredModel(null, 0);
+        clearAttentionBadge();
+        setInfoMessage('No Roger review exists for this PR yet — start one.');
+        return;
+      }
+
+      // Sessions exist but no fresh attention claim: surface the truthful
+      // inventory without bluffing findings, drafts, or attention state.
+      if (
+        response.mode === 'session_inventory' &&
+        normalizeSessionCount(response.session_count) !== null
+      ) {
+        applyMirroredModel(null, response.session_count);
+        clearAttentionBadge();
+        const count = normalizeSessionCount(response.session_count);
+        setInfoMessage(
+          `${count} local Roger review session${count === 1 ? '' : 's'} for this PR. ` +
+            'Open Roger locally (`rr status`) for authoritative detail.'
+        );
+        return;
+      }
+
       if (response.mode !== 'bounded_status' || !response.attention_state) {
-        lastAttentionState = null;
-        if (panel) {
-          applyActionModel(panel, lastAttentionState);
-        }
+        applyMirroredModel(null, null);
         clearAttentionBadge();
         setInfoMessage(
           appendGuidance(
@@ -367,10 +423,7 @@ function requestStatusMirror(context) {
         return;
       }
 
-      lastAttentionState = response.attention_state;
-      if (panel) {
-        applyActionModel(panel, lastAttentionState);
-      }
+      applyMirroredModel(response.attention_state, response.session_count);
       setAttentionBadge(response.attention_state, response.freshness_label || null);
       setInfoMessage(
         appendGuidance(response.message || 'Mirroring bounded Roger status.', response.guidance)
@@ -1224,7 +1277,7 @@ function createPanel(context, rootDocument) {
   }
 
   panel.appendChild(buttonRow);
-  applyActionModel(panel, lastAttentionState);
+  applyActionModel(panel, lastAttentionState, lastSessionCount);
 
   const status = rootDocument.createElement('p');
   status.id = STATUS_ID;
@@ -1285,7 +1338,7 @@ function ensurePanel(context, rootDocument) {
   }
 
   applyPanelModeStyles(panel, placement.mode);
-  applyActionModel(panel, lastAttentionState);
+  applyActionModel(panel, lastAttentionState, lastSessionCount);
 
   if (placement.mode === 'modal' && lastPanelMode !== 'modal') {
     const dialog = rootDocument.getElementById(MODAL_DIALOG_ID);
@@ -1306,6 +1359,9 @@ function ensurePanel(context, rootDocument) {
 let lastContextKey = null;
 let lastPanelMode = null;
 let lastAttentionState = null;
+// null means "unknown inventory" (launch-only/degraded), which keeps the
+// legacy both-buttons surface; 0 means durable truth that no session exists.
+let lastSessionCount = null;
 let refreshScheduled = false;
 
 function contextKey(context) {
@@ -1323,6 +1379,7 @@ function refreshPanelForCurrentPage(rootDocument) {
     lastContextKey = null;
     lastPanelMode = null;
     lastAttentionState = null;
+    lastSessionCount = null;
     return;
   }
 
@@ -1332,9 +1389,10 @@ function refreshPanelForCurrentPage(rootDocument) {
   if (lastContextKey !== nextKey) {
     lastContextKey = nextKey;
     lastAttentionState = null;
+    lastSessionCount = null;
     const panel = rootDocument.getElementById(PANEL_ID);
     if (panel) {
-      applyActionModel(panel, lastAttentionState);
+      applyActionModel(panel, lastAttentionState, lastSessionCount);
     }
     clearStatus();
     setInfoMessage(DEFAULT_INFO_MESSAGE);
@@ -1411,7 +1469,7 @@ function triggerLaunch(action, context, button) {
   if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
     lastAttentionState = null;
     if (panel) {
-      applyActionModel(panel, lastAttentionState);
+      applyActionModel(panel, lastAttentionState, lastSessionCount);
     }
     clearAttentionBadge();
     setInfoMessage('Bridge unavailable in browser context. Open Roger locally and run `rr` manually.');
@@ -1441,7 +1499,7 @@ function triggerLaunch(action, context, button) {
       if (chrome.runtime.lastError) {
         lastAttentionState = null;
         if (panel) {
-          applyActionModel(panel, lastAttentionState);
+          applyActionModel(panel, lastAttentionState, lastSessionCount);
         }
         clearAttentionBadge();
         const disconnectStatus = appendGuidance(
@@ -1456,7 +1514,7 @@ function triggerLaunch(action, context, button) {
       if (!response) {
         lastAttentionState = null;
         if (panel) {
-          applyActionModel(panel, lastAttentionState);
+          applyActionModel(panel, lastAttentionState, lastSessionCount);
         }
         clearAttentionBadge();
         const noResponseStatus = appendGuidance(
@@ -1471,7 +1529,7 @@ function triggerLaunch(action, context, button) {
       if (!response.ok) {
         lastAttentionState = null;
         if (panel) {
-          applyActionModel(panel, lastAttentionState);
+          applyActionModel(panel, lastAttentionState, lastSessionCount);
         }
         clearAttentionBadge();
         setInfoMessage(appendGuidance(response.message, response.guidance));
@@ -1482,7 +1540,7 @@ function triggerLaunch(action, context, button) {
       if (response.mode === 'custom_url_fallback') {
         lastAttentionState = null;
         if (panel) {
-          applyActionModel(panel, lastAttentionState);
+          applyActionModel(panel, lastAttentionState, lastSessionCount);
         }
         clearAttentionBadge();
         setInfoMessage('Launched via URL fallback. Open Roger locally for authoritative status.');
@@ -1492,8 +1550,13 @@ function triggerLaunch(action, context, button) {
 
       if (response.mode === 'native_messaging' && response.attention_state) {
         lastAttentionState = response.attention_state;
+        if (typeof response.session_id === 'string' && response.session_id.trim().length > 0) {
+          // A canonical session id is durable proof at least one session exists.
+          lastSessionCount =
+            typeof lastSessionCount === 'number' && lastSessionCount >= 1 ? lastSessionCount : 1;
+        }
         if (panel) {
-          applyActionModel(panel, lastAttentionState);
+          applyActionModel(panel, lastAttentionState, lastSessionCount);
         }
         setAttentionBadge(response.attention_state, response.freshness_label || null);
         const successStatus = formatLaunchSuccessStatus(response);
@@ -1504,7 +1567,7 @@ function triggerLaunch(action, context, button) {
 
       lastAttentionState = null;
       if (panel) {
-        applyActionModel(panel, lastAttentionState);
+        applyActionModel(panel, lastAttentionState, lastSessionCount);
       }
       const successStatus = formatLaunchSuccessStatus(response);
       setInfoMessage(successStatus);
@@ -1532,6 +1595,7 @@ if (typeof module !== 'undefined' && module.exports) {
     INLINE_ANCHOR_SELECTORS,
     MODAL_FALLBACK_STATUS,
     MODAL_OPEN_BUTTON_LABEL,
+    RESUME_ACTION_LABEL,
     applyActionModel,
     applyPanelModeStyles,
     createBrandChip,
@@ -1540,6 +1604,7 @@ if (typeof module !== 'undefined' && module.exports) {
     ensurePanel,
     findInlineAnchor,
     mountInto,
+    normalizeSessionCount,
     parsePullRequestContext,
     pickInlineAnchorSelector,
     readExtensionBuildLabel,

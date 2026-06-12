@@ -52,8 +52,10 @@ const POPUP_SCENARIOS = {
     buildLabel: SHARED_BUILD_LABEL,
     statusResponse: {
       ok: true,
+      mode: 'no_local_session',
       attention_state: null,
       finding_count: 0,
+      session_count: 0,
     },
     launchResponse: {
       ...SHARED_LAUNCH_RESPONSE,
@@ -67,6 +69,15 @@ const POPUP_SCENARIOS = {
       ok: true,
       attention_state: 'awaiting_outbound_approval',
       finding_count: 0,
+      session_count: 1,
+      sessions: [
+        {
+          session_id: 'session-155408-approval',
+          provider: 'claude',
+          attention_state: 'awaiting_outbound_approval',
+          updated_at: '2026-06-12T00:00:00Z',
+        },
+      ],
     },
     launchResponse: {
       ...SHARED_LAUNCH_RESPONSE,
@@ -83,6 +94,15 @@ const POPUP_SCENARIOS = {
       attention_state: 'findings_ready',
       finding_count: 3,
       has_findings: true,
+      session_count: 1,
+      sessions: [
+        {
+          session_id: 'session-155408-findings',
+          provider: 'claude',
+          attention_state: 'findings_ready',
+          updated_at: '2026-06-12T00:00:00Z',
+        },
+      ],
     },
     launchResponse: {
       ...SHARED_LAUNCH_RESPONSE,
@@ -103,10 +123,19 @@ const PANEL_SCENARIOS = {
     placement: 'rail',
     statusResponse: {
       ok: true,
-      mode: 'bounded_status',
-      attention_state: null,
-      message: 'Launch-only mode. Open Roger locally for authoritative detail.',
-      finding_count: 0,
+      mode: 'session_inventory',
+      session_count: 1,
+      sessions: [
+        {
+          session_id: 'session-155408-rail',
+          provider: 'claude',
+          attention_state: 'awaiting_user_input',
+          updated_at: '2026-06-12T00:00:00Z',
+        },
+      ],
+      message:
+        '1 local Roger review session(s) exist for this pull request; no fresh attention claim.',
+      guidance: 'Open Roger locally (`rr status`) for authoritative detail.',
     },
     launchResponse: {
       ...SHARED_LAUNCH_RESPONSE,
@@ -126,6 +155,15 @@ const PANEL_SCENARIOS = {
       freshness_label: 'fresh',
       message: 'Awaiting outbound approval in Roger.',
       finding_count: 0,
+      session_count: 1,
+      sessions: [
+        {
+          session_id: 'session-155408-approval',
+          provider: 'claude',
+          attention_state: 'awaiting_outbound_approval',
+          updated_at: '2026-06-12T00:00:00Z',
+        },
+      ],
     },
     launchResponse: {
       ...SHARED_LAUNCH_RESPONSE,
@@ -147,6 +185,15 @@ const PANEL_SCENARIOS = {
       message: 'Findings ready in Roger.',
       finding_count: 3,
       has_findings: true,
+      session_count: 1,
+      sessions: [
+        {
+          session_id: 'session-155408-findings',
+          provider: 'claude',
+          attention_state: 'findings_ready',
+          updated_at: '2026-06-12T00:00:00Z',
+        },
+      ],
     },
     launchResponse: {
       ...SHARED_LAUNCH_RESPONSE,
@@ -164,10 +211,10 @@ const PANEL_SCENARIOS = {
     placement: 'inline',
     statusResponse: {
       ok: true,
-      mode: 'bounded_status',
-      attention_state: null,
-      message: 'Launch-only mode. Open Roger locally for authoritative detail.',
-      finding_count: 0,
+      mode: 'no_local_session',
+      session_count: 0,
+      message: 'No local Roger review session exists for this pull request yet.',
+      guidance: 'Start a review from this panel, or run `rr review` locally.',
     },
     launchResponse: {
       ...SHARED_LAUNCH_RESPONSE,
