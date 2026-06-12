@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# macOS ships bash 3.2: the installers must stay free of bash-4-only
+# constructs. Static guard so linux CI (bash 5) still catches regressions.
+bashism_hits="$(grep -nE 'mapfile|readarray|\$\{[A-Za-z_0-9\[\]]+(,,|\^\^)[^}]*\}|declare -A' "$(dirname "${BASH_SOURCE[0]}")/rr-install.sh" | grep -v '^[0-9]*:#' || true)"
+if [ -n "${bashism_hits}" ]; then
+  echo "FAIL: rr-install.sh contains bash-4-only constructs (macOS /bin/bash is 3.2):" >&2
+  echo "${bashism_hits}" >&2
+  exit 1
+fi
+if [ -x /bin/bash ] && /bin/bash -c 'test "${BASH_VERSINFO[0]}" -le 3' 2>/dev/null; then
+  /bin/bash -n "$(dirname "${BASH_SOURCE[0]}")/rr-install.sh" || {
+    echo "FAIL: rr-install.sh does not parse under bash 3.2" >&2
+    exit 1
+  }
+fi
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 INSTALL_SCRIPT="${ROOT_DIR}/scripts/release/rr-install.sh"
 

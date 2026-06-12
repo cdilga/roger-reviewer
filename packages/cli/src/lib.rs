@@ -9060,6 +9060,7 @@ fn detect_update_target(target_override: Option<&String>) -> Result<String, Stri
         ("macos", "aarch64") => Ok("aarch64-apple-darwin".to_owned()),
         ("macos", "x86_64") => Ok("x86_64-apple-darwin".to_owned()),
         ("linux", "x86_64") => Ok("x86_64-unknown-linux-gnu".to_owned()),
+        ("linux", "aarch64") => Ok("aarch64-unknown-linux-gnu".to_owned()),
         ("windows", "x86_64") => Ok("x86_64-pc-windows-msvc".to_owned()),
         ("windows", "aarch64") => Ok("aarch64-pc-windows-msvc".to_owned()),
         (os, arch) => Err(format!(
@@ -9182,32 +9183,53 @@ fn extract_zip_archive(archive_path: &Path, destination: &Path) -> Result<(), St
         ),
     };
 
-    let output = ProcessCommand::new("tar")
-        .arg("-xf")
-        .arg(archive_path)
-        .arg("-C")
-        .arg(destination)
-        .output()
-        .map_err(|err| {
-            format!(
-                "{unzip_failure}; fallback tar extraction also failed to execute for {}: {err}",
-                archive_path.display()
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(format!(
-            "{unzip_failure}; fallback tar extraction failed for {} (status {}): {}",
-            archive_path.display(),
-            output.status,
-            if stderr.is_empty() {
-                "no stderr output".to_owned()
-            } else {
-                stderr
+    let tar_failure = {
+        let output = ProcessCommand::new("tar")
+            .arg("-xf")
+            .arg(archive_path)
+            .arg("-C")
+            .arg(destination)
+            .output();
+        match output {
+            Ok(output) if output.status.success() => return Ok(()),
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                format!(
+                    "fallback tar extraction failed (status {}): {}",
+                    output.status,
+                    if stderr.is_empty() {
+                        "no stderr output".to_owned()
+                    } else {
+                        stderr
+                    }
+                )
             }
-        ));
+            Err(err) => format!("fallback tar extraction failed to execute: {err}"),
+        }
+    };
+
+    // Minimal Linux hosts (e.g. containers) often ship python3 but neither
+    // unzip nor a zip-capable tar; python's stdlib zipfile is the last
+    // dependency-free fallback before failing closed with install guidance.
+    let python_result = ProcessCommand::new("python3")
+        .arg("-c")
+        .arg("import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])")
+        .arg(archive_path)
+        .arg(destination)
+        .output();
+    match python_result {
+        Ok(output) if output.status.success() => return Ok(()),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            Err(format!(
+                "{unzip_failure}; {tar_failure}; python3 zipfile fallback failed (status {}): {}; install unzip (or a zip-capable tar) and retry",
+                output.status, stderr
+            ))
+        }
+        Err(err) => Err(format!(
+            "{unzip_failure}; {tar_failure}; python3 zipfile fallback failed to execute: {err}; install unzip (or a zip-capable tar) and retry",
+        )),
     }
-    Ok(())
 }
 
 fn resolve_update_install_path(

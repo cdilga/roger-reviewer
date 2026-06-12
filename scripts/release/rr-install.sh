@@ -36,6 +36,12 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
+# macOS ships bash 3.2; keep this script free of bash-4-only constructs
+# (mapfile/readarray, ${var,,}, declare -A, ...).
+to_lower() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
 normalize_calver_version() {
   local value="$1"
   value="${value#v}"
@@ -391,12 +397,15 @@ fi
 install_metadata_values="$(
   read_install_metadata_fields "$install_metadata_path" "$target" "$version"
 )" || die "invalid install metadata bundle"
-mapfile -t install_metadata_lines <<<"$install_metadata_values"
+install_metadata_lines=()
+while IFS= read -r metadata_line; do
+  install_metadata_lines+=("$metadata_line")
+done <<<"$install_metadata_values"
 (( ${#install_metadata_lines[@]} == 6 )) || die "unexpected install metadata field shape"
 checksums_name="${install_metadata_lines[0]}"
 manifest_name="${install_metadata_lines[1]}"
 archive_name="${install_metadata_lines[2]}"
-archive_sha256="${install_metadata_lines[3],,}"
+archive_sha256="$(to_lower "${install_metadata_lines[3]}")"
 payload_dir="${install_metadata_lines[4]}"
 binary_name="${install_metadata_lines[5]}"
 
@@ -464,7 +473,7 @@ if ! curl -fsSL "$archive_url" -o "$archive_path"; then
 fi
 
 actual_sha256="$(sha256_file "$archive_path")"
-if [[ "${actual_sha256,,}" != "${archive_sha256}" ]]; then
+if [[ "$(to_lower "$actual_sha256")" != "${archive_sha256}" ]]; then
   die "archive checksum mismatch for ${archive_name}"
 fi
 
@@ -496,7 +505,7 @@ if extension_sha="$(read_checksums_entry "$checksums_path" "$extension_archive_n
   fi
   if [[ -n "$extension_archive_path" ]]; then
   actual_extension_sha="$(sha256_file "$extension_archive_path")"
-  if [[ "${actual_extension_sha,,}" != "${extension_sha,,}" ]]; then
+  if [[ "$(to_lower "$actual_extension_sha")" != "$(to_lower "$extension_sha")" ]]; then
     die "extension package checksum mismatch for ${extension_archive_name}"
   fi
   extension_package_dir="${store_root}/bridge/extension-package/${version}/roger-extension-unpacked"
