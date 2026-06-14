@@ -721,7 +721,11 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
             "--batch" => {
                 let value = argv
                     .get(i + 1)
-                    .ok_or_else(|| "--batch requires a value".to_owned())?;
+                    .filter(|candidate| !candidate.starts_with("--"))
+                    .ok_or_else(|| {
+                        "--batch requires a draft-batch id value, not a flag (did you forget the id?)"
+                            .to_owned()
+                    })?;
                 parsed.batch_id = Some(value.clone());
                 i += 2;
             }
@@ -14828,6 +14832,21 @@ mod tests {
             store_root,
             opencode_bin: DEFAULT_OPENCODE_BIN.to_owned(),
         }
+    }
+
+    #[test]
+    fn batch_flag_rejects_a_flag_shaped_value() {
+        // Regression: `rr approve --pr 2 --batch --robot` used to swallow
+        // --robot as the batch id and silently drop out of robot mode.
+        let argv: Vec<String> = ["approve", "--pr", "2", "--batch", "--robot"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let err = parse_args(&argv).expect_err("flag-shaped --batch value must be rejected");
+        assert!(
+            err.contains("--batch requires"),
+            "unexpected parse error: {err}"
+        );
     }
 
     #[test]
