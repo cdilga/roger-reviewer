@@ -7,7 +7,11 @@ use std::path::PathBuf;
 use tempfile::tempdir;
 
 const LIVE_PROVIDERS: &[&str] = &["opencode", "codex", "gemini", "claude"];
-const PLANNED_NOT_LIVE_PROVIDERS: &[&str] = &["copilot"];
+// Copilot is feature-gated, not "planned but not live": with the gate off it is
+// reported via feature_gated_disabled_providers so every surface agrees with the
+// doctor classification. No genuinely-planned review provider remains in 0.1.x.
+const PLANNED_NOT_LIVE_PROVIDERS: &[&str] = &[];
+const FEATURE_GATED_DISABLED_PROVIDERS: &[&str] = &["copilot"];
 const NOT_SUPPORTED_PROVIDERS: &[&str] = &["pi-agent"];
 const OPENCODE_NOTE: &str = "first-class tier-b continuity path with locator reopen and rr return";
 const BOUNDED_PROVIDER_NOTE: &str =
@@ -122,6 +126,11 @@ fn provider_support_truth_guard_matches_live_cli_help_and_docs() {
     assert_eq!(
         blocked_payload["data"]["planned_not_live_providers"],
         json!(PLANNED_NOT_LIVE_PROVIDERS)
+    );
+    assert_eq!(
+        blocked_payload["data"]["feature_gated_disabled_providers"],
+        json!(FEATURE_GATED_DISABLED_PROVIDERS),
+        "gate-off copilot must surface as feature-gated-disabled, not planned-not-live"
     );
     assert_eq!(
         blocked_payload["data"]["not_supported_providers"],

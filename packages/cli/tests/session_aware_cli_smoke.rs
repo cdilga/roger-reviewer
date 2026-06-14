@@ -1543,7 +1543,7 @@ fn review_blocks_truthfully_for_unsupported_provider() {
     );
     assert_eq!(
         payload["data"]["planned_not_live_providers"],
-        serde_json::json!(["copilot"])
+        serde_json::json!([] as [&str; 0])
     );
     assert_eq!(
         payload["data"]["not_supported_providers"],
@@ -3700,7 +3700,7 @@ fn robot_docs_surfaces_schema_inventory_and_blocks_unknown_topics() {
     );
     assert_eq!(
         review_dry_run["planned_not_live_providers"],
-        serde_json::json!(["copilot"])
+        serde_json::json!([] as [&str; 0])
     );
     assert_eq!(
         review_dry_run["not_supported_providers"],
@@ -3720,7 +3720,7 @@ fn robot_docs_surfaces_schema_inventory_and_blocks_unknown_topics() {
         .expect("provider support guide item");
     assert_eq!(
         provider_support["planned_not_live_providers"],
-        serde_json::json!(["copilot"])
+        serde_json::json!([] as [&str; 0])
     );
     assert_eq!(
         provider_support["not_supported_providers"],
@@ -3824,7 +3824,7 @@ fn provider_support_claim_guard_keeps_help_robot_and_docs_in_lockstep() {
     );
     assert_eq!(
         blocked_payload["data"]["planned_not_live_providers"],
-        serde_json::json!(["copilot"])
+        serde_json::json!([] as [&str; 0])
     );
     assert_eq!(
         blocked_payload["data"]["not_supported_providers"],

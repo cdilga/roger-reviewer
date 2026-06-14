@@ -983,6 +983,18 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         return Err("--query-mode is only supported by rr search".to_owned());
     }
 
+    // rr search is corpus-scoped, not session-scoped: it never binds a review
+    // session or PR target. Accepting --session/--pr silently (inert) would
+    // break the deliberate per-command flag-gating discipline and mislead the
+    // operator, so reject them as command-irrelevant for rr search.
+    if parsed.command == CommandKind::Search
+        && (parsed.session_id.is_some() || parsed.pr.is_some())
+    {
+        return Err(
+            "--session/--pr are not valid for rr search; rr search is corpus-scoped and does not bind a review session or PR target".to_owned(),
+        );
+    }
+
     if !matches!(parsed.command, CommandKind::Bridge)
         && (parsed.bridge_extension_id.is_some()
             || parsed.bridge_binary_path.is_some()
@@ -2834,16 +2846,20 @@ fn handle_doctor(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let baseline = match resolved.routine_surface_baseline(Some(parsed.provider.as_str())) {
         Ok(baseline) => baseline,
         Err(err) => {
+            // Only recommend providers that rr doctor actually services. pi-agent
+            // resolves but is not_supported (supports.doctor=false), so following
+            // a recommendation to rerun doctor against it would immediately fail
+            // closed; do not list it as a doctor-serviceable target.
             return blocked_response(
                 format!("rr doctor cannot resolve provider '{}': {}", parsed.provider, err.message),
                 vec![
-                    "rerun rr doctor with one of: opencode, codex, gemini, claude, copilot, pi-agent"
-                        .to_owned(),
+                    "rerun rr doctor with one of: opencode, codex, gemini, claude, copilot".to_owned(),
                 ],
                 json!({
                     "reason_code": err.reason_code,
                     "provider": parsed.provider,
-                    "supported_providers": ["opencode", "codex", "gemini", "claude", "copilot", "pi-agent"],
+                    "supported_providers": ["opencode", "codex", "gemini", "claude", "copilot"],
+                    "non_live_providers": ["pi-agent"],
                 }),
             );
         }
@@ -3077,7 +3093,31 @@ fn handle_doctor(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         );
     }
 
-    if provider_status == "planned_not_live" {
+    if provider_status == COPILOT_FEATURE_GATED_DISABLED_STATUS {
+        // Copilot is a documented feature-gated tier-b provider that is
+        // disabled-but-enableable. Do not steer the operator to a different
+        // provider; name the documented enable step instead.
+        push_check(
+            "provider_admission_state",
+            "provider is admitted as a live review lane",
+            "blocked",
+            Some("provider_feature_gate_disabled"),
+            json!({
+                "provider": provider.provider,
+                "status": provider_status,
+                "support_tier": provider_support_tier,
+                "policy_profile_id": provider.policy_profile.id,
+                "feature_gate_env": session_copilot::ENV_COPILOT_ADMISSION_GATE,
+            }),
+        );
+        repair_actions.insert(
+            format!(
+                "enable the documented Copilot feature gate with {}=1 (feature-gated bounded tier-b support), then rerun rr doctor --provider copilot",
+                session_copilot::ENV_COPILOT_ADMISSION_GATE
+            ),
+            (),
+        );
+    } else if provider_status == "planned_not_live" {
         push_check(
             "provider_admission_state",
             "provider is admitted as a live review lane",
@@ -3310,20 +3350,45 @@ fn handle_doctor(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         }
     }
 
-    push_check(
-        "provider_auth_preflight",
-        "provider auth is preflight-verified",
-        "deferred",
-        Some("auth_not_preflight_verified"),
-        json!({
-            "provider": provider.provider,
-            "deferred_to": "first_launch",
-            "guidance": format!(
-                "run rr review --provider {} --pr <number> to verify auth/path fail-closed behavior on first launch",
-                provider.provider
-            ),
-        }),
-    );
+    // Auth preflight guidance must honor admission state. `rr review` only
+    // accepts live review providers; for a provider Roger does not admit as a
+    // live review lane (e.g. pi-agent / not_supported), telling the operator to
+    // "run rr review --provider <p>" is dishonest boilerplate that fails closed.
+    let provider_is_live_review_lane = provider_capability["supports"]["review_start"]
+        .as_bool()
+        .unwrap_or(false);
+    if provider_is_live_review_lane {
+        push_check(
+            "provider_auth_preflight",
+            "provider auth is preflight-verified",
+            "deferred",
+            Some("auth_not_preflight_verified"),
+            json!({
+                "provider": provider.provider,
+                "deferred_to": "first_launch",
+                "guidance": format!(
+                    "run rr review --provider {} --pr <number> to verify auth/path fail-closed behavior on first launch",
+                    provider.provider
+                ),
+            }),
+        );
+    } else {
+        push_check(
+            "provider_auth_preflight",
+            "provider auth is preflight-verified",
+            "deferred",
+            Some("auth_preflight_not_a_live_review_provider"),
+            json!({
+                "provider": provider.provider,
+                "status": provider_status,
+                "deferred_to": "first_launch",
+                "guidance": format!(
+                    "{} is not a live rr review provider in this slice, so there is no rr review auth path to preflight; auth verification is not applicable until the provider is admitted as a live review lane",
+                    provider.provider
+                ),
+            }),
+        );
+    }
 
     let blocked_count = checks
         .iter()
@@ -4912,10 +4977,12 @@ fn handle_extension_doctor(
 
     let mut manifest_allows_origin = false;
     let mut host_binary_exists = false;
+    let mut host_binary_path: Option<String> = None;
     if manifest_exists {
         if let Ok(text) = fs::read_to_string(&manifest_path) {
             if let Ok(manifest) = serde_json::from_str::<NativeHostManifest>(&text) {
                 host_binary_exists = Path::new(&manifest.path).exists();
+                host_binary_path = Some(manifest.path.clone());
                 if let Some(extension_id) = extension_id.as_ref() {
                     let expected_origin = format!("chrome-extension://{extension_id}/");
                     manifest_allows_origin = manifest
@@ -4929,7 +4996,8 @@ fn handle_extension_doctor(
     checks.push(json!({
         "name": "native_host_binary_present",
         "ok": host_binary_exists,
-        "detail": manifest_path.to_string_lossy().to_string(),
+        "detail": host_binary_path
+            .unwrap_or_else(|| manifest_path.to_string_lossy().to_string()),
     }));
     checks.push(json!({
         "name": "native_host_origin_matches_extension_id",
@@ -5622,6 +5690,79 @@ const COPILOT_FEATURE_GATED_SURFACE_CLASS: &str = "review_bounded";
 const COPILOT_FEATURE_GATED_STATUS_REASON: &str =
     "feature_gate_enabled_tier_b_reopen_return_with_reseed_fallback";
 const COPILOT_FEATURE_GATED_NOTES: &str = "feature-gated bounded tier-b continuity path: verified start, locator/session-id reopen, rr return, and honest ResumeBundle reseed fallback; no default public live claim";
+
+// Gate-OFF projection: copilot is a documented feature-gated tier-b provider
+// that is disabled-but-enableable, NOT a genuinely-planned tier-a provider.
+// Roger must not borrow the planned_not_live/tier_a_planned classification for
+// it (that is reserved for providers with no live path at all); instead it is
+// classified as feature-gated tier-b held behind the documented env gate.
+const COPILOT_FEATURE_GATED_DISABLED_STATUS: &str = "feature_gated_disabled";
+const COPILOT_FEATURE_GATED_DISABLED_STATUS_REASON: &str =
+    "feature_gate_disabled_enable_rr_enable_copilot_provider";
+const COPILOT_FEATURE_GATED_DISABLED_NOTES: &str = "feature-gated bounded tier-b continuity path, currently disabled; enable with RR_ENABLE_COPILOT_PROVIDER=1 for verified start, locator/session-id reopen, rr return, and honest ResumeBundle reseed fallback";
+
+/// Capability projection for copilot when the feature gate is OFF.
+///
+/// Copilot is documented (rr --help, README.md, AGENTS.md) as feature-gated
+/// bounded tier-b support enabled with `RR_ENABLE_COPILOT_PROVIDER=1`. With the
+/// gate off it is disabled-but-enableable, so it must be classified as
+/// feature-gated tier-b (not the `planned_not_live`/`tier_a_planned`/
+/// `admission_pending` classification reserved for genuinely-planned providers).
+/// It still does not claim a live surface: `supports.doctor` stays true (doctor
+/// can inspect prerequisites) but the live-launch capabilities stay false until
+/// the gate is enabled.
+fn copilot_feature_gated_disabled_provider_capability(runtime: &CliRuntime) -> Value {
+    let mut capability =
+        match resolved_routine_surface_baseline(runtime, session_copilot::PROVIDER_ID) {
+            Ok(baseline) => provider_capability_projection(
+                &baseline.provider,
+                Some(COPILOT_FEATURE_GATED_DISABLED_STATUS_REASON),
+            ),
+            Err(_) => provider_capability(session_copilot::PROVIDER_ID),
+        };
+
+    if let Some(provider_obj) = capability.as_object_mut() {
+        provider_obj.insert(
+            "status".to_owned(),
+            Value::String(COPILOT_FEATURE_GATED_DISABLED_STATUS.to_owned()),
+        );
+        provider_obj.insert(
+            "tier".to_owned(),
+            Value::String(COPILOT_FEATURE_GATED_TIER.to_owned()),
+        );
+        provider_obj.insert(
+            "support_tier".to_owned(),
+            Value::String(COPILOT_FEATURE_GATED_TIER.to_owned()),
+        );
+        provider_obj.insert(
+            "surface_class".to_owned(),
+            Value::String(COPILOT_FEATURE_GATED_SURFACE_CLASS.to_owned()),
+        );
+        provider_obj.insert(
+            "status_reason".to_owned(),
+            Value::String(COPILOT_FEATURE_GATED_DISABLED_STATUS_REASON.to_owned()),
+        );
+        provider_obj.insert(
+            "notes".to_owned(),
+            Value::String(COPILOT_FEATURE_GATED_DISABLED_NOTES.to_owned()),
+        );
+        provider_obj.insert(
+            "supports".to_owned(),
+            json!({
+                "review_start": false,
+                "resume_reseed": false,
+                "resume_reopen": false,
+                "return": false,
+                "status": true,
+                "findings": true,
+                "sessions": true,
+                "doctor": true,
+            }),
+        );
+    }
+
+    capability
+}
 
 #[derive(Debug)]
 struct CopilotLaunchError {
@@ -6457,7 +6598,16 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             "use --provider gemini for bounded tier-a start/reseed support".to_owned(),
             "use --provider claude for bounded tier-a start/reseed support".to_owned(),
         ];
-        if copilot_feature_gated_launch_enabled(session_copilot::PROVIDER_ID) {
+        if parsed.provider == session_copilot::PROVIDER_ID
+            && !copilot_feature_gated_launch_enabled(session_copilot::PROVIDER_ID)
+        {
+            // Copilot is feature-gated, not unsupported: tell the operator how to
+            // turn it on rather than steering them to a different provider.
+            repair_actions.push(
+                "enable RR_ENABLE_COPILOT_PROVIDER=1 to use Copilot's feature-gated bounded tier-b review path"
+                    .to_owned(),
+            );
+        } else if copilot_feature_gated_launch_enabled(session_copilot::PROVIDER_ID) {
             repair_actions.push(
                 "use --provider copilot for feature-gated bounded tier-b continuity support"
                     .to_owned(),
@@ -6473,6 +6623,8 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 "provider": parsed.provider,
                 "supported_providers": supported_providers,
                 "planned_not_live_providers": planned_not_live_providers,
+                "feature_gated_disabled_providers":
+                    runtime_feature_gated_disabled_review_providers(runtime),
                 "not_supported_providers": NOT_LIVE_REVIEW_PROVIDERS,
                 "live_review_provider_support": runtime_review_provider_support_matrix(runtime),
             }),
@@ -7247,7 +7399,9 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             "resume is currently available for opencode, codex, gemini, and claude sessions"
                 .to_owned(),
         ];
-        if copilot_feature_gated_launch_enabled(session_copilot::PROVIDER_ID) {
+        if session.provider == session_copilot::PROVIDER_ID
+            && !copilot_feature_gated_launch_enabled(session_copilot::PROVIDER_ID)
+        {
             repair_actions.push(
                 "enable RR_ENABLE_COPILOT_PROVIDER=1 to resume Copilot sessions through the feature-gated tier-b continuity path"
                     .to_owned(),
@@ -7264,6 +7418,8 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 "provider": session.provider,
                 "supported_providers": supported_providers,
                 "planned_not_live_providers": planned_not_live_providers,
+                "feature_gated_disabled_providers":
+                    runtime_feature_gated_disabled_review_providers(runtime),
                 "not_supported_providers": NOT_LIVE_REVIEW_PROVIDERS,
                 "live_review_provider_support": runtime_review_provider_support_matrix(runtime),
             }),
@@ -8678,7 +8834,7 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                     vec!["pass --query \"<search text>\"".to_owned()]
                 }
                 SearchPlanError::QueryPlanning(SearchQueryPlanError::UnsupportedQueryMode { .. }) => vec![
-                    "pass --query-mode auto, exact_lookup, recall, related_context, candidate_audit, or promotion_review".to_owned(),
+                    "pass --query-mode auto, exact_lookup, recall, related_context, or candidate_audit".to_owned(),
                 ],
                 SearchPlanError::QueryPlanning(
                     SearchQueryPlanError::RelatedContextRequiresAnchors,
@@ -10506,6 +10662,7 @@ fn handle_robot_docs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRespon
                     "summary": runtime_review_provider_support_summary(runtime),
                     "live_review_providers": runtime_review_provider_support_matrix(runtime),
                     "planned_not_live_providers": runtime_planned_not_live_review_providers(runtime),
+                    "feature_gated_disabled_providers": runtime_feature_gated_disabled_review_providers(runtime),
                     "not_supported_providers": NOT_LIVE_REVIEW_PROVIDERS,
                 }),
                 json!({"command": "rr update --channel stable --dry-run --robot", "purpose": "update metadata preflight (non-mutating)"}),
@@ -10633,9 +10790,11 @@ fn handle_robot_docs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRespon
                     "optional_formats": [],
                     "supported_providers": runtime_supported_review_providers(runtime),
                     "planned_not_live_providers": runtime_planned_not_live_review_providers(runtime),
+                    "feature_gated_disabled_providers": runtime_feature_gated_disabled_review_providers(runtime),
                     "not_supported_providers": NOT_LIVE_REVIEW_PROVIDERS,
                 }),
                 json!({"command": "rr resume --dry-run", "required_formats": ["json"], "optional_formats": []}),
+                json!({"command": "rr return", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr bridge export-contracts", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr bridge verify-contracts", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr bridge pack-extension", "required_formats": ["json"], "optional_formats": []}),
@@ -13208,7 +13367,13 @@ fn render_output(parsed: &ParsedArgs, mut response: CommandResponse) -> CliRunRe
                     entry["attention_state"].as_str().unwrap_or("?"),
                 ));
             }
-            stdout.push_str("Re-run with --session <id> to pick one.\n");
+            // "Pick one" only makes sense for a genuine multi-candidate
+            // picker. A single blocked candidate cannot be resolved by
+            // selection, so the primary message (which surfaces the concrete
+            // blocking reason) and repair actions stand on their own.
+            if candidates.len() >= 2 {
+                stdout.push_str("Re-run with --session <id> to pick one.\n");
+            }
         } else if candidates.is_some() {
             // Zero candidates: the message and repair actions already say
             // everything a human needs; no JSON blob.
@@ -13748,6 +13913,12 @@ fn runtime_provider_capability(runtime: &CliRuntime, provider: &str) -> Value {
         return copilot_projected_provider_capability(runtime);
     }
 
+    // Copilot with the gate OFF is a documented feature-gated tier-b provider
+    // that is disabled-but-enableable, not a genuinely-planned tier-a provider.
+    if provider == session_copilot::PROVIDER_ID {
+        return copilot_feature_gated_disabled_provider_capability(runtime);
+    }
+
     match resolved_routine_surface_baseline(runtime, provider) {
         Ok(baseline) => {
             provider_capability_projection(&baseline.provider, baseline.status_reason.as_deref())
@@ -13785,6 +13956,16 @@ fn runtime_supported_review_providers(_runtime: &CliRuntime) -> Vec<&'static str
 }
 
 fn runtime_planned_not_live_review_providers(_runtime: &CliRuntime) -> Vec<&'static str> {
+    // Copilot is feature-gated, not "planned but not live": with the gate off it
+    // is reported through runtime_feature_gated_disabled_review_providers so every
+    // surface agrees with the doctor classification. No genuinely-planned review
+    // provider remains in 0.1.x, so this list is empty.
+    Vec::new()
+}
+
+fn runtime_feature_gated_disabled_review_providers(
+    _runtime: &CliRuntime,
+) -> Vec<&'static str> {
     if copilot_feature_gated_launch_enabled(session_copilot::PROVIDER_ID) {
         Vec::new()
     } else {
@@ -13797,7 +13978,7 @@ fn runtime_review_provider_support_summary(_runtime: &CliRuntime) -> String {
         "OpenCode is the only default live tier-b continuity path in 0.1.0. Codex, Gemini, and Claude Code are exposed as bounded tier-a start/reseed/raw-capture providers only. GitHub Copilot CLI is feature-gated as a bounded tier-b continuity path with verified start, locator/session-id reopen, rr return, and ResumeBundle reseed fallback, but Roger still withholds a default public live claim for Copilot. Pi-Agent remains out of scope for 0.1.0."
             .to_owned()
     } else {
-        "OpenCode is the only live tier-b continuity path in 0.1.0. Codex, Gemini, and Claude Code are exposed as bounded tier-a start/reseed/raw-capture providers only. Copilot is planned but not yet live, and Pi-Agent remains out of scope for 0.1.0."
+        "OpenCode is the only live tier-b continuity path in 0.1.0. Codex, Gemini, and Claude Code are exposed as bounded tier-a start/reseed/raw-capture providers only. Copilot is feature-gated and currently disabled; enable RR_ENABLE_COPILOT_PROVIDER=1 for its bounded tier-b continuity path. Pi-Agent remains out of scope for 0.1.0."
             .to_owned()
     }
 }
@@ -13917,32 +14098,76 @@ fn return_path_label(path: OpenCodeReturnPath) -> &'static str {
     }
 }
 
-fn blocked_picker_response(reason: String, candidates: Vec<SessionFinderEntry>) -> CommandResponse {
-    let no_match = candidates.is_empty() || reason.contains("no matching repo-local session found");
-    let warnings = if no_match {
-        vec!["no matching session found for the requested target".to_owned()]
+/// How a picker block should be described to the operator.
+///
+/// The session finder fails closed for three distinct reasons, and each one
+/// warrants a different, honest message. Conflating the last two produces a
+/// dishonest "ambiguous; pick one with --session" claim for a unique match
+/// that is actually blocked for a concrete reason (e.g. a stale launch
+/// binding), with a repair the operator has already satisfied.
+enum PickerBlockKind {
+    /// No session matches the requested target at all.
+    NoMatch,
+    /// Two or more sessions match and explicit selection genuinely resolves it.
+    Ambiguous,
+    /// Exactly one (or otherwise non-ambiguous) match exists, but it is blocked
+    /// for a specific reason that `--session` selection cannot resolve.
+    SingleBlocked,
+}
+
+fn classify_picker_block(reason: &str, candidates: &[SessionFinderEntry]) -> PickerBlockKind {
+    if candidates.is_empty() || reason.contains("no matching repo-local session found") {
+        PickerBlockKind::NoMatch
+    } else if reason.contains("ambiguous repo-local session match")
+        || reason.contains("multiple repo-local sessions")
+    {
+        PickerBlockKind::Ambiguous
     } else {
-        vec!["session inference is ambiguous; explicit selection is required".to_owned()]
+        PickerBlockKind::SingleBlocked
+    }
+}
+
+fn blocked_picker_response(reason: String, candidates: Vec<SessionFinderEntry>) -> CommandResponse {
+    let kind = classify_picker_block(&reason, &candidates);
+    let warnings = match kind {
+        PickerBlockKind::NoMatch => {
+            vec!["no matching session found for the requested target".to_owned()]
+        }
+        PickerBlockKind::Ambiguous => {
+            vec!["session inference is ambiguous; explicit selection is required".to_owned()]
+        }
+        PickerBlockKind::SingleBlocked => {
+            vec!["the matching review session is blocked and cannot be auto-selected; see reason".to_owned()]
+        }
     };
-    let repair_actions = if no_match {
-        vec![
+    let repair_actions = match kind {
+        PickerBlockKind::NoMatch => vec![
             "run rr review --pr <number> to create a new session".to_owned(),
             "run rr sessions --robot to inspect available sessions".to_owned(),
-        ]
-    } else {
-        vec!["re-run with --session <id> or pass --pr <number> for a unique match".to_owned()]
+        ],
+        PickerBlockKind::Ambiguous => {
+            vec!["re-run with --session <id> or pass --pr <number> for a unique match".to_owned()]
+        }
+        PickerBlockKind::SingleBlocked => vec![
+            "run rr sessions --robot to inspect the blocked session".to_owned(),
+            "resolve the condition shown in reason (for a stale launch binding, run rr review --pr <number> from the repository worktree root to establish a fresh session binding)".to_owned(),
+        ],
     };
 
-    // The message names the actual situation: a picker only exists when
-    // there are candidates to pick from; with zero matches the truthful
-    // message is that no review exists yet.
-    let message = if no_match {
-        "no review session exists for this target yet".to_owned()
-    } else {
-        format!(
+    // The message names the actual situation: a picker only exists when there
+    // are multiple candidates to pick from; with zero matches the truthful
+    // message is that no review exists yet, and with a single blocked match the
+    // truthful message surfaces the concrete blocking reason rather than
+    // claiming a non-existent ambiguity.
+    let message = match kind {
+        PickerBlockKind::NoMatch => "no review session exists for this target yet".to_owned(),
+        PickerBlockKind::Ambiguous => format!(
             "multiple review sessions match; pick one with --session <id> ({} candidates)",
             candidates.len()
-        )
+        ),
+        PickerBlockKind::SingleBlocked => {
+            format!("the matching review session is blocked: {reason}")
+        }
     };
     CommandResponse {
         outcome: OutcomeKind::Blocked,
@@ -14483,6 +14708,228 @@ mod tests {
 
     const TEST_EXTENSION_MANIFEST_KEY: &str = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2FDtjF8sDdzic557+0PBHZDHc0NoxOFpmh3YFtXyvMxDRqF4TeujY6y4SC5JjqUjnpbUYjMm7lNJFvd2kiauFYFBcAyJLeGGKUSzfgrr6LhpP8SRvd7+lZO6KsjsIkrJxOr8aL8uMmkwAIaC7owRO7CRjKgqaRcEublt6Xk3WfW/UKSxVry286T2DKlH+2zhz5xbnpldnWgnPEo1tdO/7Z1RfYYWZCZ47bFudhBc5Q54diUeIWtYgeSmsPmWu2gxHcaji2gIGRwtgsoTR+Fsnm1wB0XX7PsmR8iF17YgJIXeit464GQbzLt6o5tYFFXxzuU4Mrbyla0Dw76shE4eEQIDAQAB";
     const TEST_EXTENSION_MANIFEST_ID: &str = "djbjigobohmlljboggckmhhnoeldinlp";
+
+    fn finder_entry(pull_request_number: u64) -> SessionFinderEntry {
+        SessionFinderEntry {
+            session_id: format!("session-{pull_request_number}"),
+            repository: "owner/repo".to_owned(),
+            pull_request_number,
+            attention_state: "findings_ready".to_owned(),
+            provider: "opencode".to_owned(),
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn picker_block_for_single_stale_binding_is_not_called_ambiguous() {
+        // Regression: a unique match blocked by a stale launch binding used to
+        // be mislabeled "session inference is ambiguous; ... ({} candidates)"
+        // with a self-referential "--session <id>" repair the caller had
+        // already satisfied. The truthful block surfaces the concrete reason.
+        let reason = "launch binding is stale: binding cwd is outside current worktree root".to_owned();
+        assert!(matches!(
+            classify_picker_block(&reason, &[finder_entry(2)]),
+            PickerBlockKind::SingleBlocked
+        ));
+
+        let response = blocked_picker_response(reason.clone(), vec![finder_entry(2)]);
+        assert_eq!(response.outcome, OutcomeKind::Blocked);
+        let blob = serde_json::to_string(&response.warnings).unwrap()
+            + &serde_json::to_string(&response.repair_actions).unwrap()
+            + &response.message;
+        assert!(
+            !blob.contains("ambiguous") && !blob.contains("multiple review sessions"),
+            "single blocked session must not claim ambiguity: {blob}"
+        );
+        assert!(
+            response.message.contains("launch binding is stale"),
+            "message must surface the concrete blocking reason: {}",
+            response.message
+        );
+    }
+
+    #[test]
+    fn picker_block_classification_covers_no_match_and_genuine_ambiguity() {
+        assert!(matches!(
+            classify_picker_block("no matching repo-local session found for pull request 9", &[]),
+            PickerBlockKind::NoMatch
+        ));
+        let multi = vec![finder_entry(2), finder_entry(6)];
+        assert!(matches!(
+            classify_picker_block("multiple repo-local sessions found; open session picker", &multi),
+            PickerBlockKind::Ambiguous
+        ));
+        let response =
+            blocked_picker_response("ambiguous repo-local session match; picker required".to_owned(), multi);
+        assert!(
+            response.message.contains("multiple review sessions match"),
+            "genuine ambiguity must still offer the picker: {}",
+            response.message
+        );
+    }
+
+    fn test_runtime(cwd: PathBuf, store_root: PathBuf) -> CliRuntime {
+        CliRuntime {
+            cwd,
+            store_root,
+            opencode_bin: DEFAULT_OPENCODE_BIN.to_owned(),
+        }
+    }
+
+    #[test]
+    fn copilot_is_never_classified_as_a_planned_not_live_review_provider() {
+        // Regression for the cross-surface honesty fix: copilot is feature-gated,
+        // not "planned but not live". The planned list must stay empty so
+        // rr review / rr resume / robot-docs never contradict the doctor
+        // classification (which reports copilot as feature_gated_disabled).
+        let runtime = test_runtime(PathBuf::from("."), PathBuf::from("."));
+        assert!(
+            runtime_planned_not_live_review_providers(&runtime).is_empty(),
+            "no review provider is genuinely planned-not-live in 0.1.x; copilot is feature-gated"
+        );
+        // The feature-gated-disabled list only ever names copilot (or nothing
+        // once the gate is enabled), regardless of the current gate state.
+        let gated = runtime_feature_gated_disabled_review_providers(&runtime);
+        assert!(
+            gated.iter().all(|p| *p == session_copilot::PROVIDER_ID),
+            "feature-gated-disabled list must only ever contain copilot: {gated:?}"
+        );
+    }
+
+    #[test]
+    fn copilot_gate_off_capability_is_feature_gated_tier_b_not_planned() {
+        // Regression (rr-doctor-copilot-gate-honesty): with the feature gate OFF
+        // copilot must be classified as feature-gated, disabled-but-enableable
+        // tier-b support, NOT the planned_not_live/tier_a_planned/admission_pending
+        // classification reserved for genuinely-planned providers.
+        let tmp = tempdir().expect("tempdir");
+        let runtime = test_runtime(tmp.path().to_path_buf(), tmp.path().join("store"));
+        let capability = copilot_feature_gated_disabled_provider_capability(&runtime);
+
+        assert_eq!(capability["status"], "feature_gated_disabled");
+        assert_eq!(capability["tier"], "tier_b_feature_gated");
+        assert_eq!(capability["support_tier"], "tier_b_feature_gated");
+        assert_eq!(capability["surface_class"], "review_bounded");
+        assert_ne!(capability["status"], "planned_not_live");
+        assert_ne!(capability["tier"], "tier_a_planned");
+        assert_ne!(capability["surface_class"], "admission_pending");
+
+        // It is enableable but not yet live: doctor may inspect prerequisites,
+        // but the live-launch capabilities stay false until the gate is enabled.
+        assert_eq!(capability["supports"]["doctor"], true);
+        assert_eq!(capability["supports"]["review_start"], false);
+        assert_eq!(capability["supports"]["resume_reopen"], false);
+
+        // The honest classification names the documented enable step.
+        let notes = capability["notes"].as_str().unwrap_or_default();
+        let status_reason = capability["status_reason"].as_str().unwrap_or_default();
+        assert!(
+            notes.contains("RR_ENABLE_COPILOT_PROVIDER"),
+            "notes must name the documented enable env var: {notes}"
+        );
+        assert!(
+            status_reason.contains("rr_enable_copilot_provider"),
+            "status_reason must reference the documented gate: {status_reason}"
+        );
+    }
+
+    #[test]
+    fn doctor_unknown_provider_does_not_recommend_pi_agent() {
+        // Regression (rr-doctor-piagent-recommendation-honesty, leg B): the
+        // unknown-provider recommendation must not list pi-agent, which would
+        // immediately fail closed (not_supported, supports.doctor=false) if
+        // followed.
+        let tmp = tempdir().expect("tempdir");
+        let runtime = test_runtime(tmp.path().to_path_buf(), tmp.path().join("store"));
+        let parsed = parse_args(&[
+            "doctor".to_owned(),
+            "--provider".to_owned(),
+            "bogusxyz".to_owned(),
+            "--robot".to_owned(),
+        ])
+        .expect("parse doctor bogusxyz");
+        let response = handle_doctor(&parsed, &runtime);
+
+        assert_eq!(response.outcome, OutcomeKind::Blocked);
+        let supported = response.data["supported_providers"]
+            .as_array()
+            .expect("supported_providers array");
+        assert!(
+            !supported.iter().any(|p| p == "pi-agent"),
+            "unknown-provider recommendation must not list pi-agent: {supported:?}"
+        );
+        let non_live = response.data["non_live_providers"]
+            .as_array()
+            .expect("non_live_providers array");
+        assert!(
+            non_live.iter().any(|p| p == "pi-agent"),
+            "pi-agent must be surfaced as a non-live provider: {non_live:?}"
+        );
+        let repair_blob = response.repair_actions.join(" ");
+        assert!(
+            !repair_blob.contains("pi-agent"),
+            "repair action must not steer the operator to pi-agent: {repair_blob}"
+        );
+    }
+
+    #[test]
+    fn pi_agent_capability_is_not_a_live_review_lane() {
+        // Regression (rr-doctor-piagent-recommendation-honesty, leg A): the
+        // auth-preflight guidance keys off supports.review_start; pi-agent is
+        // not_supported and not a live review provider, so the "run rr review
+        // --provider <p>" guidance must be suppressed for it.
+        let tmp = tempdir().expect("tempdir");
+        let runtime = test_runtime(tmp.path().to_path_buf(), tmp.path().join("store"));
+        let capability = runtime_provider_capability(&runtime, "pi-agent");
+        assert_eq!(capability["status"], "not_supported");
+        assert_eq!(capability["supports"]["review_start"], false);
+        assert_eq!(capability["supports"]["doctor"], false);
+    }
+
+    #[test]
+    fn search_rejects_command_irrelevant_session_and_pr_flags() {
+        // Regression (rr-search-inert-session-pr-flags): rr search is
+        // corpus-scoped and must reject --session/--pr as command-irrelevant
+        // instead of silently accepting them inert.
+        let session_err = parse_args(&[
+            "search".to_owned(),
+            "--query".to_owned(),
+            "auth".to_owned(),
+            "--session".to_owned(),
+            "foo".to_owned(),
+        ])
+        .expect_err("rr search --session must fail closed");
+        assert!(
+            session_err.contains("not valid for rr search"),
+            "rejection must name the command-irrelevant flag: {session_err}"
+        );
+
+        let pr_err = parse_args(&[
+            "search".to_owned(),
+            "--query".to_owned(),
+            "auth".to_owned(),
+            "--pr".to_owned(),
+            "99999".to_owned(),
+        ])
+        .expect_err("rr search --pr must fail closed");
+        assert!(
+            pr_err.contains("not valid for rr search"),
+            "rejection must name the command-irrelevant flag: {pr_err}"
+        );
+
+        // A plain rr search still parses; --session/--pr remain valid for the
+        // commands that legitimately use them.
+        parse_args(&["search".to_owned(), "--query".to_owned(), "auth".to_owned()])
+            .expect("plain rr search must still parse");
+        parse_args(&[
+            "status".to_owned(),
+            "--session".to_owned(),
+            "foo".to_owned(),
+        ])
+        .expect("rr status --session must still parse");
+        parse_args(&["resume".to_owned(), "--pr".to_owned(), "42".to_owned()])
+            .expect("rr resume --pr must still parse");
+    }
 
     fn run_git(repo: &Path, args: &[&str]) {
         let output = Command::new("git")

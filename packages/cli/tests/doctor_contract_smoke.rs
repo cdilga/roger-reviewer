@@ -362,9 +362,21 @@ fn rr_doctor_surfaces_planned_copilot_lane_and_missing_admission_assets() {
     let payload = parse_robot(&doctor_result.stdout);
     assert_eq!(payload["outcome"], "blocked");
     assert_eq!(payload["data"]["provider"], "copilot");
+    // With the feature gate OFF, copilot is honestly classified as a documented
+    // feature-gated tier-b provider that is disabled-but-enableable, NOT the
+    // planned_not_live/tier_a_planned classification reserved for genuinely
+    // planned providers.
     assert_eq!(
         payload["data"]["provider_capability"]["status"],
-        "planned_not_live"
+        "feature_gated_disabled"
+    );
+    assert_eq!(
+        payload["data"]["provider_capability"]["support_tier"],
+        "tier_b_feature_gated"
+    );
+    assert_eq!(
+        payload["data"]["provider_capability"]["surface_class"],
+        "review_bounded"
     );
     assert_eq!(
         payload["data"]["provider_capability"]["policy_profile"]["id"],
@@ -425,12 +437,14 @@ fn rr_doctor_surfaces_planned_copilot_lane_and_missing_admission_assets() {
     );
     assert_eq!(
         check_by_id(&payload, "provider_admission_state")["reason_code"],
-        "provider_not_live"
+        "provider_feature_gate_disabled"
     );
     assert_eq!(
         check_by_id(&payload, "copilot_instructions_present")["status"],
         "blocked"
     );
+    // The repair names the documented enable step instead of steering the
+    // operator to a different provider.
     assert!(
         payload["repair_actions"]
             .as_array()
@@ -439,7 +453,21 @@ fn rr_doctor_surfaces_planned_copilot_lane_and_missing_admission_assets() {
             .any(|item| item
                 .as_str()
                 .unwrap_or_default()
-                .contains("rr review --provider opencode|codex|gemini|claude"))
+                .contains("RR_ENABLE_COPILOT_PROVIDER=1")),
+        "repair must name the documented Copilot enable gate: {:?}",
+        payload["repair_actions"]
+    );
+    assert!(
+        !payload["repair_actions"]
+            .as_array()
+            .expect("repair actions")
+            .iter()
+            .any(|item| item
+                .as_str()
+                .unwrap_or_default()
+                .contains("rr review --provider opencode|codex|gemini|claude")),
+        "gate-off copilot repair must not steer to a different provider: {:?}",
+        payload["repair_actions"]
     );
 }
 
