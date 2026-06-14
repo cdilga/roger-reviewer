@@ -1,3 +1,6 @@
 [toolchain]
-channel = "nightly"
+# Pin a specific dated nightly so re-cutting the same release tag is
+# reproducible (an undated `nightly` floats with whatever was published most
+# recently). Keep this in sync with the CI toolchain reference.
+channel = "nightly-2026-06-10"
 components = ["clippy", "rustfmt"]

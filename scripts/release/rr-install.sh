@@ -7,8 +7,13 @@ Usage: rr-install.sh [options]
 
 Install the Roger `rr` binary from published release artifacts.
 
+Releases are tagged with CalVer (vYYYY.MM.DD); the "0.1.0" alias is a
+stable-only convenience that resolves to the current latest stable CalVer
+release.
+
 Options:
-  --version <version>       Install an explicit version (for example 0.1.0 or 2026.04.01)
+  --version <version>       Install an explicit CalVer version (for example 2026.04.01),
+                            or the "0.1.0" stable-latest alias
   --channel <stable|rc>     Channel when --version is omitted (default: stable)
   --repo <owner/repo>       GitHub repository slug (default: cdilga/roger-reviewer)
   --api-root <url>          Override GitHub API root
