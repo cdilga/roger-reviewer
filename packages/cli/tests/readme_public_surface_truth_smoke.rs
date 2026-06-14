@@ -49,7 +49,7 @@ fn readme_public_surface_truth_matches_install_and_browser_contracts() {
             "supported browsers: Chrome, Edge, and Brave",
             "`rr extension setup --browser <edge|chrome|brave>`",
             "`rr extension doctor --browser <edge|chrome|brave>`",
-            "Roger Reviewer uses an issue-first contribution path.",
+            "Roger Reviewer uses an issue-first contribution path",
         ],
         "README public packaging contract",
     );

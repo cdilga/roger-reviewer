@@ -3625,7 +3625,7 @@ fn search_help_mentions_explicit_planner_modes() {
     assert_eq!(help.exit_code, 0, "{}", help.stderr);
     assert!(
         help.stdout.contains(
-            "rr search --query <text> [--query-mode auto|exact_lookup|recall|related_context|candidate_audit|promotion_review]"
+            "rr search --query <text> [--query-mode auto|exact_lookup|recall|related_context|candidate_audit]"
         ),
         "{}",
         help.stdout
@@ -3923,24 +3923,24 @@ fn provider_support_claim_guard_keeps_help_robot_and_docs_in_lockstep() {
     );
     assert_normalized_contains(
         &help.stdout,
-        "pi-agent is not part of the 0.1.0 live CLI surface",
+        "pi-agent is not part of the current live CLI surface",
         "rr --help",
     );
 
     let readme = read_workspace_file("README.md");
     assert_normalized_contains(
         &readme,
-        "`rr review --provider` currently supports `opencode`, `codex`, `gemini`, and `claude` by default, and exposes `copilot` when `RR_ENABLE_COPILOT_PROVIDER=1` is set.",
+        "`rr review --provider` accepts `opencode`, `codex`, `gemini`, and `claude` by default, and exposes `copilot` only when `RR_ENABLE_COPILOT_PROVIDER=1` is set.",
         "README.md",
     );
     assert_normalized_contains(
         &readme,
-        "Codex, Gemini, and Claude Code are live only as bounded Tier A paths: Roger can start a review, reseed from a `ResumeBundle`, and preserve raw capture, but it does not claim locator reopen or `rr return` for those providers.",
+        "are bounded Tier A providers. Roger can start a review, reseed from a `ResumeBundle`, and preserve raw capture, but it does not claim locator reopen or `rr return` for them.",
         "README.md",
     );
     assert_normalized_contains(
         &readme,
-        "GitHub Copilot CLI is feature-gated as a bounded Tier B continuity path: Roger can start a review, reopen by locator or session id, return with `rr return`, and fall back to honest `ResumeBundle` reseed when reopen is stale or unusable, but Copilot remains outside the default public live claim.",
+        "is a feature-gated opt-in (`RR_ENABLE_COPILOT_PROVIDER=1`). When enabled, Roger can start a review, reopen by locator or session id, return with `rr return`, and fall back to honest `ResumeBundle` reseed when reopen is stale or unusable. It is disabled by default and is not part of the default public live claim.",
         "README.md",
     );
 
@@ -4742,6 +4742,28 @@ fn bridge_pack_extension_emits_checksum_artifacts_in_smoke() {
     assert!(package_dir.join("assets/icon-128.png").exists());
     assert!(package_dir.join("SHA256SUMS").exists());
     assert!(package_dir.join("asset-manifest.json").exists());
+    // The packed bundle is slimmed to runtime-only files: the non-runnable
+    // generated bridge contract and unit-test files are excluded, and the
+    // SHA256SUMS/asset-manifest reflect the same slim set.
+    assert!(
+        !package_dir.join("src/generated/bridge.ts").exists(),
+        "non-runnable src/generated/bridge.ts must not ship in the packed extension"
+    );
+    let asset_manifest =
+        fs::read_to_string(package_dir.join("asset-manifest.json")).expect("read asset manifest");
+    assert!(
+        !asset_manifest.contains(".test.js"),
+        "asset-manifest must not list *.test.js files in the slimmed bundle"
+    );
+    assert!(
+        !asset_manifest.contains("src/generated/bridge.ts"),
+        "asset-manifest must not list the generated bridge contract"
+    );
+    let checksums = fs::read_to_string(package_dir.join("SHA256SUMS")).expect("read SHA256SUMS");
+    assert!(
+        !checksums.contains(".test.js") && !checksums.contains("src/generated/bridge.ts"),
+        "SHA256SUMS must describe the slim runtime-only file set"
+    );
     let manifest = fs::read_to_string(package_dir.join("manifest.json")).expect("read manifest");
     let manifest_json: serde_json::Value = serde_json::from_str(&manifest).expect("parse manifest");
     assert_eq!(manifest_json["version"], payload["data"]["version"]);

@@ -20,9 +20,16 @@ Roger Reviewer turns pull request review into a durable local workflow. Start
 from the shell or a GitHub pull request page, keep findings and drafts local,
 and approve before anything is posted back to GitHub.
 
-This README tracks the public `0.1.0` product shape and the blessed workflows
-we intend to support publicly. The deeper planning and implementation contracts
-live under [`docs/`](docs/).
+This README tracks the current live `rr` CLI surface and the blessed workflows
+we support publicly. The deeper planning and implementation contracts live
+under [`docs/`](docs/).
+
+**Versioning:** `0.2` is the current product milestone. Published releases are
+CalVer-tagged (`vYYYY.MM.DD`), while the Cargo workspace semver stays `0.1.0`.
+The milestone names the communication line; the CalVer tag is the release
+identity. See
+[`docs/RELEASE_CALVER_VERSIONING_CONTRACT.md`](docs/RELEASE_CALVER_VERSIONING_CONTRACT.md)
+for the canonical version authority.
 
 ## Why Roger Reviewer
 
@@ -112,18 +119,24 @@ draft approval queue, timeline, and prior-review search in one place.
 rr resume --pr 123
 ```
 
-Replace `123` with your pull request number. In the live `0.1.0` CLI surface,
-`rr review --provider` currently supports `opencode`, `codex`, `gemini`, and
-`claude` by default, and exposes `copilot` when
-`RR_ENABLE_COPILOT_PROVIDER=1` is set. OpenCode remains the strongest
-continuity path. Codex, Gemini, and Claude Code are live only as bounded Tier A
-paths: Roger can start a review, reseed from a `ResumeBundle`, and preserve raw
-capture, but it does not claim locator reopen or `rr return` for those
-providers. GitHub Copilot CLI is feature-gated as a bounded Tier B continuity
-path: Roger can start a review, reopen by locator or session id, return with
-`rr return`, and fall back to honest `ResumeBundle` reseed when reopen is stale
-or unusable, but Copilot remains outside the default public live claim. The
-browser companion is optional.
+Replace `123` with your pull request number. In the live CLI surface,
+`rr review --provider` accepts `opencode`, `codex`, `gemini`, and `claude` by
+default, and exposes `copilot` only when `RR_ENABLE_COPILOT_PROVIDER=1` is set.
+
+- **OpenCode** is the first-class provider and the recommended default: the only
+  live Tier B continuity path, with start, reseed, locator reopen, and
+  `rr return`. The quickstart uses `--provider opencode`.
+- **Codex, Gemini, and Claude Code** are bounded Tier A providers. Roger can
+  start a review, reseed from a `ResumeBundle`, and preserve raw capture, but it
+  does not claim locator reopen or `rr return` for them.
+- **GitHub Copilot CLI** is a feature-gated opt-in (`RR_ENABLE_COPILOT_PROVIDER=1`).
+  When enabled, Roger can start a review, reopen by locator or session id, return
+  with `rr return`, and fall back to honest `ResumeBundle` reseed when reopen is
+  stale or unusable. It is disabled by default and is not part of the default
+  public live claim.
+- **pi-agent** is not part of the live `rr review` surface.
+
+The browser companion is optional.
 
 The Roger store lives at `~/.roger` (one canonical store per profile; override
 with `RR_STORE_ROOT`). `rr doctor` verifies local bootstrap and provider
@@ -175,8 +188,8 @@ the primary Roger path.
 drop out of Roger into a bare harness session and want Roger to rebind that
 work back to the original review session. If you are already in a normal
 Roger-managed session, you usually want `rr resume` or just to keep working in
-that session. In `0.1.0`, `rr return` is blessed on OpenCode tier-B continuity
-paths and on the feature-gated Copilot tier-B continuity path enabled with
+that session. `rr return` is blessed on the OpenCode Tier B continuity path and
+on the feature-gated Copilot Tier B continuity path enabled with
 `RR_ENABLE_COPILOT_PROVIDER=1`; Codex, Gemini, and Claude should still fail
 closed rather than pretend to support it.
 
@@ -274,7 +287,7 @@ and
 Roger's browser companion is optional and bounded.
 
 - supported browsers: Chrome, Edge, and Brave
-- supported `0.1.0` bridge: Native Messaging only
+- supported bridge: Native Messaging only
 - normal setup path: `rr extension setup --browser <edge|chrome|brave>`
 - verification path: `rr extension doctor --browser <edge|chrome|brave>`
 - installed (non-dev) hosts: the installer unpacks the release extension
@@ -289,20 +302,29 @@ Roger's browser companion is optional and bounded.
 
 ## Contributing
 
-Roger Reviewer uses an issue-first contribution path.
-
-If you found a bug, want a feature, or want to challenge a workflow or product
-assumption, open an issue first:
-
-- [Open an issue](https://github.com/cdilga/roger-reviewer/issues)
-- [Contribution policy](CONTRIBUTING.md)
+Roger Reviewer uses an issue-first contribution path: open an issue before
+sending code so scope, support claims, and validation expectations are clear.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full policy and contributor
+toolchain setup.
 
 ## Docs
 
-- [Canonical plan](docs/PLAN_FOR_ROGER_REVIEWER.md)
+User-facing docs:
+
+- [Dev machine onboarding](docs/DEV_MACHINE_ONBOARDING.md) — setup and the
+  Copilot operator contract
+- [Testing doctrine](docs/TESTING.md)
+- [Release / CalVer versioning contract](docs/RELEASE_CALVER_VERSIONING_CONTRACT.md)
+
+Internal implementation contracts (deep planning and design references, not
+getting-started material):
+
+- [Canonical plan](docs/PLAN_FOR_ROGER_REVIEWER.md) (~183KB design contract)
 - [Architecture diagrams](docs/ROOT_LEVEL_FLOW_AND_ARCHITECTURE_DIAGRAMS.md)
 - [TUI workspace contract](docs/TUI_WORKSPACE_AND_OPERATOR_FLOW_CONTRACT.md)
 - [Harness session linkage contract](docs/HARNESS_SESSION_LINKAGE_CONTRACT.md)
+
+`AGENTS.md` is the primary operating contract for agents working in this repo.
 
 ## License
 

@@ -5310,6 +5310,16 @@ fn handle_bridge(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                     return error_response(format!("failed to copy extension assets tree: {err}"));
                 }
             }
+            // Slim the packed payload to runtime-only files: drop test files
+            // (*.test.js) and the non-runnable generated TypeScript contract
+            // (src/generated/bridge.ts). Pruning here — before the checksum and
+            // asset-manifest pass below — keeps SHA256SUMS, asset-manifest.json,
+            // and the published zip describing exactly the same file set.
+            if let Err(err) = prune_non_runtime_extension_files(&package_dir) {
+                return error_response(format!(
+                    "failed to slim packaged extension to runtime files: {err}"
+                ));
+            }
             if let Err(err) = validate_packaged_manifest_icon_paths(&package_dir, &manifest_json) {
                 return error_response(err);
             }
@@ -6593,7 +6603,7 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let planned_not_live_providers = runtime_planned_not_live_review_providers(runtime);
     if !supported_providers.contains(&parsed.provider.as_str()) {
         let mut repair_actions = vec![
-            "use --provider opencode for tier-b CLI continuity in 0.1.0".to_owned(),
+            "use --provider opencode for tier-b CLI continuity on the current live CLI surface".to_owned(),
             "use --provider codex for bounded tier-a start/reseed support".to_owned(),
             "use --provider gemini for bounded tier-a start/reseed support".to_owned(),
             "use --provider claude for bounded tier-a start/reseed support".to_owned(),
@@ -8081,7 +8091,7 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         capability["supports_rr_return"] = json!(false);
         return blocked_response(
             format!(
-                "rr return is unsupported for provider '{}' in 0.1.0",
+                "rr return is unsupported for provider '{}' on the current live CLI surface",
                 session.provider
             ),
             vec![
@@ -9949,7 +9959,7 @@ fn migration_policy_payload() -> Value {
     json!({
         "policy": "binary_only",
         "schema_migrations_supported": false,
-        "status": "deferred_in_0_1_x",
+        "status": "deferred_for_now",
         "guidance": "if a future release requires local-state/schema migration, fail closed and use explicit backup/export + reinstall guidance",
     })
 }
@@ -10853,6 +10863,8 @@ fn handle_robot_docs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRespon
                 json!({"command": "rr findings", "schema_id": "rr.robot.findings.v1"}),
                 json!({"command": "rr status", "schema_id": "rr.robot.status.v1"}),
                 json!({"command": "rr robot-docs", "schema_id": "rr.robot.robot_docs.v1"}),
+                json!({"command": "rr tui", "schema_id": "rr.robot.tui.v1"}),
+                json!({"command": "rr <command> (harness)", "schema_id": "rr.robot.harness_command.v1", "surface": "inside_roger_harness"}),
                 json!({"command": "rr agent", "schema_id": AGENT_TRANSPORT_RESPONSE_SCHEMA_V1, "surface": "dedicated_worker_transport"}),
             ],
             "0.1.0",
@@ -13106,6 +13118,21 @@ fn handle_findings(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
     let (session, binding) = match resolution {
         SessionReentryResolution::Resolved { session, binding } => (session, binding),
         SessionReentryResolution::PickerRequired { reason, candidates } => {
+            if candidates.is_empty() {
+                // No session yet for this target: align with the rr status /
+                // rr sessions reads-model and surface an empty, exit-0 result
+                // rather than blocking. Genuine pickers (multiple candidates)
+                // still block below.
+                return CommandResponse {
+                    outcome: OutcomeKind::Empty,
+                    data: json!({"reason": reason, "items": [], "count": 0, "candidates": []}),
+                    warnings: Vec::new(),
+                    repair_actions: vec![
+                        "run rr review --pr <number> to create a new session".to_owned(),
+                    ],
+                    message: "no findings available: no session found for this target".to_owned(),
+                };
+            }
             return blocked_picker_response(reason, candidates);
         }
     };
@@ -13707,7 +13734,7 @@ fn provider_live_support_notes(provider: &str) -> &'static str {
             "bounded tier-a start/reseed/raw-capture path only; no locator reopen or rr return"
         }
         "copilot" => "planned target, not yet a live rr review --provider value",
-        "pi-agent" => "not part of the 0.1.0 live CLI surface",
+        "pi-agent" => "not part of the current live CLI surface",
         _ => "provider is not part of the current live rr review surface",
     }
 }
@@ -13959,7 +13986,7 @@ fn runtime_planned_not_live_review_providers(_runtime: &CliRuntime) -> Vec<&'sta
     // Copilot is feature-gated, not "planned but not live": with the gate off it
     // is reported through runtime_feature_gated_disabled_review_providers so every
     // surface agrees with the doctor classification. No genuinely-planned review
-    // provider remains in 0.1.x, so this list is empty.
+    // provider remains on the current live CLI surface, so this list is empty.
     Vec::new()
 }
 
@@ -13975,10 +14002,10 @@ fn runtime_feature_gated_disabled_review_providers(
 
 fn runtime_review_provider_support_summary(_runtime: &CliRuntime) -> String {
     if copilot_feature_gated_launch_enabled(session_copilot::PROVIDER_ID) {
-        "OpenCode is the only default live tier-b continuity path in 0.1.0. Codex, Gemini, and Claude Code are exposed as bounded tier-a start/reseed/raw-capture providers only. GitHub Copilot CLI is feature-gated as a bounded tier-b continuity path with verified start, locator/session-id reopen, rr return, and ResumeBundle reseed fallback, but Roger still withholds a default public live claim for Copilot. Pi-Agent remains out of scope for 0.1.0."
+        "OpenCode is the only default live tier-b continuity path on the current live CLI surface. Codex, Gemini, and Claude Code are exposed as bounded tier-a start/reseed/raw-capture providers only. GitHub Copilot CLI is feature-gated as a bounded tier-b continuity path with verified start, locator/session-id reopen, rr return, and ResumeBundle reseed fallback, but Roger still withholds a default public live claim for Copilot. Pi-Agent remains out of scope for now."
             .to_owned()
     } else {
-        "OpenCode is the only live tier-b continuity path in 0.1.0. Codex, Gemini, and Claude Code are exposed as bounded tier-a start/reseed/raw-capture providers only. Copilot is feature-gated and currently disabled; enable RR_ENABLE_COPILOT_PROVIDER=1 for its bounded tier-b continuity path. Pi-Agent remains out of scope for 0.1.0."
+        "OpenCode is the only live tier-b continuity path on the current live CLI surface. Codex, Gemini, and Claude Code are exposed as bounded tier-a start/reseed/raw-capture providers only. Copilot is feature-gated and currently disabled; enable RR_ENABLE_COPILOT_PROVIDER=1 for its bounded tier-b continuity path. Pi-Agent remains out of scope for now."
             .to_owned()
     }
 }
@@ -14446,6 +14473,33 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> 
     Ok(())
 }
 
+/// Returns true when a packaged extension file is not needed at runtime and
+/// should be excluded from the published bundle: unit-test files (`*.test.js`)
+/// and the generated TypeScript bridge contract (`src/generated/bridge.ts`),
+/// which is a verify-contracts artifact the browser never loads.
+fn is_non_runtime_extension_file(relative: &Path) -> bool {
+    if relative == Path::new("src/generated/bridge.ts") {
+        return true;
+    }
+    relative
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".test.js"))
+}
+
+/// Removes non-runtime files from an assembled extension package directory so
+/// the checksum manifest, asset manifest, and zip all describe the slim,
+/// runtime-only file set.
+fn prune_non_runtime_extension_files(package_dir: &Path) -> std::io::Result<()> {
+    let files = collect_relative_files(package_dir)?;
+    for rel in files {
+        if is_non_runtime_extension_file(&rel) {
+            fs::remove_file(package_dir.join(&rel))?;
+        }
+    }
+    Ok(())
+}
+
 fn collect_relative_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     collect_relative_files_inner(root, root, &mut files)?;
@@ -14695,7 +14749,7 @@ fn next_id(prefix: &str) -> String {
 }
 
 fn usage_text() -> &'static str {
-    "Usage:\n\nReview:\n  rr prs [--repo owner/repo] [--limit <n>] [--robot]\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude|copilot] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr tui [--repo owner/repo] [--pr <number>] [--session <id>]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--query-mode auto|exact_lookup|recall|related_context|candidate_audit|promotion_review] [--repo owner/repo] [--limit <n>] [--robot]\n\nOutbound (explicit, gated):\n  rr triage [--repo owner/repo] [--pr <number>] [--session <id>] --finding <id>... --state <state> [--robot]\n  rr draft [--repo owner/repo] [--pr <number>] [--session <id>] (--finding <id>... | --all-findings) [--robot]\n  rr approve [--repo owner/repo] [--pr <number>] [--session <id>] --batch <draft-batch-id> [--robot]\n  rr post [--repo owner/repo] [--pr <number>] [--session <id>] --batch <draft-batch-id> [--robot]\n\nSetup & health:\n  rr init [--robot]\n  rr doctor [--provider opencode|codex|gemini|claude|copilot|pi-agent] [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--yes|-y] [--dry-run] [--robot]\n  rr extension doctor [--browser edge|chrome|brave] [--install-root <path>] [--package-dir <path>] [--robot]\n  rr extension fetch [--version <YYYY.MM.DD[-rc.N]>] [--download-root <url>] [--repo owner/repo] [--robot]\n  rr extension setup [--browser edge|chrome|brave] [--install-root <path>] [--package-dir <path>] [--robot]\n  rr extension uninstall [--install-root <path>] [--robot]\n\nIntegration & agents (advanced):\n  rr agent <operation> --task-file <path> [--request-file <path>] [--context-file <path>] [--capability-file <path>]\n  rr bridge export-contracts [--robot]\n  rr bridge install [--extension-id <id>] [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr bridge verify-contracts [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n\nAgent transport:\n  - rr agent is the dedicated in-session worker transport; it is separate from --robot\n  - current live rr agent operations cover context/status/search/finding/artifact reads, advisory clarification or follow-up proposals, and worker.submit_stage_result\n  - rr agent emits rr.agent.response.v1 envelopes over the canonical worker operation response payload instead of reusing the --robot surface\n\nProvider support in 0.1.0:\n  - opencode is the first-class tier-b continuity path; rr resume can reopen and rr return is supported\n  - codex, gemini, and claude are bounded tier-a providers; start/reseed/raw-capture only, no locator reopen or rr return\n  - copilot is feature-gated bounded tier-b support; enable with RR_ENABLE_COPILOT_PROVIDER=1 for verified start, locator/session-id reopen, rr return, and honest ResumeBundle reseed fallback\n  - pi-agent is not part of the 0.1.0 live CLI surface\n\nBootstrap notes:\n  - the Roger store bootstraps automatically on first use; rr init stays available as an explicit idempotent bootstrap\n  - rr init bootstraps Roger-owned local store state only and records a local init marker\n  - rr init does not verify provider auth/install readiness\n  - rr doctor verifies local bootstrap and provider prerequisites but defers auth proof to first launch\n\nOutbound notes:\n  - rr triage records the operator's local triage decision; rr draft only accepts findings triaged to accepted\n  - rr triage --state accepts accepted, ignored, needs_follow_up, or resolved; new and stale are Roger-derived\n  - rr draft materializes Roger-owned local draft batches only; it does not approve or post to GitHub\n  - rr approve records a local approval token for one exact stored batch payload and target tuple; it does not post to GitHub\n  - rr post executes only one exact Roger-approved stored batch on the bound target and returns a truthful success/partial/failure envelope\n  - draft selection is explicit in this slice: pass one or more --finding ids or --all-findings, then approve with --batch\n  - stale persisted review state fails closed before Roger derives or approves outbound payloads\n\nExtension notes:\n  - rr extension setup/doctor resolve the unpacked package in order: explicit --package-dir, Roger dev workspace pack output, then the installed layout under <store_root>/bridge/extension-package/<version>/roger-extension-unpacked\n  - rr extension fetch downloads the published extension.zip for this binary's release (or --version), verifies it against the release checksums, and installs it into the installed layout; local/unpublished builds fail closed\n  - branded Google Chrome 137+ ignores --load-extension: load the unpacked package once via chrome://extensions (Developer mode -> Load unpacked); Edge/Brave still honor the flag-based launch\n\nUpdate notes:\n  - default rr update apply prompts for confirmation on interactive TTY\n  - pass --yes|-y for non-interactive apply confirmation; --robot apply requires --yes|-y\n  - --dry-run and --robot without --yes are non-mutating metadata checks\n  - local/unpublished builds fail closed; migration-capable updates are deferred in 0.1.x"
+    "Usage:\n\nReview:\n  rr prs [--repo owner/repo] [--limit <n>] [--robot]\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude|copilot] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr tui [--repo owner/repo] [--pr <number>] [--session <id>]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--query-mode auto|exact_lookup|recall|related_context|candidate_audit] [--repo owner/repo] [--limit <n>] [--robot]\n\nOutbound (explicit, gated):\n  rr triage [--repo owner/repo] [--pr <number>] [--session <id>] --finding <id>... --state <state> [--robot]\n  rr draft [--repo owner/repo] [--pr <number>] [--session <id>] (--finding <id>... | --all-findings) [--robot]\n  rr approve [--repo owner/repo] [--pr <number>] [--session <id>] --batch <draft-batch-id> [--robot]\n  rr post [--repo owner/repo] [--pr <number>] [--session <id>] --batch <draft-batch-id> [--robot]\n\nSetup & health:\n  rr init [--robot]\n  rr doctor [--provider opencode|codex|gemini|claude|copilot|pi-agent] [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--yes|-y] [--dry-run] [--robot]\n  rr extension doctor [--browser edge|chrome|brave] [--install-root <path>] [--package-dir <path>] [--robot]\n  rr extension fetch [--version <YYYY.MM.DD[-rc.N]>] [--download-root <url>] [--repo owner/repo] [--robot]\n  rr extension setup [--browser edge|chrome|brave] [--install-root <path>] [--package-dir <path>] [--robot]\n  rr extension uninstall [--install-root <path>] [--robot]\n\nIntegration & agents (advanced):\n  rr agent <operation> --task-file <path> [--request-file <path>] [--context-file <path>] [--capability-file <path>]\n  rr bridge export-contracts [--robot]\n  rr bridge install [--extension-id <id>] [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr bridge verify-contracts [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n\nAgent transport:\n  - rr agent is the dedicated in-session worker transport; it is separate from --robot\n  - current live rr agent operations cover context/status/search/finding/artifact reads, advisory clarification or follow-up proposals, and worker.submit_stage_result\n  - rr agent emits rr.agent.response.v1 envelopes over the canonical worker operation response payload instead of reusing the --robot surface\n\nProvider support on the current live CLI surface:\n  - opencode is the first-class tier-b continuity path; rr resume can reopen and rr return is supported\n  - codex, gemini, and claude are bounded tier-a providers; start/reseed/raw-capture only, no locator reopen or rr return\n  - copilot is feature-gated bounded tier-b support; enable with RR_ENABLE_COPILOT_PROVIDER=1 for verified start, locator/session-id reopen, rr return, and honest ResumeBundle reseed fallback\n  - pi-agent is not part of the current live CLI surface\n\nBootstrap notes:\n  - the Roger store bootstraps automatically on first use; rr init stays available as an explicit idempotent bootstrap\n  - rr init bootstraps Roger-owned local store state only and records a local init marker\n  - rr init does not verify provider auth/install readiness\n  - rr doctor verifies local bootstrap and provider prerequisites but defers auth proof to first launch\n\nOutbound notes:\n  - rr triage records the operator's local triage decision; rr draft only accepts findings triaged to accepted\n  - rr triage --state accepts accepted, ignored, needs_follow_up, or resolved; new and stale are Roger-derived\n  - rr draft materializes Roger-owned local draft batches only; it does not approve or post to GitHub\n  - rr approve records a local approval token for one exact stored batch payload and target tuple; it does not post to GitHub\n  - rr post executes only one exact Roger-approved stored batch on the bound target and returns a truthful success/partial/failure envelope\n  - draft selection is explicit in this slice: pass one or more --finding ids or --all-findings, then approve with --batch\n  - stale persisted review state fails closed before Roger derives or approves outbound payloads\n\nExtension notes:\n  - rr extension setup/doctor resolve the unpacked package in order: explicit --package-dir, Roger dev workspace pack output, then the installed layout under <store_root>/bridge/extension-package/<version>/roger-extension-unpacked\n  - rr extension fetch downloads the published extension.zip for this binary's release (or --version), verifies it against the release checksums, and installs it into the installed layout; local/unpublished builds fail closed\n  - branded Google Chrome 137+ ignores --load-extension: load the unpacked package once via chrome://extensions (Developer mode -> Load unpacked); Edge/Brave still honor the flag-based launch\n\nUpdate notes:\n  - default rr update apply prompts for confirmation on interactive TTY\n  - pass --yes|-y for non-interactive apply confirmation; --robot apply requires --yes|-y\n  - --dry-run and --robot without --yes are non-mutating metadata checks\n  - local/unpublished builds fail closed; migration-capable updates are deferred for now"
 }
 
 #[cfg(test)]
@@ -14785,7 +14839,7 @@ mod tests {
         let runtime = test_runtime(PathBuf::from("."), PathBuf::from("."));
         assert!(
             runtime_planned_not_live_review_providers(&runtime).is_empty(),
-            "no review provider is genuinely planned-not-live in 0.1.x; copilot is feature-gated"
+            "no review provider is genuinely planned-not-live on the current live CLI surface; copilot is feature-gated"
         );
         // The feature-gated-disabled list only ever names copilot (or nothing
         // once the gate is enabled), regardless of the current gate state.
@@ -16612,7 +16666,7 @@ mod tests {
             usage_text()
         );
         assert!(
-            usage_text().contains("pi-agent is not part of the 0.1.0 live CLI surface"),
+            usage_text().contains("pi-agent is not part of the current live CLI surface"),
             "{}",
             usage_text()
         );
@@ -16635,7 +16689,7 @@ mod tests {
             payload["data"]["migration"]["schema_migrations_supported"],
             false
         );
-        assert_eq!(payload["data"]["migration"]["status"], "deferred_in_0_1_x");
+        assert_eq!(payload["data"]["migration"]["status"], "deferred_for_now");
     }
 
     #[test]
@@ -16759,11 +16813,11 @@ mod tests {
     }
 
     #[test]
-    fn migration_policy_is_explicitly_deferred_in_0_1_x() {
+    fn migration_policy_is_explicitly_deferred_for_now() {
         let policy = migration_policy_payload();
         assert_eq!(policy["policy"], "binary_only");
         assert_eq!(policy["schema_migrations_supported"], false);
-        assert_eq!(policy["status"], "deferred_in_0_1_x");
+        assert_eq!(policy["status"], "deferred_for_now");
         assert!(
             policy["guidance"]
                 .as_str()

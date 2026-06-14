@@ -344,6 +344,15 @@ The first real Roger implementation release is now defined as **`0.1.0`**.
 When this file or the canonical plan says "v1", read that as the `0.1.0`
 release line unless the user explicitly reframes it.
 
+**Versioning posture:** `0.2` is the current product milestone (the
+communication line). Published releases are CalVer-tagged (`vYYYY.MM.DD`) and
+the Cargo workspace semver stays `0.1.0`; the milestone names the line, the
+CalVer tag is the release identity, and the semver is unchanged. See
+[`docs/RELEASE_CALVER_VERSIONING_CONTRACT.md`](docs/RELEASE_CALVER_VERSIONING_CONTRACT.md)
+for the canonical version authority. Where docs say `0.1.0` / `0.1.x` as a
+release-line shorthand, read it as the current live CLI surface rather than a
+re-stamped product version.
+
 Planning phase checklist:
 
 - [x] Initial plan written
@@ -1058,27 +1067,26 @@ have dedicated support contracts or closed planning beads:
 Roger should track harness support explicitly rather than letting agents assume
 every provider is equally supported.
 
-| Provider | Roger role | `0.1.0` drop-in support | `0.1.0` deeper integration | Notes |
-|----------|------------|-------------------------|----------------------------|-------|
-| GitHub Copilot CLI | Feature-gated bounded continuity provider | Yes, behind feature gate | Bounded Tier B | Authoritative `#1` provider in the product-support order, but current live claim is feature-gated bounded Tier B only: verified start, `review_readonly` policy posture, locator/session-id reopen, `rr return`, and honest `ResumeBundle` reseed fallback with no default public live claim |
-| OpenCode | First-class continuity fallback and reference harness | Yes | Yes | Authoritative `#2` provider and current strongest landed continuity path |
-| Codex | Secondary bounded review harness | Yes | Bounded | Authoritative `#3` provider; exposed via `rr review --provider codex`; Tier A only today (no locator reopen or `rr return`) |
-| Gemini | Secondary bounded review harness | Yes | Bounded | Authoritative `#4` provider; exposed via `rr review --provider gemini`; keep Tier A live-CLI claims truthful and do not imply locator reopen or `rr return` |
-| Claude Code | Secondary bounded review harness | Yes | Bounded | Authoritative `#5` provider; exposed via `rr review --provider claude`; Tier A only today (no locator reopen or `rr return`) |
-| Pi-Agent | Deferred future review harness candidate | No | No | Post-`0.1.0` admission candidate only; evaluate `_exploration/pi_agent_rust` against the same direct-CLI launch, policy-control, auditability, and continuity-tier rubric Roger uses for every provider before creating implementation beads |
+| Provider | Roger role | Live drop-in support | Deeper integration | Notes |
+|----------|------------|----------------------|--------------------|-------|
+| OpenCode | First-class default provider and reference harness | Yes (default) | Yes (Tier B) | Default `rr review` provider and the only live Tier B continuity path: start, reseed, locator reopen, and `rr return` |
+| Codex | Bounded Tier A review harness | Yes | Bounded | Exposed via `rr review --provider codex`; Tier A only today (no locator reopen or `rr return`) |
+| Gemini | Bounded Tier A review harness | Yes | Bounded | Exposed via `rr review --provider gemini`; keep Tier A live-CLI claims truthful and do not imply locator reopen or `rr return` |
+| Claude Code | Bounded Tier A review harness | Yes | Bounded | Exposed via `rr review --provider claude`; Tier A only today (no locator reopen or `rr return`) |
+| GitHub Copilot CLI | Feature-gated opt-in continuity provider | No (gated, off by default) | Bounded Tier B when enabled | Disabled by default; opt in with `RR_ENABLE_COPILOT_PROVIDER=1`. When enabled: verified start, `review_readonly` policy posture, locator/session-id reopen, `rr return`, and honest `ResumeBundle` reseed fallback. Not part of the default public live claim |
+| Pi-Agent | Deferred future review harness candidate | No | No | Not part of the live `rr review` surface; deferred for now. Evaluate `_exploration/pi_agent_rust` against the same direct-CLI launch, policy-control, auditability, and continuity-tier rubric Roger uses for every provider before creating implementation beads |
 | GitHub CLI (`gh`) | GitHub adapter, not review harness | N/A | N/A | Write/read adapter for GitHub flows, not a drop-in review engine |
 
 Rules:
 
-- the authoritative provider support order is GitHub Copilot CLI, OpenCode,
-  Codex, Gemini, then Claude Code
-- that order is the product support hierarchy, not permission to widen live
-  claims before proof exists
-- OpenCode remains the strongest current first-class continuity path; Copilot
-  is now feature-gated bounded Tier B and still outside the default public live
-  claim
-- Codex, Gemini, and Claude Code claims must stay truthful and bounded; all
-  three are currently exposed in the live `rr review --provider ...` surface
+- OpenCode is the first-class provider, the recommended default, and the only
+  live Tier B continuity path (start, reseed, locator reopen, `rr return`)
+- Codex, Gemini, and Claude Code are bounded Tier A providers in the live
+  `rr review --provider ...` surface; their claims must stay truthful and bounded
+- GitHub Copilot CLI is a feature-gated opt-in, disabled by default; do not
+  describe it as preferred or default. Copilot may rank highly in the eventual
+  product-support aspiration, but that aspiration is not permission to widen the
+  live claim before proof exists
 - GitHub Copilot CLI stays feature-gated bounded Tier B only when Roger can
   enforce the `review_readonly` policy profile, repo-owned hook/instruction
   assets, verified start, locator/session-id reopen, `rr return`, and honest
@@ -1099,15 +1107,16 @@ Capability-tier rule:
 - Tier C ergonomic support: Tier B plus optional Roger-native in-harness
   commands and related bindings
 
-`0.1.0` intent:
+Live provider intent:
 
-- GitHub Copilot CLI currently occupies the feature-gated bounded Tier B lane:
-  verified launch, `review_readonly` policy posture, locator/session-id reopen,
-  `rr return`, and honest `ResumeBundle` reseed fallback without a default
-  public live claim
-- OpenCode should reach Tier B and remains the required fallback/reference path
+- OpenCode is the first-class default provider, occupies the only live Tier B
+  lane, and remains the required fallback/reference path
 - Codex, Gemini, and Claude Code currently expose bounded Tier A paths in the
   live CLI and must be documented literally as such
+- GitHub Copilot CLI is a feature-gated opt-in (off by default). When enabled it
+  occupies the bounded Tier B lane: verified launch, `review_readonly` policy
+  posture, locator/session-id reopen, `rr return`, and honest `ResumeBundle`
+  reseed fallback without a default public live claim
 - no provider is allowed to claim deeper support than its capability tier earns
 
 Harness-native Roger commands are optional in `0.1.0`. If implemented, prefer

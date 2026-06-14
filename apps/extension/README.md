@@ -1,9 +1,10 @@
-# Roger Extension (Bounded `0.1.0` Slice)
+# Roger Extension (Bounded Mirror Surface)
 
 This extension injects a Roger launch panel on GitHub PR pages and dispatches
-launch intents to local Roger.
+launch intents to local Roger. It is a bounded launch/mirror companion on the
+current live surface: local Roger remains the source of truth.
 
-Behavior in this slice:
+Behavior on the current surface:
 
 - actions are launch-oriented and may become more contextual over time rather
   than remaining a fixed flat primary set on every PR page
@@ -36,8 +37,8 @@ UX direction under active implementation:
   Roger already has enough local state
 - keep elevated or mutation-sensitive actions explicit
 
-Scope note for `0.1.0`: this stays a bounded mirror surface. Richer extension
-state/history queues remain in the deeper-extension lane.
+Scope note: this stays a bounded mirror surface. Richer extension state/history
+queues remain in the deeper-extension lane, deferred for now.
 
 Theme/readability smoke checklist:
 
