@@ -469,6 +469,100 @@ test('createPanel keeps GitHub button semantics while rendering Roger identity c
   assert.match(infoPanels[0].children[0].textContent, /Launch Roger locally/i);
 });
 
+function renderPanelStyleSheet() {
+  const fakeHead = createTestElement('head');
+  const fakeDocument = {
+    head: fakeHead,
+    documentElement: createTestElement('html'),
+    body: createTestElement('body'),
+    createElement(tagName) {
+      return createTestElement(tagName);
+    },
+    getElementById() {
+      return null;
+    },
+  };
+
+  createPanel({ owner: 'octo', repo: 'roger-reviewer', pr_number: 42 }, fakeDocument);
+
+  const styleNode = findNodes(
+    fakeHead,
+    (node) => node.id === 'roger-reviewer-panel-style'
+  )[0];
+  assert.ok(styleNode, 'panel style node should be injected into the document head');
+  return styleNode.textContent;
+}
+
+test('injected panel maps the dark host theme across every GitHub theme signal', () => {
+  const css = renderPanelStyleSheet();
+
+  // Explicit dark mode regardless of where GitHub puts the signal: the dark
+  // surface remap must fire for :root[data-color-mode="dark"] (html), for any
+  // ancestor carrying data-color-mode="dark" (body/wrapper), and for the panel
+  // node itself carrying it. The previous mapping only matched the html-root
+  // form, so a body-level signal (as real GitHub and the harness emit) left the
+  // panel stuck on its washed-out light treatment — provable host-theme drift.
+  assert.match(css, /:root\[data-color-mode="dark"\]\s+#roger-reviewer-panel/);
+  assert.match(css, /\[data-color-mode="dark"\]\s+#roger-reviewer-panel/);
+  assert.match(css, /#roger-reviewer-panel\[data-color-mode="dark"\]/);
+
+  // GitHub "auto" theme resolves through prefers-color-scheme; the panel must
+  // honour it instead of defaulting to the light surface in dark OS contexts.
+  assert.match(css, /@media \(prefers-color-scheme: dark\)/);
+  assert.match(css, /\[data-color-mode="auto"\]\s+#roger-reviewer-panel/);
+  assert.match(css, /:root:not\(\[data-color-mode="light"\]\)\s+#roger-reviewer-panel/);
+});
+
+test('injected panel dark remap binds Roger surfaces to dark Primer variables', () => {
+  const css = renderPanelStyleSheet();
+
+  // The dark remap must resolve from the host's dark Primer tokens (so it feels
+  // native), not from a bluffed light surface. Assert the Roger-owned mapping
+  // points at the canonical Primer dark sources.
+  assert.match(css, /--rr-panel-surface: var\(--overlay-bgColor, var\(--bgColor-default, #161b22\)\)/);
+  assert.match(css, /--rr-panel-text: var\(--fgColor-default, #e6edf3\)/);
+  assert.match(css, /--rr-panel-muted: var\(--fgColor-muted, #8b949e\)/);
+  assert.match(css, /--rr-panel-border-strong: color-mix\(\s*in srgb,\s*var\(--borderColor-emphasis/);
+});
+
+test('injected panel uses a theme-aware metallic tint instead of literal white sheen', () => {
+  const css = renderPanelStyleSheet();
+
+  // The metallic Roger treatment must not blow surfaces toward pure white in
+  // dark mode; the sheen is a token whose value flips per theme.
+  assert.match(css, /--rr-panel-metal-tint: #ffffff/);
+  assert.match(css, /--rr-panel-metal-tint: var\(--fgColor-default, #f0f6fc\)/);
+  assert.match(css, /--rr-panel-metal-tint-strength: 7%/);
+
+  // Button + chip + surface gradients consume the tint token, and no
+  // surface/button sheen mix hardcodes `white` anymore (the accent primary
+  // button keeps its branded blue gradient, which is intentional).
+  assert.match(css, /var\(--rr-panel-metal-tint\) var\(--rr-panel-metal-tint-strength\)/);
+  const surfaceWhiteMixes =
+    css.match(/var\(--rr-panel-surface[^)]*\)\s+\d+%,\s*white/g) || [];
+  assert.equal(
+    surfaceWhiteMixes.length,
+    0,
+    'surface/button gradients must route their metallic sheen through the theme-aware tint token'
+  );
+});
+
+test('injected panel title and metallic buttons stay legible in both themes', () => {
+  const css = renderPanelStyleSheet();
+
+  // The heading derives from --rr-panel-text, which is remapped to the host's
+  // dark foreground in dark mode (above) and the light foreground at the base.
+  assert.match(css, /\.roger-panel-heading\s*\{[^}]*color: var\(--rr-panel-text\)/);
+
+  // Button hierarchy: a single full-width primary action with a branded blue
+  // treatment, a metallic secondary that reads against the surface, and a
+  // demoted tertiary for findings.
+  assert.match(css, /\.roger-panel-button--primary\s*\{[\s\S]*?flex-basis: 100%/);
+  assert.match(css, /\.roger-panel-button--primary\s*\{[\s\S]*?color: #ffffff/);
+  assert.match(css, /\.roger-panel-button--secondary\s*\{[^}]*color: var\(--rr-panel-text\)/);
+  assert.match(css, /\.roger-panel-button--tertiary\s*\{[^}]*color: var\(--rr-panel-muted\)/);
+});
+
 test('modal fallback copy keeps the in-page modal primary and popup manual-only', () => {
   assert.match(MODAL_OPEN_BUTTON_LABEL, /fallback/i);
   assert.match(MODAL_FALLBACK_STATUS, /modal fallback/i);

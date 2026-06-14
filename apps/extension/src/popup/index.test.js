@@ -33,6 +33,16 @@ test('popup shell imports shared extension identity tokens', () => {
   assert.match(identityCss, /--rr-brand-radio-500/);
 });
 
+test('shared identity chip carries a dark-theme remap so it is legible in dark mode', () => {
+  const identityCss = fs.readFileSync(path.join(staticRoot, 'roger-identity.css'), 'utf8');
+  const darkChip = identityCss.match(
+    /@media \(prefers-color-scheme: dark\)\s*\{\s*\.rr-brand-chip\s*\{([\s\S]*?)\}\s*\}/
+  );
+  assert.ok(darkChip, 'identity CSS should remap the brand chip under prefers-color-scheme: dark');
+  assert.match(darkChip[1], /color: var\(--fgColor-default, #e6edf3\)/);
+  assert.match(darkChip[1], /background: linear-gradient/);
+});
+
 test('popup copy preserves manual-backup guidance in branded shell', () => {
   assert.match(popupHtml, /Local-first review continuity/i);
   assert.match(popupHtml, /id="popup-title"/);

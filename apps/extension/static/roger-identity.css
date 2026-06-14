@@ -39,3 +39,20 @@
   background: var(--rr-brand-radio-500);
   box-shadow: 0 0 0 3px rgba(47, 129, 247, 0.16);
 }
+
+/* Dark host/OS theme: keep the shared chip metallic but legible instead of a
+   white-gradient block that washes out against a dark surface. The in-page
+   panel restates these via #PANEL_ID-scoped rules; this covers standalone use
+   (e.g. the popup) and matches the panel's host-theme dark mapping. */
+@media (prefers-color-scheme: dark) {
+  .rr-brand-chip {
+    border-color: var(--borderColor-emphasis, #6e7681);
+    background: linear-gradient(
+      120deg,
+      var(--bgColor-muted, #21262d) 0%,
+      var(--bgColor-default, #161b22) 60%,
+      #0d1117 100%
+    );
+    color: var(--fgColor-default, #e6edf3);
+  }
+}

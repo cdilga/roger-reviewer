@@ -528,6 +528,67 @@ function mountInto(parent, node, options = {}) {
   return true;
 }
 
+// Roger-owned dark-surface remap. GitHub/Primer ship light defaults on
+// --bgColor-*/--fgColor-*/--borderColor-*; in dark host themes those tokens
+// already flip, but the panel previously layered hardcoded `white` mixes and
+// flat highlight rgba on top, which washed the surface, title, and buttons out.
+// This block restates Roger's own surface/border/highlight/shadow tokens for
+// dark so they resolve from the host's dark Primer values instead of bluffing
+// a light treatment. It is emitted under every host-theme dark signal below.
+const PANEL_DARK_SURFACE_VARS = `
+  --rr-panel-surface: var(--overlay-bgColor, var(--bgColor-default, #161b22));
+  --rr-panel-surface-muted: var(--bgColor-muted, #21262d);
+  --rr-panel-surface-raised: color-mix(
+    in srgb,
+    var(--rr-panel-surface) 78%,
+    var(--bgColor-emphasis, #30363d) 22%
+  );
+  --rr-panel-border: color-mix(
+    in srgb,
+    var(--borderColor-default, #30363d) 82%,
+    rgba(240, 246, 252, 0.16)
+  );
+  --rr-panel-border-strong: color-mix(
+    in srgb,
+    var(--borderColor-emphasis, #6e7681) 78%,
+    rgba(240, 246, 252, 0.22)
+  );
+  --rr-panel-text: var(--fgColor-default, #e6edf3);
+  --rr-panel-muted: var(--fgColor-muted, #8b949e);
+  --rr-brand-ink-700: var(--fgColor-default, #e6edf3);
+  --rr-panel-highlight: rgba(240, 246, 252, 0.08);
+  --rr-panel-shadow: rgba(1, 4, 9, 0.42);
+  --rr-panel-metal-tint: var(--fgColor-default, #f0f6fc);
+  --rr-panel-metal-tint-strength: 7%;
+`;
+
+// Each entry is a selector under which the Roger panel must adopt the dark
+// surface remap. We deliberately cover the full matrix of how GitHub signals an
+// active dark theme so the panel feels native regardless of placement of the
+// host signal:
+//   - data-color-mode="dark" on :root (html) — GitHub's most common explicit case
+//   - data-color-mode="dark" on any ancestor (body/wrapper) — harness + some hosts
+//   - data-color-mode="auto" + prefers-color-scheme: dark — GitHub "auto" theme
+//   - bare prefers-color-scheme: dark — degraded host with no explicit mode attr
+function buildDarkThemeBlocks(panelSelector) {
+  const surfaceRule = (selector) => `${selector} {${PANEL_DARK_SURFACE_VARS}}`;
+
+  const explicitDark = [
+    surfaceRule(`:root[data-color-mode="dark"] ${panelSelector}`),
+    surfaceRule(`[data-color-mode="dark"] ${panelSelector}`),
+    surfaceRule(`${panelSelector}[data-color-mode="dark"]`),
+  ].join('\n');
+
+  const autoDark = `
+@media (prefers-color-scheme: dark) {
+  ${surfaceRule(`:root[data-color-mode="auto"] ${panelSelector}`)}
+  ${surfaceRule(`[data-color-mode="auto"] ${panelSelector}`)}
+  ${surfaceRule(`:root:not([data-color-mode="light"]) ${panelSelector}`)}
+}`;
+
+  return `${explicitDark}\n${autoDark}`;
+}
+
 function ensurePanelStyles(rootDocument) {
   if (rootDocument.getElementById(STYLE_ID)) {
     return;
@@ -562,6 +623,12 @@ function ensurePanelStyles(rootDocument) {
   --rr-panel-muted: var(--fgColor-muted, #656d76);
   --rr-panel-highlight: rgba(255, 255, 255, 0.72);
   --rr-panel-shadow: rgba(15, 23, 42, 0.12);
+  /* Metallic sheen tint mixed into button/chip gradients. Light themes tolerate
+     a pure-white sheen; dark themes must use a restrained light overlay so the
+     surface does not blow out toward white and wash the light foreground text.
+     The dark remap restates this token. */
+  --rr-panel-metal-tint: #ffffff;
+  --rr-panel-metal-tint-strength: 16%;
   font-family: var(--fontStack-sansSerif, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
   background: var(--rr-panel-surface-muted);
   color: var(--rr-panel-text);
@@ -569,12 +636,7 @@ function ensurePanelStyles(rootDocument) {
   padding: 12px;
 }
 
-:root[data-color-mode="dark"] #${PANEL_ID} {
-  --rr-panel-border: rgba(240, 246, 252, 0.14);
-  --rr-panel-border-strong: rgba(240, 246, 252, 0.22);
-  --rr-panel-highlight: rgba(240, 246, 252, 0.08);
-  --rr-panel-shadow: rgba(1, 4, 9, 0.42);
-}
+${buildDarkThemeBlocks(`#${PANEL_ID}`)}
 
 #${PANEL_ID}.roger-panel--inline {
   position: relative;
@@ -617,7 +679,7 @@ function ensurePanelStyles(rootDocument) {
   background:
     linear-gradient(
       180deg,
-      color-mix(in srgb, var(--rr-panel-surface) 92%, white 8%) 0%,
+      color-mix(in srgb, var(--rr-panel-surface) 92%, var(--rr-panel-metal-tint) 8%) 0%,
       var(--rr-panel-surface-raised) 52%,
       color-mix(in srgb, var(--rr-panel-surface) 74%, var(--rr-panel-surface-muted) 26%) 100%
     ),
@@ -750,8 +812,8 @@ function ensurePanelStyles(rootDocument) {
   border: 1px solid var(--rr-panel-border-strong);
   background: linear-gradient(
     120deg,
-    color-mix(in srgb, var(--rr-panel-surface) 86%, white 14%) 0%,
-    color-mix(in srgb, var(--rr-panel-surface-raised) 92%, white 8%) 100%
+    color-mix(in srgb, var(--rr-panel-surface) 86%, var(--rr-panel-metal-tint) 14%) 0%,
+    color-mix(in srgb, var(--rr-panel-surface-raised) 92%, var(--rr-panel-metal-tint) 8%) 100%
   );
   color: var(--rr-brand-ink-700);
   font-size: 11px;
@@ -806,8 +868,9 @@ function ensurePanelStyles(rootDocument) {
     180deg,
     color-mix(
       in srgb,
-      var(--button-default-bgColor-rest, var(--rr-panel-surface)) 84%,
-      white 16%
+      var(--button-default-bgColor-rest, var(--rr-panel-surface))
+        calc(100% - var(--rr-panel-metal-tint-strength)),
+      var(--rr-panel-metal-tint) var(--rr-panel-metal-tint-strength)
     ),
     color-mix(
       in srgb,
@@ -840,8 +903,9 @@ function ensurePanelStyles(rootDocument) {
     180deg,
     color-mix(
       in srgb,
-      var(--button-default-bgColor-hover, var(--rr-panel-surface-raised)) 84%,
-      white 16%
+      var(--button-default-bgColor-hover, var(--rr-panel-surface-raised))
+        calc(100% - var(--rr-panel-metal-tint-strength)),
+      var(--rr-panel-metal-tint) var(--rr-panel-metal-tint-strength)
     ),
     color-mix(
       in srgb,
@@ -891,7 +955,7 @@ function ensurePanelStyles(rootDocument) {
   color: var(--rr-panel-muted);
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--rr-panel-surface-raised) 86%, white 14%),
+    color-mix(in srgb, var(--rr-panel-surface-raised) 86%, var(--rr-panel-metal-tint) 14%),
     color-mix(in srgb, var(--rr-panel-surface-raised) 94%, var(--rr-panel-surface-muted) 6%)
   );
 }
@@ -969,7 +1033,7 @@ function ensurePanelStyles(rootDocument) {
   border-radius: 999px;
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--rr-panel-surface-raised) 88%, white 12%),
+    color-mix(in srgb, var(--rr-panel-surface-raised) 88%, var(--rr-panel-metal-tint) 12%),
     color-mix(in srgb, var(--rr-panel-surface) 92%, var(--rr-panel-surface-muted) 8%)
   );
   color: var(--rr-panel-text);
@@ -1003,7 +1067,7 @@ function ensurePanelStyles(rootDocument) {
   border-radius: 12px;
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--rr-panel-surface) 92%, white 8%),
+    color-mix(in srgb, var(--rr-panel-surface) 92%, var(--rr-panel-metal-tint) 8%),
     color-mix(in srgb, var(--rr-panel-surface-raised) 94%, var(--rr-panel-surface-muted) 6%)
   );
   box-shadow: 0 18px 36px var(--rr-panel-shadow);

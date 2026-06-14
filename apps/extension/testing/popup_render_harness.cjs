@@ -220,6 +220,33 @@ const PANEL_SCENARIOS = {
       ...SHARED_LAUNCH_RESPONSE,
     },
   },
+  'pr-light-rail': {
+    activeTabUrl: PR_URL,
+    buildLabel: SHARED_BUILD_LABEL,
+    hostTheme: 'light',
+    placement: 'rail',
+    statusResponse: {
+      ok: true,
+      mode: 'session_inventory',
+      session_count: 1,
+      sessions: [
+        {
+          session_id: 'session-155408-rail-light',
+          provider: 'claude',
+          attention_state: 'awaiting_user_input',
+          updated_at: '2026-06-12T00:00:00Z',
+        },
+      ],
+      message:
+        '1 local Roger review session(s) exist for this pull request; no fresh attention claim.',
+      guidance: 'Open Roger locally (`rr status`) for authoritative detail.',
+    },
+    launchResponse: {
+      ...SHARED_LAUNCH_RESPONSE,
+      message: 'Start Review simulated for rust-lang/rust#155408.',
+      attention_state: null,
+    },
+  },
 };
 
 const SURFACES = {

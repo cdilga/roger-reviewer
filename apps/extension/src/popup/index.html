@@ -7,15 +7,37 @@
     <link rel="stylesheet" href="../../static/roger-identity.css" />
     <style>
       :root {
-        color-scheme: light;
+        /* The popup is its own document with no GitHub host, so the only
+           faithful theme signal is the OS/browser preference. We follow it via
+           color-scheme + a prefers-color-scheme dark remap of the same
+           Roger-owned popup tokens, mirroring the in-page panel mapping. */
+        color-scheme: light dark;
         --rr-popup-canvas: linear-gradient(160deg, #eef2f6 0%, #f6f8fa 48%, #e6edf3 100%);
         --rr-popup-ink: #0d1117;
         --rr-popup-muted: #57606a;
         --rr-popup-accent: #2f81f7;
         --rr-popup-accent-strong: #1f6feb;
         --rr-popup-border: #d0d7de;
+        --rr-popup-surface: #ffffff;
+        --rr-popup-surface-muted: #f4f7f9;
+        --rr-popup-surface-hover: #edf5f8;
         --rr-popup-shadow: 0 10px 20px rgba(13, 17, 23, 0.08);
         font-family: "Segoe UI Variable", "Avenir Next", "Segoe UI", sans-serif;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --rr-popup-canvas: linear-gradient(160deg, #0d1117 0%, #161b22 52%, #0d1117 100%);
+          --rr-popup-ink: #e6edf3;
+          --rr-popup-muted: #8b949e;
+          --rr-popup-accent: #58a6ff;
+          --rr-popup-accent-strong: #388bfd;
+          --rr-popup-border: #30363d;
+          --rr-popup-surface: #161b22;
+          --rr-popup-surface-muted: #21262d;
+          --rr-popup-surface-hover: #30363d;
+          --rr-popup-shadow: 0 10px 20px rgba(1, 4, 9, 0.5);
+        }
       }
 
       body {
@@ -57,7 +79,7 @@
       }
 
       .card {
-        background: #ffffff;
+        background: var(--rr-popup-surface);
         border: 1px solid var(--rr-popup-border);
         border-radius: 12px;
         padding: 12px;
@@ -94,7 +116,7 @@
       button {
         border: 1px solid var(--rr-popup-border);
         border-radius: 6px;
-        background: #f4f7f9;
+        background: var(--rr-popup-surface-muted);
         color: var(--rr-popup-ink);
         font-size: 12px;
         padding: 7px 8px;
@@ -103,7 +125,7 @@
       }
 
       button:hover:enabled {
-        background: #edf5f8;
+        background: var(--rr-popup-surface-hover);
         border-color: var(--rr-popup-accent);
         color: var(--rr-popup-accent-strong);
       }
@@ -114,7 +136,13 @@
       }
 
       .status-error {
-        color: #cf222e;
+        color: var(--fgColor-danger, #cf222e);
+      }
+
+      @media (prefers-color-scheme: dark) {
+        .status-error {
+          color: #ff7b72;
+        }
       }
 
       .action-primary {
@@ -131,7 +159,7 @@
       }
 
       .action-secondary {
-        background: #ffffff;
+        background: var(--rr-popup-surface);
       }
 
       .action-tertiary {
