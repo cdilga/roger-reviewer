@@ -52,12 +52,20 @@ with zipfile.ZipFile(archive) as zf:
 
 required = {
     "manifest.json",
-    "src/generated/bridge.ts",
     "src/background/main.js",
 }
 missing = sorted(required - names)
 if missing:
     raise SystemExit(f"extension archive missing required entries: {missing}")
+
+# The published bundle is slimmed to runtime-only files: the non-runnable
+# generated bridge contract and unit-test files must not ship.
+forbidden = {name for name in names if name.endswith(".test.js")}
+forbidden.update(name for name in names if name == "src/generated/bridge.ts")
+if forbidden:
+    raise SystemExit(
+        f"extension archive shipped non-runtime entries: {sorted(forbidden)}"
+    )
 PY
 
 echo "test_package_extension_bundle: PASS"

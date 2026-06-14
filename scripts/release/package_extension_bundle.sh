@@ -79,9 +79,23 @@ source = pathlib.Path(sys.argv[1])
 archive = pathlib.Path(sys.argv[2])
 archive.parent.mkdir(parents=True, exist_ok=True)
 
+def is_runtime_file(rel: str) -> bool:
+    # The published bundle ships runtime-only files: unit tests and the
+    # non-runnable generated bridge contract are excluded (the manifest never
+    # loads them).
+    if rel.endswith(".test.js"):
+        return False
+    if rel == "src/generated/bridge.ts":
+        return False
+    return True
+
+
 with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
     for path in sorted(p for p in source.rglob("*") if p.is_file()):
-        zf.write(path, path.relative_to(source).as_posix())
+        rel = path.relative_to(source).as_posix()
+        if not is_runtime_file(rel):
+            continue
+        zf.write(path, rel)
 PY
 
 python3 - "$archive_path" "$verify_json" "$pack_json" "$output_dir" "$version" "$tag" "$channel" <<'PY'
