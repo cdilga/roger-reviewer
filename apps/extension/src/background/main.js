@@ -14,6 +14,13 @@ const CANONICAL_ATTENTION_STATES = new Set([
 ]);
 const MAX_MIRROR_FRESHNESS_SECONDS = 300;
 const MAX_SESSION_INVENTORY_ENTRIES = 5;
+// Worker-side watchdog for the status probe. An open connectNative Port anchors
+// Edge's module service worker so the host's one reply lands before teardown,
+// but a hung/never-replying host could otherwise wedge the worker until the
+// browser kills it. This bound force-settles to the honest launch-only degrade.
+// MUST stay below the content-side settle timeout so the worker leg always
+// resolves first (see STATUS_MIRROR_SETTLE_TIMEOUT_MS in content/main.js).
+const STATUS_PROBE_TIMEOUT_MS = 4000;
 const BRIDGE_FAILURE_MODE_BY_KIND = Object.freeze({
   preflight_failed: 'bridge_preflight_failed',
   cli_spawn_failed: 'bridge_cli_spawn_failed',
@@ -285,25 +292,83 @@ function launchOnlyStatusEnvelope(reason = null) {
   };
 }
 
+// Edge's MV3 module service worker can tear down before a one-shot
+// sendNativeMessage reply lands, so the content->background->native status
+// relay never settles. A long-lived connectNative Port keeps the worker alive
+// until the host replies (the host reads one message, writes one, exits — that
+// maps to exactly one onMessage followed by onDisconnect). We settle EXACTLY
+// ONCE behind a guard, then disconnect, and a worker-side watchdog force-settles
+// to launch-only so a hung host can never wedge the worker.
 function dispatchNativeStatus(intent) {
   return new Promise((resolve) => {
-    chrome.runtime.sendNativeMessage(
-      BRIDGE_HOST,
-      {
+    let settled = false;
+    let watchdog = null;
+    let port = null;
+
+    const settle = (value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (watchdog !== null) {
+        clearTimeout(watchdog);
+        watchdog = null;
+      }
+      if (port) {
+        try {
+          port.disconnect();
+        } catch {
+          // Port may already be torn down; disconnecting twice is harmless.
+        }
+        port = null;
+      }
+      resolve(value);
+    };
+
+    try {
+      port = chrome.runtime.connectNative(BRIDGE_HOST);
+    } catch {
+      // connectNative is unavailable or threw synchronously: honest degrade.
+      resolve(null);
+      return;
+    }
+
+    if (!port || typeof port.postMessage !== 'function') {
+      resolve(null);
+      return;
+    }
+
+    // Host replied: normalize its single envelope and tear the port down.
+    if (port.onMessage && typeof port.onMessage.addListener === 'function') {
+      port.onMessage.addListener((response) => {
+        settle(normalizeStatusEnvelope(response));
+      });
+    }
+
+    // Host died/unreachable or exited after its single write: if we have not
+    // already settled from a message, degrade to launch-only honestly.
+    if (port.onDisconnect && typeof port.onDisconnect.addListener === 'function') {
+      port.onDisconnect.addListener(() => {
+        settle(null);
+      });
+    }
+
+    // A hung host that neither replies nor disconnects must not wedge the
+    // worker: force a launch-only settle (which also disconnects the port).
+    watchdog = setTimeout(() => {
+      settle(null);
+    }, STATUS_PROBE_TIMEOUT_MS);
+
+    try {
+      port.postMessage({
         type: 'roger_bridge_status',
         owner: intent.owner,
         repo: intent.repo,
         pr_number: intent.pr_number,
-      },
-      (response) => {
-        if (chrome.runtime.lastError) {
-          resolve(null);
-          return;
-        }
-
-        resolve(normalizeStatusEnvelope(response));
-      }
-    );
+      });
+    } catch {
+      settle(null);
+    }
   });
 }
 
@@ -403,8 +468,10 @@ if (typeof module !== 'undefined' && module.exports) {
     CANONICAL_ATTENTION_STATES,
     MAX_MIRROR_FRESHNESS_SECONDS,
     MAX_SESSION_INVENTORY_ENTRIES,
+    STATUS_PROBE_TIMEOUT_MS,
     buildRegistrationIntent,
     detectBrowserLabel,
+    dispatchNativeStatus,
     handleLaunchMessage,
     handleStatusMessage,
     launchOnlyStatusEnvelope,

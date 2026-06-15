@@ -1,7 +1,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { handleLaunchMessage, handleStatusMessage } = require('./background/main.js');
+const {
+  handleLaunchMessage,
+  handleStatusMessage,
+  STATUS_PROBE_TIMEOUT_MS,
+} = require('./background/main.js');
 
 function withChromeStub(stub, fn) {
   const previousChrome = global.chrome;
@@ -360,16 +364,82 @@ for (const [label, bridgeResponse, expectedMode] of [
   });
 }
 
-test('native status probe relays zero-session inventory as no_local_session', async () => {
-  const chromeStub = {
+// --- connectNative Port stub for the Edge module-service-worker status leg ---
+//
+// The status probe no longer uses one-shot sendNativeMessage; it opens a
+// long-lived connectNative Port so Edge's module service worker stays anchored
+// until the host's single reply lands. This stub models the host contract
+// (read one, write one, exit -> one onMessage then onDisconnect) and lets each
+// test script the exact onMessage/onDisconnect ordering and timing.
+function createNativePortStub({ behavior } = {}) {
+  const messageListeners = [];
+  const disconnectListeners = [];
+  const port = {
+    disconnected: false,
+    postedMessages: [],
+    onMessage: {
+      addListener(fn) {
+        messageListeners.push(fn);
+      },
+    },
+    onDisconnect: {
+      addListener(fn) {
+        disconnectListeners.push(fn);
+      },
+    },
+    disconnect() {
+      if (this.disconnected) {
+        return;
+      }
+      this.disconnected = true;
+    },
+    // Test-only drivers.
+    emitMessage(response) {
+      for (const fn of messageListeners) {
+        fn(response);
+      }
+    },
+    emitDisconnect() {
+      for (const fn of disconnectListeners) {
+        fn();
+      }
+    },
+  };
+
+  port.postMessage = function postMessage(message) {
+    port.postedMessages.push(message);
+    if (typeof behavior === 'function') {
+      behavior(port, message);
+    }
+  };
+
+  return port;
+}
+
+function chromeWithConnectNative(behavior) {
+  let lastPort = null;
+  const stub = {
     runtime: {
       lastError: null,
       onMessage: { addListener: () => {} },
-      sendNativeMessage(_host, _intent, callback) {
-        callback({ ok: true, session_count: 0 });
+      connectNative(_host) {
+        lastPort = createNativePortStub({ behavior });
+        return lastPort;
       },
     },
+    getLastPort() {
+      return lastPort;
+    },
   };
+  return stub;
+}
+
+test('status probe relays zero-session inventory as no_local_session (reply then disconnect)', async () => {
+  const chromeStub = chromeWithConnectNative((port) => {
+    // Host reads one, writes one, exits: message then disconnect.
+    port.emitMessage({ ok: true, session_count: 0 });
+    port.emitDisconnect();
+  });
 
   await withChromeStub(chromeStub, async () => {
     const response = await handleStatusMessage({
@@ -380,26 +450,31 @@ test('native status probe relays zero-session inventory as no_local_session', as
     assert.equal(response.mode, 'no_local_session');
     assert.equal(response.session_count, 0);
     assert.equal(response.attention_state, undefined);
+
+    const port = chromeStub.getLastPort();
+    assert.equal(port.disconnected, true, 'port must be torn down after settling');
+    assert.equal(port.postedMessages.length, 1);
+    assert.deepEqual(port.postedMessages[0], {
+      type: 'roger_bridge_status',
+      owner: 'acme',
+      repo: 'widgets',
+      pr_number: 42,
+    });
   });
 });
 
-test('native status probe relays multi-session inventory without a fresh attention claim', async () => {
-  const chromeStub = {
-    runtime: {
-      lastError: null,
-      onMessage: { addListener: () => {} },
-      sendNativeMessage(_host, _intent, callback) {
-        callback({
-          ok: true,
-          session_count: 2,
-          sessions: [
-            { session_id: 'session-1', provider: 'claude', attention_state: 'findings_ready' },
-            { session_id: 'session-2', provider: 'codex', attention_state: 'review_failed' },
-          ],
-        });
-      },
-    },
-  };
+test('status probe relays multi-session inventory without a fresh attention claim', async () => {
+  const chromeStub = chromeWithConnectNative((port) => {
+    port.emitMessage({
+      ok: true,
+      session_count: 2,
+      sessions: [
+        { session_id: 'session-1', provider: 'claude', attention_state: 'findings_ready' },
+        { session_id: 'session-2', provider: 'codex', attention_state: 'review_failed' },
+      ],
+    });
+    port.emitDisconnect();
+  });
 
   await withChromeStub(chromeStub, async () => {
     const response = await handleStatusMessage({
@@ -414,22 +489,17 @@ test('native status probe relays multi-session inventory without a fresh attenti
   });
 });
 
-test('native status probe still mirrors fresh bounded attention with inventory attached', async () => {
-  const chromeStub = {
-    runtime: {
-      lastError: null,
-      onMessage: { addListener: () => {} },
-      sendNativeMessage(_host, _intent, callback) {
-        callback({
-          ok: true,
-          attention_state: 'findings_ready',
-          freshness_seconds: 12,
-          session_count: 1,
-          sessions: [{ session_id: 'session-1', provider: 'claude' }],
-        });
-      },
-    },
-  };
+test('status probe still mirrors fresh bounded attention with inventory attached', async () => {
+  const chromeStub = chromeWithConnectNative((port) => {
+    port.emitMessage({
+      ok: true,
+      attention_state: 'findings_ready',
+      freshness_seconds: 12,
+      session_count: 1,
+      sessions: [{ session_id: 'session-1', provider: 'claude' }],
+    });
+    port.emitDisconnect();
+  });
 
   await withChromeStub(chromeStub, async () => {
     const response = await handleStatusMessage({
@@ -442,6 +512,127 @@ test('native status probe still mirrors fresh bounded attention with inventory a
     assert.equal(response.session_count, 1);
     assert.equal(response.sessions.length, 1);
   });
+});
+
+test('status probe degrades to launch-only when the host disconnects without a message', async () => {
+  // Host died/unreachable: the port disconnects before any reply lands.
+  const chromeStub = chromeWithConnectNative((port) => {
+    port.emitDisconnect();
+  });
+
+  await withChromeStub(chromeStub, async () => {
+    const response = await handleStatusMessage({
+      intent: { owner: 'acme', repo: 'widgets', pr_number: 42 },
+    });
+
+    assert.equal(response.ok, true);
+    assert.equal(response.mode, 'launch_only');
+    assert.equal(response.session_count, undefined);
+    assert.equal(response.attention_state, undefined);
+  });
+});
+
+test('status probe watchdog settles launch-only when a hung host never replies', async () => {
+  // Host neither replies nor disconnects: the worker-side watchdog must
+  // force-settle to launch-only and tear the port down so the worker is freed.
+  const chromeStub = chromeWithConnectNative(() => {
+    // Intentionally silent: no emitMessage, no emitDisconnect.
+  });
+
+  const realSetTimeout = global.setTimeout;
+  const realClearTimeout = global.clearTimeout;
+  let scheduledWatchdog = null;
+  global.setTimeout = (fn, ms) => {
+    scheduledWatchdog = { fn, ms };
+    return 1;
+  };
+  global.clearTimeout = () => {};
+
+  try {
+    await withChromeStub(chromeStub, async () => {
+      const pending = handleStatusMessage({
+        intent: { owner: 'acme', repo: 'widgets', pr_number: 42 },
+      });
+
+      assert.ok(scheduledWatchdog, 'a watchdog timer must be armed');
+      assert.equal(scheduledWatchdog.ms, STATUS_PROBE_TIMEOUT_MS);
+
+      // Fire the watchdog as the browser would after the bound elapses.
+      scheduledWatchdog.fn();
+
+      const response = await pending;
+      assert.equal(response.ok, true);
+      assert.equal(response.mode, 'launch_only');
+
+      const port = chromeStub.getLastPort();
+      assert.equal(port.disconnected, true, 'watchdog must tear the hung port down');
+    });
+  } finally {
+    global.setTimeout = realSetTimeout;
+    global.clearTimeout = realClearTimeout;
+  }
+});
+
+test('status probe settles exactly once and never double-settles or leaks the port', async () => {
+  // Reply lands first (settle #1), then a late disconnect and a late watchdog
+  // fire must be no-ops: single settle, single disconnect, no leaked port.
+  let messageDriver = null;
+  const chromeStub = chromeWithConnectNative((port) => {
+    messageDriver = port;
+  });
+
+  const realSetTimeout = global.setTimeout;
+  const realClearTimeout = global.clearTimeout;
+  let scheduledWatchdog = null;
+  let clearedWatchdog = false;
+  global.setTimeout = (fn) => {
+    scheduledWatchdog = fn;
+    return 7;
+  };
+  global.clearTimeout = () => {
+    clearedWatchdog = true;
+  };
+
+  try {
+    await withChromeStub(chromeStub, async () => {
+      const pending = handleStatusMessage({
+        intent: { owner: 'acme', repo: 'widgets', pr_number: 42 },
+      });
+
+      // First settle: a real bounded reply.
+      messageDriver.emitMessage({
+        ok: true,
+        attention_state: 'findings_ready',
+        freshness_seconds: 5,
+        session_count: 1,
+        sessions: [{ session_id: 'session-1' }],
+      });
+
+      const response = await pending;
+      assert.equal(response.mode, 'bounded_status');
+      assert.equal(response.attention_state, 'findings_ready');
+
+      const port = chromeStub.getLastPort();
+      assert.equal(port.disconnected, true);
+      assert.equal(clearedWatchdog, true, 'the watchdog must be cleared on settle');
+
+      // Late stragglers must not throw and must not change the resolved value.
+      let disconnectCountBefore = port.disconnected;
+      port.emitDisconnect();
+      if (typeof scheduledWatchdog === 'function') {
+        scheduledWatchdog();
+      }
+      // Idempotent: a second emit/disconnect/watchdog leaves the port settled.
+      assert.equal(port.disconnected, disconnectCountBefore);
+
+      // The promise has only one resolution; awaiting again yields the same value.
+      const again = await pending;
+      assert.equal(again.mode, 'bounded_status');
+    });
+  } finally {
+    global.setTimeout = realSetTimeout;
+    global.clearTimeout = realClearTimeout;
+  }
 });
 
 test('handleLaunchMessage rejects refresh_review as a browser action', async () => {

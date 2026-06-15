@@ -206,6 +206,15 @@ function readRuntimeAssetUrl(relativePath) {
 const BRIDGE_DISCONNECT_GUIDANCE =
   'Native bridge unreachable. Run `rr extension setup --browser <edge|chrome|brave>`, then `rr extension doctor --browser <edge|chrome|brave>`, and reload this page.';
 
+// Content-side settle bound for the bounded status mirror. On Edge the
+// content->background->native leg can fail to settle if the module service
+// worker callback never fires (worker torn down before the host reply lands).
+// This fallback guarantees the panel always degrades to launch-only within
+// bounded time instead of hanging un-settled. It MUST exceed the worker-side
+// watchdog (STATUS_PROBE_TIMEOUT_MS ~4000ms in background/main.js) so the
+// worker leg is always given its full chance to resolve first.
+const STATUS_MIRROR_SETTLE_TIMEOUT_MS = 5000;
+
 function normalizeGuidanceText(guidance) {
   if (Array.isArray(guidance)) {
     return guidance
@@ -348,11 +357,49 @@ function requestStatusMirror(context) {
     }
   };
 
-  if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
+  // One-shot settle guard. The worker leg can settle the panel from its
+  // callback, OR — when that callback never fires because Edge tore the module
+  // service worker down before the host reply landed — the timeout fallback
+  // settles it to launch-only. Whichever fires first wins; the loser is a
+  // no-op. This guarantees the panel is always settled within bounded time and
+  // is never left hanging.
+  let settled = false;
+  let settleTimer = null;
+  const settleOnce = (apply) => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    if (settleTimer !== null && typeof clearTimeout === 'function') {
+      clearTimeout(settleTimer);
+      settleTimer = null;
+    }
+    apply();
+  };
+
+  // Reused launch-only degrade branch: the panel can still start Roger actions,
+  // it just does not own live local session state.
+  const degradeToLaunchOnly = (
+    message = 'Launch-only mode. Open Roger locally (`rr status`) for authoritative detail.'
+  ) => {
     applyMirroredModel(null, null);
     clearAttentionBadge();
-    setInfoMessage('Launch-only mode. Open Roger locally (`rr status`) for authoritative detail.');
+    setInfoMessage(message);
+  };
+
+  if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
+    settleOnce(() => degradeToLaunchOnly());
     return;
+  }
+
+  // Bounded settle fallback: if the worker callback never fires, degrade to
+  // launch-only so the panel never hangs un-settled. Must outlast the
+  // worker-side watchdog (STATUS_PROBE_TIMEOUT_MS) so the worker leg resolves
+  // first when it can.
+  if (typeof setTimeout === 'function') {
+    settleTimer = setTimeout(() => {
+      settleOnce(() => degradeToLaunchOnly());
+    }, STATUS_MIRROR_SETTLE_TIMEOUT_MS);
   }
 
   chrome.runtime.sendMessage(
@@ -365,69 +412,69 @@ function requestStatusMirror(context) {
       },
     },
     (response) => {
-      if (chrome.runtime.lastError) {
-        applyMirroredModel(null, null);
-        clearAttentionBadge();
-        setInfoMessage('Launch-only mode. Open Roger locally (`rr status`) for authoritative detail.');
-        return;
-      }
+      settleOnce(() => {
+        if (chrome.runtime.lastError) {
+          degradeToLaunchOnly();
+          return;
+        }
 
-      if (!response) {
-        applyMirroredModel(null, null);
-        clearAttentionBadge();
-        setInfoMessage('No bounded status response. Open Roger locally (`rr status`) for authoritative detail.');
-        return;
-      }
+        if (!response) {
+          degradeToLaunchOnly(
+            'No bounded status response. Open Roger locally (`rr status`) for authoritative detail.'
+          );
+          return;
+        }
 
-      if (!response.ok) {
-        applyMirroredModel(null, null);
-        clearAttentionBadge();
-        setInfoMessage(appendGuidance(response.message, response.guidance));
-        return;
-      }
+        if (!response.ok) {
+          applyMirroredModel(null, null);
+          clearAttentionBadge();
+          setInfoMessage(appendGuidance(response.message, response.guidance));
+          return;
+        }
 
-      // Durable local truth: no review session exists for this PR, so there
-      // is nothing to resume and the panel must not pretend otherwise.
-      if (response.mode === 'no_local_session') {
-        applyMirroredModel(null, 0);
-        clearAttentionBadge();
-        setInfoMessage('No Roger review exists for this PR yet — start one.');
-        return;
-      }
+        // Durable local truth: no review session exists for this PR, so there
+        // is nothing to resume and the panel must not pretend otherwise.
+        if (response.mode === 'no_local_session') {
+          applyMirroredModel(null, 0);
+          clearAttentionBadge();
+          setInfoMessage('No Roger review exists for this PR yet — start one.');
+          return;
+        }
 
-      // Sessions exist but no fresh attention claim: surface the truthful
-      // inventory without bluffing findings, drafts, or attention state.
-      if (
-        response.mode === 'session_inventory' &&
-        normalizeSessionCount(response.session_count) !== null
-      ) {
-        applyMirroredModel(null, response.session_count);
-        clearAttentionBadge();
-        const count = normalizeSessionCount(response.session_count);
+        // Sessions exist but no fresh attention claim: surface the truthful
+        // inventory without bluffing findings, drafts, or attention state.
+        if (
+          response.mode === 'session_inventory' &&
+          normalizeSessionCount(response.session_count) !== null
+        ) {
+          applyMirroredModel(null, response.session_count);
+          clearAttentionBadge();
+          const count = normalizeSessionCount(response.session_count);
+          setInfoMessage(
+            `${count} local Roger review session${count === 1 ? '' : 's'} for this PR. ` +
+              'Open Roger locally (`rr status`) for authoritative detail.'
+          );
+          return;
+        }
+
+        if (response.mode !== 'bounded_status' || !response.attention_state) {
+          applyMirroredModel(null, null);
+          clearAttentionBadge();
+          setInfoMessage(
+            appendGuidance(
+              response.message || 'Launch-only mode. Open Roger locally for authoritative detail.',
+              response.guidance
+            )
+          );
+          return;
+        }
+
+        applyMirroredModel(response.attention_state, response.session_count);
+        setAttentionBadge(response.attention_state, response.freshness_label || null);
         setInfoMessage(
-          `${count} local Roger review session${count === 1 ? '' : 's'} for this PR. ` +
-            'Open Roger locally (`rr status`) for authoritative detail.'
+          appendGuidance(response.message || 'Mirroring bounded Roger status.', response.guidance)
         );
-        return;
-      }
-
-      if (response.mode !== 'bounded_status' || !response.attention_state) {
-        applyMirroredModel(null, null);
-        clearAttentionBadge();
-        setInfoMessage(
-          appendGuidance(
-            response.message || 'Launch-only mode. Open Roger locally for authoritative detail.',
-            response.guidance
-          )
-        );
-        return;
-      }
-
-      applyMirroredModel(response.attention_state, response.session_count);
-      setAttentionBadge(response.attention_state, response.freshness_label || null);
-      setInfoMessage(
-        appendGuidance(response.message || 'Mirroring bounded Roger status.', response.guidance)
-      );
+      });
     }
   );
 }
@@ -1652,6 +1699,7 @@ if (typeof module !== 'undefined' && module.exports) {
     appendGuidance,
     BRAND_CHIP_CLASS,
     BRIDGE_DISCONNECT_GUIDANCE,
+    STATUS_MIRROR_SETTLE_TIMEOUT_MS,
     formatLaunchSuccessStatus,
     requestStatusMirror,
     triggerLaunch,

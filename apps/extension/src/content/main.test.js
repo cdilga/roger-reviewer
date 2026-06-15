@@ -5,6 +5,7 @@ const {
   appendGuidance,
   BRAND_CHIP_CLASS,
   BRIDGE_DISCONNECT_GUIDANCE,
+  STATUS_MIRROR_SETTLE_TIMEOUT_MS,
   formatLaunchSuccessStatus,
   requestStatusMirror,
   triggerLaunch,
@@ -857,26 +858,39 @@ test('inline launch success status does not auto-clear on a timer', () => {
 
   const scheduled = [];
   const previousSetTimeout = global.setTimeout;
-  global.setTimeout = (...args) => {
-    scheduled.push(args);
-    return 0;
+  const previousClearTimeout = global.clearTimeout;
+  global.setTimeout = (fn, ms) => {
+    scheduled.push({ fn, ms });
+    return scheduled.length;
   };
+  global.clearTimeout = () => {};
 
   try {
     withPanelGlobals({ documentStub: dom.documentStub, chromeStub }, () => {
       triggerLaunch('start_review', TEST_CONTEXT, button);
+
+      // The only timer the success path may arm is the bounded-status mirror's
+      // settle fallback, which must never touch the launch status line. Firing
+      // every scheduled timer must leave the launch status fully intact.
+      for (const entry of scheduled) {
+        if (typeof entry.fn === 'function') {
+          entry.fn();
+        }
+      }
     });
   } finally {
     global.setTimeout = previousSetTimeout;
+    global.clearTimeout = previousClearTimeout;
   }
 
   assert.equal(dom.statusNode.hidden, false);
   assert.equal(dom.statusNode.classList.contains('roger-panel-status--inline-visible'), true);
-  assert.equal(
-    scheduled.length,
-    0,
-    'launch status must stay visible until the next action, never auto-clear on a timer'
+  assert.match(
+    dom.statusNode.textContent,
+    /rr review completed for acme\/widgets#42\./,
+    'launch status must stay visible after any mirror settle timer fires, never auto-clear'
   );
+  assert.match(dom.statusNode.textContent, /session-42/);
 });
 
 test('formatLaunchSuccessStatus derives a truthful durable success line', () => {
@@ -1112,4 +1126,139 @@ test('session inventory mirror never clears a persistent launch status line', ()
     assert.match(dom.statusNode.textContent, /Roger bridge preflight failed\./);
     assert.equal(findActionButton(dom, 'resume_review').hidden, true);
   });
+});
+
+// The worker-side watchdog bound. The content settle timeout must exceed this
+// so the worker leg always gets its full chance to resolve before the panel
+// degrades. Imported directly so the assertion tracks the real source value.
+const { STATUS_PROBE_TIMEOUT_MS } = require('../background/main.js');
+
+test('content settle timeout strictly exceeds the worker watchdog so the worker leg resolves first', () => {
+  assert.equal(typeof STATUS_MIRROR_SETTLE_TIMEOUT_MS, 'number');
+  assert.equal(typeof STATUS_PROBE_TIMEOUT_MS, 'number');
+  assert.ok(
+    STATUS_MIRROR_SETTLE_TIMEOUT_MS > STATUS_PROBE_TIMEOUT_MS,
+    'content settle timeout must outlast the worker watchdog'
+  );
+});
+
+// A chrome stub whose status sendMessage callback never fires, modelling Edge
+// tearing the module service worker down before the host reply lands.
+function makeNeverSettlingStatusChromeStub() {
+  return {
+    runtime: {
+      lastError: null,
+      sendMessage(payload, _callback) {
+        // Deliberately drop the status callback on the floor: the worker leg
+        // never replies, so only the content-side timeout fallback can settle.
+        if (payload?.type === 'roger_bridge_status') {
+          return;
+        }
+      },
+    },
+  };
+}
+
+test('requestStatusMirror degrades to launch-only when the worker callback never fires', () => {
+  const dom = makePanelDom();
+  const chromeStub = makeNeverSettlingStatusChromeStub();
+
+  // Fake timers: capture the scheduled settle fallback without real waiting.
+  const scheduled = [];
+  const previousSetTimeout = global.setTimeout;
+  const previousClearTimeout = global.clearTimeout;
+  global.setTimeout = (fn, ms) => {
+    scheduled.push({ fn, ms });
+    return scheduled.length;
+  };
+  global.clearTimeout = () => {};
+
+  try {
+    withPanelGlobals({ documentStub: dom.documentStub, chromeStub }, () => {
+      assert.doesNotThrow(() => requestStatusMirror(TEST_CONTEXT));
+
+      // A bounded settle fallback must be armed at the content timeout.
+      const settleFallback = scheduled.find(
+        (entry) => entry.ms === STATUS_MIRROR_SETTLE_TIMEOUT_MS
+      );
+      assert.ok(settleFallback, 'a launch-only settle fallback must be scheduled');
+
+      // Before the fallback fires, the panel has not yet been wrongly settled
+      // by a non-existent worker reply; firing the fallback settles it.
+      assert.doesNotThrow(() => settleFallback.fn());
+
+      // Panel settled to launch-only: badge cleared, legacy both-buttons
+      // surface retained (unknown inventory), info names launch-only.
+      assert.equal(dom.badge.style.display, 'none');
+      assert.equal(findActionButton(dom, 'start_review').hidden, false);
+      assert.equal(findActionButton(dom, 'resume_review').hidden, false);
+      assert.match(dom.infoNode.textContent, /Launch-only mode/i);
+
+      // The status action line is owned by launch actions, not the mirror.
+      assert.equal(dom.statusNode.hidden, true);
+    });
+  } finally {
+    global.setTimeout = previousSetTimeout;
+    global.clearTimeout = previousClearTimeout;
+  }
+});
+
+test('requestStatusMirror settles exactly once: a late worker reply after the fallback is a no-op', () => {
+  const dom = makePanelDom();
+
+  // Capture the status callback so we can fire it AFTER the timeout fallback.
+  let statusCallback = null;
+  const chromeStub = {
+    runtime: {
+      lastError: null,
+      sendMessage(payload, callback) {
+        if (payload?.type === 'roger_bridge_status') {
+          statusCallback = callback;
+        }
+      },
+    },
+  };
+
+  const scheduled = [];
+  const previousSetTimeout = global.setTimeout;
+  const previousClearTimeout = global.clearTimeout;
+  global.setTimeout = (fn, ms) => {
+    scheduled.push({ fn, ms });
+    return scheduled.length;
+  };
+  global.clearTimeout = () => {};
+
+  try {
+    withPanelGlobals({ documentStub: dom.documentStub, chromeStub }, () => {
+      requestStatusMirror(TEST_CONTEXT);
+
+      const settleFallback = scheduled.find(
+        (entry) => entry.ms === STATUS_MIRROR_SETTLE_TIMEOUT_MS
+      );
+      // Fallback settles first -> launch-only.
+      settleFallback.fn();
+      assert.match(dom.infoNode.textContent, /Launch-only mode/i);
+
+      // A late worker reply (e.g. a revived worker) must NOT re-render the
+      // panel: the mirror already settled exactly once.
+      assert.doesNotThrow(() => {
+        statusCallback({
+          ok: true,
+          mode: 'bounded_status',
+          attention_state: 'findings_ready',
+          freshness_seconds: 3,
+          freshness_label: '3s old',
+          session_count: 1,
+          sessions: [{ session_id: 'session-1' }],
+        });
+      });
+
+      // Badge stays cleared and info stays launch-only: the late reply lost.
+      assert.equal(dom.badge.style.display, 'none');
+      assert.match(dom.infoNode.textContent, /Launch-only mode/i);
+    });
+  } finally {
+    global.setTimeout = previousSetTimeout;
+    global.clearTimeout = previousClearTimeout;
+  }
 });
