@@ -2,7 +2,7 @@ use std::fs;
 
 use tempfile::tempdir;
 
-use roger_storage::{Result, RogerStore, SemanticAssetManifest};
+use roger_storage::{Result, RogerStore, SemanticAssetManifest, semantic_model_tree_digest};
 
 const MODEL_DIGEST: &str =
     "sha256:0d05f729f928b76c15e31e5097fb25f1f11909706e64d9c582607e5d227166c3";
@@ -82,6 +82,66 @@ fn semantic_asset_verification_fails_closed_on_digest_mismatch() -> Result<()> {
             .is_some_and(|reason| reason.contains("digest mismatch"))
     );
     assert_eq!(verification.manifest, Some(manifest));
+    Ok(())
+}
+
+#[test]
+fn semantic_model_tree_digest_is_stable_and_content_sensitive() -> Result<()> {
+    let temp = tempdir()?;
+    let root = temp.path().join("model");
+    fs::create_dir_all(root.join("snapshots/abc"))?;
+    fs::write(root.join("snapshots/abc/model.onnx"), b"onnx-bytes")?;
+    fs::write(root.join("snapshots/abc/tokenizer.json"), b"{\"tok\":1}")?;
+    fs::write(root.join("config.json"), b"{\"dim\":384}")?;
+
+    let first = semantic_model_tree_digest(&root)?;
+    let second = semantic_model_tree_digest(&root)?;
+    assert_eq!(first, second, "tree digest must be deterministic");
+    assert!(first.starts_with("sha256:"));
+
+    // Mutating any model file changes the digest (fail-closed re-verify).
+    fs::write(root.join("snapshots/abc/model.onnx"), b"onnx-bytes-tampered")?;
+    let mutated = semantic_model_tree_digest(&root)?;
+    assert_ne!(first, mutated, "digest must be content-sensitive");
+    Ok(())
+}
+
+#[test]
+fn semantic_asset_verification_succeeds_for_installed_model_tree() -> Result<()> {
+    let temp = tempdir()?;
+    let store = RogerStore::open(temp.path().join("profile"))?;
+    let asset_root = store.layout().semantic_asset_root();
+
+    // Simulate the real install layout: a model tree under the asset root, with
+    // the manifest's artifact_rel_path pointing at the root itself (".").
+    fs::create_dir_all(asset_root.join("models/snapshots/rev"))?;
+    fs::write(asset_root.join("models/snapshots/rev/model.onnx"), b"onnx")?;
+    fs::write(asset_root.join("models/snapshots/rev/tokenizer.json"), b"tok")?;
+
+    let digest = semantic_model_tree_digest(&asset_root)?;
+    let manifest = SemanticAssetManifest {
+        schema_version: 1,
+        package_id: "semantic-default".to_owned(),
+        revision: "all-minilm-l6-v2".to_owned(),
+        artifact_rel_path: ".".to_owned(),
+        artifact_digest: digest,
+        installed_at: 1_750_000_000,
+    };
+    store.install_semantic_asset_manifest(&manifest)?;
+
+    let verification = store.verify_semantic_asset_manifest()?;
+    assert!(verification.verified, "tree manifest should verify clean");
+
+    // Tampering with a model file flips verification to fail-closed.
+    fs::write(asset_root.join("models/snapshots/rev/model.onnx"), b"tampered")?;
+    let after = store.verify_semantic_asset_manifest()?;
+    assert!(!after.verified);
+    assert!(
+        after
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("digest mismatch"))
+    );
     Ok(())
 }
 

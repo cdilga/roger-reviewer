@@ -117,12 +117,14 @@ fn rr_assets_verify_reports_repair_needed_on_digest_mismatch() {
 }
 
 #[test]
-fn rr_assets_install_blocks_on_local_unpublished_build() {
+#[cfg(not(feature = "semantic-fastembed"))]
+fn rr_assets_install_blocks_when_feature_not_compiled() {
     let temp = tempdir().expect("tempdir");
     let runtime = runtime_with_store(temp.path().join("store"), temp.path().to_path_buf());
 
-    // No --version and no embedded release metadata in the test binary: install
-    // must fail-closed (blocked), never silently write an unverified manifest.
+    // Default build: the FastEmbed embedder is not compiled in, so there is no
+    // model loader to install for. Install must fail-closed honestly, never
+    // silently write a manifest no embedder can back.
     let install = run_rr(
         &["assets", "install", "--asset", "semantic-default", "--robot"],
         &runtime,
@@ -132,7 +134,7 @@ fn rr_assets_install_blocks_on_local_unpublished_build() {
     assert_eq!(value["outcome"], "blocked");
     assert_eq!(
         value["data"]["reason_code"],
-        "local_or_unpublished_build"
+        "semantic_feature_not_compiled"
     );
 }
 

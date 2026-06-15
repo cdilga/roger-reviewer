@@ -24,8 +24,9 @@ use sha2::{Digest, Sha256};
 
 pub use semantic_embedder::{
     FastEmbedAdapterConfig, FastEmbedModel, SemanticEmbedder, SemanticEmbedderAdapter,
-    SemanticEmbedderError, SemanticEmbedderResult, SemanticEmbedderState, SemanticEmbedderStatus,
-    UnavailableSemanticEmbedder, semantic_embedder_status,
+    SemanticEmbedderError, SemanticEmbedderProbe, SemanticEmbedderResult, SemanticEmbedderState,
+    SemanticEmbedderStatus, UnavailableSemanticEmbedder, probe_semantic_embedder,
+    semantic_embedder_compiled, semantic_embedder_status,
 };
 
 /// The schema this build produces; must track the highest migration.
@@ -1747,8 +1748,28 @@ impl RogerStore {
             });
         }
 
-        let payload = fs::read(&asset_path)?;
-        let observed_digest = sha256_prefixed(&payload);
+        // The artifact may be a single file (the legacy single-.onnx path) or a
+        // directory tree (the real FastEmbed model the embedder loads, written
+        // by `rr assets install`). Verify the same on-disk bytes the embedder
+        // consumes, so verification and the embedder can never diverge.
+        let observed_digest = if asset_path.is_dir() {
+            match semantic_model_tree_digest(&asset_path) {
+                Ok(digest) => digest,
+                Err(err) => {
+                    return Ok(SemanticAssetVerification {
+                        verified: false,
+                        reason: Some(format!(
+                            "semantic assets are missing or unverified; could not digest model tree at {}: {err}",
+                            asset_path.display()
+                        )),
+                        manifest: Some(manifest),
+                    });
+                }
+            }
+        } else {
+            let payload = fs::read(&asset_path)?;
+            sha256_prefixed(&payload)
+        };
         if observed_digest != manifest.artifact_digest {
             return Ok(SemanticAssetVerification {
                 verified: false,
@@ -1767,28 +1788,37 @@ impl RogerStore {
         })
     }
 
+    /// Reports the real operational posture of the semantic lane.
+    ///
+    /// `operational` is true only when the build was compiled with the
+    /// FastEmbed adapter (`semantic-fastembed`) AND the installed model verifies
+    /// clean — i.e. the exact on-disk model files the embedder loads are present
+    /// and digest-match the manifest recorded at install time (when the install
+    /// probe proved the model loads and runs inference). The compile flag alone
+    /// is never enough: a compiled-but-uninstalled build is honestly degraded.
     pub fn semantic_component_state(&self) -> Result<SemanticComponentState> {
         let assets = self.verify_semantic_asset_manifest()?;
         let embedder = semantic_embedder_status();
+        let compiled = semantic_embedder_compiled();
         let mut degraded_reasons = Vec::new();
 
-        if !assets.verified {
-            degraded_reasons.push(assets.reason.clone().unwrap_or_else(|| {
-                "semantic assets are missing or unverified; verification failed".to_owned()
-            }));
-        }
-
-        if !embedder.available {
+        if !compiled {
             degraded_reasons.push(embedder.reason.clone().unwrap_or_else(|| {
-                "semantic embedder unavailable; FastEmbed integration disabled".to_owned()
+                "semantic embedder unavailable; compile roger-cli with --features semantic-fastembed"
+                    .to_owned()
+            }));
+        } else if !assets.verified {
+            degraded_reasons.push(assets.reason.clone().unwrap_or_else(|| {
+                "semantic model not installed; run rr assets install --asset semantic-default"
+                    .to_owned()
             }));
         }
 
         Ok(SemanticComponentState {
             assets_verified: assets.verified,
-            embedder_available: embedder.available,
+            embedder_available: compiled,
             embedder_backend: embedder.backend,
-            operational: assets.verified && embedder.available,
+            operational: compiled && assets.verified,
             degraded_reasons,
         })
     }
@@ -7268,6 +7298,74 @@ fn artifact_relative_path(digest: &str) -> PathBuf {
 
 fn sha256_prefixed(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+/// Compute a stable, re-verifiable digest over an on-disk model directory tree.
+///
+/// This is the digest `rr assets install` records for the *real* FastEmbed
+/// model and that [`RogerStore::verify_semantic_asset_manifest`] re-checks: it
+/// hashes every regular file under `root` (the model files HuggingFace
+/// downloaded) keyed by its slash-normalized relative path, in sorted order, so
+/// the same files always produce the same digest regardless of walk order or
+/// platform path separators. Symlinks and directories themselves are not
+/// followed/hashed beyond their contained regular files.
+///
+/// Roger's own control files are excluded so the digest is invariant under
+/// installing/re-writing them: the manifest (`active_manifest.json`) and any
+/// `.staging-*` temp files are never part of the model identity.
+pub fn semantic_model_tree_digest(root: impl AsRef<Path>) -> Result<String> {
+    let root = root.as_ref();
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    collect_tree_files(root, root, &mut files)?;
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut hasher = Sha256::new();
+    for (rel, abs) in &files {
+        let bytes = fs::read(abs)?;
+        hasher.update((rel.len() as u64).to_le_bytes());
+        hasher.update(rel.as_bytes());
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(&bytes);
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn collect_tree_files(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<(String, PathBuf)>,
+) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_tree_files(root, &path, out)?;
+        } else if file_type.is_file() {
+            // Exclude Roger's own control files so the digest reflects only the
+            // model identity, not the manifest/staging we write alongside it.
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // Skip Roger control files and hf-hub's transient `.lock` files,
+            // which are recreated/removed by the downloader and are not part of
+            // the model content the embedder loads.
+            if name == "active_manifest.json"
+                || name.starts_with(".staging-")
+                || name.ends_with(".lock")
+            {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            out.push((rel, path));
+        }
+    }
+    Ok(())
 }
 
 /// Derive a deterministic `FindingFingerprint` from normalized issue identity

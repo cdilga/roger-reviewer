@@ -8964,6 +8964,7 @@ fn handle_assets_status(runtime: &CliRuntime) -> CommandResponse {
         "manifest": manifest_value,
         "embedder": {
             "available": embedder_status.available,
+            "compiled": roger_storage::semantic_embedder_compiled(),
             "backend": embedder_status.backend,
             "reason": embedder_status.reason,
         },
@@ -9076,10 +9077,20 @@ fn handle_assets_verify(runtime: &CliRuntime) -> CommandResponse {
     }
 }
 
-/// Downloads the requested semantic model package, sha256-verifies it against
-/// the published checksums manifest, and installs the active manifest into
-/// `<store>/sidecars/semantic_assets/`. Mirrors the audited fetch+verify flow
-/// of `rr extension fetch`: fail-closed on any digest mismatch.
+/// Installs the real semantic model the FastEmbed embedder loads at search
+/// time.
+///
+/// When the `semantic-fastembed` feature is compiled in, this constructs the
+/// real embedder against the store's `semantic_asset_root()` — triggering
+/// fastembed's HuggingFace download of the model into that directory — embeds a
+/// probe string to confirm the model loads and runs inference, then records an
+/// `active_manifest.json` whose digest covers the exact on-disk model tree the
+/// embedder just loaded. `rr assets verify` re-digests that same tree, so the
+/// install gate and the embedder always look at the same bytes.
+///
+/// When the feature is NOT compiled, this fails closed honestly: there is no
+/// embedder to load the model, so installing one would be dishonest. The build
+/// must be recompiled with `--features semantic-fastembed` first.
 fn handle_assets_install(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let asset_id = parsed
         .assets_package_id
@@ -9095,77 +9106,22 @@ fn handle_assets_install(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRe
         );
     }
 
-    // The model package is only fetchable for published builds (embedded release
-    // metadata) or an explicit --download-root + --version, mirroring how
-    // rr extension fetch refuses local/unpublished builds.
-    let version = if let Some(raw_version) = parsed.update_version.as_deref() {
-        match normalize_calver_version(raw_version) {
-            Ok(version) => version,
-            Err(err) => {
-                return blocked_response(
-                    format!("invalid --version value: {err}"),
-                    vec!["pass YYYY.MM.DD or YYYY.MM.DD-rc.N".to_owned()],
-                    json!({"subcommand": "install", "reason_code": "invalid_version"}),
-                );
-            }
-        }
-    } else if let Some(version) = option_env!("ROGER_RELEASE_VERSION") {
-        version.to_owned()
-    } else {
+    // Fail closed honestly when the embedder is not compiled in: there is no
+    // model loader to install for, so we never write an unbacked manifest.
+    if !roger_storage::semantic_embedder_compiled() {
         return blocked_response(
-            "rr assets install is disabled for local/unpublished builds without embedded release metadata"
+            "rr assets install requires the FastEmbed embedder, which is not compiled into this build"
                 .to_owned(),
             vec![
-                "pass --version <YYYY.MM.DD[-rc.N]> and --download-root <url> to install a specific published model package"
+                "compile rr with --features semantic-fastembed to install the semantic model"
                     .to_owned(),
             ],
-            json!({"subcommand": "install", "reason_code": "local_or_unpublished_build"}),
+            json!({
+                "subcommand": "install",
+                "reason_code": "semantic_feature_not_compiled",
+            }),
         );
-    };
-
-    let repo = parsed
-        .repo
-        .clone()
-        .unwrap_or_else(|| "cdilga/roger-reviewer".to_owned());
-    let tag = format!("v{version}");
-    let download_root = parsed
-        .update_download_root
-        .clone()
-        .unwrap_or_else(|| format!("https://github.com/{repo}/releases/download"));
-
-    let archive_name = format!("roger-semantic-{asset_id}-{version}.onnx");
-    let checksums_fetch =
-        match fetch_checksums_manifest_with_fallback(&download_root, &tag, "SHA256SUMS") {
-            Ok(fetch) => fetch,
-            Err(err) => {
-                return blocked_response(
-                    err.message,
-                    vec!["rebuild/upload checksums for this tag".to_owned()],
-                    json!({
-                        "subcommand": "install",
-                        "reason_code": "checksums_missing",
-                        "attempted_urls": err.attempted_urls,
-                    }),
-                );
-            }
-        };
-    let expected_sha = match checksums_entry_for_archive(&checksums_fetch.text, &archive_name) {
-        Ok(value) => value.to_ascii_lowercase(),
-        Err(err) => {
-            return blocked_response(
-                format!("release {tag} does not publish a verifiable semantic asset package: {err}"),
-                vec![
-                    "confirm this release shipped the semantic asset lane".to_owned(),
-                ],
-                json!({
-                    "subcommand": "install",
-                    "reason_code": "semantic_asset_missing",
-                    "archive_name": archive_name,
-                    "checksums_url": checksums_fetch.url,
-                }),
-            );
-        }
-    };
+    }
 
     let store = match open_store_or_response(runtime, "rr assets install") {
         Ok(store) => store,
@@ -9178,74 +9134,66 @@ fn handle_assets_install(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRe
             asset_root.display()
         ));
     }
-    let staging_path = asset_root.join(format!(".staging-{}.onnx", next_id("assets-install")));
-    let cleanup_staging = |path: &Path| {
-        let _ = fs::remove_file(path);
-    };
 
-    let archive_url = format!("{download_root}/{tag}/{archive_name}");
-    if let Err(err) = download_url_to_path(&archive_url, &staging_path) {
-        cleanup_staging(&staging_path);
-        return blocked_response(
-            format!("failed to download semantic asset package: {err}"),
-            vec!["confirm the release published the semantic asset package".to_owned()],
-            json!({
-                "subcommand": "install",
-                "reason_code": "semantic_asset_download_failed",
-                "url": archive_url,
-            }),
-        );
-    }
-    let observed_sha = match sha256_for_file(&staging_path) {
-        Ok(value) => value.to_ascii_lowercase(),
+    // Construct the real embedder against the asset root. With the `hf-hub`
+    // feature, fastembed downloads the model into `asset_root` on first use and
+    // the probe proves it loads + runs inference. Any network/load failure is a
+    // fail-closed blocked outcome — we never record an unverifiable model.
+    let model = roger_storage::FastEmbedModel::default();
+    let probe = match roger_storage::probe_semantic_embedder(roger_storage::FastEmbedAdapterConfig {
+        model,
+        cache_dir: asset_root.clone(),
+        show_download_progress: false,
+    }) {
+        Ok(probe) => probe,
         Err(err) => {
-            cleanup_staging(&staging_path);
-            return error_response(err);
+            return blocked_response(
+                format!("failed to download or load the semantic model: {err}"),
+                vec![
+                    "confirm network access to huggingface.co and retry rr assets install"
+                        .to_owned(),
+                ],
+                json!({
+                    "subcommand": "install",
+                    "reason_code": "semantic_model_download_or_load_failed",
+                    "model_id": model.model_id(),
+                }),
+            );
         }
     };
-    if observed_sha != expected_sha {
-        cleanup_staging(&staging_path);
-        return blocked_response(
-            format!(
-                "semantic asset checksum mismatch for {archive_name}: expected {expected_sha}, got {observed_sha}; refusing to install"
-            ),
-            vec![
-                "re-run rr assets install; if the mismatch persists, the release assets need re-verification"
-                    .to_owned(),
-            ],
-            json!({
-                "subcommand": "install",
-                "reason_code": "semantic_asset_checksum_mismatch",
-                "archive_name": archive_name,
-                "expected_sha256": expected_sha,
-                "observed_sha256": observed_sha,
-            }),
-        );
-    }
 
-    let artifact_rel_path = format!("{asset_id}.onnx");
-    let artifact_path = asset_root.join(&artifact_rel_path);
-    if let Err(err) = fs::rename(&staging_path, &artifact_path) {
-        cleanup_staging(&staging_path);
-        return error_response(format!(
-            "failed to move verified semantic asset into place at {}: {err}",
-            artifact_path.display()
-        ));
-    }
+    // Digest the exact on-disk model tree the embedder loaded. This is the
+    // stable, re-verifiable proof recorded in the manifest; `rr assets verify`
+    // re-computes it over the same files.
+    let artifact_digest = match roger_storage::semantic_model_tree_digest(&asset_root) {
+        Ok(digest) => digest,
+        Err(err) => {
+            return error_response(format!(
+                "failed to digest downloaded semantic model tree at {}: {err}",
+                asset_root.display()
+            ));
+        }
+    };
 
     let manifest = SemanticAssetManifest {
         schema_version: 1,
         package_id: asset_id.to_owned(),
-        revision: version.clone(),
-        artifact_rel_path,
-        artifact_digest: format!("sha256:{observed_sha}"),
+        // The revision identifies the model descriptor the embedder loaded; the
+        // tree digest below is the authoritative re-verifiable artifact proof.
+        revision: probe.model_id.clone(),
+        // The model lives directly under the asset root (the fastembed cache),
+        // so the artifact path is the asset root itself ("."): verification
+        // digests the whole model tree.
+        artifact_rel_path: ".".to_owned(),
+        artifact_digest,
         installed_at: time::now_ts(),
     };
     if let Err(err) = store.install_semantic_asset_manifest(&manifest) {
         return error_response(format!("failed to write semantic asset manifest: {err}"));
     }
 
-    // Re-verify fail-closed: the manifest we just wrote must verify clean.
+    // Re-verify fail-closed: the manifest we just wrote must verify clean
+    // against the same model tree the embedder loaded.
     match store.verify_semantic_asset_manifest() {
         Ok(verification) if verification.verified => {}
         Ok(verification) => {
@@ -9268,24 +9216,35 @@ fn handle_assets_install(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRe
         }
     }
 
+    // Mark the semantic index ready for every repo scope at install time: the
+    // in-process embedder *is* the semantic index for this design (candidates
+    // are embedded live from the canonical corpus), so a verified+probed model
+    // means the semantic lane is generation-ready.
+    if let Err(err) = store.upsert_index_state(roger_storage::UpdateIndexState {
+        scope_key: "semantic:assets",
+        generation: manifest.installed_at,
+        status: "ready",
+        artifact_digest: Some(manifest.artifact_digest.as_str()),
+    }) {
+        return error_response(format!("failed to record semantic index state: {err}"));
+    }
+
     CommandResponse {
         outcome: OutcomeKind::Complete,
         data: json!({
             "subcommand": "install",
             "asset": asset_id,
-            "version": version,
-            "tag": tag,
+            "model_id": probe.model_id,
+            "embedding_dimension": probe.dimension,
+            "backend": probe.backend,
             "manifest": semantic_manifest_to_json(&manifest),
-            "archive": {
-                "name": archive_name,
-                "sha256": observed_sha,
-                "url": archive_url,
-            },
-            "checksums_url": checksums_fetch.url,
         }),
         warnings: Vec::new(),
         repair_actions: Vec::new(),
-        message: format!("semantic asset package {asset_id} installed, verified, and active"),
+        message: format!(
+            "semantic model {} installed, probed, verified, and active",
+            probe.model_id
+        ),
     }
 }
 
@@ -9329,10 +9288,13 @@ fn semantic_manifest_to_json(manifest: &SemanticAssetManifest) -> Value {
 
 fn semantic_posture_label(state: &SemanticComponentState) -> &'static str {
     if state.operational {
+        // Compiled embedder + verified+probed model: hybrid search is live.
         "operational"
-    } else if state.assets_verified {
-        "assets_verified_embedder_unavailable"
+    } else if state.embedder_available {
+        // Embedder compiled in but the model is not installed/verified yet.
+        "compiled_pending_install"
     } else {
+        // Feature not compiled: semantic lane is honestly disabled.
         "disabled_pending_install"
     }
 }
@@ -9381,6 +9343,25 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         .map(|state| state.assets_verified)
         .unwrap_or(false);
     let semantic_assets_verified = assets_verified && embedder_operational;
+
+    // When the semantic lane is fully operational (verified+probed model and a
+    // compiled embedder), mark this repo scope's semantic index ready so the
+    // in-process lookup's `semantic_index_ready` gate flips to hybrid. The
+    // embedder is the index for this design — candidates are embedded live from
+    // the canonical corpus — so an operational lane is generation-ready.
+    let scope_index_key = format!("semantic:repo:{repository}");
+    if semantic_assets_verified {
+        let digest = component_state
+            .as_ref()
+            .and_then(|_| store.semantic_asset_manifest().ok().flatten())
+            .map(|manifest| manifest.artifact_digest);
+        let _ = store.upsert_index_state(roger_storage::UpdateIndexState {
+            scope_key: &scope_index_key,
+            generation: time::now_ts(),
+            status: "ready",
+            artifact_digest: digest.as_deref(),
+        });
+    }
 
     let search_plan = match materialize_search_plan(SearchPlanInput {
         review_session_id: None,

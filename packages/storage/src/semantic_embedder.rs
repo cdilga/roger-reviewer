@@ -115,6 +115,55 @@ pub fn semantic_embedder_status() -> SemanticEmbedderStatus {
     }
 }
 
+/// True when the build was compiled with the `semantic-fastembed` feature, i.e.
+/// the FastEmbed adapter is statically linked and *could* be installed. This is
+/// distinct from "operational": a compiled build still needs `rr assets install`
+/// to download and probe the real model before search can flip to hybrid.
+pub const fn semantic_embedder_compiled() -> bool {
+    cfg!(feature = "semantic-fastembed")
+}
+
+/// Result of constructing the real semantic embedder and embedding a probe
+/// string. Returned by [`probe_semantic_embedder`] so callers (notably
+/// `rr assets install`) can prove the model loads and runs inference before
+/// recording it as operational.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticEmbedderProbe {
+    pub backend: String,
+    pub model_id: String,
+    pub dimension: usize,
+}
+
+/// Construct the real FastEmbed embedder against `config` (triggering the
+/// HuggingFace model download into `config.cache_dir` on first use), embed a
+/// fixed probe string, and report the loaded model's identity + embedding
+/// dimension. Fails closed with an honest reason when the feature is not
+/// compiled or the model cannot be loaded/run.
+pub fn probe_semantic_embedder(
+    config: FastEmbedAdapterConfig,
+) -> SemanticEmbedderResult<SemanticEmbedderProbe> {
+    let model_id = config.model.model_id().to_owned();
+    let mut adapter = SemanticEmbedderAdapter::try_fastembed(config)?;
+    if !adapter.state().is_ready() {
+        return Err(SemanticEmbedderError::new(
+            "semantic embedder constructed but did not report a ready state",
+        ));
+    }
+    let probe = adapter.embed_texts(&["roger semantic embedder install probe".to_owned()])?;
+    let dimension = probe
+        .first()
+        .map(Vec::len)
+        .filter(|len| *len > 0)
+        .ok_or_else(|| {
+            SemanticEmbedderError::new("semantic embedder returned an empty probe embedding")
+        })?;
+    Ok(SemanticEmbedderProbe {
+        backend: "fastembed".to_owned(),
+        model_id,
+        dimension,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FastEmbedModel {
     AllMiniLML6V2,
