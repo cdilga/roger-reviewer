@@ -47,7 +47,7 @@ fn future_provider_admission_stays_gate_driven_and_non_widening() {
     assert_contains_all(
         &release_matrix,
         &[
-            "| Pi-Agent | Not in `0.1.0` |",
+            "| Pi-Agent | Not in the current live surface |",
             "no live support claim, no `rr review --provider pi-agent`",
         ],
         "release matrix pi-agent non-live posture",

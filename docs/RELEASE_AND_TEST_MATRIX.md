@@ -46,19 +46,20 @@ Rules:
 
 ## `0.1.0` Provider Matrix
 
-| Provider | `0.1.0` status | Minimum expectation |
+| Provider | Current status | Minimum expectation |
 |----------|----------------|---------------------|
-| GitHub Copilot CLI | Feature-gated bounded Tier B | Exposed only with `RR_ENABLE_COPILOT_PROVIDER=1`; verified start, locator/session-id reopen, `rr return`, and honest `ResumeBundle` reseed fallback, but still withheld from the default public live claim |
-| OpenCode | First-class fallback and current strongest landed path | Real locator-based resume, Roger ledger integration, bare-harness dropout, `rr return` |
+| OpenCode | First-class default and current strongest landed path | Real locator-based resume, Roger ledger integration, bare-harness dropout, `rr return` |
 | Codex | Secondary, bounded | Exposed via `rr review --provider codex`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |
 | Gemini | Secondary, bounded | Exposed via `rr review --provider gemini`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |
 | Claude Code | Secondary, bounded | Exposed via `rr review --provider claude`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |
-| Pi-Agent | Not in `0.1.0` | Planning-only future harness candidate; no live support claim, no `rr review --provider pi-agent`, and no Tier A/Tier B language until a later admission spike proves direct-CLI launch, Roger-safe policy control, audit capture, and truthful continuity behavior |
+| GitHub Copilot CLI | Feature-gated opt-in, bounded Tier B | Exposed only with `RR_ENABLE_COPILOT_PROVIDER=1`; verified start, locator/session-id reopen, `rr return`, and honest `ResumeBundle` reseed fallback, but still withheld from the default public live claim and never the default or preferred lane |
+| Pi-Agent | Not in the current live surface | Planning-only future harness candidate; no live support claim, no `rr review --provider pi-agent`, and no Tier A/Tier B language until a later admission spike proves direct-CLI launch, Roger-safe policy control, audit capture, and truthful continuity behavior |
 
-Bounded-provider coverage in `0.1.0` should stay common-sense:
+Bounded-provider coverage should stay common-sense:
 
-- the authoritative provider support order is GitHub Copilot CLI, OpenCode,
-  Codex, Gemini, then Claude Code
+- the current live first-class default provider is OpenCode; the GitHub Copilot
+  CLI, OpenCode, Codex, Gemini, then Claude Code ordering is an aspirational
+  future product-support order, not the current default or preferred lane
 - that order does not widen a live claim before the relevant proof exists
 - Roger owns the continuity model
 - Codex, Gemini, and Claude Code do not require transcript-isomorphic resume

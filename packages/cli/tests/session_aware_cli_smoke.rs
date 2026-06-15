@@ -3951,7 +3951,7 @@ fn provider_support_claim_guard_keeps_help_robot_and_docs_in_lockstep() {
     let release_matrix = read_workspace_file("docs/RELEASE_AND_TEST_MATRIX.md");
     assert_normalized_contains(
         &release_matrix,
-        "| GitHub Copilot CLI | Feature-gated bounded Tier B | Exposed only with `RR_ENABLE_COPILOT_PROVIDER=1`; verified start, locator/session-id reopen, `rr return`, and honest `ResumeBundle` reseed fallback, but still withheld from the default public live claim |",
+        "| GitHub Copilot CLI | Feature-gated opt-in, bounded Tier B | Exposed only with `RR_ENABLE_COPILOT_PROVIDER=1`; verified start, locator/session-id reopen, `rr return`, and honest `ResumeBundle` reseed fallback, but still withheld from the default public live claim and never the default or preferred lane |",
         "docs/RELEASE_AND_TEST_MATRIX.md",
     );
     assert_normalized_contains(
@@ -3971,14 +3971,14 @@ fn provider_support_claim_guard_keeps_help_robot_and_docs_in_lockstep() {
     );
     assert_normalized_contains(
         &release_matrix,
-        "| Pi-Agent | Not in `0.1.0` | Planning-only future harness candidate; no live support claim, no `rr review --provider pi-agent`, and no Tier A/Tier B language until a later admission spike proves direct-CLI launch, Roger-safe policy control, audit capture, and truthful continuity behavior |",
+        "| Pi-Agent | Not in the current live surface | Planning-only future harness candidate; no live support claim, no `rr review --provider pi-agent`, and no Tier A/Tier B language until a later admission spike proves direct-CLI launch, Roger-safe policy control, audit capture, and truthful continuity behavior |",
         "docs/RELEASE_AND_TEST_MATRIX.md",
     );
 
     let canonical_plan = read_workspace_file("docs/PLAN_FOR_ROGER_REVIEWER.md");
     assert_normalized_contains(
         &canonical_plan,
-        "the authoritative provider support order is GitHub Copilot CLI, OpenCode, Codex, Gemini, then Claude Code",
+        "the current live first-class default provider is OpenCode; the GitHub Copilot CLI, OpenCode, Codex, Gemini, then Claude Code ordering is an aspirational future product-support order, not the current default or preferred lane",
         "docs/PLAN_FOR_ROGER_REVIEWER.md",
     );
     assert_normalized_contains(

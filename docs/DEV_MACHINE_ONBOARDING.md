@@ -229,7 +229,7 @@ Contract note:
 
 ## Copilot Admission Lane
 
-GitHub Copilot CLI is not part of Roger's default public live claim in `0.1.0`.
+GitHub Copilot CLI is not part of Roger's current default public live claim.
 Its current truthful posture is narrower:
 
 - feature-gated bounded Tier B continuity lane only

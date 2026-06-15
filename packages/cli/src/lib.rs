@@ -1145,22 +1145,10 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
                     .to_owned(),
             );
         }
-        if parsed.draft_finding_ids.is_empty() {
-            return Err("rr triage requires at least one --finding <id>".to_owned());
-        }
-        let Some(state) = parsed.triage_state.as_deref() else {
-            return Err(
-                "rr triage requires --state <accepted|ignored|needs_follow_up|resolved>".to_owned(),
-            );
-        };
-        if !matches!(
-            state,
-            "accepted" | "ignored" | "needs_follow_up" | "resolved"
-        ) {
-            return Err(format!(
-                "unsupported --state: {state} (expected accepted, ignored, needs_follow_up, or resolved; new and stale are Roger-derived triage states and cannot be set by the operator)"
-            ));
-        }
+        // The missing-finding, missing-state, and unsupported-state checks live
+        // in handle_triage so that, like rr draft/approve/post, a bad or missing
+        // required argument emits a `--robot` blocked envelope instead of plain
+        // text + exit 2. Only structural flag-shape errors stay here.
         if !parsed.attention_states.is_empty()
             || parsed.limit.is_some()
             || parsed.query_text.is_some()
@@ -8533,11 +8521,57 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     }
 }
 
+/// Canonical attention-state vocabulary `rr sessions --attention` may filter on.
+///
+/// The set is the union of the states the system writes onto a session
+/// (`review_launched`, `review_resumed`, `returned_to_roger`, `findings_ready`,
+/// `awaiting_user_input`, and the persisted `refresh_recommended` flag) and the
+/// forward-compat states the prs-queue projection (`derive_prs_queue_state`)
+/// explicitly recognizes (`awaiting_return`, `review_failed`,
+/// `outbound_approval_required`). Filtering on any of these can return real
+/// rows, so the validator must never reject them; only an unknown typo is
+/// blocked, matching how `--query-mode` fails closed on an unsupported value.
+const CANONICAL_ATTENTION_STATES: &[&str] = &[
+    "awaiting_return",
+    "awaiting_user_input",
+    "findings_ready",
+    "outbound_approval_required",
+    "refresh_recommended",
+    "returned_to_roger",
+    "review_failed",
+    "review_launched",
+    "review_resumed",
+];
+
 fn handle_sessions(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let store = match open_store_or_response(runtime, "rr sessions") {
         Ok(store) => store,
         Err(response) => return response,
     };
+
+    let unknown_attention_states = parsed
+        .attention_states
+        .iter()
+        .filter(|state| !CANONICAL_ATTENTION_STATES.contains(&state.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unknown_attention_states.is_empty() {
+        return blocked_response(
+            format!(
+                "rr sessions cannot filter on unknown attention state(s): {}",
+                unknown_attention_states.join(", ")
+            ),
+            vec![format!(
+                "pass --attention with one or more of: {}",
+                CANONICAL_ATTENTION_STATES.join(", ")
+            )],
+            json!({
+                "reason_code": "unknown_attention_state",
+                "unknown_attention_states": unknown_attention_states,
+                "supported_attention_states": CANONICAL_ATTENTION_STATES,
+            }),
+        );
+    }
 
     let limit = parsed.limit.unwrap_or(25).min(250);
     let fetch_limit = limit.saturating_add(1).min(250);
@@ -11502,11 +11536,55 @@ fn handle_robot_docs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRespon
     }
 }
 
+const TRIAGE_OPERATOR_STATES: &[&str] = &["accepted", "ignored", "needs_follow_up", "resolved"];
+
 fn handle_triage(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let store = match open_store_or_response(runtime, "rr triage") {
         Ok(store) => store,
         Err(response) => return response,
     };
+
+    // Required-argument validation lives here (not in parse_args) so that under
+    // --robot a bad or missing argument emits a blocked JSON envelope, matching
+    // rr draft/approve/post conformance instead of plain text + exit 2.
+    if parsed.draft_finding_ids.is_empty() {
+        return blocked_response(
+            "rr triage requires at least one --finding <id>".to_owned(),
+            vec!["pass --finding <id> one or more times".to_owned()],
+            json!({
+                "reason_code": "finding_selection_required",
+            }),
+        );
+    }
+    let Some(triage_state_arg) = parsed.triage_state.as_deref() else {
+        return blocked_response(
+            "rr triage requires --state <accepted|ignored|needs_follow_up|resolved>".to_owned(),
+            vec![format!(
+                "pass --state with one of: {}",
+                TRIAGE_OPERATOR_STATES.join(", ")
+            )],
+            json!({
+                "reason_code": "triage_state_required",
+                "supported_states": TRIAGE_OPERATOR_STATES,
+            }),
+        );
+    };
+    if !TRIAGE_OPERATOR_STATES.contains(&triage_state_arg) {
+        return blocked_response(
+            format!(
+                "unsupported --state: {triage_state_arg} (expected accepted, ignored, needs_follow_up, or resolved; new and stale are Roger-derived triage states and cannot be set by the operator)"
+            ),
+            vec![format!(
+                "pass --state with one of: {}",
+                TRIAGE_OPERATOR_STATES.join(", ")
+            )],
+            json!({
+                "reason_code": "unsupported_triage_state",
+                "requested_state": triage_state_arg,
+                "supported_states": TRIAGE_OPERATOR_STATES,
+            }),
+        );
+    }
 
     let binding_context = LaunchBindingContext::for_cwd(&runtime.cwd);
     let repository = resolve_repository(parsed.repo.clone(), &runtime.cwd);
@@ -11532,8 +11610,8 @@ fn handle_triage(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         }
     };
 
-    // Validated against the operator-settable vocabulary in parse_args; new/stale
-    // are Roger-derived states and are rejected before this handler runs.
+    // Validated against TRIAGE_OPERATOR_STATES at the top of this handler;
+    // new/stale are Roger-derived states and are rejected before this point.
     let triage_state = match parsed.triage_state.as_deref() {
         Some(state) => state,
         None => {

@@ -361,18 +361,26 @@ fn provider_support_truth_guard_matches_live_cli_help_and_docs() {
     assert_contains_all(
         &release_matrix,
         &[
-            "| GitHub Copilot CLI | Feature-gated bounded Tier B | Exposed only with `RR_ENABLE_COPILOT_PROVIDER=1`; verified start, locator/session-id reopen, `rr return`, and honest `ResumeBundle` reseed fallback, but still withheld from the default public live claim |",
-            "| OpenCode | First-class fallback and current strongest landed path |",
+            "| GitHub Copilot CLI | Feature-gated opt-in, bounded Tier B | Exposed only with `RR_ENABLE_COPILOT_PROVIDER=1`; verified start, locator/session-id reopen, `rr return`, and honest `ResumeBundle` reseed fallback, but still withheld from the default public live claim and never the default or preferred lane |",
+            "| OpenCode | First-class default and current strongest landed path |",
             "| Codex | Secondary, bounded | Exposed via `rr review --provider codex`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |",
             "| Gemini | Secondary, bounded | Exposed via `rr review --provider gemini`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |",
             "| Claude Code | Secondary, bounded | Exposed via `rr review --provider claude`; truthful Tier A reseed/raw-capture path, no locator reopen or `rr return` claim |",
-            "| Pi-Agent | Not in `0.1.0` | Planning-only future harness candidate; no live support claim, no `rr review --provider pi-agent`, and no Tier A/Tier B language until a later admission spike proves direct-CLI launch, Roger-safe policy control, audit capture, and truthful continuity behavior |",
-            "the authoritative provider support order is GitHub Copilot CLI, OpenCode,",
+            "| Pi-Agent | Not in the current live surface | Planning-only future harness candidate; no live support claim, no `rr review --provider pi-agent`, and no Tier A/Tier B language until a later admission spike proves direct-CLI launch, Roger-safe policy control, audit capture, and truthful continuity behavior |",
+            "the current live first-class default provider is OpenCode; the GitHub Copilot CLI, OpenCode, Codex, Gemini, then Claude Code ordering is an aspirational future product-support order, not the current default or preferred lane",
             "#### SMOKE-OPENCODE-01: OpenCode direct continuity smoke",
             "Codex, Gemini, Claude Code, and feature-gated Copilot stay out of per-provider real-provider smoke until Roger widens them beyond bounded, non-first-class support wording",
             "bounded-provider release proof remains `accept_codex_*`, `accept_gemini_*`, `accept_claude_*`, and `accept_copilot_*` plus provider-surface truth coverage",
         ],
         "release matrix provider contract",
+    );
+    assert_contains_none(
+        &release_matrix,
+        &[
+            "the authoritative provider support order is GitHub Copilot CLI",
+            "| GitHub Copilot CLI | Feature-gated bounded Tier B |",
+        ],
+        "release matrix stale Copilot-first wording",
     );
 
     let robot_contract = fs::read_to_string(workspace_root().join("docs/ROBOT_CLI_CONTRACT.md"))
@@ -395,7 +403,7 @@ fn provider_support_truth_guard_matches_live_cli_help_and_docs() {
     assert_contains_all(
         &onboarding,
         &[
-            "GitHub Copilot CLI is not part of Roger's default public live claim in `0.1.0`.",
+            "GitHub Copilot CLI is not part of Roger's current default public live claim.",
             "feature-gated bounded Tier B continuity lane only",
             "enable it with `RR_ENABLE_COPILOT_PROVIDER=1`",
             "`RR_COPILOT_BIN=/abs/path/to/copilot`",
@@ -449,13 +457,14 @@ fn provider_support_truth_guard_matches_live_cli_help_and_docs() {
     assert_contains_all(
         &canonical_plan,
         &[
-            "Harness integration should keep GitHub Copilot CLI as the highest-priority",
-            "feature-gated bounded Tier B admission lane and OpenCode as the required",
-            "fallback/reference path, not an OpenCode-only design",
-            "the authoritative provider support order is GitHub Copilot CLI, OpenCode,",
-            "| GitHub Copilot CLI | Feature-gated bounded continuity provider | Yes, behind feature gate | Bounded Tier B |",
+            "Harness integration should keep OpenCode as the current first-class default",
+            "with GitHub Copilot CLI as a feature-gated",
+            "opt-in bounded Tier B admission lane (an aspirational future product priority,",
+            "not the current default or preferred lane), not an OpenCode-only design",
+            "the current live first-class default provider is OpenCode; the GitHub Copilot CLI, OpenCode, Codex, Gemini, then Claude Code ordering is an aspirational future product-support order, not the current default or preferred lane",
+            "| GitHub Copilot CLI | Feature-gated opt-in bounded continuity provider | Yes, behind feature gate | Bounded Tier B |",
             "OpenCode remains the strongest current first-class continuity path; Copilot",
-            "is now feature-gated bounded Tier B and still outside the default public live",
+            "is a feature-gated opt-in bounded Tier B lane and still outside the default",
             "GitHub Copilot CLI currently occupies the feature-gated bounded Tier B lane:",
             "`review_readonly` policy posture, locator/session-id reopen,",
             "`rr return`, and honest `ResumeBundle` reseed fallback without a default",
@@ -465,7 +474,12 @@ fn provider_support_truth_guard_matches_live_cli_help_and_docs() {
     );
     assert_contains_none(
         &canonical_plan,
-        &["golden-path target"],
+        &[
+            "golden-path target",
+            "highest-priority",
+            "the authoritative provider support order is GitHub Copilot CLI",
+            "Authoritative `#1` provider in the product-support order",
+        ],
         "canonical plan stale provider wording",
     );
 
@@ -529,14 +543,18 @@ fn provider_support_truth_guard_matches_live_cli_help_and_docs() {
             "feature-gates GitHub Copilot CLI as a bounded Tier B lane",
             "Codex/Gemini/Claude Code truthful as bounded Tier A lanes",
             "## Artefact 4A: Current Provider Truth Snapshot",
-            "GitHub Copilot CLI is authoritative `#1` in the product support order, but",
-            "the live claim is feature-gated bounded Tier B only.",
+            "GitHub Copilot CLI is a feature-gated opt-in bounded Tier B lane, not the",
+            "current default or preferred provider; any `#1` product-support ranking is",
+            "an aspirational future target, not a current-truth claim.",
         ],
         "alien artefacts provider truth",
     );
     assert_contains_none(
         &alien_artefacts,
-        &["underlying OpenCode session"],
+        &[
+            "underlying OpenCode session",
+            "GitHub Copilot CLI is authoritative `#1` in the product support order",
+        ],
         "alien artefacts stale single-provider wording",
     );
 

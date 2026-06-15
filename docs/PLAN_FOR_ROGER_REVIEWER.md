@@ -523,9 +523,10 @@ web-native.
 **Default direction for non-web local layers: Rust**
 - Session-aware `rr` CLI commands should default to Rust
 - App-core, storage, search, and local orchestration should default to Rust
-- Harness integration should keep GitHub Copilot CLI as the highest-priority
-  feature-gated bounded Tier B admission lane and OpenCode as the required
-  fallback/reference path, not an OpenCode-only design
+- Harness integration should keep OpenCode as the current first-class default
+  and required continuity path, with GitHub Copilot CLI as a feature-gated
+  opt-in bounded Tier B admission lane (an aspirational future product priority,
+  not the current default or preferred lane), not an OpenCode-only design
 - GitHub adapter logic may shell out to `gh`, but only behind Roger-owned
   adapter boundaries; agent-facing review communication should stay Roger
   mediated, not raw-`gh` driven
@@ -816,11 +817,11 @@ Important consequences:
 
 ## Session Model
 
-Roger should wrap a supported harness session rather than replace it. In
-`0.1.x`, OpenCode is the current first-class continuity path and required
-fallback/reference harness, while GitHub Copilot CLI is the highest-priority
-feature-gated bounded Tier B admission lane rather than a default public live
-path.
+Roger should wrap a supported harness session rather than replace it. Today,
+OpenCode is the current first-class continuity path and required
+fallback/reference harness, while GitHub Copilot CLI is a feature-gated opt-in
+bounded Tier B admission lane (an aspirational future product priority, not the
+current default or preferred lane) rather than a default public live path.
 
 Required properties:
 
@@ -863,25 +864,26 @@ Not every provider needs equal status in `0.1.0`.
 
 `0.1.0` support matrix:
 
-| Provider | Roger role | `0.1.0` drop-in support | `0.1.0` deeper integration | Direction |
+| Provider | Roger role | Current drop-in support | Current deeper integration | Direction |
 |----------|------------|-------------------------|----------------------------|-----------|
-| GitHub Copilot CLI | Feature-gated bounded continuity provider | Yes, behind feature gate | Bounded Tier B | Authoritative `#1` provider in the product-support order, but current live claim is feature-gated bounded Tier B only: verified start, `review_readonly` policy posture, locator/session-id reopen, `rr return`, and honest `ResumeBundle` reseed fallback with no default public live claim |
-| OpenCode | First-class continuity fallback and reference harness | Yes | Yes | Authoritative `#2` provider and current strongest landed continuity path |
-| Codex | Secondary bounded review harness | Yes | Bounded | Authoritative `#3` provider; exposed via `rr review --provider codex`; Tier A only today (no locator reopen or `rr return`) |
-| Gemini | Secondary bounded review harness | Yes | Bounded | Authoritative `#4` provider; exposed via `rr review --provider gemini`; keep Tier A live-CLI claims truthful and do not imply locator reopen or `rr return` |
-| Claude Code | Secondary bounded review harness | Yes | Bounded | Authoritative `#5` provider; exposed via `rr review --provider claude`; Tier A only today (no locator reopen or `rr return`) |
-| Pi-Agent | Deferred future review harness candidate | No | No | Post-`0.1.0` admission candidate only; evaluate `_exploration/pi_agent_rust` against the same direct-CLI launch, policy-control, auditability, and continuity-tier rubric Roger uses for every provider before creating implementation beads |
+| OpenCode | First-class default continuity path and reference harness | Yes | Yes | Current first-class default provider and strongest landed continuity path |
+| Codex | Secondary bounded review harness | Yes | Bounded | Exposed via `rr review --provider codex`; Tier A only today (no locator reopen or `rr return`) |
+| Gemini | Secondary bounded review harness | Yes | Bounded | Exposed via `rr review --provider gemini`; keep Tier A live-CLI claims truthful and do not imply locator reopen or `rr return` |
+| Claude Code | Secondary bounded review harness | Yes | Bounded | Exposed via `rr review --provider claude`; Tier A only today (no locator reopen or `rr return`) |
+| GitHub Copilot CLI | Feature-gated opt-in bounded continuity provider | Yes, behind feature gate | Bounded Tier B | Aspirational future product priority, never the current default or preferred lane; current live claim is feature-gated opt-in bounded Tier B only: verified start, `review_readonly` policy posture, locator/session-id reopen, `rr return`, and honest `ResumeBundle` reseed fallback with no default public live claim |
+| Pi-Agent | Deferred future review harness candidate | No | No | Future admission candidate only; evaluate `_exploration/pi_agent_rust` against the same direct-CLI launch, policy-control, auditability, and continuity-tier rubric Roger uses for every provider before creating implementation beads |
 | GitHub CLI (`gh`) | GitHub adapter, not review harness | N/A | N/A | Read/write adapter for GitHub operations only |
 
 Rules:
 
-- the authoritative provider support order is GitHub Copilot CLI, OpenCode,
-  Codex, Gemini, then Claude Code
-- that support order is a product hierarchy, not permission to widen live
-  claims before proof exists
+- the current live first-class default provider is OpenCode; the GitHub Copilot
+  CLI, OpenCode, Codex, Gemini, then Claude Code ordering is an aspirational
+  future product-support order, not the current default or preferred lane
+- that future support order is a forward-looking product hierarchy, not
+  permission to widen live claims before proof exists
 - OpenCode remains the strongest current first-class continuity path; Copilot
-  is now feature-gated bounded Tier B and still outside the default public live
-  claim
+  is a feature-gated opt-in bounded Tier B lane and still outside the default
+  public live claim
 - Codex, Gemini, and Claude Code may ship as bounded Tier A live-CLI paths
   without implying Tier B reopen/dropout parity
 - GitHub Copilot CLI stays feature-gated bounded Tier B only when Roger can

@@ -70,8 +70,9 @@ reconciliation logic. UI layers should be thin.
 
 - OpenCode is the strongest current first-class continuity path and required
   fallback/reference harness.
-- GitHub Copilot CLI is authoritative `#1` in the product support order, but
-  the live claim is feature-gated bounded Tier B only.
+- GitHub Copilot CLI is a feature-gated opt-in bounded Tier B lane, not the
+  current default or preferred provider; any `#1` product-support ranking is
+  an aspirational future target, not a current-truth claim.
 - Codex, Gemini, and Claude Code are bounded Tier A live-CLI providers only.
 - Pi-Agent remains planning-only and outside the `0.1.0` live CLI surface.
 

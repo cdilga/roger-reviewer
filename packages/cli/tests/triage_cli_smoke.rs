@@ -290,7 +290,7 @@ fn triage_unknown_finding_id_fails_closed() {
 }
 
 #[test]
-fn triage_invalid_state_value_fails_closed_with_exit_2() {
+fn triage_invalid_state_value_fails_closed_with_robot_envelope() {
     let temp = tempdir().expect("tempdir");
     let repo = init_repo(&temp);
     let runtime = CliRuntime {
@@ -299,6 +299,9 @@ fn triage_invalid_state_value_fails_closed_with_exit_2() {
         opencode_bin: "opencode".to_owned(),
     };
 
+    // Under --robot a bad --state must fail closed through the JSON blocked
+    // envelope (exit 3), matching rr draft/approve/post conformance, not the
+    // plain-text + exit-2 path that bypasses the robot surface.
     for state in ["new", "stale", "approved", "bogus"] {
         let triage = run_rr(
             &[
@@ -313,15 +316,35 @@ fn triage_invalid_state_value_fails_closed_with_exit_2() {
             ],
             &runtime,
         );
-        assert_eq!(triage.exit_code, 2, "state {state}: {}", triage.stderr);
+        assert_eq!(triage.exit_code, 3, "state {state}: {}", triage.stderr);
+        let payload = parse_robot_payload(&triage.stdout);
+        assert_eq!(payload["schema_id"], "rr.robot.triage.v1");
+        assert_eq!(payload["command"], "rr triage");
+        assert_eq!(payload["outcome"], "blocked", "state {state}");
+        assert_eq!(
+            payload["data"]["reason_code"], "unsupported_triage_state",
+            "state {state}"
+        );
+        assert_eq!(payload["data"]["requested_state"], state);
         assert!(
-            triage.stderr.contains("unsupported --state"),
+            payload["repair_actions"]
+                .as_array()
+                .map(|actions| {
+                    actions.iter().any(|action| {
+                        action
+                            .as_str()
+                            .unwrap_or_default()
+                            .contains("pass --state with one of")
+                    })
+                })
+                .unwrap_or(false),
             "state {state}: {}",
-            triage.stderr
+            triage.stdout
         );
     }
 
-    // The rejection message must explain that new/stale are Roger-derived.
+    // The rejection message must explain that new/stale are Roger-derived. The
+    // non-robot path renders the same blocked message as human-readable text.
     let derived = run_rr(
         &[
             "triage",
@@ -334,13 +357,45 @@ fn triage_invalid_state_value_fails_closed_with_exit_2() {
         ],
         &runtime,
     );
-    assert_eq!(derived.exit_code, 2);
+    assert_eq!(derived.exit_code, 3);
+    let combined = format!("{}{}", derived.stdout, derived.stderr);
     assert!(
-        derived.stderr.contains(
+        combined.contains(
             "new and stale are Roger-derived triage states and cannot be set by the operator"
         ),
-        "{}",
-        derived.stderr
+        "{combined}"
+    );
+}
+
+#[test]
+fn triage_missing_required_args_fail_closed_with_robot_envelope() {
+    let temp = tempdir().expect("tempdir");
+    let repo = init_repo(&temp);
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: "opencode".to_owned(),
+    };
+
+    // Missing --finding under --robot must emit a blocked envelope, not plain
+    // text + exit 2.
+    let no_finding = run_rr(&["triage", "--state", "accepted", "--robot"], &runtime);
+    assert_eq!(no_finding.exit_code, 3, "{}", no_finding.stderr);
+    let no_finding_payload = parse_robot_payload(&no_finding.stdout);
+    assert_eq!(no_finding_payload["outcome"], "blocked");
+    assert_eq!(
+        no_finding_payload["data"]["reason_code"],
+        "finding_selection_required"
+    );
+
+    // Missing --state under --robot must emit a blocked envelope as well.
+    let no_state = run_rr(&["triage", "--finding", "finding-1", "--robot"], &runtime);
+    assert_eq!(no_state.exit_code, 3, "{}", no_state.stderr);
+    let no_state_payload = parse_robot_payload(&no_state.stdout);
+    assert_eq!(no_state_payload["outcome"], "blocked");
+    assert_eq!(
+        no_state_payload["data"]["reason_code"],
+        "triage_state_required"
     );
 }
 
