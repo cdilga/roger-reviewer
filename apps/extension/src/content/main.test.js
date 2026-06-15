@@ -408,8 +408,21 @@ test('createBrandChip renders shared rr-brand-chip primitive', () => {
   assert.equal(chip.className, BRAND_CHIP_CLASS);
   assert.match(chip.className, /\brr-brand-chip\b/);
   assert.equal(chip.getAttribute('aria-label'), 'Roger identity');
-  assert.equal(chip.children.length, 1);
-  assert.equal(chip.children[0].textContent, 'Roger');
+  assert.equal(chip.children.length, 2);
+  const icon = chip.children[0];
+  assert.equal(icon.tagName, 'IMG');
+  assert.match(icon.className, /\broger-panel-brandicon\b/);
+  // The mark must be an inline data: URI — GitHub's img-src CSP blocks
+  // chrome-extension:// images injected into the page (regression: broken mark).
+  assert.ok(
+    icon.src.startsWith('data:image/svg+xml'),
+    'brand mark must render from an inline data: URI'
+  );
+  assert.ok(
+    !icon.src.includes('chrome-extension'),
+    'brand mark must not depend on a chrome-extension:// resource URL'
+  );
+  assert.equal(chip.children[1].textContent, 'Roger');
 });
 
 test('createPanel keeps GitHub button semantics while rendering Roger identity chip', () => {

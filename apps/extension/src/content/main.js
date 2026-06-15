@@ -1285,20 +1285,47 @@ function removeSlot(rootDocument, slotId) {
   }
 }
 
+// The Roger mark is rendered as an inline data: URI, NOT a chrome-extension://
+// web-accessible resource. GitHub's strict img-src CSP blocks chrome-extension:
+// images injected into the page, which made the mark render as a broken image.
+// A data:image/svg+xml URI is permitted by GitHub's img-src and needs no
+// resource load. Keep ROGER_MARK_SVG in sync with static/roger-mark.svg — a
+// content test guards against drift.
+const ROGER_MARK_SVG =
+  '<svg width="96" height="96" viewBox="0 0 96 96" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">' +
+  '<title id="title">Roger walkie mark</title>' +
+  '<desc id="desc">Metallic walkie-talkie icon with radio pulse accent.</desc>' +
+  '<defs>' +
+  '<linearGradient id="plate" x1="12" y1="10" x2="84" y2="86" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#F6F8FA" /><stop offset="0.48" stop-color="#D0D7DE" /><stop offset="1" stop-color="#8C959F" /></linearGradient>' +
+  '<linearGradient id="body" x1="27" y1="17" x2="69" y2="80" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#6E7781" /><stop offset="0.54" stop-color="#4A535D" /><stop offset="1" stop-color="#2D333B" /></linearGradient>' +
+  '<linearGradient id="screen" x1="34" y1="24" x2="62" y2="42" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#0D1117" /><stop offset="1" stop-color="#30363D" /></linearGradient>' +
+  '<radialGradient id="pulse" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(67 22) rotate(135) scale(8 8)"><stop offset="0" stop-color="#58A6FF" /><stop offset="1" stop-color="#1F6FEB" /></radialGradient>' +
+  '</defs>' +
+  '<rect x="8" y="8" width="80" height="80" rx="20" fill="url(#plate)" stroke="#6E7781" stroke-width="1.5" />' +
+  '<rect x="26" y="18" width="44" height="60" rx="11" fill="url(#body)" stroke="#A3ADB8" stroke-opacity="0.45" />' +
+  '<rect x="34" y="25" width="28" height="16" rx="4" fill="url(#screen)" />' +
+  '<rect x="45" y="11" width="6" height="6" rx="1.5" fill="#AFB8C1" />' +
+  '<path d="M48 11V4" stroke="#57606A" stroke-width="2.2" stroke-linecap="round" />' +
+  '<circle cx="61.5" cy="22.5" r="6.5" fill="url(#pulse)" />' +
+  '<path d="M73 16C76.7 19.5 76.7 25.5 73 29" stroke="#1F6FEB" stroke-opacity="0.75" stroke-width="2" stroke-linecap="round" />' +
+  '<path d="M76.5 12.5C82.3 18.2 82.3 27.8 76.5 33.5" stroke="#58A6FF" stroke-opacity="0.5" stroke-width="1.8" stroke-linecap="round" />' +
+  '<circle cx="39" cy="48.5" r="3.2" fill="#C9D1D9" />' +
+  '<circle cx="57" cy="48.5" r="3.2" fill="#C9D1D9" />' +
+  '<g stroke="#C9D1D9" stroke-width="2" stroke-linecap="round"><path d="M35 58H61" /><path d="M35 63H61" /><path d="M35 68H61" /></g>' +
+  '</svg>';
+const ROGER_MARK_DATA_URI = `data:image/svg+xml;utf8,${encodeURIComponent(ROGER_MARK_SVG)}`;
+
 function createBrandChip(rootDocument) {
   const chip = rootDocument.createElement('span');
   chip.id = BRAND_CHIP_ID;
   chip.className = BRAND_CHIP_CLASS;
   chip.setAttribute('aria-label', 'Roger identity');
-  const iconUrl = readRuntimeAssetUrl('static/roger-mark.svg');
-  if (iconUrl) {
-    const icon = rootDocument.createElement('img');
-    icon.className = 'roger-panel-brandicon';
-    icon.src = iconUrl;
-    icon.alt = '';
-    icon.setAttribute('aria-hidden', 'true');
-    chip.appendChild(icon);
-  }
+  const icon = rootDocument.createElement('img');
+  icon.className = 'roger-panel-brandicon';
+  icon.src = ROGER_MARK_DATA_URI;
+  icon.alt = '';
+  icon.setAttribute('aria-hidden', 'true');
+  chip.appendChild(icon);
   const label = rootDocument.createElement('span');
   label.className = 'roger-panel-brandlabel';
   label.textContent = 'Roger';
