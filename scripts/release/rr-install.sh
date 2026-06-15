@@ -29,6 +29,7 @@ Environment overrides:
   RR_INSTALL_DOWNLOAD_ROOT
   RR_INSTALL_DIR
   RR_STORE_ROOT          Roger store root for the extension package (default: $HOME/.roger)
+  RR_SKILLS_DIR          Claude skills dir for the roger-* skills (default: $HOME/.claude/skills)
 EOF
 }
 
@@ -455,6 +456,9 @@ archive_path="${tmp_dir}/${archive_name}"
 store_root="${RR_STORE_ROOT:-${HOME}/.roger}"
 extension_archive_name="roger-reviewer-${version}-extension.zip"
 extension_archive_url="${download_root}/${tag}/${extension_archive_name}"
+skills_dir="${RR_SKILLS_DIR:-${HOME}/.claude/skills}"
+skills_archive_name="roger-reviewer-${version}-skills.zip"
+skills_archive_url="${download_root}/${tag}/${skills_archive_name}"
 
 if [[ "$dry_run" -eq 1 ]]; then
   cat <<EOF
@@ -469,6 +473,8 @@ rr-install dry-run
   checksums_url:${checksums_url}
   archive_url:  ${archive_url}
   extension_archive_url: ${extension_archive_url}
+  skills_dir:   ${skills_dir}
+  skills_archive_url: ${skills_archive_url}
 EOF
   exit 0
 fi
@@ -528,6 +534,61 @@ PY
   fi
 else
   echo "Note: release ${tag} does not publish ${extension_archive_name}; skipping extension package install (run 'rr extension fetch' later if needed)."
+fi
+
+# Roger skills bundle (optional release lane asset): checksum-verify against the
+# same release checksums manifest and install the roger-* skills into the user's
+# Claude skills dir. Only roger-<name> subdirs are replaced, so a user's other
+# skills are left untouched. A missing/unpublished bundle is non-fatal; an
+# integrity failure on a *downloaded* asset stays fatal.
+if skills_sha="$(read_checksums_entry "$checksums_path" "$skills_archive_name" 2>/dev/null)"; then
+  skills_archive_path="${tmp_dir}/${skills_archive_name}"
+  if ! curl -fsSL "$skills_archive_url" -o "$skills_archive_path"; then
+    echo "Warning: could not download optional skills bundle (${skills_archive_url}); skipping." >&2
+    skills_archive_path=""
+  fi
+  if [[ -n "$skills_archive_path" ]]; then
+    actual_skills_sha="$(sha256_file "$skills_archive_path")"
+    if [[ "$(to_lower "$actual_skills_sha")" != "$(to_lower "$skills_sha")" ]]; then
+      die "skills bundle checksum mismatch for ${skills_archive_name}"
+    fi
+    skills_stage_dir="${tmp_dir}/skills-unpacked"
+    rm -rf "$skills_stage_dir"
+    mkdir -p "$skills_stage_dir"
+    python3 - "$skills_archive_path" "$skills_stage_dir" <<'PY'
+import sys
+import zipfile
+
+archive, destination = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(archive) as zf:
+    # Defense in depth: refuse traversal/absolute members and anything outside
+    # a roger-* skill subdirectory before extracting into the user's tree.
+    for name in zf.namelist():
+        if name.startswith("/") or ".." in name.split("/"):
+            raise SystemExit(f"refusing unsafe skills archive member: {name!r}")
+        top = name.split("/", 1)[0]
+        if top and not top.startswith("roger-"):
+            raise SystemExit(f"refusing non-roger skills archive member: {name!r}")
+    zf.extractall(destination)
+PY
+    mkdir -p "$skills_dir"
+    installed_skills=""
+    for skill_path in "${skills_stage_dir}"/roger-*; do
+      [[ -d "$skill_path" ]] || continue
+      skill_name="$(basename "$skill_path")"
+      target="${skills_dir}/${skill_name}"
+      rm -rf "$target"
+      cp -R "$skill_path" "$target"
+      installed_skills="${installed_skills} ${skill_name}"
+    done
+    if [[ -n "$installed_skills" ]]; then
+      echo "Installed Roger skills into ${skills_dir}:${installed_skills}"
+    else
+      echo "Warning: skills bundle ${skills_archive_name} contained no roger-* skills; nothing installed." >&2
+    fi
+  fi
+else
+  echo "Note: release ${tag} does not publish ${skills_archive_name}; skipping Roger skills install."
 fi
 
 # Auto-bootstrap the Roger store; never fail the install on bootstrap issues.

@@ -36,6 +36,12 @@ sha256_file() {
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
+# Safety: isolate the skills install destination for EVERY installer invocation
+# in this test so a run can never write to (or clobber) the developer's real
+# ~/.claude/skills. Per-invocation RR_SKILLS_DIR overrides still win.
+export RR_SKILLS_DIR="${TMP_DIR}/skills-global-default"
+mkdir -p "${RR_SKILLS_DIR}"
+
 DOWNLOAD_ROOT="file://${TMP_DIR}/releases/download"
 DOWNLOAD_FS_ROOT="${TMP_DIR}/releases/download"
 TARGET="x86_64-unknown-linux-gnu"
@@ -88,9 +94,22 @@ EOF
   local extension_sha
   extension_sha="$(sha256_file "${extension_archive}")"
 
+  # Skills lane asset: a real zip of roger-* skill dirs whose checksum is
+  # published alongside the core archive, mirroring the release layout.
+  local skills_source="${TMP_DIR}/skills-source-${version}"
+  rm -rf "${skills_source}"
+  mkdir -p "${skills_source}/roger-review-driver" "${skills_source}/roger-copilot-harness"
+  printf -- '---\nname: Roger Review Driver\n---\n' >"${skills_source}/roger-review-driver/SKILL.md"
+  printf -- '---\nname: Roger Copilot Harness\n---\n' >"${skills_source}/roger-copilot-harness/SKILL.md"
+  local skills_archive="${release_dir}/${artifact_stem}-skills.zip"
+  (cd "${skills_source}" && python3 -m zipfile -c "${skills_archive}" roger-review-driver roger-copilot-harness)
+  local skills_sha
+  skills_sha="$(sha256_file "${skills_archive}")"
+
   cat >"${release_dir}/${published_checksums_name}" <<EOF
 ${archive_sha}  ${archive_name}
 ${extension_sha}  ${artifact_stem}-extension.zip
+${skills_sha}  ${artifact_stem}-skills.zip
 EOF
 
   if [[ "${ambiguous}" == "1" ]]; then
@@ -185,7 +204,13 @@ make_release_payload "2026.04.01" 0
 
 INSTALL_DIR="${TMP_DIR}/install/bin"
 STORE_ROOT_0401="${TMP_DIR}/store-0401"
-RR_STORE_ROOT="${STORE_ROOT_0401}" bash "${INSTALL_SCRIPT}" \
+SKILLS_DIR_0401="${TMP_DIR}/skills-0401"
+# Pre-seed the skills dir: a user's own non-roger skill (must survive) and a
+# stale roger-* skill (must be replaced wholesale, not merged).
+mkdir -p "${SKILLS_DIR_0401}/my-own-skill" "${SKILLS_DIR_0401}/roger-review-driver"
+echo "keep me" >"${SKILLS_DIR_0401}/my-own-skill/SKILL.md"
+echo "stale leftover" >"${SKILLS_DIR_0401}/roger-review-driver/STALE.md"
+RR_STORE_ROOT="${STORE_ROOT_0401}" RR_SKILLS_DIR="${SKILLS_DIR_0401}" bash "${INSTALL_SCRIPT}" \
   --version "2026.04.01" \
   --download-root "${DOWNLOAD_ROOT}" \
   --install-dir "${INSTALL_DIR}" \
@@ -195,6 +220,24 @@ RR_STORE_ROOT="${STORE_ROOT_0401}" bash "${INSTALL_SCRIPT}" \
 [[ "$("${INSTALL_DIR}/rr")" == "rr smoke ok" ]] || { echo "installed rr smoke output mismatch" >&2; exit 1; }
 [[ -f "${STORE_ROOT_0401}/bridge/extension-package/2026.04.01/roger-extension-unpacked/manifest.json" ]] || {
   echo "install did not unpack the extension package into the installed layout" >&2
+  exit 1
+}
+# Skills lane: roger-* skills installed, the user's other skill untouched, and
+# the stale roger-* skill replaced wholesale (STALE.md gone, SKILL.md present).
+[[ -f "${SKILLS_DIR_0401}/roger-review-driver/SKILL.md" ]] || {
+  echo "install did not place roger-review-driver/SKILL.md into the skills dir" >&2
+  exit 1
+}
+[[ -f "${SKILLS_DIR_0401}/roger-copilot-harness/SKILL.md" ]] || {
+  echo "install did not place roger-copilot-harness/SKILL.md into the skills dir" >&2
+  exit 1
+}
+[[ ! -e "${SKILLS_DIR_0401}/roger-review-driver/STALE.md" ]] || {
+  echo "install did not replace the stale roger-review-driver subdir wholesale" >&2
+  exit 1
+}
+[[ "$(cat "${SKILLS_DIR_0401}/my-own-skill/SKILL.md")" == "keep me" ]] || {
+  echo "install clobbered a non-roger user skill" >&2
   exit 1
 }
 

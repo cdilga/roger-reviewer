@@ -5,9 +5,10 @@ description: Use when running Roger reviews on the feature-gated GitHub Copilot 
 
 # Roger Copilot Harness
 
-GitHub Copilot CLI is Roger's preferred provider, but it is feature-gated and
-bounded Tier B — not the default public claim. This skill is the truthful
-operating recipe.
+GitHub Copilot CLI is a feature-gated, bounded Tier B provider — an opt-in, not
+Roger's default or preferred provider. OpenCode is the first-class Tier B
+continuity path; Copilot is only available once you explicitly enable the gate.
+This skill is the truthful operating recipe for that gated lane.
 
 ## Enable and preflight
 

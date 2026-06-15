@@ -380,6 +380,68 @@ try {
         Write-Output "Installed extension package $Version to $extensionPackageDir"
     }
 
+    # Roger skills bundle (optional release lane asset): checksum-verify against
+    # the same release checksums manifest and install the roger-* skills into the
+    # user's Claude skills dir. Only roger-<name> subdirs are replaced, so other
+    # skills are untouched. Missing/unpublished is non-fatal; an integrity
+    # failure on a downloaded asset stays fatal.
+    $skillsDir = if ($env:RR_SKILLS_DIR) { $env:RR_SKILLS_DIR } else { Join-Path $env:USERPROFILE ".claude\skills" }
+    $skillsArchiveName = "roger-reviewer-$Version-skills.zip"
+    $skillsSha = $null
+    try {
+        $skillsSha = Read-ChecksumsEntry -ChecksumsPath $checksumsPath -ArchiveName $skillsArchiveName
+    }
+    catch {
+        Write-Output "Note: release $tag does not publish $skillsArchiveName; skipping Roger skills install."
+    }
+    if ($skillsSha) {
+        $skillsUrl = "$DownloadRoot/$tag/$skillsArchiveName"
+        $skillsArchivePath = Join-Path $tmpDir $skillsArchiveName
+        Save-UrlToFile -Uri $skillsUrl -OutFile $skillsArchivePath
+        $skillsObservedSha = (Get-FileHash -Algorithm SHA256 -Path $skillsArchivePath).Hash.ToLowerInvariant()
+        if ($skillsObservedSha -ne $skillsSha) {
+            Fail "skills bundle checksum mismatch for $skillsArchiveName"
+        }
+        $skillsStageDir = Join-Path $tmpDir "skills-unpacked"
+        if (Test-Path -Path $skillsStageDir) {
+            Remove-Item -Path $skillsStageDir -Recurse -Force
+        }
+        New-Item -ItemType Directory -Path $skillsStageDir -Force | Out-Null
+        # Defense in depth (parity with rr-install.sh): refuse traversal/absolute
+        # members before extracting so a malicious archive cannot escape the stage dir.
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $skillsZip = [System.IO.Compression.ZipFile]::OpenRead($skillsArchivePath)
+        try {
+            foreach ($entry in $skillsZip.Entries) {
+                $entryName = $entry.FullName
+                if ($entryName -match '^[/\\]' -or (($entryName -split '[/\\]') -contains '..')) {
+                    Fail "refusing unsafe skills archive member: $entryName"
+                }
+            }
+        }
+        finally {
+            $skillsZip.Dispose()
+        }
+        Expand-Archive -Path $skillsArchivePath -DestinationPath $skillsStageDir -Force
+
+        New-Item -ItemType Directory -Path $skillsDir -Force | Out-Null
+        $installedSkills = @()
+        foreach ($skillPath in @(Get-ChildItem -Path $skillsStageDir -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "roger-*" })) {
+            $target = Join-Path $skillsDir $skillPath.Name
+            if (Test-Path -Path $target) {
+                Remove-Item -Path $target -Recurse -Force
+            }
+            Copy-Item -Path $skillPath.FullName -Destination $target -Recurse -Force
+            $installedSkills += $skillPath.Name
+        }
+        if ($installedSkills.Count -gt 0) {
+            Write-Output "Installed Roger skills into ${skillsDir}: $($installedSkills -join ' ')"
+        }
+        else {
+            Write-Warning "skills bundle $skillsArchiveName contained no roger-* skills; nothing installed."
+        }
+    }
+
     # Auto-bootstrap the Roger store; never fail the install on bootstrap issues.
     try {
         & $installPath init --robot | Out-Null

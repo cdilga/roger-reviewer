@@ -66,6 +66,7 @@ jobs:
           bash scripts/release/test_build_release_notes.sh
           bash scripts/release/test_build_install_metadata_bundle.sh
           bash scripts/release/test_derive_calver_version.sh
+          bash scripts/release/test_package_skills_bundle.sh
 
   migration-rehearsal:
     if: github.event_name != 'pull_request'
@@ -396,12 +397,43 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  package-skills:
+    if: github.event_name != 'pull_request'
+    needs:
+      - derive-release-metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-version-metadata
+          path: release-metadata
+
+      - name: Package roger-* skills bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/release/package_skills_bundle.sh \
+            --version-metadata release-metadata/release-metadata.json \
+            --output-dir dist/skills
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: skills-bundle
+          path: |
+            dist/skills/*-skills.zip
+            dist/skills/skills-bundle-manifest.json
+          if-no-files-found: error
+          retention-days: 14
+
   summarize-optional-lanes:
     if: github.event_name != 'pull_request'
     needs:
       - derive-release-metadata
       - package-bridge
       - package-extension
+      - package-skills
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -422,6 +454,14 @@ jobs:
           name: extension-bundle
           path: optional-lanes/extension
 
+      # The skills bundle is an optional lane: a missing artifact warns-and-skips
+      # and must never fail the core publish path.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: skills-bundle
+          path: optional-lanes/skills
+
       - name: Build optional-lane summary
         shell: bash
         run: |
@@ -436,10 +476,24 @@ jobs:
             args+=(--extension-artifact "$(basename "$archive")")
           done < <(find optional-lanes/extension -type f -name '*.zip' | sort)
 
+          # Skills lane stays optional: only declare it built when its zip is
+          # actually present; otherwise mark it skipped (warn, never fail).
+          skills_status="skipped"
+          if [[ -d optional-lanes/skills ]]; then
+            while IFS= read -r archive; do
+              skills_status="built"
+              args+=(--skills-artifact "$(basename "$archive")")
+            done < <(find optional-lanes/skills -type f -name '*-skills.zip' | sort)
+          fi
+          if [[ "${skills_status}" != "built" ]]; then
+            echo "warning: no skills bundle artifact present; recording skills lane as skipped" >&2
+          fi
+
           python3 scripts/release/build_optional_lane_summary.py \
             --version-metadata release-metadata/release-metadata.json \
             --bridge-status built \
             --extension-status built \
+            --skills-status "${skills_status}" \
             "${args[@]}" \
             --output optional-lanes/release-optional-lanes.json
 
@@ -490,6 +544,15 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: extension-bundle
+          path: upstream/assets
+
+      # Optional skills lane: pull the bundle into the asset root when present so
+      # its checksum is folded into SHA256SUMS + the asset manifest. A missing
+      # skills bundle warns-and-skips and never fails verification.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: skills-bundle
           path: upstream/assets
 
       - uses: actions/download-artifact@v4
@@ -1169,6 +1232,14 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: extension-bundle
+          path: upstream/assets
+
+      # Optional skills lane: present-or-absent, never blocks publish. When the
+      # verified manifest references the skills zip, it must be resolvable here.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: skills-bundle
           path: upstream/assets
 
       - uses: actions/download-artifact@v4

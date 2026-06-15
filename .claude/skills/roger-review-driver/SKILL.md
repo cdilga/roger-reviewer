@@ -28,16 +28,19 @@ machine surface with `rr robot-docs guide|commands|schemas|workflows --robot`.
 
 ## Provider selection
 
-Authoritative support order: copilot, opencode, codex, gemini, claude.
+Authoritative support order: opencode, codex, gemini, claude, copilot.
 
-- `copilot` — preferred when available. Feature-gated bounded Tier B: export
-  `RR_ENABLE_COPILOT_PROVIDER=1`, ensure `copilot` binary on PATH (or
-  `RR_COPILOT_BIN`), and run from the intended repo/worktree root. Supports
-  verified start, locator/session-id reopen, `rr return`, and honest
-  `ResumeBundle` reseed fallback.
-- `opencode` — first-class Tier B continuity fallback; no gate needed.
+- `opencode` — first-class default Tier B continuity path; no gate needed.
+  Supports verified start, `rr resume` reopen, and `rr return`. Prefer this
+  unless the operator explicitly asked for another provider.
 - `codex` / `gemini` / `claude` — bounded Tier A: start, reseed, raw capture
   only. They fail closed on `rr return`; do not work around that.
+- `copilot` — feature-gated opt-in (not preferred, not default). Bounded
+  Tier B once enabled: export `RR_ENABLE_COPILOT_PROVIDER=1`, ensure `copilot`
+  binary on PATH (or `RR_COPILOT_BIN`), and run from the intended
+  repo/worktree root. Then it supports verified start, locator/session-id
+  reopen, `rr return`, and honest `ResumeBundle` reseed fallback. With the gate
+  off, copilot is `planned_not_live`.
 
 Run `rr doctor --provider <p> --robot` before the first review on a provider.
 A green doctor proves prerequisites, not auth; auth is proven by the first
@@ -91,6 +94,7 @@ Do not retry blocked mutations verbatim, do not invent flags, and do not
 
 ## Memory
 
-`rr search --query <text> --query-mode auto|recall|related_context --robot`
-searches prior local review memory and evidence. Use it before re-reviewing a
-repo or PR you may have seen before.
+`rr search --query <text> [--query-mode <mode>] --robot` searches prior local
+review memory and evidence. Use it before re-reviewing a repo or PR you may
+have seen before. The full accepted `--query-mode` set is
+`auto|exact_lookup|recall|related_context|candidate_audit` (default `auto`).

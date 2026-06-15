@@ -59,6 +59,28 @@ def _parse_args() -> argparse.Namespace:
         help="Extension lane note (repeatable).",
     )
     parser.add_argument(
+        "--skills-status",
+        default=None,
+        choices=sorted(ALLOWED_STATUS),
+        help=(
+            "Status for the optional release-package-skills lane. Omit entirely "
+            "to leave the skills lane out of the summary (warns-and-skips: a "
+            "missing skills bundle never enters the support claims)."
+        ),
+    )
+    parser.add_argument(
+        "--skills-artifact",
+        action="append",
+        default=[],
+        help="Skills lane artifact name or path (repeatable).",
+    )
+    parser.add_argument(
+        "--skills-note",
+        action="append",
+        default=[],
+        help="Skills lane note (repeatable).",
+    )
+    parser.add_argument(
         "--scope",
         default="workflow_lane",
         help="Summary scope label (default: workflow_lane).",
@@ -128,6 +150,8 @@ def main() -> int:
         shipped_optional_lanes.append("release-package-bridge")
     if args.extension_status == "built":
         shipped_optional_lanes.append("release-package-extension")
+    if args.skills_status == "built":
+        shipped_optional_lanes.append("release-package-skills")
 
     narrowed_claims = []
     if args.bridge_status != "built":
@@ -136,6 +160,11 @@ def main() -> int:
         narrowed_claims.append("extension_sideload_unshipped")
     if args.extension_status == "built" and args.bridge_status != "built":
         narrowed_claims.append("browser_launch_claim_blocked_without_bridge")
+    # The skills lane is fully optional: only narrow the claim when the lane is
+    # explicitly present but did not build. An absent skills lane (status None)
+    # leaves the support claims untouched.
+    if args.skills_status is not None and args.skills_status != "built":
+        narrowed_claims.append("skills_bundle_unshipped")
 
     warnings = []
     if args.extension_status == "built" and args.bridge_status != "built":
@@ -145,6 +174,27 @@ def main() -> int:
     if args.bridge_status == "failed" or args.extension_status == "failed":
         warnings.append(
             "one or more optional lanes failed; release-publish must not imply missing lane parity"
+        )
+    if args.skills_status == "failed":
+        warnings.append(
+            "skills lane failed; release-publish must not imply skills-bundle parity"
+        )
+
+    lanes = {
+        "release-package-bridge": _lane_payload(
+            args.bridge_status, args.bridge_artifact, args.bridge_note
+        ),
+        "release-package-extension": _lane_payload(
+            args.extension_status,
+            args.extension_artifact,
+            args.extension_note,
+        ),
+    }
+    # Skills are emitted only when the lane was actually exercised; an absent
+    # skills lane stays absent so existing two-lane consumers are unaffected.
+    if args.skills_status is not None:
+        lanes["release-package-skills"] = _lane_payload(
+            args.skills_status, args.skills_artifact, args.skills_note
         )
 
     summary = {
@@ -158,16 +208,7 @@ def main() -> int:
             "prerelease": prerelease,
             "artifact_stem": artifact_stem,
         },
-        "lanes": {
-            "release-package-bridge": _lane_payload(
-                args.bridge_status, args.bridge_artifact, args.bridge_note
-            ),
-            "release-package-extension": _lane_payload(
-                args.extension_status,
-                args.extension_artifact,
-                args.extension_note,
-            ),
-        },
+        "lanes": lanes,
         "support_claims": {
             "posture": posture,
             "shipped_optional_lanes": shipped_optional_lanes,

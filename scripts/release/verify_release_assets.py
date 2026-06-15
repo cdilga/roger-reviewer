@@ -597,6 +597,15 @@ def _collect_lane_entries(
         "release-package-bridge": {"statuses": [], "artifacts": set(), "sources": []},
         "release-package-extension": {"statuses": [], "artifacts": set(), "sources": []},
     }
+    # The skills lane is optional and additive: only register it when at least
+    # one summary actually carries it, so two-lane releases verify unchanged.
+    for _, summary in summaries:
+        lanes = summary.get("lanes", {})
+        if isinstance(lanes, dict) and "release-package-skills" in lanes:
+            lane_data.setdefault(
+                "release-package-skills",
+                {"statuses": [], "artifacts": set(), "sources": []},
+            )
     for source, summary in summaries:
         lanes = summary.get("lanes", {})
         if not isinstance(lanes, dict):
