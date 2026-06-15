@@ -8,8 +8,14 @@ license.workspace = true
 doctest = false
 
 [features]
+# `semantic-fastembed` stays opt-in for 0.2: enabling it pulls the fastembed
+# crate (ONNX Runtime + tokenizers), which is heavy and not guaranteed to
+# build/download on every cross-platform target. A shipped build can still go
+# fully semantic by compiling with `--features semantic-fastembed` and then
+# running `rr assets install`; the default build keeps the always-on lexical
+# canonical-DB scan and reports the real (disabled) posture honestly.
 default = []
-semantic-fastembed = []
+semantic-fastembed = ["dep:fastembed"]
 
 [dependencies]
 roger-app-core = { path = "../app-core" }
@@ -17,6 +23,11 @@ rusqlite.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+fastembed = { version = "5", optional = true, default-features = false, features = [
+    "hf-hub",
+    "hf-hub-native-tls",
+    "ort-download-binaries-native-tls",
+] }
 
 [dev-dependencies]
 roger-session-copilot = { path = "../session-copilot" }

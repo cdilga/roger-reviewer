@@ -324,7 +324,8 @@ fn e2e_tui_first_memory_triage_runs_recall_triage_and_local_refinement_without_p
         ],
         &runtime,
     );
-    assert_eq!(search.exit_code, 5, "{}", search.stderr);
+    // Recovery scan with seeded recall is a healthy Complete outcome (exit 0).
+    assert_eq!(search.exit_code, 0, "{}", search.stderr);
     let search_payload = parse_robot_payload(&search.stdout);
     let requested_query_mode = search_payload["data"]["requested_query_mode"]
         .as_str()

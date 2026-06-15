@@ -22,7 +22,11 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub use semantic_embedder::{SemanticEmbedderStatus, semantic_embedder_status};
+pub use semantic_embedder::{
+    FastEmbedAdapterConfig, FastEmbedModel, SemanticEmbedder, SemanticEmbedderAdapter,
+    SemanticEmbedderError, SemanticEmbedderResult, SemanticEmbedderState, SemanticEmbedderStatus,
+    UnavailableSemanticEmbedder, semantic_embedder_status,
+};
 
 /// The schema this build produces; must track the highest migration.
 pub const CURRENT_SCHEMA_VERSION: i64 = 17;
@@ -46,6 +50,12 @@ const MIGRATION_0015: &str = include_str!("../migrations/0015_worker_audit_trail
 const MIGRATION_0016: &str = include_str!("../migrations/0016_posted_action_items.sql");
 const MIGRATION_0017: &str = include_str!("../migrations/0017_session_baseline_snapshots.sql");
 const PRIOR_REVIEW_BULK_HYDRATION_CHUNK_SIZE: usize = 64;
+
+/// Upper bound on the number of prior-review corpus documents (per kind) that
+/// [`RogerStore::generate_semantic_candidates`] embeds in a single lookup. The
+/// cap keeps embedding latency bounded; lexical retrieval remains the always-on
+/// recall floor so capped semantic recall never starves the result set.
+const SEMANTIC_CANDIDATE_CORPUS_CAP: usize = 256;
 
 const MIGRATION_TERMINAL_STARTED: &str = "started";
 const MIGRATION_TERMINAL_COMMITTED: &str = "committed";
@@ -4889,6 +4899,143 @@ impl RogerStore {
         })
     }
 
+    /// Embed the query and the local prior-review corpus (evidence findings +
+    /// memory items in scope), then rank by cosine similarity to produce the
+    /// semantic candidates that flip [`Self::prior_review_lookup`] into the
+    /// hybrid retrieval mode.
+    ///
+    /// Returns an empty vector whenever the embedder is not operational or the
+    /// corpus is empty: callers treat an empty result as "stay lexical-only",
+    /// so a stub embedder can never fake a hybrid run.
+    pub fn generate_semantic_candidates(
+        &self,
+        scope_key: &str,
+        repository: &str,
+        query_text: &str,
+        embedder: &mut dyn SemanticEmbedder,
+        limit: usize,
+    ) -> Result<Vec<SemanticLookupCandidate>> {
+        if !embedder.state().is_ready() {
+            return Ok(Vec::new());
+        }
+        let query = query_text.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let limit = limit.clamp(1, 100);
+
+        let corpus = self.semantic_candidate_corpus(scope_key, repository)?;
+        if corpus.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // First embedding is the query; the remainder are corpus documents, in
+        // the same order as `corpus`.
+        let mut texts = Vec::with_capacity(corpus.len() + 1);
+        texts.push(query.to_owned());
+        for entry in &corpus {
+            texts.push(entry.text.clone());
+        }
+
+        let embeddings = match embedder.embed_texts(&texts) {
+            Ok(embeddings) => embeddings,
+            Err(_) => return Ok(Vec::new()),
+        };
+        if embeddings.len() != texts.len() {
+            return Ok(Vec::new());
+        }
+
+        let query_embedding = &embeddings[0];
+        let mut scored: Vec<(SemanticLookupCandidate, f32)> = Vec::with_capacity(corpus.len());
+        for (entry, embedding) in corpus.iter().zip(embeddings.iter().skip(1)) {
+            let similarity = cosine_similarity(query_embedding, embedding);
+            // Map cosine similarity from [-1, 1] into the [0, 1] range that the
+            // semantic→milli conversion and fused-score blending expect.
+            let normalized = ((similarity + 1.0) / 2.0).clamp(0.0, 1.0);
+            scored.push((
+                SemanticLookupCandidate {
+                    target_kind: entry.target_kind,
+                    target_id: entry.target_id.clone(),
+                    score: normalized,
+                },
+                normalized,
+            ));
+        }
+
+        scored.sort_by(|left, right| {
+            right
+                .1
+                .partial_cmp(&left.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.0.target_id.cmp(&right.0.target_id))
+        });
+        scored.truncate(limit);
+
+        Ok(scored.into_iter().map(|(candidate, _)| candidate).collect())
+    }
+
+    fn semantic_candidate_corpus(
+        &self,
+        scope_key: &str,
+        repository: &str,
+    ) -> Result<Vec<SemanticCorpusEntry>> {
+        let mut entries = Vec::new();
+
+        let mut finding_stmt = self.conn.prepare_cached(
+            "SELECT f.id, f.title, f.normalized_summary
+             FROM findings f
+             JOIN review_sessions rs ON rs.id = f.session_id
+             WHERE json_extract(rs.review_target, '$.repository') = ?1
+             ORDER BY rs.updated_at DESC, f.rowid DESC
+             LIMIT ?2",
+        )?;
+        let finding_rows = finding_stmt.query_map(
+            params![repository, SEMANTIC_CANDIDATE_CORPUS_CAP as i64],
+            |row| {
+                let id: String = row.get(0)?;
+                let title: String = row.get(1)?;
+                let summary: String = row.get(2)?;
+                Ok((id, title, summary))
+            },
+        )?;
+        for row in finding_rows {
+            let (id, title, summary) = row?;
+            entries.push(SemanticCorpusEntry {
+                target_kind: SemanticLookupTargetKind::EvidenceFinding,
+                target_id: id,
+                text: format!("{title}\n{summary}"),
+            });
+        }
+
+        let mut memory_stmt = self.conn.prepare_cached(
+            "SELECT id, statement, normalized_key
+             FROM memory_items
+             WHERE scope_key = ?1
+               AND state IN ('proven', 'established', 'candidate')
+             ORDER BY updated_at DESC, rowid DESC
+             LIMIT ?2",
+        )?;
+        let memory_rows = memory_stmt.query_map(
+            params![scope_key, SEMANTIC_CANDIDATE_CORPUS_CAP as i64],
+            |row| {
+                let id: String = row.get(0)?;
+                let statement: String = row.get(1)?;
+                let normalized_key: String = row.get(2)?;
+                Ok((id, statement, normalized_key))
+            },
+        )?;
+        for row in memory_rows {
+            let (id, statement, normalized_key) = row?;
+            entries.push(SemanticCorpusEntry {
+                target_kind: SemanticLookupTargetKind::MemoryItem,
+                target_id: id,
+                text: format!("{statement}\n{normalized_key}"),
+            });
+        }
+
+        Ok(entries)
+    }
+
     pub fn update_review_session_attention(
         &self,
         session_id: &str,
@@ -6978,6 +7125,35 @@ fn scope_bucket_for_class(scope_class: ScopeClass) -> &'static str {
         ScopeClass::Project => "project_overlay",
         ScopeClass::Org => "org_policy",
         ScopeClass::Unknown => "repo_memory",
+    }
+}
+
+struct SemanticCorpusEntry {
+    target_kind: SemanticLookupTargetKind,
+    target_id: String,
+    text: String,
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    if left.is_empty() || left.len() != right.len() {
+        return 0.0;
+    }
+    let mut dot = 0.0f32;
+    let mut left_norm = 0.0f32;
+    let mut right_norm = 0.0f32;
+    for (a, b) in left.iter().zip(right.iter()) {
+        dot += a * b;
+        left_norm += a * a;
+        right_norm += b * b;
+    }
+    if left_norm <= f32::EPSILON || right_norm <= f32::EPSILON {
+        return 0.0;
+    }
+    let similarity = dot / (left_norm.sqrt() * right_norm.sqrt());
+    if similarity.is_finite() {
+        similarity.clamp(-1.0, 1.0)
+    } else {
+        0.0
     }
 }
 

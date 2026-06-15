@@ -133,7 +133,7 @@ exit 0
 }
 
 #[test]
-fn search_robot_surfaces_explicit_recovery_scan_for_degraded_runs() {
+fn search_robot_surfaces_recovery_scan_as_healthy_empty_fallback() {
     let temp = tempdir().expect("tempdir");
     let repo = init_repo(&temp);
     let (_stub_dir, opencode_bin) = write_stub_binary();
@@ -145,10 +145,23 @@ fn search_robot_surfaces_explicit_recovery_scan_for_degraded_runs() {
     };
 
     let search = run_rr(&["search", "--query", "stale draft", "--robot"], &runtime);
-    assert_eq!(search.exit_code, 5, "{}", search.stderr);
+    // Recovery scan over an empty corpus is a HEALTHY fallback that returns
+    // zero results, so search exits 0 (empty), never 5 (degraded). The semantic
+    // shortfall is surfaced as a fallback block + warning, not a degraded verdict.
+    assert_eq!(search.exit_code, 0, "{}", search.stderr);
     let payload = parse_robot_payload(&search.stdout);
     assert_eq!(payload["schema_id"], "rr.robot.search.v1");
-    assert_eq!(payload["outcome"], "degraded");
+    assert_eq!(payload["outcome"], "empty");
+    assert_eq!(
+        payload["data"]["fallback"]["semantic_available"],
+        false,
+        "{}",
+        search.stdout
+    );
+    assert_eq!(
+        payload["data"]["fallback"]["reason_code"],
+        "semantic_assets_unverified"
+    );
     assert_eq!(payload["data"]["requested_query_mode"], "auto");
     assert_eq!(payload["data"]["resolved_query_mode"], "recall");
     assert_eq!(payload["data"]["retrieval_mode"], "recovery_scan");
@@ -222,8 +235,9 @@ fn search_robot_keeps_requested_vs_resolved_planner_truth() {
         &["search", "--query", "packages/cli/src/lib.rs", "--robot"],
         &runtime,
     );
-    assert_eq!(exact.exit_code, 5, "{}", exact.stderr);
+    assert_eq!(exact.exit_code, 0, "{}", exact.stderr);
     let exact_payload = parse_robot_payload(&exact.stdout);
+    assert_eq!(exact_payload["outcome"], "empty");
     assert_eq!(exact_payload["data"]["requested_query_mode"], "auto");
     assert_eq!(exact_payload["data"]["resolved_query_mode"], "exact_lookup");
     assert_eq!(exact_payload["data"]["retrieval_mode"], "recovery_scan");
@@ -335,8 +349,11 @@ fn search_robot_preserves_candidate_and_promoted_recall_truth() {
         ],
         &runtime,
     );
-    assert_eq!(search.exit_code, 5, "{}", search.stderr);
+    // Recovery scan WITH results is a healthy Complete outcome (exit 0): the
+    // lexical canonical-DB scan served real prior-review recall.
+    assert_eq!(search.exit_code, 0, "{}", search.stderr);
     let payload = parse_robot_payload(&search.stdout);
+    assert_eq!(payload["outcome"], "complete");
     assert_eq!(payload["data"]["requested_query_mode"], "candidate_audit");
     assert_eq!(payload["data"]["resolved_query_mode"], "candidate_audit");
     assert_eq!(payload["data"]["retrieval_mode"], "recovery_scan");

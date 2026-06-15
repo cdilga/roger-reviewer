@@ -8,6 +8,15 @@ license.workspace = true
 name = "rr"
 path = "src/main.rs"
 
+[features]
+# Opt-in passthrough that compiles the real FastEmbed semantic embedder into the
+# shipped binary. Off by default for 0.2 so the default cross-platform build
+# stays lean and the lexical canonical-DB scan remains the always-on fallback;
+# build with `--features semantic-fastembed` plus `rr assets install` to go
+# fully semantic.
+default = []
+semantic-fastembed = ["roger-storage/semantic-fastembed"]
+
 [dependencies]
 roger-app-core = { path = "../app-core" }
 roger-bridge = { path = "../bridge" }

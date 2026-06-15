@@ -3153,7 +3153,7 @@ fn sessions_lists_filters_and_compacts_with_explicit_follow_on_hints() {
 }
 
 #[test]
-fn search_reports_truthful_degraded_mode_and_stable_robot_fields() {
+fn search_reports_truthful_lexical_fallback_and_stable_robot_fields() {
     let temp = tempdir().expect("tempdir");
     let repo = init_repo(&temp);
     let (_stub_dir, opencode_bin) = write_stub_binary(false);
@@ -3165,10 +3165,13 @@ fn search_reports_truthful_degraded_mode_and_stable_robot_fields() {
     };
 
     let search = run_rr(&["search", "--query", "stale draft", "--robot"], &runtime);
-    assert_eq!(search.exit_code, 5, "{}", search.stderr);
+    // Empty-corpus recovery scan is a healthy exit-0 empty fallback, not a
+    // degraded verdict; the semantic shortfall is reported via the fallback block.
+    assert_eq!(search.exit_code, 0, "{}", search.stderr);
     let payload = parse_robot_payload(&search.stdout);
     assert_eq!(payload["schema_id"], "rr.robot.search.v1");
-    assert_eq!(payload["outcome"], "degraded");
+    assert_eq!(payload["outcome"], "empty");
+    assert_eq!(payload["data"]["fallback"]["semantic_available"], false);
     assert_eq!(payload["data"]["query"], "stale draft");
     assert_eq!(payload["data"]["requested_query_mode"], "auto");
     assert_eq!(payload["data"]["resolved_query_mode"], "recall");
@@ -3220,7 +3223,7 @@ fn search_reports_truthful_degraded_mode_and_stable_robot_fields() {
         ],
         &runtime,
     );
-    assert_eq!(compact.exit_code, 5, "{}", compact.stderr);
+    assert_eq!(compact.exit_code, 0, "{}", compact.stderr);
     let compact_payload = parse_robot_payload(&compact.stdout);
     assert_eq!(compact_payload["schema_id"], "rr.robot.search.v1");
     assert_eq!(compact_payload["robot_format"], "compact");
@@ -3250,9 +3253,9 @@ fn search_resolves_auto_to_exact_lookup_and_blocks_anchor_free_related_context()
         &["search", "--query", "packages/cli/src/lib.rs", "--robot"],
         &runtime,
     );
-    assert_eq!(exact.exit_code, 5, "{}", exact.stderr);
+    assert_eq!(exact.exit_code, 0, "{}", exact.stderr);
     let exact_payload = parse_robot_payload(&exact.stdout);
-    assert_eq!(exact_payload["outcome"], "degraded");
+    assert_eq!(exact_payload["outcome"], "empty");
     assert_eq!(exact_payload["data"]["requested_query_mode"], "auto");
     assert_eq!(exact_payload["data"]["resolved_query_mode"], "exact_lookup");
     assert_eq!(exact_payload["data"]["retrieval_mode"], "recovery_scan");
@@ -3330,10 +3333,11 @@ fn search_projects_canonical_recall_truth_for_seeded_hits() {
         ],
         &runtime,
     );
-    assert_eq!(search.exit_code, 5, "{}", search.stderr);
+    // Recovery scan WITH seeded recall is a healthy Complete outcome (exit 0).
+    assert_eq!(search.exit_code, 0, "{}", search.stderr);
     let payload = parse_robot_payload(&search.stdout);
     assert_eq!(payload["schema_id"], "rr.robot.search.v1");
-    assert_eq!(payload["outcome"], "degraded");
+    assert_eq!(payload["outcome"], "complete");
     assert_eq!(payload["data"]["requested_query_mode"], "candidate_audit");
     assert_eq!(payload["data"]["resolved_query_mode"], "candidate_audit");
     assert_eq!(payload["data"]["retrieval_mode"], "recovery_scan");
@@ -3435,10 +3439,10 @@ fn search_and_rr_agent_project_same_recall_envelope_truth_for_seeded_hits() {
         ],
         &runtime,
     );
-    assert_eq!(search.exit_code, 5, "{}", search.stderr);
+    assert_eq!(search.exit_code, 0, "{}", search.stderr);
     let search_payload = parse_robot_payload(&search.stdout);
     assert_eq!(search_payload["schema_id"], "rr.robot.search.v1");
-    assert_eq!(search_payload["outcome"], "degraded");
+    assert_eq!(search_payload["outcome"], "complete");
 
     write_json_fixture(
         &request_path,

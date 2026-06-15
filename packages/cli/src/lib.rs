@@ -43,9 +43,11 @@ use roger_storage::{
     FinalizeReviewLaunchAttempt, LaunchAttemptAction, LaunchAttemptState, LaunchSurface,
     OutboundSurfaceProjection, PriorReviewLookupQuery, PriorReviewRetrievalMode,
     ResolveSessionLaunchBinding, ResolveSessionLocalRoot, ResolveSessionReentry,
-    ReviewLaunchFinalizationError, ReviewSessionRecord, RogerStore, SessionBindingResolution,
+    ReviewLaunchFinalizationError, ReviewSessionRecord, RogerStore, SemanticAssetManifest,
+    SemanticComponentState, SemanticEmbedderAdapter, SessionBindingResolution,
     SessionFinderEntry, SessionFinderQuery, SessionLaunchBindingRecord, SessionReentryResolution,
     StorageError, StorageLayout, UpdateLaunchAttempt, derive_finding_fingerprint,
+    semantic_embedder_status,
 };
 use rusqlite::{Connection as SqliteConnection, OpenFlags};
 use serde::{Serialize, de::DeserializeOwned};
@@ -138,6 +140,7 @@ enum CommandKind {
     Findings,
     Status,
     Tui,
+    Assets,
 }
 
 impl CommandKind {
@@ -165,6 +168,7 @@ impl CommandKind {
             (Self::Findings, _) => "rr findings",
             (Self::Status, _) => "rr status",
             (Self::Tui, _) => "rr tui",
+            (Self::Assets, _) => "rr assets",
         }
     }
 
@@ -190,6 +194,7 @@ impl CommandKind {
             Self::Findings => "rr.robot.findings.v1",
             Self::Status => "rr.robot.status.v1",
             Self::Tui => "rr.robot.tui.v1",
+            Self::Assets => "rr.robot.assets.v1",
         }
     }
 }
@@ -209,6 +214,13 @@ enum ExtensionCommandKind {
     Doctor,
     Fetch,
     Uninstall,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AssetsCommandKind {
+    Install,
+    Status,
+    Verify,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,6 +250,7 @@ struct ParsedArgs {
     agent_capability_file: Option<PathBuf>,
     bridge_command: Option<BridgeCommandKind>,
     extension_command: Option<ExtensionCommandKind>,
+    assets_command: Option<AssetsCommandKind>,
     extension_browser: Option<SupportedBrowser>,
     extension_package_dir: Option<PathBuf>,
     bridge_extension_id: Option<String>,
@@ -261,6 +274,7 @@ struct ParsedArgs {
     limit: Option<usize>,
     query_text: Option<String>,
     query_mode: Option<String>,
+    assets_package_id: Option<String>,
     robot_docs_topic: Option<String>,
     robot: bool,
     robot_format: RobotFormat,
@@ -599,6 +613,7 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         "findings" => CommandKind::Findings,
         "status" => CommandKind::Status,
         "tui" => CommandKind::Tui,
+        "assets" => CommandKind::Assets,
         "-h" | "--help" | "help" => {
             return Err("help requested".to_owned());
         }
@@ -614,6 +629,7 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         agent_capability_file: None,
         bridge_command: None,
         extension_command: None,
+        assets_command: None,
         extension_browser: None,
         extension_package_dir: None,
         bridge_extension_id: None,
@@ -637,6 +653,7 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         limit: None,
         query_text: None,
         query_mode: None,
+        assets_package_id: None,
         robot_docs_topic: None,
         robot: false,
         robot_format: RobotFormat::Json,
@@ -811,6 +828,13 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
                 parsed.query_mode = Some(value.clone());
                 i += 2;
             }
+            "--asset" => {
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--asset requires a value".to_owned())?;
+                parsed.assets_package_id = Some(value.clone());
+                i += 2;
+            }
             "--topic" => {
                 let value = argv
                     .get(i + 1)
@@ -929,6 +953,17 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
                         parsed.query_text = Some(positional.to_owned());
                         i += 1;
                     }
+                    CommandKind::Assets if parsed.assets_command.is_none() => {
+                        parsed.assets_command = match positional {
+                            "install" => Some(AssetsCommandKind::Install),
+                            "status" => Some(AssetsCommandKind::Status),
+                            "verify" => Some(AssetsCommandKind::Verify),
+                            other => {
+                                return Err(format!("unknown assets subcommand: {other}"));
+                            }
+                        };
+                        i += 1;
+                    }
                     _ => {
                         return Err(format!("unexpected positional argument: {positional}"));
                     }
@@ -977,6 +1012,14 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         return Err(
             "rr extension requires a subcommand: setup, doctor, fetch, or uninstall".to_owned(),
         );
+    }
+
+    if parsed.command == CommandKind::Assets && parsed.assets_command.is_none() {
+        return Err("rr assets requires a subcommand: install, status, or verify".to_owned());
+    }
+
+    if parsed.command != CommandKind::Assets && parsed.assets_package_id.is_some() {
+        return Err("--asset is only supported by rr assets".to_owned());
     }
 
     if parsed.command != CommandKind::Extension && parsed.extension_package_dir.is_some() {
@@ -1464,6 +1507,7 @@ fn execute_command(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
         CommandKind::Findings => handle_findings(parsed, runtime),
         CommandKind::Status => handle_status(parsed, runtime),
         CommandKind::Tui => handle_tui(parsed, runtime),
+        CommandKind::Assets => handle_assets(parsed, runtime),
     }
 }
 
@@ -1851,6 +1895,21 @@ fn build_agent_search_response(
     } else {
         request.requested_scopes.clone()
     };
+
+    // Mirror rr search: real semantic verification gates hybrid eligibility so
+    // the agent and operator surfaces stay in parity. False (lexical-only) until
+    // verified assets + an operational embedder are installed.
+    let component_state = store.semantic_component_state().ok();
+    let embedder_operational = component_state
+        .as_ref()
+        .map(|state| state.embedder_available)
+        .unwrap_or(false);
+    let assets_verified = component_state
+        .as_ref()
+        .map(|state| state.assets_verified)
+        .unwrap_or(false);
+    let semantic_assets_verified = assets_verified && embedder_operational;
+
     let search_plan = materialize_search_plan(SearchPlanInput {
         review_session_id: Some(&task.review_session_id),
         review_run_id: Some(&task.review_run_id),
@@ -1862,12 +1921,27 @@ fn build_agent_search_response(
         anchor_hints: &search_request.anchor_hints,
         supports_candidate_audit: true,
         supports_promotion_review: false,
-        semantic_assets_verified: false,
+        semantic_assets_verified,
     })
     .map_err(|err| format!("failed to plan rr agent search intent: {err}"))?;
 
     let repository = &session.review_target.repository;
     let scope_key = format!("repo:{repository}");
+    let semantic_candidates = if semantic_assets_verified && search_plan.retrieval_strategy.semantic
+    {
+        let mut embedder = build_search_semantic_embedder(store);
+        store
+            .generate_semantic_candidates(
+                &scope_key,
+                repository,
+                &search_request.query_text,
+                &mut embedder,
+                25,
+            )
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let lookup = store
         .prior_review_lookup(PriorReviewLookupQuery {
             scope_key: &scope_key,
@@ -1877,8 +1951,8 @@ fn build_agent_search_response(
             include_tentative_candidates: search_plan.includes_tentative_candidates(),
             allow_project_scope: false,
             allow_org_scope: false,
-            semantic_assets_verified: false,
-            semantic_candidates: Vec::new(),
+            semantic_assets_verified,
+            semantic_candidates,
         })
         .map_err(|err| format!("failed to run rr agent prior-review lookup: {err}"))?;
     let retrieval_mode = retrieval_mode_label(&lookup.mode).to_owned();
@@ -8799,6 +8873,436 @@ fn render_prs_table(data: &Value) -> String {
     table
 }
 
+/// `rr assets` manages the local semantic-asset surface that flips search into
+/// hybrid retrieval. The semantic lane is strictly additive: lexical
+/// canonical-DB recall is always on, so every assets subcommand reports posture
+/// honestly and never downgrades a healthy install to a degraded outcome.
+fn handle_assets(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
+    let Some(subcommand) = parsed.assets_command else {
+        return error_response("rr assets missing subcommand".to_owned());
+    };
+
+    match subcommand {
+        AssetsCommandKind::Status => handle_assets_status(runtime),
+        AssetsCommandKind::Verify => handle_assets_verify(runtime),
+        AssetsCommandKind::Install => handle_assets_install(parsed, runtime),
+    }
+}
+
+/// Reports the full semantic posture: manifest verification, embedder backend,
+/// operational gate, and whether the semantic index sidecar is ready. Always
+/// resolves to a healthy outcome (Complete/Empty) because the lexical fallback
+/// keeps search exit-0 regardless of semantic availability.
+fn handle_assets_status(runtime: &CliRuntime) -> CommandResponse {
+    let store = match open_store_or_response(runtime, "rr assets status") {
+        Ok(store) => store,
+        Err(response) => return response,
+    };
+
+    let component_state = match store.semantic_component_state() {
+        Ok(state) => state,
+        Err(err) => {
+            return error_response(format!("failed to read semantic component state: {err}"));
+        }
+    };
+    let verification = match store.verify_semantic_asset_manifest() {
+        Ok(verification) => verification,
+        Err(err) => {
+            return error_response(format!("failed to verify semantic asset manifest: {err}"));
+        }
+    };
+    let embedder_status = semantic_embedder_status();
+    let index_ready = matches!(
+        store.index_state("semantic:assets"),
+        Ok(Some(state)) if state.status == "ready"
+    );
+
+    let manifest_value = verification
+        .manifest
+        .as_ref()
+        .map(semantic_manifest_to_json)
+        .unwrap_or(Value::Null);
+
+    let data = json!({
+        "subcommand": "status",
+        "manifest_present": verification.manifest.is_some(),
+        "manifest_verified": verification.verified,
+        "manifest": manifest_value,
+        "embedder": {
+            "available": embedder_status.available,
+            "backend": embedder_status.backend,
+            "reason": embedder_status.reason,
+        },
+        "index_ready": index_ready,
+        "operational": component_state.operational,
+        "posture": semantic_posture_label(&component_state),
+        "degraded_reasons": component_state.degraded_reasons,
+    });
+
+    let outcome = if verification.manifest.is_some() {
+        OutcomeKind::Complete
+    } else {
+        OutcomeKind::Empty
+    };
+
+    CommandResponse {
+        outcome,
+        data,
+        warnings: Vec::new(),
+        repair_actions: if component_state.operational {
+            Vec::new()
+        } else {
+            vec![
+                "run rr assets install --asset semantic-default to install the verified model package"
+                    .to_owned(),
+            ]
+        },
+        message: format!(
+            "semantic assets {} (embedder {})",
+            semantic_posture_label(&component_state),
+            embedder_status
+                .backend
+                .clone()
+                .unwrap_or_else(|| "disabled".to_owned())
+        ),
+    }
+}
+
+/// Verifies the installed semantic asset manifest against its on-disk artifact
+/// digest. Complete when verified, Empty when no manifest is installed, and
+/// RepairNeeded (exit 4) on a digest mismatch or missing artifact.
+fn handle_assets_verify(runtime: &CliRuntime) -> CommandResponse {
+    let store = match open_store_or_response(runtime, "rr assets verify") {
+        Ok(store) => store,
+        Err(response) => return response,
+    };
+
+    let verification = match store.verify_semantic_asset_manifest() {
+        Ok(verification) => verification,
+        Err(err) => {
+            return error_response(format!("failed to verify semantic asset manifest: {err}"));
+        }
+    };
+
+    let manifest_value = verification
+        .manifest
+        .as_ref()
+        .map(semantic_manifest_to_json)
+        .unwrap_or(Value::Null);
+
+    if verification.verified {
+        return CommandResponse {
+            outcome: OutcomeKind::Complete,
+            data: json!({
+                "subcommand": "verify",
+                "verified": true,
+                "manifest": manifest_value,
+            }),
+            warnings: Vec::new(),
+            repair_actions: Vec::new(),
+            message: "semantic assets verified against installed manifest digest".to_owned(),
+        };
+    }
+
+    if verification.manifest.is_none() {
+        return CommandResponse {
+            outcome: OutcomeKind::Empty,
+            data: json!({
+                "subcommand": "verify",
+                "verified": false,
+                "manifest": Value::Null,
+                "reason": verification.reason,
+            }),
+            warnings: Vec::new(),
+            repair_actions: vec![
+                "run rr assets install --asset semantic-default to install the verified model package"
+                    .to_owned(),
+            ],
+            message: "no semantic asset manifest is installed".to_owned(),
+        };
+    }
+
+    CommandResponse {
+        outcome: OutcomeKind::RepairNeeded,
+        data: json!({
+            "subcommand": "verify",
+            "verified": false,
+            "manifest": manifest_value,
+            "reason": verification.reason,
+            "reason_code": "semantic_asset_digest_mismatch",
+        }),
+        warnings: Vec::new(),
+        repair_actions: vec![
+            "re-run rr assets install --asset semantic-default to repair the corrupted/missing artifact"
+                .to_owned(),
+        ],
+        message: verification
+            .reason
+            .unwrap_or_else(|| "semantic asset verification failed".to_owned()),
+    }
+}
+
+/// Downloads the requested semantic model package, sha256-verifies it against
+/// the published checksums manifest, and installs the active manifest into
+/// `<store>/sidecars/semantic_assets/`. Mirrors the audited fetch+verify flow
+/// of `rr extension fetch`: fail-closed on any digest mismatch.
+fn handle_assets_install(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
+    let asset_id = parsed
+        .assets_package_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("semantic-default");
+    if asset_id != "semantic-default" {
+        return blocked_response(
+            format!("unknown semantic asset package: {asset_id}"),
+            vec!["pass --asset semantic-default (the only supported baseline)".to_owned()],
+            json!({"subcommand": "install", "reason_code": "unknown_asset_package"}),
+        );
+    }
+
+    // The model package is only fetchable for published builds (embedded release
+    // metadata) or an explicit --download-root + --version, mirroring how
+    // rr extension fetch refuses local/unpublished builds.
+    let version = if let Some(raw_version) = parsed.update_version.as_deref() {
+        match normalize_calver_version(raw_version) {
+            Ok(version) => version,
+            Err(err) => {
+                return blocked_response(
+                    format!("invalid --version value: {err}"),
+                    vec!["pass YYYY.MM.DD or YYYY.MM.DD-rc.N".to_owned()],
+                    json!({"subcommand": "install", "reason_code": "invalid_version"}),
+                );
+            }
+        }
+    } else if let Some(version) = option_env!("ROGER_RELEASE_VERSION") {
+        version.to_owned()
+    } else {
+        return blocked_response(
+            "rr assets install is disabled for local/unpublished builds without embedded release metadata"
+                .to_owned(),
+            vec![
+                "pass --version <YYYY.MM.DD[-rc.N]> and --download-root <url> to install a specific published model package"
+                    .to_owned(),
+            ],
+            json!({"subcommand": "install", "reason_code": "local_or_unpublished_build"}),
+        );
+    };
+
+    let repo = parsed
+        .repo
+        .clone()
+        .unwrap_or_else(|| "cdilga/roger-reviewer".to_owned());
+    let tag = format!("v{version}");
+    let download_root = parsed
+        .update_download_root
+        .clone()
+        .unwrap_or_else(|| format!("https://github.com/{repo}/releases/download"));
+
+    let archive_name = format!("roger-semantic-{asset_id}-{version}.onnx");
+    let checksums_fetch =
+        match fetch_checksums_manifest_with_fallback(&download_root, &tag, "SHA256SUMS") {
+            Ok(fetch) => fetch,
+            Err(err) => {
+                return blocked_response(
+                    err.message,
+                    vec!["rebuild/upload checksums for this tag".to_owned()],
+                    json!({
+                        "subcommand": "install",
+                        "reason_code": "checksums_missing",
+                        "attempted_urls": err.attempted_urls,
+                    }),
+                );
+            }
+        };
+    let expected_sha = match checksums_entry_for_archive(&checksums_fetch.text, &archive_name) {
+        Ok(value) => value.to_ascii_lowercase(),
+        Err(err) => {
+            return blocked_response(
+                format!("release {tag} does not publish a verifiable semantic asset package: {err}"),
+                vec![
+                    "confirm this release shipped the semantic asset lane".to_owned(),
+                ],
+                json!({
+                    "subcommand": "install",
+                    "reason_code": "semantic_asset_missing",
+                    "archive_name": archive_name,
+                    "checksums_url": checksums_fetch.url,
+                }),
+            );
+        }
+    };
+
+    let store = match open_store_or_response(runtime, "rr assets install") {
+        Ok(store) => store,
+        Err(response) => return response,
+    };
+    let asset_root = store.layout().semantic_asset_root();
+    if let Err(err) = fs::create_dir_all(&asset_root) {
+        return error_response(format!(
+            "failed to create semantic asset directory {}: {err}",
+            asset_root.display()
+        ));
+    }
+    let staging_path = asset_root.join(format!(".staging-{}.onnx", next_id("assets-install")));
+    let cleanup_staging = |path: &Path| {
+        let _ = fs::remove_file(path);
+    };
+
+    let archive_url = format!("{download_root}/{tag}/{archive_name}");
+    if let Err(err) = download_url_to_path(&archive_url, &staging_path) {
+        cleanup_staging(&staging_path);
+        return blocked_response(
+            format!("failed to download semantic asset package: {err}"),
+            vec!["confirm the release published the semantic asset package".to_owned()],
+            json!({
+                "subcommand": "install",
+                "reason_code": "semantic_asset_download_failed",
+                "url": archive_url,
+            }),
+        );
+    }
+    let observed_sha = match sha256_for_file(&staging_path) {
+        Ok(value) => value.to_ascii_lowercase(),
+        Err(err) => {
+            cleanup_staging(&staging_path);
+            return error_response(err);
+        }
+    };
+    if observed_sha != expected_sha {
+        cleanup_staging(&staging_path);
+        return blocked_response(
+            format!(
+                "semantic asset checksum mismatch for {archive_name}: expected {expected_sha}, got {observed_sha}; refusing to install"
+            ),
+            vec![
+                "re-run rr assets install; if the mismatch persists, the release assets need re-verification"
+                    .to_owned(),
+            ],
+            json!({
+                "subcommand": "install",
+                "reason_code": "semantic_asset_checksum_mismatch",
+                "archive_name": archive_name,
+                "expected_sha256": expected_sha,
+                "observed_sha256": observed_sha,
+            }),
+        );
+    }
+
+    let artifact_rel_path = format!("{asset_id}.onnx");
+    let artifact_path = asset_root.join(&artifact_rel_path);
+    if let Err(err) = fs::rename(&staging_path, &artifact_path) {
+        cleanup_staging(&staging_path);
+        return error_response(format!(
+            "failed to move verified semantic asset into place at {}: {err}",
+            artifact_path.display()
+        ));
+    }
+
+    let manifest = SemanticAssetManifest {
+        schema_version: 1,
+        package_id: asset_id.to_owned(),
+        revision: version.clone(),
+        artifact_rel_path,
+        artifact_digest: format!("sha256:{observed_sha}"),
+        installed_at: time::now_ts(),
+    };
+    if let Err(err) = store.install_semantic_asset_manifest(&manifest) {
+        return error_response(format!("failed to write semantic asset manifest: {err}"));
+    }
+
+    // Re-verify fail-closed: the manifest we just wrote must verify clean.
+    match store.verify_semantic_asset_manifest() {
+        Ok(verification) if verification.verified => {}
+        Ok(verification) => {
+            return CommandResponse {
+                outcome: OutcomeKind::RepairNeeded,
+                data: json!({
+                    "subcommand": "install",
+                    "reason_code": "post_install_verification_failed",
+                    "reason": verification.reason,
+                }),
+                warnings: Vec::new(),
+                repair_actions: vec!["re-run rr assets install to repair the manifest".to_owned()],
+                message: "semantic asset install did not verify post-write".to_owned(),
+            };
+        }
+        Err(err) => {
+            return error_response(format!(
+                "failed to verify semantic asset manifest after install: {err}"
+            ));
+        }
+    }
+
+    CommandResponse {
+        outcome: OutcomeKind::Complete,
+        data: json!({
+            "subcommand": "install",
+            "asset": asset_id,
+            "version": version,
+            "tag": tag,
+            "manifest": semantic_manifest_to_json(&manifest),
+            "archive": {
+                "name": archive_name,
+                "sha256": observed_sha,
+                "url": archive_url,
+            },
+            "checksums_url": checksums_fetch.url,
+        }),
+        warnings: Vec::new(),
+        repair_actions: Vec::new(),
+        message: format!("semantic asset package {asset_id} installed, verified, and active"),
+    }
+}
+
+/// Build the semantic embedder used for live search candidate generation.
+///
+/// When the `semantic-fastembed` feature is compiled in, this loads the real
+/// FastEmbed adapter against the installed model cache. When the feature is off
+/// (the default 0.2 build), it returns the Unavailable adapter, whose
+/// `state().is_ready()` is false, so `generate_semantic_candidates` returns an
+/// empty vector and search stays on the always-on lexical fallback.
+fn build_search_semantic_embedder(store: &RogerStore) -> SemanticEmbedderAdapter {
+    let status = semantic_embedder_status();
+    if !status.available {
+        return SemanticEmbedderAdapter::default_for_runtime();
+    }
+
+    let cache_dir = store.layout().semantic_asset_root();
+    let config = roger_storage::FastEmbedAdapterConfig {
+        model: roger_storage::FastEmbedModel::default(),
+        cache_dir,
+        show_download_progress: false,
+    };
+    match SemanticEmbedderAdapter::try_fastembed(config) {
+        Ok(adapter) => adapter,
+        Err(err) => SemanticEmbedderAdapter::unavailable(format!(
+            "FastEmbed adapter could not load installed semantic model: {err}"
+        )),
+    }
+}
+
+fn semantic_manifest_to_json(manifest: &SemanticAssetManifest) -> Value {
+    json!({
+        "schema_version": manifest.schema_version,
+        "package_id": manifest.package_id,
+        "revision": manifest.revision,
+        "artifact_rel_path": manifest.artifact_rel_path,
+        "artifact_digest": manifest.artifact_digest,
+        "installed_at": manifest.installed_at,
+    })
+}
+
+fn semantic_posture_label(state: &SemanticComponentState) -> &'static str {
+    if state.operational {
+        "operational"
+    } else if state.assets_verified {
+        "assets_verified_embedder_unavailable"
+    } else {
+        "disabled_pending_install"
+    }
+}
+
 fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let Some(query_text) = parsed
         .query_text
@@ -8828,6 +9332,22 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
 
     let limit = parsed.limit.unwrap_or(10).min(100);
     let granted_scopes = vec!["repo".to_owned()];
+
+    // Real semantic verification: assets must verify clean AND the embedder must
+    // be operational before we let search claim semantic readiness. This gates
+    // both the plan's semantic posture and the lookup's hybrid eligibility, so a
+    // stub embedder or unverified asset can never fake a hybrid run.
+    let component_state = store.semantic_component_state().ok();
+    let embedder_operational = component_state
+        .as_ref()
+        .map(|state| state.embedder_available)
+        .unwrap_or(false);
+    let assets_verified = component_state
+        .as_ref()
+        .map(|state| state.assets_verified)
+        .unwrap_or(false);
+    let semantic_assets_verified = assets_verified && embedder_operational;
+
     let search_plan = match materialize_search_plan(SearchPlanInput {
         review_session_id: None,
         review_run_id: None,
@@ -8839,7 +9359,7 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         anchor_hints: &[],
         supports_candidate_audit: true,
         supports_promotion_review: false,
-        semantic_assets_verified: false,
+        semantic_assets_verified,
     }) {
         Ok(plan) => plan,
         Err(err) => {
@@ -8885,6 +9405,27 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         }
     };
     let scope_key = format!("repo:{repository}");
+
+    // Only attempt real semantic candidate generation when verification says the
+    // semantic lane is fully operational (verified assets + operational
+    // embedder). The generator itself re-checks embedder readiness and returns
+    // an empty vector otherwise, so this can never fabricate a hybrid run.
+    let semantic_candidates = if semantic_assets_verified && search_plan.retrieval_strategy.semantic
+    {
+        let mut embedder = build_search_semantic_embedder(&store);
+        store
+            .generate_semantic_candidates(
+                &scope_key,
+                &repository,
+                query_text,
+                &mut embedder,
+                limit.saturating_add(1),
+            )
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     let lookup = match store.prior_review_lookup(PriorReviewLookupQuery {
         scope_key: &scope_key,
         repository: &repository,
@@ -8893,8 +9434,8 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         include_tentative_candidates: search_plan.includes_tentative_candidates(),
         allow_project_scope: false,
         allow_org_scope: false,
-        semantic_assets_verified: false,
-        semantic_candidates: Vec::new(),
+        semantic_assets_verified,
+        semantic_candidates,
     }) {
         Ok(result) => result,
         Err(err) => return error_response(format!("failed to run prior-review lookup: {err}")),
@@ -8997,15 +9538,59 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
 
     let mode = retrieval_mode;
     let count = items.len();
-    let degraded =
-        mode == "recovery_scan" || (mode == "lexical_only" && !degraded_reasons.is_empty());
-    let outcome = if degraded {
-        OutcomeKind::Degraded
-    } else if count == 0 {
+
+    // Hybrid, lexical_only, and recovery_scan are all HEALTHY retrieval modes:
+    // the lexical canonical-DB scan is the always-on exit-0 default, and a stale
+    // sidecar recovery scan still returns real results. A true lexical-scan
+    // error is surfaced earlier via `prior_review_lookup` returning `Err`
+    // (mapped to an Error outcome), so we never reach here in that case.
+    // Therefore: results -> Complete (exit 0), zero results -> Empty (exit 0).
+    // Degraded is no longer emitted for default installs.
+    let outcome = if count == 0 {
         OutcomeKind::Empty
     } else {
         OutcomeKind::Complete
     };
+
+    // Surface semantic/sidecar shortfalls as a structured fallback block plus
+    // warnings, not as a degraded verdict. `semantic_available` reflects the
+    // real operational gate (verified assets + operational embedder + hybrid
+    // mode actually engaged).
+    let semantic_available = semantic_assets_verified && mode == "hybrid";
+    let (fallback_lane, reason_code, advice) = if semantic_available {
+        ("hybrid", "semantic_operational", Value::Null)
+    } else if !assets_verified {
+        (
+            mode.as_str(),
+            "semantic_assets_unverified",
+            json!("run rr assets install --asset semantic-default to enable hybrid semantic retrieval"),
+        )
+    } else if !embedder_operational {
+        (
+            mode.as_str(),
+            "semantic_embedder_unavailable",
+            json!("rebuild with the semantic-fastembed feature to enable the local embedder"),
+        )
+    } else {
+        (
+            mode.as_str(),
+            "semantic_sidecar_or_candidates_unavailable",
+            json!("semantic assets verified but the semantic index/candidates are not yet ready; lexical fallback is serving results"),
+        )
+    };
+    let fallback = json!({
+        "lane": fallback_lane,
+        "semantic_available": semantic_available,
+        "reason_code": reason_code,
+        "advice": advice,
+    });
+
+    let mut warnings = Vec::new();
+    if !semantic_available {
+        warnings.push(format!(
+            "semantic retrieval inactive ({reason_code}); served via {mode} lexical fallback"
+        ));
+    }
 
     CommandResponse {
         outcome,
@@ -9024,10 +9609,11 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             "count": count,
             "truncated": truncated,
             "degraded_reasons": degraded_reasons,
+            "fallback": fallback,
             "scope_bucket": scope_bucket,
             "lane_counts": lane_counts,
         }),
-        warnings: Vec::new(),
+        warnings,
         repair_actions: Vec::new(),
         message: format!(
             "search completed with query_mode {} and retrieval_mode {mode}",

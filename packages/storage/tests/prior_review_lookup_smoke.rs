@@ -5,9 +5,39 @@ use tempfile::tempdir;
 use roger_app_core::ReviewTarget;
 use roger_storage::{
     CreateMaterializedFinding, CreateReviewRun, CreateReviewSession, PriorReviewLookupQuery,
-    PriorReviewRetrievalMode, Result, RogerStore, SemanticAssetManifest, SemanticLookupCandidate,
+    PriorReviewRetrievalMode, Result, RogerStore, SemanticAssetManifest, SemanticEmbedder,
+    SemanticEmbedderResult, SemanticEmbedderState, SemanticLookupCandidate,
     SemanticLookupTargetKind, UpdateIndexState, UpsertMemoryItem,
 };
+
+/// Deterministic in-test embedder: every text becomes a 3-d bag-of-keywords
+/// vector so cosine similarity is fully predictable without loading a model.
+/// Reports `Ready` so `generate_semantic_candidates` runs its full path.
+struct StubKeywordEmbedder;
+
+impl StubKeywordEmbedder {
+    fn vector_for(text: &str) -> Vec<f32> {
+        let lower = text.to_ascii_lowercase();
+        vec![
+            lower.matches("refresh").count() as f32,
+            lower.matches("drift").count() as f32,
+            lower.matches("approval").count() as f32,
+        ]
+    }
+}
+
+impl SemanticEmbedder for StubKeywordEmbedder {
+    fn state(&self) -> SemanticEmbedderState {
+        SemanticEmbedderState::Ready {
+            provider: "stub",
+            model_id: "stub-keyword".to_owned(),
+        }
+    }
+
+    fn embed_texts(&mut self, texts: &[String]) -> SemanticEmbedderResult<Vec<Vec<f32>>> {
+        Ok(texts.iter().map(|text| Self::vector_for(text)).collect())
+    }
+}
 
 fn target(repository: &str, pull_request_number: u64) -> ReviewTarget {
     ReviewTarget {
@@ -407,6 +437,116 @@ fn prior_review_lookup_blocks_project_overlay_when_not_enabled() -> Result<()> {
             .iter()
             .any(|reason| reason.contains("project scope requested"))
     );
+
+    Ok(())
+}
+
+#[test]
+fn generate_semantic_candidates_ranks_corpus_by_embedding_similarity() -> Result<()> {
+    let temp = tempdir()?;
+    let store = RogerStore::open(temp.path().join("profile"))?;
+
+    seed_session(&store, "session-owner", "run-owner", "owner/repo", 42)?;
+
+    store.upsert_materialized_finding(CreateMaterializedFinding {
+        id: "finding-refresh",
+        session_id: "session-owner",
+        review_run_id: "run-owner",
+        stage: "deep_review",
+        fingerprint: "fp:refresh",
+        title: "Approval refresh invalidation",
+        normalized_summary: "approval refresh refresh path drifts",
+        severity: "high",
+        confidence: "high",
+        triage_state: "new",
+        outbound_state: "not-drafted",
+    })?;
+    store.upsert_materialized_finding(CreateMaterializedFinding {
+        id: "finding-unrelated",
+        session_id: "session-owner",
+        review_run_id: "run-owner",
+        stage: "deep_review",
+        fingerprint: "fp:unrelated",
+        title: "Unrelated parsing bug",
+        normalized_summary: "parser mishandles empty input",
+        severity: "low",
+        confidence: "low",
+        triage_state: "new",
+        outbound_state: "not-drafted",
+    })?;
+    store.upsert_memory_item(UpsertMemoryItem {
+        id: "mem-drift",
+        scope_key: "repo:owner/repo",
+        memory_class: "semantic",
+        state: "candidate",
+        statement: "drift drift drift detection memory",
+        normalized_key: "drift detection",
+        anchor_digest: None,
+        source_kind: "derived",
+    })?;
+
+    let mut embedder = StubKeywordEmbedder;
+    let candidates = store.generate_semantic_candidates(
+        "repo:owner/repo",
+        "owner/repo",
+        "approval refresh refresh",
+        &mut embedder,
+        10,
+    )?;
+
+    // The refresh-heavy finding must outrank the unrelated finding, and every
+    // candidate score must be a normalized [0, 1] cosine value.
+    assert!(!candidates.is_empty());
+    let refresh_rank = candidates
+        .iter()
+        .position(|c| c.target_id == "finding-refresh")
+        .expect("refresh finding present");
+    let unrelated_rank = candidates
+        .iter()
+        .position(|c| c.target_id == "finding-unrelated")
+        .expect("unrelated finding present");
+    assert!(
+        refresh_rank < unrelated_rank,
+        "refresh finding should rank above unrelated: {candidates:?}"
+    );
+    assert!(
+        candidates
+            .iter()
+            .all(|c| (0.0..=1.0).contains(&c.score)),
+        "scores must be normalized: {candidates:?}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn generate_semantic_candidates_stays_empty_for_unavailable_embedder() -> Result<()> {
+    let temp = tempdir()?;
+    let store = RogerStore::open(temp.path().join("profile"))?;
+
+    seed_session(&store, "session-owner", "run-owner", "owner/repo", 42)?;
+    store.upsert_memory_item(UpsertMemoryItem {
+        id: "mem-drift",
+        scope_key: "repo:owner/repo",
+        memory_class: "semantic",
+        state: "candidate",
+        statement: "drift detection memory",
+        normalized_key: "drift detection",
+        anchor_digest: None,
+        source_kind: "derived",
+    })?;
+
+    // The Unavailable adapter reports a non-ready state, so the generator must
+    // return an empty vector: a stub can never fake a hybrid run.
+    let mut embedder = roger_storage::SemanticEmbedderAdapter::default_for_runtime();
+    let candidates = store.generate_semantic_candidates(
+        "repo:owner/repo",
+        "owner/repo",
+        "drift",
+        &mut embedder,
+        10,
+    )?;
+    assert!(candidates.is_empty());
 
     Ok(())
 }

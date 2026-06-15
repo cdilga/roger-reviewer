@@ -356,13 +356,21 @@ fn e2e_cross_surface_review_continuity_proves_bridge_resume_tui_and_recall_truth
         ],
         &runtime_secondary,
     );
-    assert!(
-        matches!(search_secondary.status.code(), Some(0) | Some(5)),
+    assert_eq!(
+        search_secondary.status.code(),
+        Some(0),
         "{}",
         String::from_utf8_lossy(&search_secondary.stderr)
     );
     let search_payload = parse_robot_output(&search_secondary);
-    assert_eq!(search_payload["outcome"], "degraded");
+    // Recovery-scan recall with seeded results is a healthy Complete outcome:
+    // the lexical fallback served real recall, so search exits 0 (not degraded).
+    // The semantic shortfall is reported via the fallback block, not the verdict.
+    assert_eq!(search_payload["outcome"], "complete");
+    assert_eq!(
+        search_payload["data"]["fallback"]["semantic_available"],
+        json!(false)
+    );
     assert_eq!(
         search_payload["data"]["requested_query_mode"],
         "candidate_audit"

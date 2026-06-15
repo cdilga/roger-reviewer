@@ -365,7 +365,9 @@ fn rr_agent_candidate_audit_matches_rr_search_recall_projection() {
         ],
         &runtime,
     );
-    assert_eq!(search.exit_code, 5, "{}", search.stderr);
+    // Recovery-scan recall over seeded records is a healthy Complete (exit 0):
+    // the lexical canonical-DB scan returns real candidate/promoted memory.
+    assert_eq!(search.exit_code, 0, "{}", search.stderr);
     let search_payload = parse_robot_payload(&search.stdout);
     let search_data = &search_payload["data"];
     assert_eq!(search_data["candidate_included"], true);
@@ -434,7 +436,9 @@ fn rr_agent_auto_exact_lookup_matches_rr_search_hidden_candidate_projection() {
         &["search", "--query", "packages/cli/src/lib.rs", "--robot"],
         &runtime,
     );
-    assert_eq!(search.exit_code, 5, "{}", search.stderr);
+    // Exact-lookup recovery scan with no matching record is a healthy empty
+    // fallback (exit 0), not a degraded verdict.
+    assert_eq!(search.exit_code, 0, "{}", search.stderr);
     let search_payload = parse_robot_payload(&search.stdout);
     let search_data = &search_payload["data"];
     assert_eq!(search_data["resolved_query_mode"], "exact_lookup");
