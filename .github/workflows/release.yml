@@ -74,7 +74,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@nightly-2026-06-10
+      - uses: dtolnay/rust-toolchain@nightly
 
       - name: Rehearse prior-schema store migration before release generation
         shell: bash
@@ -154,7 +154,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@nightly-2026-06-10
+      - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: ${{ matrix.target }}
 
@@ -350,7 +350,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@nightly-2026-06-10
+      - uses: dtolnay/rust-toolchain@nightly
 
       - name: Verify bridge contract drift gate
         run: cargo run -q -p roger-cli --bin rr -- bridge verify-contracts --robot > bridge-verify.json
@@ -371,7 +371,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@nightly-2026-06-10
+      - uses: dtolnay/rust-toolchain@nightly
 
       - uses: actions/download-artifact@v4
         with:
