@@ -1,6 +1,9 @@
 [toolchain]
-# Pin a specific dated nightly so re-cutting the same release tag is
-# reproducible (an undated `nightly` floats with whatever was published most
-# recently). Keep this in sync with the CI toolchain reference.
-channel = "nightly-2026-06-10"
+# Channel must stay in sync with the CI toolchain action ref
+# (dtolnay/rust-toolchain@nightly), which installs the cross-compile targets
+# into the channel named here. Pinning a *dated* nightly here while CI adds
+# targets to `nightly` causes cross-target builds to fail ("can't find crate
+# for core"). Dated-nightly reproducibility must be done by pinning the SAME
+# dated toolchain + targets in CI (tracked as a follow-up), not here alone.
+channel = "nightly"
 components = ["clippy", "rustfmt"]

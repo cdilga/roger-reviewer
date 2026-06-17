@@ -66,8 +66,8 @@ the release and update path.
 
 - Packaged and shipped the `roger-*` skills alongside `rr`, reconciling the
   shipped skill content with the docs.
-- Pinned the dated nightly, deprecated the orphaned release trigger, and
-  clarified CalVer install guidance.
+- Deprecated the orphaned release trigger and clarified CalVer install
+  guidance.
 - Slimmed the published `extension.zip` to runtime-only files.
 - Derived the binary's embedded store envelope and `store_schema_version` from
   storage truth (migrations) rather than a stale constant, so updates reflect
