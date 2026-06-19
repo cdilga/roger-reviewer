@@ -435,6 +435,44 @@ def _enforce_upstream_optional_lane_parity(
     return lane_requirements
 
 
+def _changelog_highlights(version: str) -> List[str]:
+    """Return the bullet/body lines of the CHANGELOG.md section for `version`.
+
+    Looks for a heading whose text contains the version (e.g. `## 0.2 — ...`
+    or `## [2026.06.17]`). Returns the lines up to the next heading. Returns an
+    empty list when no CHANGELOG or matching section is found, so the notes
+    degrade gracefully (the Highlights section is simply omitted).
+    """
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
+    changelog = repo_root / "CHANGELOG.md"
+    if not changelog.is_file():
+        return []
+    try:
+        raw = changelog.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    section: List[str] = []
+    capturing = False
+    for line in raw:
+        is_heading = line.startswith("#")
+        if is_heading:
+            if capturing:
+                break  # next heading ends the section
+            heading = line.lstrip("#").strip()
+            # Match the milestone label ("0.2") or the CalVer version.
+            if version in heading or "0.2" in heading:
+                capturing = True
+            continue
+        if capturing:
+            section.append(line.rstrip())
+    # Trim leading/trailing blank lines.
+    while section and not section[0].strip():
+        section.pop(0)
+    while section and not section[-1].strip():
+        section.pop()
+    return section
+
+
 def _render_notes(
     metadata: Dict[str, Any],
     publish_mode: str,
@@ -453,92 +491,125 @@ def _render_notes(
     installer_latest_ps1 = f"{RELEASES_BASE_URL}/latest/download/rr-install.ps1"
     installer_tag_sh = f"{RELEASES_BASE_URL}/download/{tag}/rr-install.sh"
     installer_tag_ps1 = f"{RELEASES_BASE_URL}/download/{tag}/rr-install.ps1"
+    ps_latest = (
+        "& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing "
+        + f"'{installer_latest_ps1}').Content))"
+    )
+    ps_pinned = (
+        "& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing "
+        + f"'{installer_tag_ps1}').Content)) -Version '{version}'"
+    )
 
+    # ---- Human-facing top: what it is, install, quickstart, highlights ----
     lines = [
         f"# {release_name}",
         "",
-        f"- Release tag: `{tag}`",
-        f"- Channel: `{channel}`",
-        f"- Publication mode: `{publish_mode}`",
+        "**Local-first pull request review for GitHub.** Durable review sessions,",
+        "structured findings, and an explicit approval gate — your review state stays",
+        "on your machine until you choose to post it back.",
         "",
-        "## Artifact Lanes",
+        "## Install",
+        "",
+        "**macOS / Linux**",
+        "",
+        "```sh",
+        f"curl -fsSL {installer_latest_sh} | bash",
+        "```",
+        "",
+        "**Windows (PowerShell)**",
+        "",
+        "```powershell",
+        ps_latest,
+        "```",
+        "",
+        "Already have Roger? Update in place:",
+        "",
+        "```sh",
+        "rr update",
+        "```",
+        "",
+        "<details>",
+        f"<summary>Install this exact version (<code>{tag}</code>)</summary>",
+        "",
+        "```sh",
+        f"curl -fsSL {installer_tag_sh} | bash -s -- --version {version}",
+        "```",
+        "",
+        "```powershell",
+        ps_pinned,
+        "```",
+        "</details>",
+        "",
+        "## Quickstart",
+        "",
+        "```sh",
+        "rr prs                                  # open PRs as a review queue",
+        "rr review --pr 123 --provider opencode  # start a review",
+        "rr findings                             # inspect what Roger found",
+        "rr tui                                  # open the local review cockpit",
+        "```",
         "",
     ]
 
-    for lane_name in ("release-package-bridge", "release-package-extension"):
-        lane = lane_summary.get(lane_name, {})
-        status = lane.get("status", "skipped")
-        artifacts = lane.get("artifacts", [])
-        lines.append(f"- `{lane_name}`: `{status}`")
-        if isinstance(artifacts, list) and artifacts:
-            for artifact in artifacts:
-                lines.append(f"  - artifact: `{artifact}`")
+    highlights = _changelog_highlights(version)
+    if highlights:
+        lines.append("## Highlights")
+        lines.append("")
+        lines.extend(highlights)
+        lines.append("")
 
+    # ---- What shipped (human summary of the lanes) ----
+    bridge_status = lane_summary.get("release-package-bridge", {}).get("status", "skipped")
+    extension_status = lane_summary.get("release-package-extension", {}).get("status", "skipped")
     lines.extend(
         [
+            "## What's in this release",
             "",
-            "## Support Claims",
+            "- **`rr` CLI** — the core, all you need. Cross-platform binaries are attached below.",
+            "- **Browser companion** (optional) — "
+            + ("included" if bridge_status == "built" and extension_status == "built" else "not in this build")
+            + "; load it for the GitHub PR-page launcher. Or run `rr extension setup` later.",
+            "- **Roger skills** (optional) — agent skills installed alongside `rr` by the installer.",
             "",
-            f"- Posture: `{support_claims['posture']}`",
+            "Browser/skills lanes are optional; the base `rr` install needs neither.",
+            "",
         ]
     )
 
+    # ---- Machine-truth provenance, collapsed (keeps verifiable detail honest
+    #      without dominating the page). ----
     shipped = support_claims.get("shipped_optional_lanes", [])
-    if shipped:
-        lines.append(
-            "- Shipped optional lanes: " + ", ".join(f"`{lane}`" for lane in shipped)
-        )
-    else:
-        lines.append("- Shipped optional lanes: none")
-
+    shipped_line = (
+        "- Shipped optional lanes: " + ", ".join(f"`{lane}`" for lane in shipped)
+        if shipped
+        else "- Shipped optional lanes: none"
+    )
     narrowed = support_claims.get("narrowed_claims", [])
-    if narrowed:
-        lines.append(
-            "- Narrowed claims: " + ", ".join(f"`{claim}`" for claim in narrowed)
-        )
-    else:
-        lines.append("- Narrowed claims: none")
-
+    narrowed_line = (
+        "- Narrowed claims: " + ", ".join(f"`{claim}`" for claim in narrowed)
+        if narrowed
+        else "- Narrowed claims: none"
+    )
     lines.extend(
         [
+            "<details>",
+            "<summary>Release verification &amp; provenance</summary>",
             "",
-            "## Upstream Workflow Evidence",
-            "",
+            f"- Release tag: `{tag}`",
+            f"- Channel: `{channel}`",
+            f"- Publication mode: `{publish_mode}`",
+            f"- Posture: `{support_claims['posture']}`",
+            shipped_line,
+            narrowed_line,
             f"- Core build run: `{upstream_runs.get('core') or 'not-recorded'}`",
             f"- Verify-assets run: `{upstream_runs.get('verify') or 'not-recorded'}`",
             f"- Bridge package run: `{upstream_runs.get('bridge') or 'not-recorded'}`",
             f"- Extension package run: `{upstream_runs.get('extension') or 'not-recorded'}`",
-            "",
-            "## Verification Artifacts",
-            "",
             f"- Checksums: `{checksums_name}`",
             f"- Verified asset manifest: `{verified_manifest_name}`",
             f"- Signing notes: `{signing_notes_name}`",
-            "",
-            "## Install Commands (CLI Base Product)",
-            "",
-            "- Stable/latest (Unix):",
-            f"  - `curl -fsSL {installer_latest_sh} | bash`",
-            "- Stable/latest (PowerShell):",
-            "  - `& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing "
-            + f"'{installer_latest_ps1}').Content))`",
-            f"- Pinned `{tag}` (Unix):",
-            f"  - `curl -fsSL {installer_tag_sh} | bash -s -- --version {version}`",
-            f"- Pinned `{tag}` (PowerShell):",
-            "  - `& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing "
-            + f"'{installer_tag_ps1}').Content)) -Version '{version}'`",
-            "",
-            "## Optional Follow-On (Separate From Base Install)",
-            "",
-            "- Bridge and extension lanes are optional packaging surfaces and are not required for the base CLI install.",
-            "- Use the release optional-lane artifacts only when you need browser launch/helper integration.",
-            "",
-            "## Manual Smoke",
-            "",
-            "- Release owner must complete documented release-smoke before publish mode is used.",
-            "- Required checklist: `docs/release-publish-operator-smoke.md`",
-            "",
-            f"Release `{version}` prepared by Roger release-publish plan.",
+            "- Operator smoke checklist: `docs/release-publish-operator-smoke.md`",
+            "</details>",
             "",
         ]
     )

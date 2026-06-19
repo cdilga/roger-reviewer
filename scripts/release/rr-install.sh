@@ -38,6 +38,25 @@ die() {
   exit 1
 }
 
+# Tasteful one-time sign-off shown after a successful install. Pure ASCII so it
+# renders on barebones terminals; kept short so it is celebratory, not noisy.
+print_banner() {
+  local installed_version="$1"
+  cat <<BANNER
+
+       .------.
+       | o  o |     R O G E R   R E V I E W E R
+       |  ||  |
+       | _||_ |     Local-first pull request review for GitHub.
+       '------'     10-4 -- rr ${installed_version} is installed.
+
+  Next:
+    rr --help     see everything rr can do
+    rr prs        list open PRs as a review queue
+    rr doctor     check your local + provider setup
+BANNER
+}
+
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
@@ -597,6 +616,8 @@ if "$install_path" init --robot >/dev/null 2>&1; then
 else
   echo "Warning: 'rr init --robot' bootstrap failed; run it manually after install." >&2
 fi
+
+print_banner "${version}"
 
 if [[ ":$PATH:" != *":${install_dir}:"* ]]; then
   shell_name="$(basename "${SHELL:-sh}")"
