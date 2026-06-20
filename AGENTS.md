@@ -858,6 +858,34 @@ Current repo honesty rule:
 - docs, planning, and bead-shaping tasks may close without code tests, but
   implementation beads normally should not
 
+Seeded-contract vs. genuine-live evidence (the falsifiability rule):
+
+- a test that seeds the precondition state itself and then drives the CLI
+  proves the *contract* ("given this state, the surface behaves"), NOT that the
+  real producer of that state actually delivers it and the end-to-end flow
+  completes. Example: seeding a review session + task + nonce directly in the
+  store and then calling `rr agent` proves the transport contract, not that a
+  live in-session provider agent receives its binding through the launch path
+  and genuinely reads memory / submits a stage result.
+- for any flow that crosses a real external boundary — a live provider session,
+  a real browser + native-messaging, the network, or install/update against a
+  published release — contract/seeded coverage is necessary but NOT sufficient.
+  Do not claim the flow is "genuinely proven" or "works end-to-end" on
+  seeded/contract tests alone; say "contract-proven, live-unproven" until a real
+  run exists.
+- the bar for "genuinely proven" is ticketed, replayable live evidence: a real
+  run with a captured artifact (run id, transcript, screenshot, store-diff, or
+  command transcript) recorded in the closing bead so the claim is falsifiable
+  and another agent can replay it. Patterns already established at this bar:
+  the CDP harness that proved the Edge status relay live (rr-s8wx), and the
+  Docker install+update E2E (`scripts/release/test_docker_install_update_e2e.sh`)
+  that proved install→`rr update`→upgrade against real releases.
+- when a real-boundary flow has only contract coverage, file an honest
+  "contract-proven, live-unproven" bead rather than letting the gap read as
+  covered. As of this writing the in-session agent → memory → surface flow is
+  in exactly that state (contract-proven via agent_transport_smoke /
+  search_agent_parity; no ticketed live in-session run).
+
 Authority:
 
 - [`docs/TEST_HARNESS_GUIDELINES.md`](docs/TEST_HARNESS_GUIDELINES.md) is the
