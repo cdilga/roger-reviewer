@@ -886,6 +886,32 @@ Seeded-contract vs. genuine-live evidence (the falsifiability rule):
   in exactly that state (contract-proven via agent_transport_smoke /
   search_agent_parity; no ticketed live in-session run).
 
+Live interaction surfaces (browser panel / native messaging):
+
+- a browser UI whose behavior only exists across a real click -> service worker
+  -> native-messaging -> CLI boundary is a LIVE INTERACTION SURFACE. jsdom and
+  contract tests for these stub the exact transport the real bugs live in, so
+  they pass while the surface is broken (this is how both the status relay
+  rr-s8wx AND the launch buttons shipped dead on Edge — see
+  [`docs/POSTMORTEM_EDGE_NATIVE_MESSAGING.md`](docs/POSTMORTEM_EDGE_NATIVE_MESSAGING.md)).
+- changes to panel interaction, the background service worker, or native
+  messaging must be validated with the live-interaction harness, which drives
+  real clicks via CDP and asserts OBSERVABLE outcomes (control settles, feedback
+  is visually visible, launch still settles after a service-worker idle, the
+  info control toggles):
+  `scripts/extension/test_panel_interaction_e2e.sh` /
+  `apps/extension/testing/panel_interaction_e2e.cjs`. Edge is the strict case
+  (MV3 module service worker); Chrome/Brave should also pass.
+- reply-expecting native dispatch in the MV3 background worker must use a
+  long-lived `chrome.runtime.connectNative` Port, never one-shot
+  `chrome.runtime.sendNativeMessage` (torn down before the reply on Edge). A
+  static guard enforces this:
+  `apps/extension/src/background.native_transport_guard.test.js`.
+- when you fix a transport/boundary defect, AUDIT EVERY call site of that
+  mechanism before closing the bead, not just the one reported broken. The
+  launch bug existed because the status-relay fix did not audit its sibling
+  dispatch.
+
 Authority:
 
 - [`docs/TEST_HARNESS_GUIDELINES.md`](docs/TEST_HARNESS_GUIDELINES.md) is the
