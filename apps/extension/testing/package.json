@@ -4,12 +4,16 @@
   "description": "DOM-backed popup render harness for Roger Reviewer extension surfaces",
   "scripts": {
     "render": "node ./popup_render_harness.cjs",
-    "test": "node --test ./popup_render_harness.test.cjs"
+    "test": "node --test ./popup_render_harness.test.cjs",
+    "interaction-e2e": "node ./panel_interaction_e2e.cjs"
   },
   "dependencies": {
     "jsdom": "29.1.1"
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^22.15.0"
   }
 }

@@ -51,3 +51,4 @@ test-results/
 .beads/.metadata_repair_backups/
 .beads/.br_recovery/
 scripts/swarm/.metadata_repair_backups/
+apps/extension/testing/panel_interaction_e2e.png
