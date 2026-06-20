@@ -21,6 +21,13 @@ const MAX_SESSION_INVENTORY_ENTRIES = 5;
 // MUST stay below the content-side settle timeout so the worker leg always
 // resolves first (see STATUS_MIRROR_SETTLE_TIMEOUT_MS in content/main.js).
 const STATUS_PROBE_TIMEOUT_MS = 4000;
+// Worker-side watchdog for the LAUNCH dispatch. Like the status probe, launch
+// uses a long-lived connectNative Port so Edge's module service worker stays
+// anchored until the host's single launch-result reply lands (one-shot
+// sendNativeMessage was torn down before the reply on Edge MV3 -> clicks
+// silently no-oped). A launch (rr review/resume) can take real time, so this
+// backstop is generous; it only force-settles a host that truly hangs.
+const LAUNCH_DISPATCH_TIMEOUT_MS = 120000;
 const BRIDGE_FAILURE_MODE_BY_KIND = Object.freeze({
   preflight_failed: 'bridge_preflight_failed',
   cli_spawn_failed: 'bridge_cli_spawn_failed',
@@ -46,46 +53,115 @@ function classifyBridgeFailureMode(response) {
   return BRIDGE_FAILURE_MODE_BY_KIND[failureKind] || 'native_bridge_failure';
 }
 
+// Launch dispatch over a long-lived connectNative Port (NOT one-shot
+// sendNativeMessage). On Edge's MV3 module service worker the one-shot reply
+// callback was torn down before the native host replied, so panel launch
+// clicks silently no-oped; an open port anchors the worker until the host's
+// single launch-result envelope lands (read one, write one, exit -> one
+// onMessage then onDisconnect). The resolved envelope shape is unchanged so
+// handleLaunchMessage and the content panel behave identically.
 function dispatchNative(intent) {
   return new Promise((resolve) => {
-    chrome.runtime.sendNativeMessage(BRIDGE_HOST, intent, (response) => {
-      if (chrome.runtime.lastError) {
-        resolve({
-          ok: false,
-          mode: 'native_error',
-          message: chrome.runtime.lastError.message,
-        });
+    let settled = false;
+    let watchdog = null;
+    let port = null;
+
+    const settle = (value) => {
+      if (settled) {
         return;
       }
-
-      if (!response || typeof response !== 'object') {
-        resolve({
-          ok: false,
-          mode: 'native_invalid_response',
-          message: 'Bridge host returned an invalid response envelope.',
-        });
-        return;
+      settled = true;
+      if (watchdog !== null) {
+        clearTimeout(watchdog);
+        watchdog = null;
       }
+      if (port) {
+        try {
+          port.disconnect();
+        } catch {
+          // Port may already be torn down; disconnecting twice is harmless.
+        }
+        port = null;
+      }
+      resolve(value);
+    };
 
-      const mirrored = normalizeBoundedStatus(response);
+    const nativeError = (message) =>
+      settle({ ok: false, mode: 'native_error', message });
+
+    try {
+      port = chrome.runtime.connectNative(BRIDGE_HOST);
+    } catch (err) {
       resolve({
-        ok: Boolean(response.ok),
-        mode: response.ok ? 'native_messaging' : classifyBridgeFailureMode(response),
-        action: response.action,
-        message: response.message || 'Bridge handled launch request.',
-        guidance: response.guidance,
-        session_id: response.session_id,
-        failure_kind: response.failure_kind,
-        launch_outcome: response.launch_outcome,
-        ...(mirrored
-          ? {
-              attention_state: mirrored.attention_state,
-              freshness_seconds: mirrored.freshness_seconds,
-              freshness_label: mirrored.freshness_label,
-            }
-          : {}),
+        ok: false,
+        mode: 'native_error',
+        message: (err && err.message) || 'connectNative is unavailable.',
       });
-    });
+      return;
+    }
+
+    if (!port || typeof port.postMessage !== 'function') {
+      resolve({
+        ok: false,
+        mode: 'native_error',
+        message: 'Native messaging port is unavailable.',
+      });
+      return;
+    }
+
+    if (port.onMessage && typeof port.onMessage.addListener === 'function') {
+      port.onMessage.addListener((response) => {
+        if (!response || typeof response !== 'object') {
+          settle({
+            ok: false,
+            mode: 'native_invalid_response',
+            message: 'Bridge host returned an invalid response envelope.',
+          });
+          return;
+        }
+        const mirrored = normalizeBoundedStatus(response);
+        settle({
+          ok: Boolean(response.ok),
+          mode: response.ok ? 'native_messaging' : classifyBridgeFailureMode(response),
+          action: response.action,
+          message: response.message || 'Bridge handled launch request.',
+          guidance: response.guidance,
+          session_id: response.session_id,
+          failure_kind: response.failure_kind,
+          launch_outcome: response.launch_outcome,
+          ...(mirrored
+            ? {
+                attention_state: mirrored.attention_state,
+                freshness_seconds: mirrored.freshness_seconds,
+                freshness_label: mirrored.freshness_label,
+              }
+            : {}),
+        });
+      });
+    }
+
+    // Host died/unreachable or exited without writing a launch result: surface
+    // it as a native_error so handleLaunchMessage degrades to the honest
+    // "Native Messaging unavailable; launch blocked" guidance instead of hanging.
+    if (port.onDisconnect && typeof port.onDisconnect.addListener === 'function') {
+      port.onDisconnect.addListener(() => {
+        const lastError = chrome.runtime?.lastError;
+        nativeError(
+          (lastError && lastError.message) ||
+            'Native messaging host disconnected before returning a launch result.'
+        );
+      });
+    }
+
+    watchdog = setTimeout(() => {
+      nativeError('Native messaging launch timed out before the host replied.');
+    }, LAUNCH_DISPATCH_TIMEOUT_MS);
+
+    try {
+      port.postMessage(intent);
+    } catch (err) {
+      nativeError((err && err.message) || 'Failed to post launch intent to the native host.');
+    }
   });
 }
 

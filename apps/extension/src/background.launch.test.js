@@ -21,24 +21,56 @@ function withChromeStub(stub, fn) {
     });
 }
 
-test('handleLaunchMessage fails closed when Native Messaging is unavailable', async () => {
-  let tabCreateCalled = false;
-  const chromeStub = {
-    runtime: {
-      lastError: null,
-      onMessage: { addListener: () => {} },
-      sendNativeMessage(_host, _intent, callback) {
-        this.lastError = { message: 'Specified native messaging host not found.' };
-        callback(undefined);
-        this.lastError = null;
-      },
-    },
-    tabs: {
-      async create() {
-        tabCreateCalled = true;
-      },
+// Launch dispatch opens a long-lived connectNative Port (NOT one-shot
+// sendNativeMessage) so Edge's MV3 module service worker stays anchored until
+// the host returns its single launch-result envelope. This stub models that
+// contract: on postMessage the host either writes one envelope (onMessage) or
+// dies without a result (onDisconnect, optionally carrying a lastError), which
+// is how an unavailable/forbidden host is surfaced.
+function launchChromeStub({ reply, disconnectError, extra = {} } = {}) {
+  const runtime = {
+    lastError: null,
+    onMessage: { addListener: () => {} },
+    connectNative() {
+      const onMessageListeners = [];
+      const onDisconnectListeners = [];
+      return {
+        onMessage: { addListener: (fn) => onMessageListeners.push(fn) },
+        onDisconnect: { addListener: (fn) => onDisconnectListeners.push(fn) },
+        disconnect() {},
+        postMessage() {
+          if (reply !== undefined) {
+            for (const fn of onMessageListeners) {
+              fn(reply);
+            }
+            return;
+          }
+          if (disconnectError) {
+            runtime.lastError = { message: disconnectError };
+          }
+          for (const fn of onDisconnectListeners) {
+            fn();
+          }
+          runtime.lastError = null;
+        },
+      };
     },
   };
+  return { runtime, ...extra };
+}
+
+test('handleLaunchMessage fails closed when Native Messaging is unavailable', async () => {
+  let tabCreateCalled = false;
+  const chromeStub = launchChromeStub({
+    disconnectError: 'Specified native messaging host not found.',
+    extra: {
+      tabs: {
+        async create() {
+          tabCreateCalled = true;
+        },
+      },
+    },
+  });
 
   await withChromeStub(chromeStub, async () => {
     const response = await handleLaunchMessage({
@@ -64,19 +96,9 @@ test('handleLaunchMessage fails closed when Native Messaging is unavailable', as
 });
 
 test('handleLaunchMessage surfaces forbidden native host access as browser-policy guidance', async () => {
-  const chromeStub = {
-    runtime: {
-      lastError: null,
-      onMessage: { addListener: () => {} },
-      sendNativeMessage(_host, _intent, callback) {
-        this.lastError = {
-          message: 'Access to the specified native messaging host is forbidden.',
-        };
-        callback(undefined);
-        this.lastError = null;
-      },
-    },
-  };
+  const chromeStub = launchChromeStub({
+    disconnectError: 'Access to the specified native messaging host is forbidden.',
+  });
 
   await withChromeStub(chromeStub, async () => {
     const response = await handleLaunchMessage({
@@ -105,30 +127,24 @@ test('handleLaunchMessage surfaces forbidden native host access as browser-polic
 for (const action of ['start_review', 'resume_review', 'show_findings']) {
   test(`handleLaunchMessage preserves native messaging success envelope for ${action}`, async () => {
     const generatedAt = new Date(Date.now() - 2_000).toISOString();
-    const chromeStub = {
-      runtime: {
-        lastError: null,
-        onMessage: { addListener: () => {} },
-        sendNativeMessage(_host, _intent, callback) {
-          callback({
-            ok: true,
-            action,
-            message: `Dispatching ${action} for acme/widgets#42`,
-            guidance: null,
-            session_id: `session-${action}`,
-            attention_state: 'awaiting_user_input',
-            generated_at: generatedAt,
-            status: {
-              schema_id: 'rr.robot.status.v1',
-              outcome: 'complete',
-              generated_at: generatedAt,
-              session_id: `session-${action}`,
-              attention_state: 'awaiting_user_input',
-            },
-          });
+    const chromeStub = launchChromeStub({
+      reply: {
+        ok: true,
+        action,
+        message: `Dispatching ${action} for acme/widgets#42`,
+        guidance: null,
+        session_id: `session-${action}`,
+        attention_state: 'awaiting_user_input',
+        generated_at: generatedAt,
+        status: {
+          schema_id: 'rr.robot.status.v1',
+          outcome: 'complete',
+          generated_at: generatedAt,
+          session_id: `session-${action}`,
+          attention_state: 'awaiting_user_input',
         },
       },
-    };
+    });
 
     await withChromeStub(chromeStub, async () => {
       const response = await handleLaunchMessage({
@@ -157,21 +173,15 @@ test('handleLaunchMessage preserves message and session id even without a fresh 
   // The panel renders a persistent success status line from message +
   // session_id, so the envelope must carry both even when the bridge omits
   // attention_state/generated_at and no bounded mirror can be normalized.
-  const chromeStub = {
-    runtime: {
-      lastError: null,
-      onMessage: { addListener: () => {} },
-      sendNativeMessage(_host, _intent, callback) {
-        callback({
-          ok: true,
-          action: 'start_review',
-          message: 'rr review completed for acme/widgets#42.',
-          guidance: null,
-          session_id: 'session-42',
-        });
-      },
+  const chromeStub = launchChromeStub({
+    reply: {
+      ok: true,
+      action: 'start_review',
+      message: 'rr review completed for acme/widgets#42.',
+      guidance: null,
+      session_id: 'session-42',
     },
-  };
+  });
 
   await withChromeStub(chromeStub, async () => {
     const response = await handleLaunchMessage({
@@ -192,21 +202,15 @@ test('handleLaunchMessage preserves message and session id even without a fresh 
 });
 
 test('handleLaunchMessage failure envelopes keep message and guidance for persistent panel errors', async () => {
-  const chromeStub = {
-    runtime: {
-      lastError: null,
-      onMessage: { addListener: () => {} },
-      sendNativeMessage(_host, _intent, callback) {
-        callback({
-          ok: false,
-          action: 'start_review',
-          message: 'Roger bridge preflight failed.',
-          guidance: 'Roger data directory not found. Run `rr init` to set up.',
-          failure_kind: 'preflight_failed',
-        });
-      },
+  const chromeStub = launchChromeStub({
+    reply: {
+      ok: false,
+      action: 'start_review',
+      message: 'Roger bridge preflight failed.',
+      guidance: 'Roger data directory not found. Run `rr init` to set up.',
+      failure_kind: 'preflight_failed',
     },
-  };
+  });
 
   await withChromeStub(chromeStub, async () => {
     const response = await handleLaunchMessage({
@@ -229,32 +233,26 @@ test('handleLaunchMessage failure envelopes keep message and guidance for persis
 
 test('handleLaunchMessage keeps degraded bridge launch outcome explicit', async () => {
   const generatedAt = new Date(Date.now() - 1_000).toISOString();
-  const chromeStub = {
-    runtime: {
-      lastError: null,
-      onMessage: { addListener: () => {} },
-      sendNativeMessage(_host, _intent, callback) {
-        callback({
-          ok: true,
-          action: 'resume_review',
-          message:
-            'rr resume completed in degraded mode for acme/widgets#42. Open Roger locally with `rr status --session session-resume` for authoritative detail.',
-          guidance: null,
-          session_id: 'session-resume',
-          launch_outcome: 'degraded',
-          attention_state: 'review_failed',
-          generated_at: generatedAt,
-          status: {
-            schema_id: 'rr.robot.status.v1',
-            outcome: 'complete',
-            generated_at: generatedAt,
-            session_id: 'session-resume',
-            attention_state: 'review_failed',
-          },
-        });
+  const chromeStub = launchChromeStub({
+    reply: {
+      ok: true,
+      action: 'resume_review',
+      message:
+        'rr resume completed in degraded mode for acme/widgets#42. Open Roger locally with `rr status --session session-resume` for authoritative detail.',
+      guidance: null,
+      session_id: 'session-resume',
+      launch_outcome: 'degraded',
+      attention_state: 'review_failed',
+      generated_at: generatedAt,
+      status: {
+        schema_id: 'rr.robot.status.v1',
+        outcome: 'complete',
+        generated_at: generatedAt,
+        session_id: 'session-resume',
+        attention_state: 'review_failed',
       },
     },
-  };
+  });
 
   await withChromeStub(chromeStub, async () => {
     const response = await handleLaunchMessage({
@@ -334,15 +332,7 @@ for (const [label, bridgeResponse, expectedMode] of [
   ],
 ]) {
   test(`handleLaunchMessage preserves ${label} distinctly`, async () => {
-    const chromeStub = {
-      runtime: {
-        lastError: null,
-        onMessage: { addListener: () => {} },
-        sendNativeMessage(_host, _intent, callback) {
-          callback(bridgeResponse);
-        },
-      },
-    };
+    const chromeStub = launchChromeStub({ reply: bridgeResponse });
 
     await withChromeStub(chromeStub, async () => {
       const response = await handleLaunchMessage({
@@ -640,7 +630,7 @@ test('handleLaunchMessage rejects refresh_review as a browser action', async () 
     runtime: {
       lastError: null,
       onMessage: { addListener: () => {} },
-      sendNativeMessage() {
+      connectNative() {
         throw new Error('native dispatch should not be reached');
       },
     },
