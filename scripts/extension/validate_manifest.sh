@@ -51,6 +51,21 @@ content_scripts = data.get('content_scripts', [])
 if not content_scripts:
     raise SystemExit('content_scripts must not be empty')
 
+# The content script must run on BOTH the PR-detail route and the PR-listing
+# route. The landed row controls (parsePullRequestListContext etc.) are dead
+# code on /pulls listing pages unless a matching content_scripts pattern exists.
+all_matches = []
+for entry in content_scripts:
+    all_matches.extend(entry.get('matches', []) or [])
+
+def _has(predicate):
+    return any(predicate(m) for m in all_matches)
+
+if not _has(lambda m: '/pull/' in m):
+    raise SystemExit('content_scripts must match the PR-detail route (…/pull/*)')
+if not _has(lambda m: '/pulls' in m):
+    raise SystemExit('content_scripts must match the PR-listing route (…/pulls*)')
+
 print('manifest validation ok')
 PY
 

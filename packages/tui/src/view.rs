@@ -48,6 +48,7 @@ impl CockpitModel {
     /// Top status strip: target identity, run state, attention counts.
     fn status_line(&self) -> String {
         let screen = match self.screen {
+            Screen::Picker => "Session Picker",
             Screen::Home => "Review Home",
             Screen::SessionHome => "Session Overview",
             Screen::Findings => "Findings Queue",
@@ -56,7 +57,13 @@ impl CockpitModel {
             Screen::Timeline => "Timeline/History",
             Screen::Search => "Search/Recall",
         };
-        match &self.active_session {
+        if self.screen == Screen::Picker {
+            return format!(
+                "Roger Reviewer — {screen} — {} candidate session(s)",
+                self.picker_candidates.len()
+            );
+        }
+        let mut line = match &self.active_session {
             Some(session) if self.screen != Screen::Home => {
                 let run = self
                     .home
@@ -95,7 +102,15 @@ impl CockpitModel {
                 }
                 line
             }
+        };
+        // Surface the retrieval/memory posture on the Search screen where it
+        // materially affects operator judgment of recall results.
+        if self.screen == Screen::Search
+            && let Some(posture) = &self.memory_posture
+        {
+            line.push_str(&format!(" — memory: {}", posture.summary()));
         }
+        line
     }
 
     fn key_hints(&self) -> String {
@@ -116,6 +131,9 @@ impl CockpitModel {
             InputMode::None => {}
         }
         match self.screen {
+            Screen::Picker => {
+                "j/k move  Enter open session  Esc full finder  ? help  q quit".to_owned()
+            }
             Screen::Home => "j/k move  Enter open  / filter  r reload  ? help  q quit".to_owned(),
             Screen::SessionHome => {
                 "f findings  d drafts  t timeline  s search  c clarify  Esc home  ? help  q quit"
@@ -128,7 +146,7 @@ impl CockpitModel {
             Screen::Drafts => {
                 "j/k move  Enter inspect  a approve (elevated)  Esc home  ? help  q quit".to_owned()
             }
-            Screen::DraftItems => "j/k move  Esc drafts  ? help  q quit".to_owned(),
+            Screen::DraftItems => "j/k move  e edit draft  Esc drafts  ? help  q quit".to_owned(),
             Screen::Timeline => "j/k move  Esc home  ? help  q quit".to_owned(),
             Screen::Search => "j/k move  / new query  Esc home  ? help  q quit".to_owned(),
         }
@@ -150,6 +168,7 @@ impl CockpitModel {
     /// Primary pane lines and the index of the cursor row (for windowing).
     fn primary_lines(&self) -> (Vec<String>, usize) {
         match self.screen {
+            Screen::Picker => self.render_picker_primary(),
             Screen::Home => self.render_home_primary(),
             Screen::SessionHome => (self.render_session_overview(), 0),
             Screen::Findings => self.render_findings_primary(),
@@ -158,6 +177,49 @@ impl CockpitModel {
             Screen::Timeline => self.render_timeline_primary(),
             Screen::Search => self.render_search_primary(),
         }
+    }
+
+    // --- Session Picker --------------------------------------------------------
+
+    fn render_picker_primary(&self) -> (Vec<String>, usize) {
+        let mut lines = Vec::new();
+        // One-line disambiguation header keyed on the shared repo/PR.
+        let header = match self.picker_candidates.first() {
+            Some(first) => format!(
+                "{} sessions exist for {} PR #{} — choose one",
+                self.picker_candidates.len(),
+                first.repository,
+                first.pull_request
+            ),
+            None => "no candidate sessions to disambiguate".to_owned(),
+        };
+        lines.push(header);
+        lines.push(String::new());
+        if self.picker_candidates.is_empty() {
+            lines.push("Esc returns to the full session finder".to_owned());
+            return (lines, 0);
+        }
+        let mut cursor_line = 0;
+        for (idx, candidate) in self.picker_candidates.iter().enumerate() {
+            if idx == self.picker_cursor {
+                cursor_line = lines.len();
+            }
+            let tier = candidate
+                .continuity_tier
+                .as_deref()
+                .map(|tier| format!("  continuity={tier}"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "{} {}  [{}]  attention={}{}  updated_at={}",
+                cursor_marker(idx == self.picker_cursor),
+                candidate.session_id,
+                candidate.provider,
+                candidate.attention_state,
+                tier,
+                candidate.updated_at
+            ));
+        }
+        (lines, cursor_line)
     }
 
     // --- Review Home -----------------------------------------------------------
@@ -290,7 +352,11 @@ impl CockpitModel {
         ));
         if self.findings.is_empty() {
             lines.push(String::new());
-            lines.push("no findings materialized for this session yet".to_owned());
+            // Explain *why* the queue is empty and the next step, distinguishing
+            // no-run / worker-pending / zero-findings.
+            for explanation in self.findings_empty_explanation() {
+                lines.push(explanation);
+            }
             return (lines, 0);
         }
         if visible.is_empty() {
@@ -499,6 +565,19 @@ impl CockpitModel {
             ""
         };
         lines.push(format!("query: {}{caret}", self.search_input));
+        // Session-level retrieval/memory posture line (distinct from the
+        // per-query retrieval_mode reported by the lookup result below).
+        if let Some(posture) = &self.memory_posture {
+            lines.push(format!("memory posture: {}", posture.summary()));
+            if let Some(backend) = &posture.embedder_backend {
+                lines.push(format!("  embedder backend: {backend}"));
+            }
+            for reason in &posture.degraded_reasons {
+                lines.push(format!("  posture degraded: {reason}"));
+            }
+        } else {
+            lines.push("memory posture: unknown (projection unavailable)".to_owned());
+        }
         let Some(view) = &self.search else {
             lines.push(String::new());
             lines.push(
@@ -551,6 +630,7 @@ impl CockpitModel {
     /// Secondary inspector pane: high-signal detail for the current focus.
     pub fn inspector_lines(&self) -> Vec<String> {
         match self.screen {
+            Screen::Picker => self.inspect_picker_candidate(),
             Screen::Home => self.inspect_session(),
             Screen::SessionHome => self.inspect_active_session_entrypoints(),
             Screen::Findings => self.inspect_finding(),
@@ -559,6 +639,30 @@ impl CockpitModel {
             Screen::Timeline => self.inspect_timeline_entry(),
             Screen::Search => self.inspect_search_hit(),
         }
+    }
+
+    fn inspect_picker_candidate(&self) -> Vec<String> {
+        let Some(candidate) = self.picker_candidates.get(self.picker_cursor) else {
+            return vec!["no candidate focused".to_owned()];
+        };
+        let mut lines = vec![
+            "inspector — candidate session".to_owned(),
+            String::new(),
+            format!("session   {}", candidate.session_id),
+            format!(
+                "target    {} PR #{}",
+                candidate.repository, candidate.pull_request
+            ),
+            format!("provider  {}", candidate.provider),
+            format!("attention {}", candidate.attention_state),
+        ];
+        if let Some(tier) = &candidate.continuity_tier {
+            lines.push(format!("continuity {tier}"));
+        }
+        lines.push(format!("updated   {}", candidate.updated_at));
+        lines.push(String::new());
+        lines.push("Enter opens this session; Esc returns to the full finder".to_owned());
+        lines
     }
 
     fn inspect_session(&self) -> Vec<String> {
@@ -868,6 +972,7 @@ impl CockpitModel {
             "help — keyboard reference (Esc closes)".to_owned(),
             String::new(),
             "global      q quit   ? help   Esc back/clear".to_owned(),
+            "picker      j/k move   Enter open candidate   Esc full session finder".to_owned(),
             "home        j/k move   Enter open session   / filter sessions   r reload".to_owned(),
             "overview    f findings   d drafts   t timeline   s search   c clarify hint".to_owned(),
             "findings    j/k move   space multi-select   a/i/n/r triage (batch on selection)"
@@ -875,8 +980,10 @@ impl CockpitModel {
             "            s cycle sort   g cycle group   / filter   Esc clear sel/filter/back"
                 .to_owned(),
             "drafts      Enter inspect items   a elevated approve confirmation".to_owned(),
+            "draft items j/k move   e edit draft body in $EDITOR   Esc drafts".to_owned(),
             "timeline    j/k move across runs, stage results, posted actions".to_owned(),
             "search      / edit query   Enter run   j/k move hits".to_owned(),
+            "            posture line shows retrieval_mode + semantic asset state".to_owned(),
             String::new(),
             "mutation    triage writes the same storage state as rr triage".to_owned(),
             "            approval requires typing approve in the elevated prompt".to_owned(),

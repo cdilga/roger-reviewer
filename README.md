@@ -107,17 +107,21 @@ rr review --pr 123 --provider opencode
 ```bash
 rr status
 rr findings
-rr tui
+rr open
 ```
 
-`rr tui` opens the keyboard-driven review cockpit: sessions, findings triage,
-draft approval queue, timeline, and prior-review search in one place.
+`rr open` (compatibility alias: `rr tui`) opens the keyboard-driven review
+cockpit: sessions, findings triage, draft approval queue, timeline, and
+prior-review search in one place.
 
 ### 4. Continue the same review later
 
 ```bash
-rr resume --pr 123
+rr review --resume --pr 123
 ```
+
+`rr review --resume` re-enters an existing review (compatibility alias:
+`rr resume --pr 123`).
 
 Replace `123` with your pull request number. In the live CLI surface,
 `rr review --provider` accepts `opencode`, `codex`, `gemini`, and `claude` by
@@ -160,27 +164,32 @@ verbs: check the environment, choose work, review, inspect, and send only after
 explicit approval. Older exact command names remain supported as compatibility
 aliases where noted.
 
-| Command | What it does |
+Preferred names come first; the older exact command names shown in parentheses
+remain fully supported compatibility aliases and route to the same handlers.
+
+| Command (compatibility alias) | What it does |
 | --- | --- |
 | `rr doctor --provider opencode` | Run local + provider preflight checks with fail-closed guidance |
 | `rr queue` (`rr prs`) | List open pull requests as a review queue joined with local Roger state |
 | `rr review --pr 123 --provider opencode` | Start a review for a pull request |
-| `rr resume --pr 123` | Re-enter the existing review for that pull request |
+| `rr review --resume --pr 123` (`rr resume --pr 123`) | Re-enter the existing review for that pull request |
 | `rr open` (`rr tui`) | Open the local review cockpit (sessions, findings, drafts, timeline, search) |
 | `rr status` | Show the current session, attention state, and next step |
 | `rr findings` | Inspect the structured findings Roger has materialized |
-| `rr search --query "auth"` | Search prior local review memory and evidence |
-| `rr triage --finding <id> --state accepted` | Record your local triage decision on a finding |
-| `rr draft --finding <id>` | Materialize a local outbound draft batch from accepted findings |
-| `rr approve --batch <id>` | Record a local approval token for one exact draft batch |
-| `rr post --batch <id>` | Post one approved batch to GitHub and record the audit trail |
-| `rr init` | Optional explicit bootstrap; the store auto-creates on first use |
+| `rr findings --query "auth"` (`rr search --query "auth"`) | Search prior local review memory and evidence |
+| `rr findings --sessions` (`rr sessions`) | List local review sessions; mostly useful for automation and recovery |
+| `rr send triage --finding <id> --state accepted` (`rr triage ...`) | Record your local triage decision on a finding |
+| `rr send draft --finding <id>` (`rr draft ...`) | Materialize a local outbound draft batch from accepted findings |
+| `rr send approve --batch <id>` (`rr approve ...`) | Record a local approval token for one exact draft batch |
+| `rr send post --batch <id>` (`rr post ...`) | Post one approved batch to GitHub and record the audit trail |
 | `rr return --pr 123` | Rebind a dropped-out bare OpenCode or feature-gated Copilot session back to Roger |
-| `rr update` | Self-update `rr` from the latest published GitHub release |
-| `rr extension fetch` | Download and verify the published extension package for this release |
-| `rr extension setup --browser edge` | Set up the optional browser companion |
-| `rr extension doctor --browser edge` | Verify the browser companion path |
-| `rr sessions` | List local review sessions; mostly useful for automation and recovery |
+| `rr setup update` (`rr update`) | Self-update `rr` from the latest published GitHub release |
+| `rr setup fetch` (`rr extension fetch`) | Download and verify the published extension package for this release |
+| `rr setup extension --browser edge` (`rr extension setup ...`) | Set up the optional browser companion |
+| `rr setup doctor --browser edge` (`rr extension doctor ...`) | Verify the browser companion path |
+| `rr setup assets install` (`rr assets install`) | Install and verify local semantic-search assets |
+| `rr api docs schemas` (`rr robot-docs schemas`) | Machine-readable command and schema reference |
+| `rr init` | Optional explicit bootstrap; the store auto-creates on first use |
 
 ## Blessed Paths
 

@@ -1,10 +1,11 @@
 use crate::backend::CockpitBackend;
 use crate::model::{
-    ApproveOutcome, CLARIFY_HINT, CockpitKey, CockpitModel, DecisionEventRow, DraftBatchRow,
-    DraftItemRow, ELEVATED_MUTATION_HINT, EMPTY_STORE_HINT, EvidenceRow, FindingDetail, FindingRow,
-    GroupKey, InputMode, KeyOutcome, OutboundLinkRow, Overlay, PostedActionRow, Screen,
-    SearchHitRow, SearchView, SessionHomeView, SessionRow, SortKey, StageResultRow, TimelineEntry,
-    TimelineRunRow, TimelineView, TriageAction,
+    ApproveOutcome, CLARIFY_HINT, CockpitEntry, CockpitKey, CockpitModel, DecisionEventRow,
+    DraftBatchRow, DraftItemRow, ELEVATED_MUTATION_HINT, EMPTY_STORE_HINT, EvidenceRow,
+    FindingDetail, FindingRow, GroupKey, InputMode, KeyOutcome, MemoryPostureRow, ModelEffect,
+    OutboundLinkRow, Overlay, PickerCandidate, PostedActionRow, Screen, SearchHitRow, SearchView,
+    SessionHomeView, SessionRow, SortKey, StageResultRow, TimelineEntry, TimelineRunRow,
+    TimelineView, TriageAction,
 };
 
 #[derive(Default)]
@@ -22,6 +23,16 @@ struct FakeBackend {
     detail_calls: Vec<String>,
     fail_home: bool,
     fail_detail: bool,
+    /// Session-home latest-run projection knobs (drive the explained
+    /// empty-findings states).
+    home_latest_run_id: Option<String>,
+    home_stage_count: usize,
+    /// Memory posture returned by `memory_posture`.
+    memory_posture: MemoryPostureRow,
+    fail_memory_posture: bool,
+    /// Recorded `revise_draft_body(draft_id, new_body)` calls.
+    revise_calls: Vec<(String, String)>,
+    fail_revise: bool,
 }
 
 impl CockpitBackend for FakeBackend {
@@ -37,8 +48,12 @@ impl CockpitBackend for FakeBackend {
             findings_total: self.findings.len(),
             triage_counts: vec![("new".to_owned(), self.findings.len())],
             outbound_counts: vec![("not_drafted".to_owned(), self.findings.len())],
-            latest_run_id: Some("run-2".to_owned()),
-            latest_run_kind: Some("initial".to_owned()),
+            latest_run_id: self.home_latest_run_id.clone(),
+            latest_run_kind: self
+                .home_latest_run_id
+                .as_ref()
+                .map(|_| "initial".to_owned()),
+            latest_run_stage_count: self.home_stage_count,
             run_count: 2,
             draft_count: self.batches.len(),
             posted_action_count: self.timeline.posted_actions.len(),
@@ -129,6 +144,25 @@ impl CockpitBackend for FakeBackend {
         self.search_calls
             .push((repository.to_owned(), query.to_owned()));
         Ok(self.search_view.clone())
+    }
+
+    fn memory_posture(&mut self) -> Result<MemoryPostureRow, String> {
+        if self.fail_memory_posture {
+            return Err("posture load failed".to_owned());
+        }
+        Ok(self.memory_posture.clone())
+    }
+
+    fn revise_draft_body(&mut self, draft_id: &str, new_body: &str) -> Result<(), String> {
+        self.revise_calls
+            .push((draft_id.to_owned(), new_body.to_owned()));
+        if self.fail_revise {
+            return Err("revision rejected by storage".to_owned());
+        }
+        if let Some(item) = self.items.iter_mut().find(|item| item.draft_id == draft_id) {
+            item.body = new_body.to_owned();
+        }
+        Ok(())
     }
 }
 
@@ -225,6 +259,18 @@ fn populated_backend() -> FakeBackend {
             draft_count: 2,
             already_recorded: false,
         }),
+        // A run exists with worker stage results (drives the "zero findings"
+        // explained empty-state when findings are cleared).
+        home_latest_run_id: Some("run-2".to_owned()),
+        home_stage_count: 1,
+        memory_posture: MemoryPostureRow {
+            retrieval_mode: "lexical_only".to_owned(),
+            semantic_operational: false,
+            assets_verified: false,
+            embedder_available: true,
+            embedder_backend: Some("fastembed".to_owned()),
+            degraded_reasons: vec!["semantic model not installed".to_owned()],
+        },
         ..FakeBackend::default()
     }
 }
@@ -1295,4 +1341,333 @@ fn clarify_key_shows_bounded_hint_instead_of_fake_chat() {
     model.notice = None;
     model.handle_key(CockpitKey::Char('c'), &mut backend);
     assert_eq!(model.notice.as_deref(), Some(CLARIFY_HINT));
+}
+
+// --- session picker ---------------------------------------------------------
+
+fn picker_candidate(id: &str, pr: u64, attention: &str) -> PickerCandidate {
+    PickerCandidate {
+        session_id: id.to_owned(),
+        repository: "owner/repo".to_owned(),
+        pull_request: pr,
+        provider: "opencode".to_owned(),
+        attention_state: attention.to_owned(),
+        continuity_tier: Some("tier_b".to_owned()),
+        updated_at: 100,
+    }
+}
+
+fn entry_with_candidates(candidates: Vec<PickerCandidate>) -> CockpitEntry {
+    CockpitEntry {
+        initial_session_id: None,
+        picker_candidates: Some(candidates),
+    }
+}
+
+#[test]
+fn bootstrap_with_picker_candidates_opens_picker_with_explanation() {
+    let mut backend = populated_backend();
+    let entry = entry_with_candidates(vec![
+        picker_candidate("session-1", 7, "awaiting_user_input"),
+        picker_candidate("session-2", 7, "outbound_approval_required"),
+    ]);
+    let model = CockpitModel::bootstrap_with_entry(&mut backend, &entry).expect("bootstrap");
+    assert_eq!(model.screen, Screen::Picker);
+    assert_eq!(model.picker_candidates.len(), 2);
+
+    let rendered = model.render_lines(160, 30).join("\n");
+    assert!(
+        rendered.contains("2 sessions exist for owner/repo PR #7 — choose one"),
+        "{rendered}"
+    );
+    // Candidate rows project provider, attention, continuity tier, updated_at.
+    assert!(rendered.contains("session-1"), "{rendered}");
+    assert!(rendered.contains("[opencode]"), "{rendered}");
+    assert!(
+        rendered.contains("attention=outbound_approval_required"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("continuity=tier_b"), "{rendered}");
+    assert!(
+        rendered.contains("Session Picker"),
+        "status strip: {rendered}"
+    );
+}
+
+#[test]
+fn picker_enter_opens_selected_candidate_session_home() {
+    let mut backend = populated_backend();
+    let entry = entry_with_candidates(vec![
+        picker_candidate("session-1", 7, "awaiting_user_input"),
+        picker_candidate("session-2", 8, "outbound_approval_required"),
+    ]);
+    let mut model = CockpitModel::bootstrap_with_entry(&mut backend, &entry).expect("bootstrap");
+    model.handle_key(CockpitKey::Down, &mut backend);
+    assert_eq!(model.picker_cursor, 1);
+    model.handle_key(CockpitKey::Enter, &mut backend);
+    assert_eq!(model.screen, Screen::SessionHome);
+    assert_eq!(
+        model.active_session.as_ref().map(|s| s.session_id.as_str()),
+        Some("session-2"),
+        "Enter opens the highlighted candidate"
+    );
+    assert!(model.home.is_some());
+}
+
+#[test]
+fn picker_esc_falls_back_to_full_session_finder() {
+    let mut backend = populated_backend();
+    let entry = entry_with_candidates(vec![picker_candidate(
+        "session-1",
+        7,
+        "awaiting_user_input",
+    )]);
+    let mut model = CockpitModel::bootstrap_with_entry(&mut backend, &entry).expect("bootstrap");
+    assert_eq!(model.screen, Screen::Picker);
+    model.handle_key(CockpitKey::Esc, &mut backend);
+    assert_eq!(
+        model.screen,
+        Screen::Home,
+        "Esc falls back to the full finder"
+    );
+    // The full finder lists every session, not just the candidate.
+    assert_eq!(model.sessions.len(), 2);
+    let rendered = model.render_lines(160, 30).join("\n");
+    assert!(rendered.contains("Review Home"), "{rendered}");
+}
+
+#[test]
+fn empty_picker_candidates_open_review_home_not_picker() {
+    let mut backend = populated_backend();
+    let entry = entry_with_candidates(Vec::new());
+    let model = CockpitModel::bootstrap_with_entry(&mut backend, &entry).expect("bootstrap");
+    assert_eq!(
+        model.screen,
+        Screen::Home,
+        "an empty candidate list is not a disambiguation state"
+    );
+}
+
+// --- memory / search posture -----------------------------------------------
+
+#[test]
+fn search_screen_and_status_strip_render_memory_posture() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    keys(
+        &mut model,
+        &mut backend,
+        &[CockpitKey::Enter, CockpitKey::Char('s')],
+    );
+    assert_eq!(model.screen, Screen::Search);
+    let rendered = model.render_lines(200, 30).join("\n");
+    // Posture line on the Search screen body.
+    assert!(
+        rendered.contains("memory posture: retrieval_mode=lexical_only semantic=degraded(1)"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("posture degraded: semantic model not installed"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("embedder backend: fastembed"),
+        "{rendered}"
+    );
+    // Status strip carries a compact posture summary on the Search screen.
+    let status = &model.render_lines(200, 30)[0];
+    assert!(
+        status.contains("memory: retrieval_mode=lexical_only"),
+        "{status}"
+    );
+}
+
+#[test]
+fn memory_posture_operational_reports_hybrid_without_degraded_reasons() {
+    let mut backend = populated_backend();
+    backend.memory_posture = MemoryPostureRow {
+        retrieval_mode: "hybrid".to_owned(),
+        semantic_operational: true,
+        assets_verified: true,
+        embedder_available: true,
+        embedder_backend: Some("fastembed".to_owned()),
+        degraded_reasons: Vec::new(),
+    };
+    let mut model = bootstrap(&mut backend);
+    keys(
+        &mut model,
+        &mut backend,
+        &[CockpitKey::Enter, CockpitKey::Char('s')],
+    );
+    let rendered = model.render_lines(200, 30).join("\n");
+    assert!(
+        rendered.contains("memory posture: retrieval_mode=hybrid semantic=operational"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("posture degraded:"), "{rendered}");
+}
+
+#[test]
+fn memory_posture_failure_degrades_to_unknown() {
+    let mut backend = populated_backend();
+    backend.fail_memory_posture = true;
+    let mut model = bootstrap(&mut backend);
+    assert!(
+        model.memory_posture.is_none(),
+        "posture load failure leaves posture unknown"
+    );
+    keys(
+        &mut model,
+        &mut backend,
+        &[CockpitKey::Enter, CockpitKey::Char('s')],
+    );
+    let rendered = model.render_lines(200, 30).join("\n");
+    assert!(rendered.contains("memory posture: unknown"), "{rendered}");
+}
+
+// --- explained empty findings states ----------------------------------------
+
+#[test]
+fn empty_findings_explains_no_review_run() {
+    let mut backend = populated_backend();
+    backend.findings.clear();
+    backend.home_latest_run_id = None;
+    backend.home_stage_count = 0;
+    let mut model = bootstrap(&mut backend);
+    open_findings(&mut model, &mut backend);
+    let rendered = model.render_lines(160, 30).join("\n");
+    assert!(
+        rendered.contains("no review run yet for this session"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("run rr review --pr 7"), "{rendered}");
+}
+
+#[test]
+fn empty_findings_explains_worker_has_not_submitted_results() {
+    let mut backend = populated_backend();
+    backend.findings.clear();
+    backend.home_latest_run_id = Some("run-9".to_owned());
+    backend.home_stage_count = 0;
+    let mut model = bootstrap(&mut backend);
+    open_findings(&mut model, &mut backend);
+    let rendered = model.render_lines(160, 30).join("\n");
+    assert!(
+        rendered.contains("the worker has not submitted results yet"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("check rr status"), "{rendered}");
+}
+
+#[test]
+fn empty_findings_explains_run_completed_with_zero_findings() {
+    let mut backend = populated_backend();
+    backend.findings.clear();
+    backend.home_latest_run_id = Some("run-9".to_owned());
+    backend.home_stage_count = 3;
+    let mut model = bootstrap(&mut backend);
+    open_findings(&mut model, &mut backend);
+    let rendered = model.render_lines(160, 30).join("\n");
+    assert!(
+        rendered.contains("the latest review run completed with zero findings"),
+        "{rendered}"
+    );
+}
+
+// --- draft edit affordance (groundwork) -------------------------------------
+
+fn open_draft_items(model: &mut CockpitModel, backend: &mut FakeBackend) {
+    keys(
+        model,
+        backend,
+        &[CockpitKey::Enter, CockpitKey::Char('d'), CockpitKey::Enter],
+    );
+    assert_eq!(model.screen, Screen::DraftItems);
+}
+
+#[test]
+fn edit_key_emits_edit_draft_effect_for_focused_item() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    open_draft_items(&mut model, &mut backend);
+    model.handle_key(CockpitKey::Char('e'), &mut backend);
+    let effect = model.take_effect().expect("edit effect emitted");
+    assert_eq!(
+        effect,
+        ModelEffect::EditDraft {
+            draft_id: "draft-1".to_owned(),
+            body: "Finding: Null result ignored\nmore detail".to_owned(),
+        }
+    );
+    // The effect is drained exactly once.
+    assert!(model.take_effect().is_none());
+}
+
+#[test]
+fn apply_draft_revision_persists_and_reloads_preview() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    open_draft_items(&mut model, &mut backend);
+    model.handle_key(CockpitKey::Char('e'), &mut backend);
+    let _ = model.take_effect();
+
+    model.apply_draft_revision("draft-1", "Rewritten body line", &mut backend);
+    assert_eq!(
+        backend.revise_calls,
+        vec![("draft-1".to_owned(), "Rewritten body line".to_owned())],
+        "revision goes through the storage revise path"
+    );
+    assert!(
+        model
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("revised draft draft-1")),
+        "{:?}",
+        model.notice
+    );
+    // The read-only preview reflects the reloaded, revised body.
+    let inspector = model.inspector_lines().join("\n");
+    assert!(inspector.contains("Rewritten body line"), "{inspector}");
+    assert!(
+        !inspector.contains("Null result ignored"),
+        "stale body must not linger: {inspector}"
+    );
+}
+
+#[test]
+fn apply_draft_revision_surfaces_storage_error() {
+    let mut backend = populated_backend();
+    backend.fail_revise = true;
+    let mut model = bootstrap(&mut backend);
+    open_draft_items(&mut model, &mut backend);
+
+    model.apply_draft_revision("draft-1", "attempted body", &mut backend);
+    assert_eq!(
+        backend.revise_calls,
+        vec![("draft-1".to_owned(), "attempted body".to_owned())]
+    );
+    assert!(
+        model
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("draft edit failed")),
+        "{:?}",
+        model.notice
+    );
+}
+
+#[test]
+fn draft_items_hint_and_help_document_edit_key() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    open_draft_items(&mut model, &mut backend);
+    let rendered = model.render_lines(120, 24).join("\n");
+    assert!(rendered.contains("e edit draft"), "key hint: {rendered}");
+
+    model.handle_key(CockpitKey::Char('?'), &mut backend);
+    let help = model.render_lines(140, 40).join("\n");
+    assert!(
+        help.contains("e edit draft body in $EDITOR"),
+        "help overlay: {help}"
+    );
 }

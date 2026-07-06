@@ -633,12 +633,16 @@ fn usage_and_robot_docs_advertise_rr_prs() {
 
     let help = run_rr(&["--help"], &runtime);
     assert_eq!(help.exit_code, 0);
+    // The operator help now leads with the preferred `rr queue` verb; `rr prs`
+    // stays a routable compatibility alias (named in the compatibility block and
+    // still present in robot-docs commands/schemas below).
     assert!(
         help.stdout
-            .contains("rr prs [--repo owner/repo] [--limit <n>] [--robot]"),
+            .contains("rr queue [--repo owner/repo] [--limit <n>] [--robot]"),
         "{}",
         help.stdout
     );
+    assert!(help.stdout.contains("rr prs = rr queue"), "{}", help.stdout);
 
     let commands = run_rr(&["robot-docs", "commands", "--robot"], &runtime);
     assert_eq!(commands.exit_code, 0, "{}", commands.stderr);

@@ -488,18 +488,36 @@ fn encode_native_intent(intent: &BridgeLaunchIntent) -> Vec<u8> {
 }
 
 fn decode_native_response(stdout: &[u8]) -> BridgeResponse {
-    assert!(
-        stdout.len() >= 4,
-        "native host output missing length prefix: {} bytes",
-        stdout.len()
-    );
-    let len = u32::from_le_bytes([stdout[0], stdout[1], stdout[2], stdout[3]]) as usize;
-    assert_eq!(
-        stdout.len(),
-        4 + len,
-        "native host output length prefix mismatch"
-    );
-    serde_json::from_slice(&stdout[4..]).expect("decode native host response payload")
+    // Launch dispatch streams length-prefixed launch-progress frames
+    // (roger.bridge.launch-progress.v1) ahead of the final response frame;
+    // walk every frame and return the final non-progress payload.
+    let mut offset = 0usize;
+    let mut final_frame: Option<BridgeResponse> = None;
+    while offset < stdout.len() {
+        assert!(
+            stdout.len() >= offset + 4,
+            "native host output missing length prefix at offset {offset}: {} bytes total",
+            stdout.len()
+        );
+        let len = u32::from_le_bytes([
+            stdout[offset],
+            stdout[offset + 1],
+            stdout[offset + 2],
+            stdout[offset + 3],
+        ]) as usize;
+        assert!(
+            stdout.len() >= offset + 4 + len,
+            "native host frame at offset {offset} truncated"
+        );
+        let payload = &stdout[offset + 4..offset + 4 + len];
+        let value: Value = serde_json::from_slice(payload).expect("decode native host frame");
+        if value.get("schema").and_then(Value::as_str) != Some("roger.bridge.launch-progress.v1") {
+            final_frame =
+                Some(serde_json::from_slice(payload).expect("decode native host response payload"));
+        }
+        offset += 4 + len;
+    }
+    final_frame.expect("native host output contained no final response frame")
 }
 
 fn workspace_root() -> PathBuf {

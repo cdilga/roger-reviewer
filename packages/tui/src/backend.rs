@@ -7,8 +7,9 @@
 
 use crate::model::{
     ApproveOutcome, DecisionEventRow, DraftBatchRow, DraftItemRow, EvidenceRow, FindingDetail,
-    FindingRow, OutboundLinkRow, PostedActionRow, SearchHitRow, SearchView, SessionHomeView,
-    SessionRow, StageResultRow, TimelineRunRow, TimelineView, TriageAction, bump_count,
+    FindingRow, MemoryPostureRow, OutboundLinkRow, PostedActionRow, SearchHitRow, SearchView,
+    SessionHomeView, SessionRow, StageResultRow, TimelineRunRow, TimelineView, TriageAction,
+    bump_count,
 };
 use roger_storage::{
     OutboundBatchApproval, PriorReviewLookupQuery, PriorReviewRetrievalMode, RogerStore,
@@ -43,6 +44,12 @@ pub trait CockpitBackend {
     /// prior-review lookup API (repo scope only, lexical posture).
     fn search_prior_reviews(&mut self, repository: &str, query: &str)
     -> Result<SearchView, String>;
+    /// Project the session-level retrieval/memory posture (retrieval mode,
+    /// semantic asset/embedder state, degraded reasons) from storage.
+    fn memory_posture(&mut self) -> Result<MemoryPostureRow, String>;
+    /// Persist an edited outbound-draft body through the storage revision path
+    /// (same author/audit semantics a future `rr` draft-edit command uses).
+    fn revise_draft_body(&mut self, draft_id: &str, new_body: &str) -> Result<(), String>;
 }
 
 pub struct StoreCockpitBackend {
@@ -97,6 +104,17 @@ impl CockpitBackend for StoreCockpitBackend {
             .store
             .latest_review_run(session_id)
             .map_err(|err| format!("failed to load latest run: {err}"))?;
+        // Count worker stage results for the latest run so the findings screen
+        // can distinguish "worker has not submitted results yet" from "run
+        // completed with zero findings".
+        let latest_run_stage_count = match &latest_run {
+            Some(run) => self
+                .store
+                .worker_stage_results_for_run(session_id, &run.id)
+                .map_err(|err| format!("failed to load stage results for {}: {err}", run.id))?
+                .len(),
+            None => 0,
+        };
         let overview = self
             .store
             .session_overview(session_id)
@@ -107,6 +125,7 @@ impl CockpitBackend for StoreCockpitBackend {
             outbound_counts,
             latest_run_id: latest_run.as_ref().map(|run| run.id.clone()),
             latest_run_kind: latest_run.as_ref().map(|run| run.run_kind.clone()),
+            latest_run_stage_count,
             run_count: overview.run_count.max(0) as usize,
             draft_count: overview.draft_count.max(0) as usize,
             posted_action_count: overview.posted_action_count.max(0) as usize,
@@ -343,6 +362,42 @@ impl CockpitBackend for StoreCockpitBackend {
                 })
                 .collect(),
         })
+    }
+
+    fn memory_posture(&mut self) -> Result<MemoryPostureRow, String> {
+        let state = self
+            .store
+            .semantic_component_state()
+            .map_err(|err| format!("failed to load semantic component state: {err}"))?;
+        // The session-level default posture: hybrid only when the semantic lane
+        // is actually operational (compiled embedder + verified assets),
+        // otherwise lexical-only. Per-query recovery-scan escalation is a
+        // property of an individual lookup, not the default posture.
+        let retrieval_mode = if state.operational {
+            "hybrid"
+        } else {
+            "lexical_only"
+        }
+        .to_owned();
+        Ok(MemoryPostureRow {
+            retrieval_mode,
+            semantic_operational: state.operational,
+            assets_verified: state.assets_verified,
+            embedder_available: state.embedder_available,
+            embedder_backend: state.embedder_backend,
+            degraded_reasons: state.degraded_reasons,
+        })
+    }
+
+    fn revise_draft_body(&mut self, draft_id: &str, new_body: &str) -> Result<(), String> {
+        self.store
+            .revise_outbound_draft_body(
+                draft_id,
+                new_body,
+                roger_storage::RevisionAuthorKind::Operator,
+            )
+            .map(|_| ())
+            .map_err(|err| format!("draft revision failed: {err}"))
     }
 }
 

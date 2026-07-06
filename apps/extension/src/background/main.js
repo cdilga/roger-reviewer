@@ -28,6 +28,20 @@ const STATUS_PROBE_TIMEOUT_MS = 4000;
 // silently no-oped). A launch (rr review/resume) can take real time, so this
 // backstop is generous; it only force-settles a host that truly hangs.
 const LAUNCH_DISPATCH_TIMEOUT_MS = 120000;
+// Wire schema id for the host's incremental launch-progress frames (matches
+// roger_bridge::LAUNCH_PROGRESS_SCHEMA). Any frame carrying this schema is
+// progress (updates onProgress, does NOT settle the launch); the first frame
+// whose schema is anything else is the final BridgeResponse and settles.
+const LAUNCH_PROGRESS_SCHEMA = 'roger.bridge.launch-progress.v1';
+// First-frame watchdog for the LAUNCH dispatch. The host now acks the moment a
+// launch parses (host_started), so ANY silence past this bound means the host
+// never came alive at all — fail fast and loud instead of waiting out the full
+// completion budget. This is deliberately far below LAUNCH_DISPATCH_TIMEOUT_MS:
+// once the first frame lands the generous completion watchdog takes over for the
+// real (possibly slow) launch work.
+const LAUNCH_FIRST_FRAME_TIMEOUT_MS = 10000;
+const LAUNCH_FIRST_FRAME_GUIDANCE =
+  'Roger native host did not respond — run rr setup doctor --live';
 const BRIDGE_FAILURE_MODE_BY_KIND = Object.freeze({
   preflight_failed: 'bridge_preflight_failed',
   cli_spawn_failed: 'bridge_cli_spawn_failed',
@@ -57,20 +71,37 @@ function classifyBridgeFailureMode(response) {
 // sendNativeMessage). On Edge's MV3 module service worker the one-shot reply
 // callback was torn down before the native host replied, so panel launch
 // clicks silently no-oped; an open port anchors the worker until the host's
-// single launch-result envelope lands (read one, write one, exit -> one
-// onMessage then onDisconnect). The resolved envelope shape is unchanged so
-// handleLaunchMessage and the content panel behave identically.
-function dispatchNative(intent) {
+// launch-result envelope lands.
+//
+// The host now STREAMS frames: an immediate `host_started` ack, then a
+// `preflight_ok` marker once preflight passes, then the final BridgeResponse.
+// Progress frames (schema === LAUNCH_PROGRESS_SCHEMA) fan out through the
+// optional `onProgress` callback and MUST NOT settle the promise; the first
+// non-progress frame is the final envelope and settles exactly as before, so
+// handleLaunchMessage and the content panel behave identically. Two watchdogs
+// bound the wait: a fast FIRST-FRAME watchdog fails loud when the host never
+// even acks, and the generous completion watchdog backstops a host that acked
+// but then hung mid-launch.
+function dispatchNative(intent, onProgress) {
   return new Promise((resolve) => {
     let settled = false;
     let watchdog = null;
+    let firstFrameWatchdog = null;
     let port = null;
+
+    const clearFirstFrameWatchdog = () => {
+      if (firstFrameWatchdog !== null) {
+        clearTimeout(firstFrameWatchdog);
+        firstFrameWatchdog = null;
+      }
+    };
 
     const settle = (value) => {
       if (settled) {
         return;
       }
       settled = true;
+      clearFirstFrameWatchdog();
       if (watchdog !== null) {
         clearTimeout(watchdog);
         watchdog = null;
@@ -110,8 +141,23 @@ function dispatchNative(intent) {
     }
 
     if (port.onMessage && typeof port.onMessage.addListener === 'function') {
-      port.onMessage.addListener((response) => {
-        if (!response || typeof response !== 'object') {
+      port.onMessage.addListener((frame) => {
+        // Any frame at all proves the host is alive: retire the fast watchdog.
+        clearFirstFrameWatchdog();
+
+        // Progress frame: surface it and keep waiting for the final envelope.
+        if (frame && typeof frame === 'object' && frame.schema === LAUNCH_PROGRESS_SCHEMA) {
+          if (typeof onProgress === 'function') {
+            try {
+              onProgress(frame);
+            } catch {
+              // Progress rendering is best-effort; never let it break the launch.
+            }
+          }
+          return;
+        }
+
+        if (!frame || typeof frame !== 'object') {
           settle({
             ok: false,
             mode: 'native_invalid_response',
@@ -119,16 +165,16 @@ function dispatchNative(intent) {
           });
           return;
         }
-        const mirrored = normalizeBoundedStatus(response);
+        const mirrored = normalizeBoundedStatus(frame);
         settle({
-          ok: Boolean(response.ok),
-          mode: response.ok ? 'native_messaging' : classifyBridgeFailureMode(response),
-          action: response.action,
-          message: response.message || 'Bridge handled launch request.',
-          guidance: response.guidance,
-          session_id: response.session_id,
-          failure_kind: response.failure_kind,
-          launch_outcome: response.launch_outcome,
+          ok: Boolean(frame.ok),
+          mode: frame.ok ? 'native_messaging' : classifyBridgeFailureMode(frame),
+          action: frame.action,
+          message: frame.message || 'Bridge handled launch request.',
+          guidance: frame.guidance,
+          session_id: frame.session_id,
+          failure_kind: frame.failure_kind,
+          launch_outcome: frame.launch_outcome,
           ...(mirrored
             ? {
                 attention_state: mirrored.attention_state,
@@ -152,6 +198,20 @@ function dispatchNative(intent) {
         );
       });
     }
+
+    // Fast first-frame watchdog: the host acks immediately on parse, so no frame
+    // within this bound means it never came alive. Fail loud with the honest
+    // native_unavailable envelope (handleLaunchMessage passes it through
+    // unchanged) rather than waiting out the full completion budget.
+    firstFrameWatchdog = setTimeout(() => {
+      settle({
+        ok: false,
+        mode: 'native_unavailable',
+        action: intent && intent.action,
+        message: 'Native Messaging unavailable; launch blocked.',
+        guidance: LAUNCH_FIRST_FRAME_GUIDANCE,
+      });
+    }, LAUNCH_FIRST_FRAME_TIMEOUT_MS);
 
     watchdog = setTimeout(() => {
       nativeError('Native messaging launch timed out before the host replied.');
@@ -448,7 +508,43 @@ function dispatchNativeStatus(intent) {
   });
 }
 
-async function handleLaunchMessage(payload) {
+// Fan a host progress frame back out to whichever surface originated the
+// launch. Content scripts (PR-detail panel + listing rows) live in a tab and
+// only receive `chrome.tabs.sendMessage`; the popup is an extension page and
+// receives the runtime broadcast. Delivery is strictly best-effort: a dropped
+// progress frame never affects the final launch result.
+function emitLaunchProgress(sender, intent, frame) {
+  if (!frame || typeof frame !== 'object' || typeof frame.stage !== 'string') {
+    return;
+  }
+  const message = {
+    type: 'roger_bridge_launch_progress',
+    schema: LAUNCH_PROGRESS_SCHEMA,
+    stage: frame.stage,
+    intent,
+  };
+  const swallow = () => {
+    void (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.lastError);
+  };
+  try {
+    if (
+      sender &&
+      sender.tab &&
+      typeof sender.tab.id === 'number' &&
+      chrome?.tabs?.sendMessage
+    ) {
+      chrome.tabs.sendMessage(sender.tab.id, message, swallow);
+    } else if (chrome?.runtime?.sendMessage) {
+      chrome.runtime.sendMessage(message, swallow);
+    }
+  } catch {
+    // No receiver / teardown: progress is advisory, so drop it silently.
+  }
+}
+
+async function handleLaunchMessage(payload, sender = null, options = {}) {
+  const dispatch =
+    typeof options.dispatch === 'function' ? options.dispatch : dispatchNative;
   const intent = payload?.intent;
   if (!intent || typeof intent !== 'object') {
     return {
@@ -468,7 +564,11 @@ async function handleLaunchMessage(payload) {
     };
   }
 
-  const nativeResult = await dispatchNative(intent);
+  const onProgress =
+    typeof options.onProgress === 'function'
+      ? options.onProgress
+      : (frame) => emitLaunchProgress(sender, intent, frame);
+  const nativeResult = await dispatch(intent, onProgress);
   if (nativeResult.ok) {
     return nativeResult;
   }
@@ -509,9 +609,9 @@ function registerRuntimeHandlers() {
     return;
   }
 
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === 'roger_bridge_launch') {
-      handleLaunchMessage(message)
+      handleLaunchMessage(message, sender)
         .then((response) => sendResponse(response))
         .catch((error) => {
           sendResponse({
@@ -545,9 +645,14 @@ if (typeof module !== 'undefined' && module.exports) {
     MAX_MIRROR_FRESHNESS_SECONDS,
     MAX_SESSION_INVENTORY_ENTRIES,
     STATUS_PROBE_TIMEOUT_MS,
+    LAUNCH_PROGRESS_SCHEMA,
+    LAUNCH_FIRST_FRAME_TIMEOUT_MS,
+    LAUNCH_FIRST_FRAME_GUIDANCE,
     buildRegistrationIntent,
     detectBrowserLabel,
+    dispatchNative,
     dispatchNativeStatus,
+    emitLaunchProgress,
     handleLaunchMessage,
     handleStatusMessage,
     launchOnlyStatusEnvelope,

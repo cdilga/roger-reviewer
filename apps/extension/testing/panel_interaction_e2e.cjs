@@ -78,6 +78,12 @@ const launchSettled = (s) =>
   !s.btnDisabled && s.btnText !== '…' &&
   /completed|session|launched|blocked|unavailable|error|failed/i.test(`${s.status} ${s.info}`);
 
+// Transient host ack/progress lines (host_started -> "Roger host connected —
+// running preflight…", preflight_ok -> "Launching review…"). These are NOT
+// terminal (no settle keyword), so launchSettled() correctly ignores them; we
+// poll across the launch window to also assert they were shown to the user.
+const PROGRESS_RE = /host connected|running preflight|launching review/i;
+
 const snapLaunch = (page) => page.evaluate(() => {
   const panel = document.getElementById('roger-reviewer-panel');
   const status = document.getElementById('roger-reviewer-status');
@@ -94,6 +100,23 @@ const snapLaunch = (page) => page.evaluate(() => {
       parseFloat(scs.opacity) > 0 && sr.height > 0,
   };
 });
+
+// Poll the panel across the launch window so the transient host progress states
+// are observed even though the final settle line supersedes them. Returns the
+// final snapshot plus whether any loud progress line appeared.
+async function driveLaunchWindow(page, ms) {
+  let sawProgress = false;
+  let last = null;
+  const start = Date.now();
+  while (Date.now() - start < ms) {
+    last = await snapLaunch(page);
+    if (PROGRESS_RE.test(`${last.status} ${last.info}`)) sawProgress = true;
+    if (launchSettled(last)) break;
+    await sleep(250);
+  }
+  if (!last) last = await snapLaunch(page);
+  return { snap: last, sawProgress };
+}
 
 (async () => {
   const port = resolvePort();
@@ -118,11 +141,12 @@ const snapLaunch = (page) => page.evaluate(() => {
   for (const action of ['start_review', 'resume_review']) {
     const clicked = await clickAction(page, action);
     if (!clicked) { record(`${action}: button present + clickable`, false, 'no visible button'); continue; }
-    await sleep(4500);
-    const s = await snapLaunch(page);
+    const { snap: s, sawProgress } = await driveLaunchWindow(page, 6000);
     record(`${action}: click settles (not stuck on …)`, launchSettled(s), `btn="${s.btnText}"`);
     record(`${action}: feedback is VISUALLY VISIBLE to a user`, s.statusVisible && launchSettled(s),
       s.status.slice(0, 80));
+    record(`${action}: shows loud host progress before settling`, sawProgress,
+      'expected host_started/preflight_ok progress line');
   }
 
   // 3) Worker-idle regression (the exact condition that broke one-shot
@@ -131,8 +155,7 @@ const snapLaunch = (page) => page.evaluate(() => {
     console.log(`--- waiting ${IDLE_MS / 1000}s for the service worker to idle (rr-s8wx-class regression guard) ---`);
     await sleep(IDLE_MS);
     await clickAction(page, 'start_review');
-    await sleep(5000);
-    const s = await snapLaunch(page);
+    const { snap: s } = await driveLaunchWindow(page, 6000);
     record('launch still settles after service-worker idle', launchSettled(s), s.status.slice(0, 80));
   } else {
     console.log('--- RR_SKIP_IDLE=1: skipping the worker-idle regression (weaker run) ---');
@@ -154,6 +177,63 @@ const snapLaunch = (page) => page.evaluate(() => {
     record('"i" button toggles and reveals visible info', before === false && after === true && panelVis.visible);
   } else {
     record('"i" button present', false, 'no info summary');
+  }
+
+  // 5) PR-listing row controls (bead ziv8.5). The content script now runs on the
+  //    /pulls route (manifest match added), so each open PR row carries a Roger
+  //    start control whose click settles with visible row-local feedback and the
+  //    same loud host progress. This scenario drives the real listing page; it is
+  //    part of the eventual live run (skip with RR_SKIP_LISTING=1).
+  if (process.env.RR_SKIP_LISTING !== '1') {
+    const pullsUrl = process.env.RR_PULLS_URL || PR_URL.replace(/\/pull\/\d+.*$/, '/pulls');
+    try {
+      await page.goto(pullsUrl, { waitUntil: 'networkidle2' }).catch(() => {});
+      await sleep(2500);
+      const listing = await page.evaluate(
+        () => ({ count: document.querySelectorAll('.rr-listing-control').length })
+      );
+      record('listing: row controls injected on /pulls route', listing.count > 0, `${listing.count} controls`);
+
+      if (listing.count > 0) {
+        const rect = await page.evaluate(() => {
+          const btn = document.querySelector('.rr-listing-control .rr-listing-button');
+          if (!btn) return null;
+          const r = btn.getBoundingClientRect();
+          return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        });
+        if (rect) {
+          await page.mouse.click(rect.x, rect.y);
+          let sawProgress = false;
+          let rowSettled = false;
+          let rowText = '';
+          for (let i = 0; i < 24; i++) {
+            const row = await page.evaluate(() => {
+              const st = document.querySelector('.rr-listing-control .rr-listing-status');
+              if (!st) return { text: '', visible: false };
+              const cs = getComputedStyle(st);
+              const r = st.getBoundingClientRect();
+              return {
+                text: (st.textContent || '').trim().slice(0, 160),
+                visible: cs.display !== 'none' && cs.visibility !== 'hidden' && r.height > 0,
+              };
+            });
+            rowText = row.text;
+            if (PROGRESS_RE.test(row.text)) sawProgress = true;
+            if (row.visible && /dispatch|completed|session|launched|blocked|unavailable|error|failed/i.test(row.text)) {
+              rowSettled = true;
+              break;
+            }
+            await sleep(250);
+          }
+          record('listing: row launch settles with visible row-local feedback', rowSettled, rowText.slice(0, 80));
+          record('listing: row launch shows loud host progress', sawProgress, 'host_started/preflight_ok');
+        }
+      }
+    } catch (e) {
+      record('listing: scenario ran', false, e.message);
+    }
+  } else {
+    console.log('--- RR_SKIP_LISTING=1: skipping the PR-listing row scenario ---');
   }
 
   await page.screenshot({ path: path.join(__dirname, 'panel_interaction_e2e.png') }).catch(() => {});

@@ -6,19 +6,64 @@
 //! rendered lines. Keep it thin: no domain logic here.
 
 use crate::backend::StoreCockpitBackend;
-use crate::model::{CockpitKey, CockpitModel, KeyOutcome};
+use crate::model::{CockpitKey, CockpitModel, KeyOutcome, ModelEffect};
+use crate::tty;
 use ftui::widgets::Widget;
 use ftui::widgets::paragraph::Paragraph;
 use ftui::{Cmd, Event, Frame, KeyCode, KeyEventKind, Model, Modifiers};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) struct CockpitApp {
     model: CockpitModel,
     backend: StoreCockpitBackend,
+    /// Shared with the TTY event source: set true after an editor suspension so
+    /// the next poll injects a synthetic resize and forces a full repaint.
+    force_repaint: Arc<AtomicBool>,
 }
 
 impl CockpitApp {
-    pub(crate) fn new(model: CockpitModel, backend: StoreCockpitBackend) -> Self {
-        Self { model, backend }
+    pub(crate) fn new(
+        model: CockpitModel,
+        backend: StoreCockpitBackend,
+        force_repaint: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            model,
+            backend,
+            force_repaint,
+        }
+    }
+
+    /// Perform any side effect the pure reducer queued (currently: suspend the
+    /// TUI and open `$EDITOR` on a draft body, then persist the revision).
+    fn drain_effect(&mut self) {
+        let Some(effect) = self.model.take_effect() else {
+            return;
+        };
+        match effect {
+            ModelEffect::EditDraft { draft_id, body } => {
+                match tty::suspend_and_edit(&body) {
+                    Ok(Some(new_body)) if new_body != body => {
+                        self.model
+                            .apply_draft_revision(&draft_id, &new_body, &mut self.backend);
+                    }
+                    Ok(Some(_)) => {
+                        self.model.notice =
+                            Some(format!("draft {draft_id} unchanged — no revision written"));
+                    }
+                    Ok(None) => {
+                        self.model.notice = Some(format!("draft {draft_id} edit cancelled"));
+                    }
+                    Err(err) => {
+                        self.model.notice = Some(format!("editor failed: {err}"));
+                    }
+                }
+                // The alternate screen was clobbered by the editor; force a full
+                // repaint on the next poll.
+                self.force_repaint.store(true, Ordering::SeqCst);
+            }
+        }
     }
 }
 
@@ -58,7 +103,11 @@ impl Model for CockpitApp {
         let Some(key) = cockpit_key(&msg) else {
             return Cmd::None;
         };
-        match self.model.handle_key(key, &mut self.backend) {
+        let outcome = self.model.handle_key(key, &mut self.backend);
+        // Perform any queued side effect (e.g. editor suspension) before the
+        // next render so the model and screen stay consistent.
+        self.drain_effect();
+        match outcome {
             KeyOutcome::Quit => Cmd::Quit,
             KeyOutcome::Continue => Cmd::None,
         }

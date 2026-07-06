@@ -237,6 +237,34 @@ fn read_native_value<R: Read>(reader: &mut R) -> Result<serde_json::Value> {
         .map_err(|e| BridgeError::NativeMessagingReadError(format!("invalid message JSON: {e}")))
 }
 
+/// Wire schema id for the incremental launch-progress frames the native host
+/// streams ahead of the final [`BridgeResponse`].
+///
+/// One-shot messaging on Edge's MV3 module service worker was torn down before
+/// a slow launch settled, so the panel waited (up to 120s) with no feedback.
+/// The host now emits length-prefixed progress frames — an immediate ack the
+/// moment the launch parses, then a preflight-passed marker — before the final
+/// response, so the extension can render loud, incremental feedback and a
+/// first-frame watchdog can fail fast when the host never answers at all.
+///
+/// These frames are strictly additive: any frame whose `schema` equals this
+/// value is progress and must not settle the extension-side launch promise; the
+/// first frame whose `schema` is anything else is the final response frame.
+pub const LAUNCH_PROGRESS_SCHEMA: &str = "roger.bridge.launch-progress.v1";
+
+/// Build one launch-progress frame value for the given `stage`
+/// (`host_started` immediately after parse, `preflight_ok` after preflight
+/// passes). Kept here so the wire contract has a single Rust-owned source.
+pub fn launch_progress_frame(stage: &str) -> serde_json::Value {
+    serde_json::json!({ "schema": LAUNCH_PROGRESS_SCHEMA, "stage": stage })
+}
+
+/// Write one length-prefixed launch-progress frame to `writer` using the same
+/// framing as every other native message.
+pub fn write_launch_progress<W: Write>(writer: &mut W, stage: &str) -> Result<()> {
+    write_native_value(writer, &launch_progress_frame(stage))
+}
+
 /// Write an arbitrary serializable native message (used for status-probe
 /// replies whose shape is owned by the companion-tier readback contract).
 pub fn write_native_value<W: Write>(writer: &mut W, value: &serde_json::Value) -> Result<()> {
@@ -1021,6 +1049,38 @@ esac
         let json: BridgeResponse = serde_json::from_slice(&buf[4..4 + len]).unwrap();
         assert_eq!(json.ok, true);
         assert_eq!(json.session_id, Some("sess-1".to_owned()));
+    }
+
+    #[test]
+    fn launch_progress_frame_shape_is_stable() {
+        let frame = launch_progress_frame("host_started");
+        assert_eq!(
+            frame["schema"].as_str(),
+            Some("roger.bridge.launch-progress.v1")
+        );
+        assert_eq!(frame["stage"].as_str(), Some("host_started"));
+
+        // A progress frame is distinguishable from a final BridgeResponse by its
+        // schema (a BridgeResponse carries no `schema` field, an `ok` bool).
+        let response = BridgeResponse::success("start_review", "ok", None);
+        let response_value = serde_json::to_value(&response).unwrap();
+        assert!(response_value.get("schema").is_none());
+        assert_ne!(
+            response_value.get("schema").and_then(|v| v.as_str()),
+            Some(LAUNCH_PROGRESS_SCHEMA)
+        );
+    }
+
+    #[test]
+    fn write_launch_progress_is_length_prefixed_and_readable() {
+        let mut buf = Vec::new();
+        write_launch_progress(&mut buf, "preflight_ok").unwrap();
+        assert!(buf.len() > 4);
+        let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+        assert_eq!(buf.len(), 4 + len);
+        let value: serde_json::Value = serde_json::from_slice(&buf[4..]).unwrap();
+        assert_eq!(value["schema"].as_str(), Some(LAUNCH_PROGRESS_SCHEMA));
+        assert_eq!(value["stage"].as_str(), Some("preflight_ok"));
     }
 
     #[test]

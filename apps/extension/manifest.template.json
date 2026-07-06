@@ -19,7 +19,10 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://github.com/*/*/pull/*"],
+      "matches": [
+        "https://github.com/*/*/pull/*",
+        "https://github.com/*/*/pulls*"
+      ],
       "js": ["src/content/main.js"],
       "run_at": "document_idle"
     }

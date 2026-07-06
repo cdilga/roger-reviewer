@@ -279,6 +279,13 @@ struct ParsedArgs {
     robot_format: RobotFormat,
     dry_run: bool,
     provider: String,
+    // `rr review --resume` flips the command to Resume; `rr findings --query`
+    // and `rr findings --sessions` flip to Search/Sessions. These flags are
+    // captured here so the flip and its foreign-flag rejection stay in
+    // parse_args, keeping every downstream handler and check byte-identical to
+    // the old direct invocations.
+    resume_requested: bool,
+    findings_sessions: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -343,6 +350,14 @@ pub fn run(argv: &[String], runtime: &CliRuntime) -> CliRunResult {
             return CliRunResult {
                 exit_code: 0,
                 stdout: format!("{}\n", usage_text()),
+                stderr: String::new(),
+            };
+        }
+        Err(message) if message.starts_with("help:") => {
+            let topic = &message["help:".len()..];
+            return CliRunResult {
+                exit_code: 0,
+                stdout: format!("{}\n", command_usage(topic)),
                 stderr: String::new(),
             };
         }
@@ -586,10 +601,35 @@ fn render_harness_robot_envelope(
     }
 }
 
-fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
-    if argv.is_empty() {
+fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
+    if raw_argv.is_empty() {
         return Err("missing command".to_owned());
     }
+
+    // Global help: a bare help token in the first position prints the full
+    // usage. Per-command help: `--help`/`-h` anywhere after a recognized
+    // command (or container) prints a focused usage block for that command.
+    // This fixes the old bug where `rr review --help` errored "unknown flag".
+    match raw_argv[0].as_str() {
+        "-h" | "--help" | "help" => return Err("help requested".to_owned()),
+        _ => {}
+    }
+    if raw_argv[1..]
+        .iter()
+        .any(|arg| arg == "--help" || arg == "-h")
+    {
+        if let Some(topic) = help_topic_for(raw_argv) {
+            return Err(format!("help:{topic}"));
+        }
+    }
+
+    // Normalize the container verbs (`send`, `setup`, `api`) into the
+    // underlying command's argv before the main parse. This is the cleanest
+    // way to guarantee identical ParsedArgs, identical schema ids, and
+    // identical checks: `send post ...` becomes `post ...`, `setup update ...`
+    // becomes `update ...`, `api docs schemas` becomes `robot-docs schemas`.
+    let normalized = normalize_container_argv(raw_argv)?;
+    let argv = normalized.as_slice();
 
     let command = match argv[0].as_str() {
         "agent" => CommandKind::Agent,
@@ -658,6 +698,8 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         robot_format: RobotFormat::Json,
         dry_run: false,
         provider: "opencode".to_owned(),
+        resume_requested: false,
+        findings_sessions: false,
     };
 
     let mut i = 1;
@@ -910,6 +952,14 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
                 parsed.dry_run = true;
                 i += 1;
             }
+            "--resume" => {
+                parsed.resume_requested = true;
+                i += 1;
+            }
+            "--sessions" => {
+                parsed.findings_sessions = true;
+                i += 1;
+            }
             positional => {
                 if positional.starts_with('-') {
                     return Err(format!("unknown flag: {positional}"));
@@ -969,6 +1019,32 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
                 }
             }
         }
+    }
+
+    // Alias routing flips. These run before every downstream check so the
+    // resulting command routes to the same handler, whitelist, and schema id
+    // as the old direct invocation. `original_command` distinguishes how we
+    // arrived here so the routing flags can be rejected on unrelated commands.
+    let original_command = parsed.command;
+    if parsed.resume_requested {
+        if original_command == CommandKind::Review {
+            parsed.command = CommandKind::Resume;
+        } else {
+            return Err("--resume is only supported by rr review".to_owned());
+        }
+    }
+    if original_command == CommandKind::Findings {
+        if parsed.query_text.is_some() && parsed.findings_sessions {
+            return Err("rr findings supports either --query or --sessions, not both".to_owned());
+        }
+        if parsed.query_text.is_some() {
+            parsed.command = CommandKind::Search;
+        } else if parsed.findings_sessions {
+            parsed.command = CommandKind::Sessions;
+        }
+    }
+    if parsed.findings_sessions && original_command != CommandKind::Findings {
+        return Err("--sessions is only supported by rr findings".to_owned());
     }
 
     match parsed.robot_format {
@@ -1457,6 +1533,415 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
             || parsed.agent_capability_file.is_some()
         {
             return Err("rr tui only supports --repo, --pr, and --session".to_owned());
+        }
+    }
+
+    // Positive flag whitelists for the remaining commands. Each rejects every
+    // flag it does not implement (same style as rr prs/tui/doctor above) so a
+    // misapplied flag fails loudly instead of being silently ignored.
+    if parsed.command == CommandKind::Review {
+        // review supports --dry-run (preflight); --resume flips to resume.
+        if parsed.session_id.is_some()
+            || !parsed.attention_states.is_empty()
+            || parsed.limit.is_some()
+            || parsed.query_text.is_some()
+            || parsed.query_mode.is_some()
+            || parsed.robot_docs_topic.is_some()
+            || parsed.bridge_command.is_some()
+            || parsed.extension_command.is_some()
+            || parsed.assets_command.is_some()
+            || parsed.extension_browser.is_some()
+            || parsed.extension_package_dir.is_some()
+            || parsed.assets_package_id.is_some()
+            || parsed.bridge_extension_id.is_some()
+            || parsed.bridge_binary_path.is_some()
+            || parsed.bridge_install_root.is_some()
+            || parsed.bridge_output_dir.is_some()
+            || parsed.update_channel != "stable"
+            || parsed.update_version.is_some()
+            || parsed.update_api_root.is_some()
+            || parsed.update_download_root.is_some()
+            || parsed.update_target.is_some()
+            || parsed.update_yes
+            || parsed.draft_all_findings
+            || !parsed.draft_finding_ids.is_empty()
+            || parsed.batch_id.is_some()
+            || parsed.agent_operation.is_some()
+            || parsed.agent_task_file.is_some()
+            || parsed.agent_request_file.is_some()
+            || parsed.agent_context_file.is_some()
+            || parsed.agent_capability_file.is_some()
+        {
+            return Err(
+                "rr review only supports --repo, --pr, --provider, --resume, --dry-run, and --robot"
+                    .to_owned(),
+            );
+        }
+    }
+
+    if parsed.command == CommandKind::Resume {
+        // resume supports --dry-run (preflight); reached via rr resume or rr review --resume.
+        if parsed.provider != "opencode"
+            || !parsed.attention_states.is_empty()
+            || parsed.limit.is_some()
+            || parsed.query_text.is_some()
+            || parsed.query_mode.is_some()
+            || parsed.robot_docs_topic.is_some()
+            || parsed.bridge_command.is_some()
+            || parsed.extension_command.is_some()
+            || parsed.assets_command.is_some()
+            || parsed.extension_browser.is_some()
+            || parsed.extension_package_dir.is_some()
+            || parsed.assets_package_id.is_some()
+            || parsed.bridge_extension_id.is_some()
+            || parsed.bridge_binary_path.is_some()
+            || parsed.bridge_install_root.is_some()
+            || parsed.bridge_output_dir.is_some()
+            || parsed.update_channel != "stable"
+            || parsed.update_version.is_some()
+            || parsed.update_api_root.is_some()
+            || parsed.update_download_root.is_some()
+            || parsed.update_target.is_some()
+            || parsed.update_yes
+            || parsed.draft_all_findings
+            || !parsed.draft_finding_ids.is_empty()
+            || parsed.batch_id.is_some()
+            || parsed.agent_operation.is_some()
+            || parsed.agent_task_file.is_some()
+            || parsed.agent_request_file.is_some()
+            || parsed.agent_context_file.is_some()
+            || parsed.agent_capability_file.is_some()
+        {
+            return Err(
+                "rr resume only supports --repo, --pr, --session, --dry-run, and --robot"
+                    .to_owned(),
+            );
+        }
+    }
+
+    if parsed.command == CommandKind::Return {
+        if parsed.dry_run {
+            return Err("rr return does not support --dry-run".to_owned());
+        }
+        if parsed.provider != "opencode"
+            || !parsed.attention_states.is_empty()
+            || parsed.limit.is_some()
+            || parsed.query_text.is_some()
+            || parsed.query_mode.is_some()
+            || parsed.robot_docs_topic.is_some()
+            || parsed.bridge_command.is_some()
+            || parsed.extension_command.is_some()
+            || parsed.assets_command.is_some()
+            || parsed.extension_browser.is_some()
+            || parsed.extension_package_dir.is_some()
+            || parsed.assets_package_id.is_some()
+            || parsed.bridge_extension_id.is_some()
+            || parsed.bridge_binary_path.is_some()
+            || parsed.bridge_install_root.is_some()
+            || parsed.bridge_output_dir.is_some()
+            || parsed.update_channel != "stable"
+            || parsed.update_version.is_some()
+            || parsed.update_api_root.is_some()
+            || parsed.update_download_root.is_some()
+            || parsed.update_target.is_some()
+            || parsed.update_yes
+            || parsed.draft_all_findings
+            || !parsed.draft_finding_ids.is_empty()
+            || parsed.batch_id.is_some()
+            || parsed.agent_operation.is_some()
+            || parsed.agent_task_file.is_some()
+            || parsed.agent_request_file.is_some()
+            || parsed.agent_context_file.is_some()
+            || parsed.agent_capability_file.is_some()
+        {
+            return Err("rr return only supports --repo, --pr, --session, and --robot".to_owned());
+        }
+    }
+
+    if parsed.command == CommandKind::Sessions {
+        // reached via rr sessions or rr findings --sessions.
+        if parsed.dry_run {
+            return Err("rr sessions does not support --dry-run".to_owned());
+        }
+        if parsed.session_id.is_some()
+            || parsed.provider != "opencode"
+            || parsed.query_text.is_some()
+            || parsed.query_mode.is_some()
+            || parsed.robot_docs_topic.is_some()
+            || parsed.bridge_command.is_some()
+            || parsed.extension_command.is_some()
+            || parsed.assets_command.is_some()
+            || parsed.extension_browser.is_some()
+            || parsed.extension_package_dir.is_some()
+            || parsed.assets_package_id.is_some()
+            || parsed.bridge_extension_id.is_some()
+            || parsed.bridge_binary_path.is_some()
+            || parsed.bridge_install_root.is_some()
+            || parsed.bridge_output_dir.is_some()
+            || parsed.update_channel != "stable"
+            || parsed.update_version.is_some()
+            || parsed.update_api_root.is_some()
+            || parsed.update_download_root.is_some()
+            || parsed.update_target.is_some()
+            || parsed.update_yes
+            || parsed.draft_all_findings
+            || !parsed.draft_finding_ids.is_empty()
+            || parsed.batch_id.is_some()
+            || parsed.agent_operation.is_some()
+            || parsed.agent_task_file.is_some()
+            || parsed.agent_request_file.is_some()
+            || parsed.agent_context_file.is_some()
+            || parsed.agent_capability_file.is_some()
+        {
+            return Err(
+                "rr sessions only supports --repo, --pr, --attention, --limit, and --robot"
+                    .to_owned(),
+            );
+        }
+    }
+
+    if parsed.command == CommandKind::Search {
+        // reached via rr search or rr findings --query; --session/--pr already
+        // rejected above as corpus-scope violations.
+        if parsed.dry_run {
+            return Err("rr search does not support --dry-run".to_owned());
+        }
+        if parsed.provider != "opencode"
+            || !parsed.attention_states.is_empty()
+            || parsed.robot_docs_topic.is_some()
+            || parsed.bridge_command.is_some()
+            || parsed.extension_command.is_some()
+            || parsed.assets_command.is_some()
+            || parsed.extension_browser.is_some()
+            || parsed.extension_package_dir.is_some()
+            || parsed.assets_package_id.is_some()
+            || parsed.bridge_extension_id.is_some()
+            || parsed.bridge_binary_path.is_some()
+            || parsed.bridge_install_root.is_some()
+            || parsed.bridge_output_dir.is_some()
+            || parsed.update_channel != "stable"
+            || parsed.update_version.is_some()
+            || parsed.update_api_root.is_some()
+            || parsed.update_download_root.is_some()
+            || parsed.update_target.is_some()
+            || parsed.update_yes
+            || parsed.draft_all_findings
+            || !parsed.draft_finding_ids.is_empty()
+            || parsed.batch_id.is_some()
+            || parsed.agent_operation.is_some()
+            || parsed.agent_task_file.is_some()
+            || parsed.agent_request_file.is_some()
+            || parsed.agent_context_file.is_some()
+            || parsed.agent_capability_file.is_some()
+        {
+            return Err(
+                "rr search only supports --query, --query-mode, --repo, --limit, and --robot"
+                    .to_owned(),
+            );
+        }
+    }
+
+    if parsed.command == CommandKind::Status {
+        if parsed.dry_run {
+            return Err("rr status does not support --dry-run".to_owned());
+        }
+        if parsed.provider != "opencode"
+            || !parsed.attention_states.is_empty()
+            || parsed.limit.is_some()
+            || parsed.query_text.is_some()
+            || parsed.query_mode.is_some()
+            || parsed.robot_docs_topic.is_some()
+            || parsed.bridge_command.is_some()
+            || parsed.extension_command.is_some()
+            || parsed.assets_command.is_some()
+            || parsed.extension_browser.is_some()
+            || parsed.extension_package_dir.is_some()
+            || parsed.assets_package_id.is_some()
+            || parsed.bridge_extension_id.is_some()
+            || parsed.bridge_binary_path.is_some()
+            || parsed.bridge_install_root.is_some()
+            || parsed.bridge_output_dir.is_some()
+            || parsed.update_channel != "stable"
+            || parsed.update_version.is_some()
+            || parsed.update_api_root.is_some()
+            || parsed.update_download_root.is_some()
+            || parsed.update_target.is_some()
+            || parsed.update_yes
+            || parsed.draft_all_findings
+            || !parsed.draft_finding_ids.is_empty()
+            || parsed.batch_id.is_some()
+            || parsed.agent_operation.is_some()
+            || parsed.agent_task_file.is_some()
+            || parsed.agent_request_file.is_some()
+            || parsed.agent_context_file.is_some()
+            || parsed.agent_capability_file.is_some()
+        {
+            return Err("rr status only supports --repo, --pr, --session, and --robot".to_owned());
+        }
+    }
+
+    if parsed.command == CommandKind::Findings {
+        // bare rr findings; --query/--sessions already flipped to search/sessions.
+        if parsed.dry_run {
+            return Err("rr findings does not support --dry-run".to_owned());
+        }
+        if parsed.provider != "opencode"
+            || !parsed.attention_states.is_empty()
+            || parsed.limit.is_some()
+            || parsed.query_text.is_some()
+            || parsed.query_mode.is_some()
+            || parsed.robot_docs_topic.is_some()
+            || parsed.bridge_command.is_some()
+            || parsed.extension_command.is_some()
+            || parsed.assets_command.is_some()
+            || parsed.extension_browser.is_some()
+            || parsed.extension_package_dir.is_some()
+            || parsed.assets_package_id.is_some()
+            || parsed.bridge_extension_id.is_some()
+            || parsed.bridge_binary_path.is_some()
+            || parsed.bridge_install_root.is_some()
+            || parsed.bridge_output_dir.is_some()
+            || parsed.update_channel != "stable"
+            || parsed.update_version.is_some()
+            || parsed.update_api_root.is_some()
+            || parsed.update_download_root.is_some()
+            || parsed.update_target.is_some()
+            || parsed.update_yes
+            || parsed.draft_all_findings
+            || !parsed.draft_finding_ids.is_empty()
+            || parsed.batch_id.is_some()
+            || parsed.agent_operation.is_some()
+            || parsed.agent_task_file.is_some()
+            || parsed.agent_request_file.is_some()
+            || parsed.agent_context_file.is_some()
+            || parsed.agent_capability_file.is_some()
+        {
+            return Err(
+                "rr findings only supports --repo, --pr, --session, --query, --sessions, and --robot"
+                    .to_owned(),
+            );
+        }
+    }
+
+    if parsed.command == CommandKind::Bridge {
+        if parsed.dry_run {
+            return Err("rr bridge does not support --dry-run".to_owned());
+        }
+        if parsed.repo.is_some()
+            || parsed.pr.is_some()
+            || parsed.session_id.is_some()
+            || parsed.provider != "opencode"
+            || !parsed.attention_states.is_empty()
+            || parsed.limit.is_some()
+            || parsed.query_text.is_some()
+            || parsed.query_mode.is_some()
+            || parsed.robot_docs_topic.is_some()
+            || parsed.extension_command.is_some()
+            || parsed.assets_command.is_some()
+            || parsed.extension_browser.is_some()
+            || parsed.extension_package_dir.is_some()
+            || parsed.assets_package_id.is_some()
+            || parsed.update_channel != "stable"
+            || parsed.update_version.is_some()
+            || parsed.update_api_root.is_some()
+            || parsed.update_download_root.is_some()
+            || parsed.update_target.is_some()
+            || parsed.update_yes
+            || parsed.draft_all_findings
+            || !parsed.draft_finding_ids.is_empty()
+            || parsed.batch_id.is_some()
+            || parsed.agent_operation.is_some()
+            || parsed.agent_task_file.is_some()
+            || parsed.agent_request_file.is_some()
+            || parsed.agent_context_file.is_some()
+            || parsed.agent_capability_file.is_some()
+        {
+            return Err(
+                "rr bridge only supports <subcommand> plus --extension-id, --bridge-binary, --install-root, --output-dir, and --robot"
+                    .to_owned(),
+            );
+        }
+    }
+
+    if parsed.command == CommandKind::Extension {
+        if parsed.dry_run {
+            return Err("rr extension does not support --dry-run".to_owned());
+        }
+        // --version/--download-root are legitimate for `extension fetch` and are
+        // scope-gated by the shared update-flag check above; the remaining
+        // update flags and every unrelated flag are rejected here.
+        if parsed.repo.is_some()
+            || parsed.pr.is_some()
+            || parsed.session_id.is_some()
+            || parsed.provider != "opencode"
+            || !parsed.attention_states.is_empty()
+            || parsed.limit.is_some()
+            || parsed.query_text.is_some()
+            || parsed.query_mode.is_some()
+            || parsed.robot_docs_topic.is_some()
+            || parsed.bridge_command.is_some()
+            || parsed.assets_command.is_some()
+            || parsed.assets_package_id.is_some()
+            || parsed.bridge_extension_id.is_some()
+            || parsed.bridge_binary_path.is_some()
+            || parsed.bridge_output_dir.is_some()
+            || parsed.draft_all_findings
+            || !parsed.draft_finding_ids.is_empty()
+            || parsed.batch_id.is_some()
+            || parsed.agent_operation.is_some()
+            || parsed.agent_task_file.is_some()
+            || parsed.agent_request_file.is_some()
+            || parsed.agent_context_file.is_some()
+            || parsed.agent_capability_file.is_some()
+        {
+            return Err(
+                "rr extension only supports <subcommand> plus --browser, --package-dir, --install-root, --version (fetch), --download-root (fetch), and --robot"
+                    .to_owned(),
+            );
+        }
+    }
+
+    if parsed.command == CommandKind::RobotDocs {
+        if parsed.dry_run {
+            return Err("rr robot-docs does not support --dry-run".to_owned());
+        }
+        if parsed.repo.is_some()
+            || parsed.pr.is_some()
+            || parsed.session_id.is_some()
+            || parsed.provider != "opencode"
+            || !parsed.attention_states.is_empty()
+            || parsed.limit.is_some()
+            || parsed.query_text.is_some()
+            || parsed.query_mode.is_some()
+            || parsed.bridge_command.is_some()
+            || parsed.extension_command.is_some()
+            || parsed.assets_command.is_some()
+            || parsed.extension_browser.is_some()
+            || parsed.extension_package_dir.is_some()
+            || parsed.assets_package_id.is_some()
+            || parsed.bridge_extension_id.is_some()
+            || parsed.bridge_binary_path.is_some()
+            || parsed.bridge_install_root.is_some()
+            || parsed.bridge_output_dir.is_some()
+            || parsed.update_channel != "stable"
+            || parsed.update_version.is_some()
+            || parsed.update_api_root.is_some()
+            || parsed.update_download_root.is_some()
+            || parsed.update_target.is_some()
+            || parsed.update_yes
+            || parsed.draft_all_findings
+            || !parsed.draft_finding_ids.is_empty()
+            || parsed.batch_id.is_some()
+            || parsed.agent_operation.is_some()
+            || parsed.agent_task_file.is_some()
+            || parsed.agent_request_file.is_some()
+            || parsed.agent_context_file.is_some()
+            || parsed.agent_capability_file.is_some()
+        {
+            return Err(
+                "rr robot-docs only supports [guide|commands|schemas|workflows] and --robot"
+                    .to_owned(),
+            );
         }
     }
 
@@ -11268,6 +11753,34 @@ fn handle_robot_docs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRespon
     let (items, version) = match topic {
         "guide" => (
             vec![
+                json!({
+                    "kind": "preferred_surface",
+                    "summary": "The operator surface is seven verbs: doctor, queue, review, open, findings, send, setup. Older command names remain routable compatibility aliases and emit the underlying command's schema id unchanged.",
+                    "verbs": {
+                        "doctor": "check whether Roger can run",
+                        "queue": "choose review work (alias: prs)",
+                        "review": "start or re-enter review work (rr review --resume aliases rr resume)",
+                        "open": "use the local cockpit (alias: tui)",
+                        "findings": "inspect and search output (--query aliases search, --sessions aliases sessions)",
+                        "send": "triage/draft/approve/post outbound comms (rr send <sub>)",
+                        "setup": "install/update/repair integrations (rr setup extension|doctor|fetch|uninstall|update|assets)"
+                    },
+                    "machine_surfaces": {
+                        "rr api docs": "machine-contract docs (alias: rr robot-docs)",
+                        "rr agent": "in-session worker transport, separate from --robot"
+                    },
+                    "alias_schema_mapping": [
+                        {"alias": "rr send post", "schema_id": "rr.robot.post.v1"},
+                        {"alias": "rr send approve", "schema_id": "rr.robot.approve.v1"},
+                        {"alias": "rr send draft", "schema_id": "rr.robot.draft.v1"},
+                        {"alias": "rr send triage", "schema_id": "rr.robot.triage.v1"},
+                        {"alias": "rr review --resume", "schema_id": "rr.robot.resume.v1"},
+                        {"alias": "rr findings --query", "schema_id": "rr.robot.search.v1"},
+                        {"alias": "rr findings --sessions", "schema_id": "rr.robot.sessions.v1"},
+                        {"alias": "rr setup update", "schema_id": "rr.robot.update.v1"},
+                        {"alias": "rr api docs", "schema_id": "rr.robot.robot_docs.v1"}
+                    ]
+                }),
                 json!({"command": "rr status --robot", "purpose": "session attention snapshot"}),
                 json!({"command": "rr init --robot", "purpose": "bootstrap Roger-owned local store and marker state; provider auth/install preflight remains a separate follow-up surface"}),
                 json!({"command": "rr doctor --provider <name> --robot", "purpose": "provider-aware preflight for local bootstrap, binary presence, policy/profile resolution, and deferred first-launch checks"}),
@@ -11395,6 +11908,12 @@ fn handle_robot_docs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRespon
         ),
         "commands" => (
             vec![
+                json!({"command": "rr send triage", "preferred_alias_of": "rr triage", "required_formats": ["json"], "optional_formats": []}),
+                json!({"command": "rr send draft", "preferred_alias_of": "rr draft", "required_formats": ["json"], "optional_formats": []}),
+                json!({"command": "rr send approve", "preferred_alias_of": "rr approve", "required_formats": ["json"], "optional_formats": []}),
+                json!({"command": "rr send post", "preferred_alias_of": "rr post", "required_formats": ["json"], "optional_formats": []}),
+                json!({"command": "rr setup update", "preferred_alias_of": "rr update", "required_formats": ["json"], "optional_formats": []}),
+                json!({"command": "rr api docs", "preferred_alias_of": "rr robot-docs", "required_formats": ["json"], "optional_formats": ["compact"]}),
                 json!({"command": "rr status", "required_formats": ["json"], "optional_formats": ["compact"]}),
                 json!({"command": "rr init", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr doctor", "required_formats": ["json"], "optional_formats": []}),
@@ -11479,6 +11998,20 @@ fn handle_robot_docs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRespon
                 json!({"command": "rr tui", "schema_id": "rr.robot.tui.v1"}),
                 json!({"command": "rr <command> (harness)", "schema_id": "rr.robot.harness_command.v1", "surface": "inside_roger_harness"}),
                 json!({"command": "rr agent", "schema_id": AGENT_TRANSPORT_RESPONSE_SCHEMA_V1, "surface": "dedicated_worker_transport"}),
+                // Preferred container/alias names emit the underlying command's
+                // schema id unchanged. No new schema ids are introduced by the
+                // simplified surface; the mapping is documented here truthfully.
+                json!({"command": "rr send triage", "alias_of": "rr triage", "schema_id": "rr.robot.triage.v1"}),
+                json!({"command": "rr send draft", "alias_of": "rr draft", "schema_id": "rr.robot.draft.v1"}),
+                json!({"command": "rr send approve", "alias_of": "rr approve", "schema_id": "rr.robot.approve.v1"}),
+                json!({"command": "rr send post", "alias_of": "rr post", "schema_id": "rr.robot.post.v1"}),
+                json!({"command": "rr review --resume", "alias_of": "rr resume", "schema_id": "rr.robot.resume.v1"}),
+                json!({"command": "rr findings --query", "alias_of": "rr search", "schema_id": "rr.robot.search.v1"}),
+                json!({"command": "rr findings --sessions", "alias_of": "rr sessions", "schema_id": "rr.robot.sessions.v1"}),
+                json!({"command": "rr setup extension", "alias_of": "rr extension", "schema_id": "rr.robot.extension.v1"}),
+                json!({"command": "rr setup update", "alias_of": "rr update", "schema_id": "rr.robot.update.v1"}),
+                json!({"command": "rr setup assets", "alias_of": "rr assets", "schema_id": "rr.robot.assets.v1"}),
+                json!({"command": "rr api docs", "alias_of": "rr robot-docs", "schema_id": "rr.robot.robot_docs.v1"}),
             ],
             "0.1.0",
         ),
@@ -15406,6 +15939,184 @@ fn next_id(prefix: &str) -> String {
     format!("{prefix}-{}-{pid}-{seq}", time::now_ts())
 }
 
+/// Rewrite the container verbs (`send`, `setup`, `api`) into the underlying
+/// command's argv so parse_args, the flag loop, every check, and every handler
+/// stay byte-identical to the old direct invocations (and emit the same schema
+/// ids). `send edit` is reserved but not yet routable in this build.
+fn normalize_container_argv(argv: &[String]) -> Result<Vec<String>, String> {
+    fn rebuild(head: &[&str], rest: &[String]) -> Vec<String> {
+        let mut out: Vec<String> = head.iter().map(|token| (*token).to_owned()).collect();
+        out.extend_from_slice(rest);
+        out
+    }
+
+    match argv[0].as_str() {
+        "send" => {
+            let mapped = match argv.get(1).map(String::as_str) {
+                Some("triage") => "triage",
+                Some("draft") => "draft",
+                Some("approve") => "approve",
+                Some("post") => "post",
+                Some("edit") => {
+                    return Err(
+                        "rr send edit is not yet available in this build; use rr send triage|draft|approve|post"
+                            .to_owned(),
+                    );
+                }
+                Some(other) if !other.starts_with('-') => {
+                    return Err(format!(
+                        "unknown send subcommand: {other} (expected triage, draft, approve, or post)"
+                    ));
+                }
+                _ => {
+                    return Err(
+                        "rr send requires a subcommand: triage, draft, approve, or post".to_owned(),
+                    );
+                }
+            };
+            Ok(rebuild(&[mapped], &argv[2..]))
+        }
+        "setup" => match argv.get(1).map(String::as_str) {
+            Some("extension") => Ok(rebuild(&["extension", "setup"], &argv[2..])),
+            Some("doctor") => Ok(rebuild(&["extension", "doctor"], &argv[2..])),
+            Some("fetch") => Ok(rebuild(&["extension", "fetch"], &argv[2..])),
+            Some("uninstall") => Ok(rebuild(&["extension", "uninstall"], &argv[2..])),
+            Some("update") => Ok(rebuild(&["update"], &argv[2..])),
+            Some("assets") => Ok(rebuild(&["assets"], &argv[2..])),
+            Some(other) if !other.starts_with('-') => Err(format!(
+                "unknown setup subcommand: {other} (expected extension, doctor, fetch, update, uninstall, or assets)"
+            )),
+            _ => Err(
+                "rr setup requires a subcommand: extension, doctor, fetch, update, uninstall, or assets"
+                    .to_owned(),
+            ),
+        },
+        "api" => match argv.get(1).map(String::as_str) {
+            Some("docs") => Ok(rebuild(&["robot-docs"], &argv[2..])),
+            Some(other) if !other.starts_with('-') => {
+                Err(format!("unknown api subcommand: {other} (expected docs)"))
+            }
+            _ => Err("rr api requires a subcommand: docs".to_owned()),
+        },
+        _ => Ok(argv.to_vec()),
+    }
+}
+
+/// Map the first argv token to a per-command help topic. Aliases collapse onto
+/// their preferred name (`prs`->queue, `tui`->open). Returns None for unknown
+/// leading tokens so parse_args falls through to its normal unknown-command
+/// error instead of printing help.
+fn help_topic_for(argv: &[String]) -> Option<&'static str> {
+    match argv[0].as_str() {
+        "doctor" => Some("doctor"),
+        "queue" | "prs" => Some("queue"),
+        "review" => Some("review"),
+        "resume" => Some("resume"),
+        "return" => Some("return"),
+        "open" | "tui" => Some("open"),
+        "findings" => Some("findings"),
+        "search" => Some("search"),
+        "sessions" => Some("sessions"),
+        "status" => Some("status"),
+        "send" => Some("send"),
+        "triage" => Some("triage"),
+        "draft" => Some("draft"),
+        "approve" => Some("approve"),
+        "post" => Some("post"),
+        "setup" => Some("setup"),
+        "extension" => Some("extension"),
+        "assets" => Some("assets"),
+        "update" => Some("update"),
+        "api" => Some("api"),
+        "robot-docs" => Some("robot-docs"),
+        "agent" => Some("agent"),
+        "init" => Some("init"),
+        "bridge" => Some("bridge"),
+        _ => None,
+    }
+}
+
+/// Focused per-command usage block. `send`/`setup`/`api` show their container
+/// help (subcommands grouped). Unknown topics fall back to the global usage.
+fn command_usage(topic: &str) -> String {
+    let body = match topic {
+        "doctor" => {
+            "rr doctor — check whether Roger can run.\n\nUsage:\n  rr doctor [--provider opencode|codex|gemini|claude|copilot] [--robot]"
+        }
+        "queue" => {
+            "rr queue — list open pull requests as a review queue (alias: rr prs).\n\nUsage:\n  rr queue [--repo owner/repo] [--limit <n>] [--robot]"
+        }
+        "review" => {
+            "rr review — start or re-enter a review.\n\nUsage:\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude|copilot] [--dry-run] [--robot]\n  rr review --resume [--pr <number> | --session <id>] [--repo owner/repo] [--dry-run] [--robot]\n\nNote: --resume routes to the resume handler (rr resume)."
+        }
+        "resume" => {
+            "rr resume — re-enter an existing review (preferred form: rr review --resume).\n\nUsage:\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]"
+        }
+        "return" => {
+            "rr return — deliberate control handoff back to Roger from a provider session.\n\nUsage:\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]"
+        }
+        "open" => {
+            "rr open — open the local review cockpit (alias: rr tui).\n\nUsage:\n  rr open [--repo owner/repo] [--pr <number>] [--session <id>]"
+        }
+        "findings" => {
+            "rr findings — inspect and search review output.\n\nUsage:\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr findings --query <text> [--repo owner/repo] [--limit <n>] [--robot]   prior-review search\n  rr findings --sessions [--repo owner/repo] [--pr <number>] [--robot]      session listing\n\nNote: --query routes to the search handler, --sessions to the sessions handler."
+        }
+        "search" => {
+            "rr search — prior-review corpus search (preferred form: rr findings --query).\n\nUsage:\n  rr search --query <text> [--query-mode auto|exact_lookup|recall|related_context|candidate_audit] [--repo owner/repo] [--limit <n>] [--robot]"
+        }
+        "sessions" => {
+            "rr sessions — list local review sessions (preferred form: rr findings --sessions).\n\nUsage:\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]"
+        }
+        "status" => {
+            "rr status — session attention snapshot.\n\nUsage:\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]"
+        }
+        "send" => {
+            "rr send — explicitly triage/draft/approve/post outbound communication.\n\nUsage:\n  rr send triage --finding <id>... --state accepted|ignored|needs_follow_up|resolved [--session <id>] [--robot]\n  rr send draft (--finding <id>... | --all-findings) [--session <id>] [--robot]\n  rr send approve --batch <draft-batch-id> [--session <id>] [--robot]\n  rr send post --batch <draft-batch-id> [--session <id>] [--robot]\n\nrr send edit is reserved but not yet available in this build.\nEach subcommand routes to the same fail-closed handler as the old rr triage/draft/approve/post name and emits the same robot schema id."
+        }
+        "triage" => {
+            "rr triage — record a local triage decision (preferred form: rr send triage).\n\nUsage:\n  rr triage --finding <id>... --state accepted|ignored|needs_follow_up|resolved [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]"
+        }
+        "draft" => {
+            "rr draft — materialize local outbound draft batches (preferred form: rr send draft).\n\nUsage:\n  rr draft (--finding <id>... | --all-findings) [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]"
+        }
+        "approve" => {
+            "rr approve — record a local approval token (preferred form: rr send approve).\n\nUsage:\n  rr approve --batch <draft-batch-id> [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]"
+        }
+        "post" => {
+            "rr post — post one exact approved batch to GitHub (preferred form: rr send post).\n\nUsage:\n  rr post --batch <draft-batch-id> [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]"
+        }
+        "setup" => {
+            "rr setup — install, update, and repair local integrations.\n\nUsage:\n  rr setup extension [--browser edge|chrome|brave] [--robot]     set up the browser companion\n  rr setup doctor [--browser b] [--robot]                       verify the companion path\n  rr setup fetch [--version YYYY.MM.DD] [--robot]               download the published package\n  rr setup uninstall [--robot]                                  remove host-registration assets\n  rr setup update [--channel stable|rc] [--version <v>] [--yes|-y] [--dry-run] [--robot]   self-update rr\n  rr setup assets install|status|verify [--robot]              manage semantic assets\n\nEach form routes to the same handler as the old rr extension/update/assets name."
+        }
+        "extension" => {
+            "rr extension — browser companion setup (preferred form: rr setup ...).\n\nUsage:\n  rr extension setup|doctor|fetch|uninstall [--browser edge|chrome|brave] [--package-dir <dir>] [--install-root <dir>] [--robot]\n  rr extension fetch [--version <YYYY.MM.DD[-rc.N]>] [--download-root <dir>] [--robot]"
+        }
+        "assets" => {
+            "rr assets — manage semantic assets (preferred form: rr setup assets ...).\n\nUsage:\n  rr assets install|status|verify [--robot]"
+        }
+        "update" => {
+            "rr update — self-update rr (preferred form: rr setup update).\n\nUsage:\n  rr update [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <dir>] [--target <tag>] [--yes|-y] [--dry-run] [--robot]"
+        }
+        "api" => {
+            "rr api — machine-contract documentation surface.\n\nUsage:\n  rr api docs guide|commands|schemas|workflows [--robot]\n\nRoutes to the robot-docs handler."
+        }
+        "robot-docs" => {
+            "rr robot-docs — machine-readable command/schema reference (preferred form: rr api docs).\n\nUsage:\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]"
+        }
+        "agent" => {
+            "rr agent — in-session worker transport (separate from --robot).\n\nUsage:\n  rr agent <operation> --task-file <path> [--request-file <path>] [--context-file <path>] [--capability-file <path>]"
+        }
+        "init" => {
+            "rr init — bootstrap the local Roger store (usually auto-bootstrapped).\n\nUsage:\n  rr init [--robot]"
+        }
+        "bridge" => {
+            "rr bridge — dev/repair surface for native-host registration and contracts.\n\nUsage:\n  rr bridge export-contracts|verify-contracts|pack-extension|install|uninstall [--extension-id <id>] [--bridge-binary <path>] [--install-root <dir>] [--output-dir <dir>] [--robot]\n\nPrefer rr setup ... for normal operator flows."
+        }
+        _ => return format!("{}\n", usage_text()),
+    };
+    body.to_owned()
+}
+
 fn usage_text() -> &'static str {
     r#"Roger Reviewer (rr) — local-first pull request review for GitHub.
 Durable sessions, structured findings, and an explicit approval gate before
@@ -15414,43 +16125,59 @@ anything is posted back to GitHub.
 Usage:
   rr <command> [options]
 
+The seven verbs:
+  rr doctor                                    check whether Roger can run
+  rr queue                                     choose review work
+  rr review                                    start or re-enter review work
+  rr open                                      use the local cockpit
+  rr findings                                  inspect and search review output
+  rr send                                      triage/draft/approve/post outbound comms
+  rr setup                                     install, update, and repair integrations
+
 Primary flow:
-  rr doctor                                    check local + provider setup
+  rr doctor --provider <name>                  check local + provider setup
   rr queue                                     list open PRs needing review
   rr review --pr <number>                      start a review
-  rr resume --pr <number>                      re-enter an existing review
+  rr review --resume --pr <number>             re-enter an existing review
   rr open                                      open the local review cockpit
 
-Core commands:
-  rr queue [--repo owner/repo] [--limit <n>] [--robot]        alias for rr prs
-  rr prs [--repo owner/repo] [--limit <n>] [--robot]
+Choose and enter review work:
+  rr queue [--repo owner/repo] [--limit <n>] [--robot]
   rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude|copilot] [--dry-run] [--robot]
-  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]
-  rr open [--repo owner/repo] [--pr <number>] [--session <id>] alias for rr tui
-  rr tui [--repo owner/repo] [--pr <number>] [--session <id>]
+  rr review --resume [--pr <number> | --session <id>] [--repo owner/repo] [--dry-run] [--robot]
+  rr open [--repo owner/repo] [--pr <number>] [--session <id>]
+  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]
+
+Inspect and search review output:
   rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]
   rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]
-  rr search --query <text> [--query-mode auto|exact_lookup|recall|related_context|candidate_audit] [--repo owner/repo] [--limit <n>] [--robot]
+  rr findings --query <text> [--query-mode auto|exact_lookup|recall|related_context|candidate_audit] [--repo owner/repo] [--limit <n>] [--robot]
+  rr findings --sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]
 
-Send to GitHub, explicitly gated:
-  rr triage --finding <id>... --state accepted|ignored|needs_follow_up|resolved [--session <id>] [--robot]
-  rr draft (--finding <id>... | --all-findings) [--session <id>] [--robot]
-  rr approve --batch <draft-batch-id> [--session <id>] [--robot]
-  rr post --batch <draft-batch-id> [--session <id>] [--robot]
+Send to GitHub, explicitly gated (rr send <sub>):
+  rr send triage --finding <id>... --state accepted|ignored|needs_follow_up|resolved [--session <id>] [--robot]
+  rr send draft (--finding <id>... | --all-findings) [--session <id>] [--robot]
+  rr send approve --batch <draft-batch-id> [--session <id>] [--robot]
+  rr send post --batch <draft-batch-id> [--session <id>] [--robot]
 
-Setup:
-  rr init [--robot]
-  rr doctor [--provider opencode|codex|gemini|claude|copilot|pi-agent] [--robot]
-  rr update [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--yes|-y] [--dry-run] [--robot]
-  rr extension setup|doctor|fetch|uninstall [--browser edge|chrome|brave] [--robot]
+Set up, update, and repair (rr setup <sub>):
+  rr setup extension [--browser edge|chrome|brave] [--robot]
+  rr setup doctor [--browser edge|chrome|brave] [--robot]
+  rr setup fetch [--version <YYYY.MM.DD[-rc.N]>] [--robot]
+  rr setup uninstall [--robot]
+  rr setup update [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--yes|-y] [--dry-run] [--robot]
+  rr setup assets install|status|verify [--robot]
 
-Advanced / machine interfaces:
-  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]
-  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]
-  rr bridge export-contracts|verify-contracts|pack-extension|install|uninstall [--robot]
-  rr assets install|status|verify [--robot]
-  rr robot-docs [guide|commands|schemas|workflows] [--robot]
+Machine interfaces:
+  rr api docs guide|commands|schemas|workflows [--robot]
   rr agent <operation> --task-file <path> [--request-file <path>] [--context-file <path>] [--capability-file <path>]
+
+Compatibility names (still supported; prefer the forms above):
+  rr prs = rr queue    rr tui = rr open    rr resume = rr review --resume    rr search = rr findings --query
+  rr sessions = rr findings --sessions    rr triage|draft|approve|post = rr send <sub>
+  rr extension|update|assets = rr setup <sub>    rr robot-docs = rr api docs
+  rr tui [--repo owner/repo] [--pr <number>] [--session <id>]
+  rr search --query <text> [--query-mode auto|exact_lookup|recall|related_context|candidate_audit] [--repo owner/repo] [--limit <n>] [--robot]
 
 Agent transport:
   - rr agent is the dedicated in-session worker transport; it is separate from --robot
@@ -15475,8 +16202,8 @@ Browser note:
   - Edge and Brave still honor the guided preloaded-extension launch path
 
 More:
-  - machine-readable command and schema reference: rr robot-docs [guide|commands|schemas|workflows]
-  - compatibility names stay supported while the operator surface moves toward: doctor, queue, review, open, findings, send, setup
+  - machine-readable command and schema reference: rr api docs [guide|commands|schemas|workflows]
+  - per-command help: rr <command> --help
 "#
 }
 
@@ -17323,7 +18050,7 @@ mod tests {
     #[test]
     fn update_usage_text_lists_yes_confirmation_flags() {
         assert!(
-            usage_text().contains("rr update")
+            usage_text().contains("rr setup update")
                 && usage_text().contains("[--yes|-y] [--dry-run] [--robot]"),
             "{}",
             usage_text()
@@ -17333,10 +18060,10 @@ mod tests {
     #[test]
     fn draft_and_approve_usage_text_and_flag_contract_are_explicit() {
         assert!(
-            usage_text().contains("rr draft")
+            usage_text().contains("rr send draft")
                 && usage_text().contains("(--finding <id>... | --all-findings)")
-                && usage_text().contains("rr approve")
-                && usage_text().contains("rr post")
+                && usage_text().contains("rr send approve")
+                && usage_text().contains("rr send post")
                 && usage_text().contains("--batch <draft-batch-id>"),
             "{}",
             usage_text()
@@ -17690,11 +18417,15 @@ mod tests {
         assert_eq!(payload["outcome"], "blocked");
         assert_eq!(payload["data"]["reason_code"], "store_migration_blocked");
         assert_eq!(payload["data"]["command"], "rr sessions");
+        let expected_block = format!(
+            "unsupported automatic migration class class_d from schema v9 to v{}",
+            roger_storage::CURRENT_SCHEMA_VERSION
+        );
         assert!(
             payload["data"]["blocked_reason"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("unsupported automatic migration class class_d from schema v9 to v17")
+                .contains(&expected_block)
         );
         assert!(
             payload["repair_actions"]
@@ -18435,5 +19166,319 @@ mod tests {
             .find(|entry| entry["name"] == "extension_package_present")
             .expect("package presence check");
         assert_eq!(package_check["ok"], true);
+    }
+
+    // ---- CLI surface simplification: parser + help + whitelist coverage ----
+
+    fn pa(args: &[&str]) -> Result<ParsedArgs, String> {
+        let owned: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        parse_args(&owned)
+    }
+
+    fn debug_of(args: &[&str]) -> String {
+        format!("{:?}", pa(args).expect("parse ok"))
+    }
+
+    #[test]
+    fn send_container_parses_identically_to_underlying_commands() {
+        assert_eq!(
+            debug_of(&["send", "triage", "--finding", "f1", "--state", "accepted"]),
+            debug_of(&["triage", "--finding", "f1", "--state", "accepted"]),
+        );
+        assert_eq!(
+            debug_of(&["send", "draft", "--all-findings"]),
+            debug_of(&["draft", "--all-findings"]),
+        );
+        assert_eq!(
+            debug_of(&["send", "approve", "--batch", "b1"]),
+            debug_of(&["approve", "--batch", "b1"]),
+        );
+        assert_eq!(
+            debug_of(&["send", "post", "--batch", "b1", "--robot"]),
+            debug_of(&["post", "--batch", "b1", "--robot"]),
+        );
+    }
+
+    #[test]
+    fn setup_container_parses_identically_to_underlying_commands() {
+        assert_eq!(
+            debug_of(&["setup", "extension", "--browser", "edge"]),
+            debug_of(&["extension", "setup", "--browser", "edge"]),
+        );
+        assert_eq!(
+            debug_of(&["setup", "doctor", "--browser", "brave"]),
+            debug_of(&["extension", "doctor", "--browser", "brave"]),
+        );
+        assert_eq!(
+            debug_of(&["setup", "fetch", "--version", "2026.07.01"]),
+            debug_of(&["extension", "fetch", "--version", "2026.07.01"]),
+        );
+        assert_eq!(
+            debug_of(&["setup", "uninstall"]),
+            debug_of(&["extension", "uninstall"]),
+        );
+        assert_eq!(
+            debug_of(&["setup", "update", "--yes"]),
+            debug_of(&["update", "--yes"]),
+        );
+        assert_eq!(
+            debug_of(&["setup", "assets", "verify", "--robot"]),
+            debug_of(&["assets", "verify", "--robot"]),
+        );
+    }
+
+    #[test]
+    fn api_docs_parses_identically_to_robot_docs() {
+        for topic in ["guide", "commands", "schemas", "workflows"] {
+            assert_eq!(
+                debug_of(&["api", "docs", topic, "--robot"]),
+                debug_of(&["robot-docs", topic, "--robot"]),
+            );
+        }
+    }
+
+    #[test]
+    fn alias_forms_route_to_the_underlying_schema_ids() {
+        assert_eq!(
+            pa(&["send", "post", "--batch", "b1"])
+                .unwrap()
+                .command
+                .schema_id(),
+            "rr.robot.post.v1"
+        );
+        assert_eq!(
+            pa(&["review", "--resume", "--pr", "5"])
+                .unwrap()
+                .command
+                .schema_id(),
+            "rr.robot.resume.v1"
+        );
+        assert_eq!(
+            pa(&["findings", "--query", "auth"])
+                .unwrap()
+                .command
+                .schema_id(),
+            "rr.robot.search.v1"
+        );
+        assert_eq!(
+            pa(&["findings", "--sessions"]).unwrap().command.schema_id(),
+            "rr.robot.sessions.v1"
+        );
+        assert_eq!(
+            pa(&["setup", "update", "--yes"])
+                .unwrap()
+                .command
+                .schema_id(),
+            "rr.robot.update.v1"
+        );
+    }
+
+    #[test]
+    fn review_resume_flips_command_and_findings_flips_route() {
+        assert_eq!(
+            pa(&["review", "--resume"]).unwrap().command,
+            CommandKind::Resume
+        );
+        assert_eq!(
+            pa(&["findings", "--query", "x"]).unwrap().command,
+            CommandKind::Search
+        );
+        assert_eq!(
+            pa(&["findings", "--sessions"]).unwrap().command,
+            CommandKind::Sessions
+        );
+        assert_eq!(pa(&["findings"]).unwrap().command, CommandKind::Findings);
+        // findings cannot combine --query and --sessions.
+        assert!(pa(&["findings", "--query", "x", "--sessions"]).is_err());
+        // routing flags are rejected on unrelated commands.
+        assert!(pa(&["status", "--resume"]).is_err());
+        assert!(pa(&["status", "--sessions"]).is_err());
+    }
+
+    #[test]
+    fn send_edit_is_reserved_and_unknown_subcommands_are_named() {
+        let edit = pa(&["send", "edit", "--draft", "d1"]).unwrap_err();
+        assert!(edit.contains("not yet available"), "{edit}");
+        let bad_send = pa(&["send", "bogus"]).unwrap_err();
+        assert!(bad_send.contains("unknown send subcommand"), "{bad_send}");
+        let bad_setup = pa(&["setup", "bogus"]).unwrap_err();
+        assert!(
+            bad_setup.contains("unknown setup subcommand"),
+            "{bad_setup}"
+        );
+        let bad_api = pa(&["api", "bogus"]).unwrap_err();
+        assert!(bad_api.contains("unknown api subcommand"), "{bad_api}");
+    }
+
+    #[test]
+    fn per_command_help_prints_focused_usage_at_any_position() {
+        let runtime = CliRuntime {
+            cwd: PathBuf::from("."),
+            store_root: PathBuf::from(".roger-test"),
+            opencode_bin: "opencode".to_owned(),
+        };
+        let review = run(&["review".to_owned(), "--help".to_owned()], &runtime);
+        assert_eq!(review.exit_code, 0, "{}", review.stderr);
+        assert!(review.stdout.contains("rr review"), "{}", review.stdout);
+        assert!(review.stderr.is_empty(), "{}", review.stderr);
+
+        // --help anywhere after the command, not only first.
+        let review_mid = run(
+            &[
+                "review".to_owned(),
+                "--pr".to_owned(),
+                "5".to_owned(),
+                "--help".to_owned(),
+            ],
+            &runtime,
+        );
+        assert_eq!(review_mid.exit_code, 0, "{}", review_mid.stderr);
+        assert!(
+            review_mid.stdout.contains("rr review"),
+            "{}",
+            review_mid.stdout
+        );
+
+        let send_help = run(&["send".to_owned(), "-h".to_owned()], &runtime);
+        assert_eq!(send_help.exit_code, 0, "{}", send_help.stderr);
+        assert!(send_help.stdout.contains("rr send"), "{}", send_help.stdout);
+
+        let send_sub_help = run(
+            &["send".to_owned(), "post".to_owned(), "--help".to_owned()],
+            &runtime,
+        );
+        assert_eq!(send_sub_help.exit_code, 0, "{}", send_sub_help.stderr);
+        assert!(
+            send_sub_help.stdout.contains("rr send"),
+            "{}",
+            send_sub_help.stdout
+        );
+
+        let setup_help = run(&["setup".to_owned(), "--help".to_owned()], &runtime);
+        assert_eq!(setup_help.exit_code, 0, "{}", setup_help.stderr);
+        assert!(
+            setup_help.stdout.contains("rr setup"),
+            "{}",
+            setup_help.stdout
+        );
+
+        let api_help = run(
+            &["api".to_owned(), "docs".to_owned(), "--help".to_owned()],
+            &runtime,
+        );
+        assert_eq!(api_help.exit_code, 0, "{}", api_help.stderr);
+        assert!(
+            api_help.stdout.contains("rr api docs"),
+            "{}",
+            api_help.stdout
+        );
+
+        // Bare global help still works.
+        let global = run(&["--help".to_owned()], &runtime);
+        assert_eq!(global.exit_code, 0, "{}", global.stderr);
+        assert!(
+            global.stdout.contains("The seven verbs:"),
+            "{}",
+            global.stdout
+        );
+    }
+
+    #[test]
+    fn new_command_whitelists_reject_foreign_flags() {
+        assert!(
+            pa(&["review", "--session", "s1"])
+                .unwrap_err()
+                .contains("rr review only supports")
+        );
+        assert!(
+            pa(&["resume", "--provider", "codex"])
+                .unwrap_err()
+                .contains("rr resume only supports")
+        );
+        assert!(
+            pa(&["return", "--limit", "3"])
+                .unwrap_err()
+                .contains("rr return only supports")
+        );
+        assert!(
+            pa(&["sessions", "--session", "s1"])
+                .unwrap_err()
+                .contains("rr sessions only supports")
+        );
+        assert!(
+            pa(&["search", "--query", "x", "--provider", "codex"])
+                .unwrap_err()
+                .contains("rr search only supports")
+        );
+        assert!(
+            pa(&["status", "--limit", "3"])
+                .unwrap_err()
+                .contains("rr status only supports")
+        );
+        assert!(
+            pa(&["findings", "--attention", "stale"])
+                .unwrap_err()
+                .contains("rr findings only supports")
+        );
+        assert!(
+            pa(&["bridge", "verify-contracts", "--pr", "5"])
+                .unwrap_err()
+                .contains("rr bridge only supports")
+        );
+        assert!(
+            pa(&["extension", "setup", "--pr", "5"])
+                .unwrap_err()
+                .contains("rr extension only supports")
+        );
+        assert!(
+            pa(&["robot-docs", "guide", "--pr", "5"])
+                .unwrap_err()
+                .contains("rr robot-docs only supports")
+        );
+    }
+
+    #[test]
+    fn dry_run_is_rejected_by_commands_that_do_not_implement_it() {
+        for (args, needle) in [
+            (
+                &["return", "--dry-run"][..],
+                "rr return does not support --dry-run",
+            ),
+            (
+                &["sessions", "--dry-run"][..],
+                "rr sessions does not support --dry-run",
+            ),
+            (
+                &["search", "--query", "x", "--dry-run"][..],
+                "rr search does not support --dry-run",
+            ),
+            (
+                &["status", "--dry-run"][..],
+                "rr status does not support --dry-run",
+            ),
+            (
+                &["findings", "--dry-run"][..],
+                "rr findings does not support --dry-run",
+            ),
+            (
+                &["bridge", "verify-contracts", "--dry-run"][..],
+                "rr bridge does not support --dry-run",
+            ),
+            (
+                &["extension", "doctor", "--dry-run"][..],
+                "rr extension does not support --dry-run",
+            ),
+            (
+                &["robot-docs", "guide", "--dry-run"][..],
+                "rr robot-docs does not support --dry-run",
+            ),
+        ] {
+            let err = pa(args).unwrap_err();
+            assert!(err.contains(needle), "args={args:?} err={err}");
+        }
+        // review/resume/update DO support --dry-run.
+        assert!(pa(&["review", "--pr", "5", "--dry-run"]).is_ok());
+        assert!(pa(&["resume", "--pr", "5", "--dry-run"]).is_ok());
+        assert!(pa(&["update", "--dry-run"]).is_ok());
     }
 }

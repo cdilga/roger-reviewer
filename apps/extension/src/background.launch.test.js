@@ -5,6 +5,8 @@ const {
   handleLaunchMessage,
   handleStatusMessage,
   STATUS_PROBE_TIMEOUT_MS,
+  LAUNCH_PROGRESS_SCHEMA,
+  LAUNCH_FIRST_FRAME_TIMEOUT_MS,
 } = require('./background/main.js');
 
 function withChromeStub(stub, fn) {
@@ -623,6 +625,204 @@ test('status probe settles exactly once and never double-settles or leaks the po
     global.setTimeout = realSetTimeout;
     global.clearTimeout = realClearTimeout;
   }
+});
+
+// --- ack/progress protocol: multi-frame launch handling ---------------------
+
+test('handleLaunchMessage streams progress frames then resolves on the final envelope', async () => {
+  const progress = [];
+  const chromeStub = chromeWithConnectNative((port) => {
+    // Host contract: immediate ack, preflight_ok, then the final response.
+    port.emitMessage({ schema: LAUNCH_PROGRESS_SCHEMA, stage: 'host_started' });
+    port.emitMessage({ schema: LAUNCH_PROGRESS_SCHEMA, stage: 'preflight_ok' });
+    port.emitMessage({
+      ok: true,
+      action: 'start_review',
+      message: 'rr review completed for acme/widgets#42.',
+      session_id: 'session-42',
+    });
+    port.emitDisconnect();
+  });
+
+  await withChromeStub(chromeStub, async () => {
+    const response = await handleLaunchMessage(
+      { intent: { action: 'start_review', owner: 'acme', repo: 'widgets', pr_number: 42 } },
+      null,
+      { onProgress: (frame) => progress.push(frame.stage) }
+    );
+
+    assert.equal(response.ok, true);
+    assert.equal(response.mode, 'native_messaging');
+    assert.equal(response.session_id, 'session-42');
+    // Progress frames fanned out but did NOT settle the launch early.
+    assert.deepEqual(progress, ['host_started', 'preflight_ok']);
+
+    const port = chromeStub.getLastPort();
+    assert.equal(port.disconnected, true, 'port torn down after the final frame');
+  });
+});
+
+test('handleLaunchMessage first-frame watchdog fails loud when the host never acks', async () => {
+  // Host connected but never emitted a single frame (not even the ack): the
+  // fast first-frame watchdog must fail closed with native_unavailable rather
+  // than waiting out the full completion budget.
+  const chromeStub = chromeWithConnectNative(() => {
+    // Intentionally silent: no emitMessage, no emitDisconnect.
+  });
+
+  const realSetTimeout = global.setTimeout;
+  const realClearTimeout = global.clearTimeout;
+  const timers = [];
+  global.setTimeout = (fn, ms) => {
+    const id = timers.length + 1;
+    timers.push({ fn, ms, id, cleared: false });
+    return id;
+  };
+  global.clearTimeout = (id) => {
+    const timer = timers.find((t) => t.id === id);
+    if (timer) {
+      timer.cleared = true;
+    }
+  };
+
+  try {
+    await withChromeStub(chromeStub, async () => {
+      const pending = handleLaunchMessage({
+        intent: { action: 'start_review', owner: 'acme', repo: 'widgets', pr_number: 42 },
+      });
+
+      const firstFrame = timers.find((t) => t.ms === LAUNCH_FIRST_FRAME_TIMEOUT_MS);
+      assert.ok(firstFrame, 'a first-frame watchdog must be armed at the 10s bound');
+
+      // Fire the watchdog as the browser would once the bound elapses.
+      firstFrame.fn();
+
+      const response = await pending;
+      assert.equal(response.ok, false);
+      assert.equal(response.mode, 'native_unavailable');
+      assert.equal(response.action, 'start_review');
+      assert.match(response.guidance, /rr setup doctor --live/);
+      assert.match(response.message, /launch blocked/i);
+
+      const port = chromeStub.getLastPort();
+      assert.equal(port.disconnected, true, 'watchdog must tear the silent port down');
+    });
+  } finally {
+    global.setTimeout = realSetTimeout;
+    global.clearTimeout = realClearTimeout;
+  }
+});
+
+test('handleLaunchMessage first-frame watchdog is retired once the ack lands', async () => {
+  // The ack arrives, then the host works for a while before the final frame.
+  // The first-frame watchdog must be cleared by the ack so it can never fire.
+  let driver = null;
+  const chromeStub = chromeWithConnectNative((port) => {
+    driver = port;
+  });
+
+  const realSetTimeout = global.setTimeout;
+  const realClearTimeout = global.clearTimeout;
+  const timers = [];
+  global.setTimeout = (fn, ms) => {
+    const id = timers.length + 1;
+    timers.push({ fn, ms, id, cleared: false });
+    return id;
+  };
+  global.clearTimeout = (id) => {
+    const timer = timers.find((t) => t.id === id);
+    if (timer) {
+      timer.cleared = true;
+    }
+  };
+
+  try {
+    await withChromeStub(chromeStub, async () => {
+      const pending = handleLaunchMessage({
+        intent: { action: 'start_review', owner: 'acme', repo: 'widgets', pr_number: 42 },
+      });
+
+      driver.emitMessage({ schema: LAUNCH_PROGRESS_SCHEMA, stage: 'host_started' });
+
+      const firstFrame = timers.find((t) => t.ms === LAUNCH_FIRST_FRAME_TIMEOUT_MS);
+      assert.ok(firstFrame.cleared, 'the ack must retire the first-frame watchdog');
+
+      driver.emitMessage({ ok: true, action: 'start_review', message: 'done', session_id: 's1' });
+      const response = await pending;
+      assert.equal(response.ok, true);
+      assert.equal(response.session_id, 's1');
+    });
+  } finally {
+    global.setTimeout = realSetTimeout;
+    global.clearTimeout = realClearTimeout;
+  }
+});
+
+test('handleLaunchMessage fans progress out to the originating tab', async () => {
+  const chromeStub = chromeWithConnectNative((port) => {
+    port.emitMessage({ schema: LAUNCH_PROGRESS_SCHEMA, stage: 'host_started' });
+    port.emitMessage({ ok: true, action: 'start_review', message: 'ok', session_id: 's1' });
+    port.emitDisconnect();
+  });
+  const sent = [];
+  chromeStub.tabs = {
+    sendMessage: (id, msg, cb) => {
+      sent.push({ id, msg });
+      if (typeof cb === 'function') {
+        cb();
+      }
+    },
+  };
+
+  await withChromeStub(chromeStub, async () => {
+    const response = await handleLaunchMessage(
+      { intent: { action: 'start_review', owner: 'acme', repo: 'widgets', pr_number: 42 } },
+      { tab: { id: 7 } }
+    );
+
+    assert.equal(response.ok, true);
+    assert.equal(sent.length, 1, 'exactly one progress frame fanned out to the tab');
+    assert.equal(sent[0].id, 7);
+    assert.equal(sent[0].msg.type, 'roger_bridge_launch_progress');
+    assert.equal(sent[0].msg.schema, LAUNCH_PROGRESS_SCHEMA);
+    assert.equal(sent[0].msg.stage, 'host_started');
+    assert.deepEqual(sent[0].msg.intent, {
+      action: 'start_review',
+      owner: 'acme',
+      repo: 'widgets',
+      pr_number: 42,
+    });
+  });
+});
+
+test('handleLaunchMessage broadcasts progress to the popup when there is no tab', async () => {
+  const chromeStub = chromeWithConnectNative((port) => {
+    port.emitMessage({ schema: LAUNCH_PROGRESS_SCHEMA, stage: 'preflight_ok' });
+    port.emitMessage({ ok: true, action: 'start_review', message: 'ok', session_id: 's1' });
+    port.emitDisconnect();
+  });
+  const broadcast = [];
+  chromeStub.runtime.sendMessage = (msg, cb) => {
+    broadcast.push(msg);
+    if (typeof cb === 'function') {
+      cb();
+    }
+  };
+
+  await withChromeStub(chromeStub, async () => {
+    // No sender.tab -> popup/extension-page origin -> runtime broadcast.
+    const response = await handleLaunchMessage(
+      { intent: { action: 'start_review', owner: 'acme', repo: 'widgets', pr_number: 42 } },
+      { tab: undefined }
+    );
+
+    assert.equal(response.ok, true);
+    const progressBroadcasts = broadcast.filter(
+      (m) => m && m.type === 'roger_bridge_launch_progress'
+    );
+    assert.equal(progressBroadcasts.length, 1);
+    assert.equal(progressBroadcasts[0].stage, 'preflight_ok');
+  });
 });
 
 test('handleLaunchMessage rejects refresh_review as a browser action', async () => {

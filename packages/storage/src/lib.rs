@@ -30,7 +30,7 @@ pub use semantic_embedder::{
 };
 
 /// The schema this build produces; must track the highest migration.
-pub const CURRENT_SCHEMA_VERSION: i64 = 17;
+pub const CURRENT_SCHEMA_VERSION: i64 = 18;
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_session_ledger.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_launch_binding_context.sql");
@@ -50,6 +50,7 @@ const MIGRATION_0014: &str = include_str!("../migrations/0014_outbound_postable_
 const MIGRATION_0015: &str = include_str!("../migrations/0015_worker_audit_trail.sql");
 const MIGRATION_0016: &str = include_str!("../migrations/0016_posted_action_items.sql");
 const MIGRATION_0017: &str = include_str!("../migrations/0017_session_baseline_snapshots.sql");
+const MIGRATION_0018: &str = include_str!("../migrations/0018_outbound_draft_revisions.sql");
 const PRIOR_REVIEW_BULK_HYDRATION_CHUNK_SIZE: usize = 64;
 
 /// Upper bound on the number of prior-review corpus documents (per kind) that
@@ -1671,6 +1672,60 @@ pub struct IndexStateRecord {
     pub status: String,
     pub artifact_digest: Option<String>,
     pub row_version: i64,
+}
+
+/// Typed reason recorded on a batch approval token that
+/// [`RogerStore::revise_outbound_draft_body`] revokes because a draft body was
+/// edited after the batch was approved. Surfaced so `rr post` and status
+/// projections can explain why a previously-approved batch fell back to
+/// awaiting re-approval.
+pub const OUTBOUND_APPROVAL_REVOKED_REASON_DRAFT_REVISED: &str = "draft_revised_after_approval";
+
+/// Who authored a draft-body revision. `Agent` is the original generator (also
+/// used for the reserved revision 0 that preserves the original generated
+/// body); `Operator` is a human edit through `rr send edit` / the TUI editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevisionAuthorKind {
+    Operator,
+    Agent,
+}
+
+impl RevisionAuthorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Operator => "operator",
+            Self::Agent => "agent",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Result<Self> {
+        match raw {
+            "operator" => Ok(Self::Operator),
+            "agent" => Ok(Self::Agent),
+            other => Err(StorageError::Conflict {
+                entity: "outbound_draft_revision_author_kind",
+                id: other.to_owned(),
+            }),
+        }
+    }
+}
+
+/// One immutable entry in a draft body's revision lineage.
+///
+/// Lineage invariant: `revision_index` is monotonic per `draft_id` and starts
+/// at 0. Revision 0 is the original generated body (author [`RevisionAuthorKind::Agent`],
+/// `supersedes_revision_id = None`); each later revision supersedes its
+/// immediate predecessor via `supersedes_revision_id`, so the full chain (and
+/// the original) is always reconstructable in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundDraftRevisionRecord {
+    pub id: String,
+    pub draft_id: String,
+    pub revision_index: i64,
+    pub body: String,
+    pub author_kind: RevisionAuthorKind,
+    pub supersedes_revision_id: Option<String>,
+    pub created_at: i64,
 }
 
 pub struct RogerStore {
@@ -3928,6 +3983,249 @@ impl RogerStore {
             drafts.push(row?);
         }
         Ok(drafts)
+    }
+
+    /// Record a new draft-body revision and make it the current body.
+    ///
+    /// Design (original-body preservation): the canonical
+    /// `outbound_draft_items.body` column always mirrors the newest revision, so
+    /// the existing posting/readback path over `outbound_draft_item(s)` observes
+    /// the latest body with no change. The `outbound_draft_revisions` table is
+    /// the durable audit lineage. The original generated body is preserved as
+    /// revision 0: it is lazily materialized from the current draft row body on
+    /// the first revise (up to that point the row body is exactly the original
+    /// generated body, because `store_outbound_draft_item` never rewrites body),
+    /// then the edit is appended as the next revision.
+    ///
+    /// Fail-closed rules:
+    /// - editing any draft in a POSTED batch (a batch with a recorded posted
+    ///   action, or in `Posted` approval state) is rejected outright;
+    /// - editing a draft in a batch that still holds a live approval token
+    ///   revokes that token with reason
+    ///   [`OUTBOUND_APPROVAL_REVOKED_REASON_DRAFT_REVISED`] and resets the batch
+    ///   and its approved draft items from `Approved` back to `Drafted`, so a
+    ///   revised-but-unapproved body can never be posted.
+    pub fn revise_outbound_draft_body(
+        &self,
+        draft_id: &str,
+        new_body: &str,
+        author_kind: RevisionAuthorKind,
+    ) -> Result<OutboundDraftRevisionRecord> {
+        let draft = self
+            .outbound_draft_item(draft_id)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "outbound_draft_item",
+                id: draft_id.to_owned(),
+            })?;
+        let batch = self
+            .outbound_draft_batch(&draft.draft_batch_id)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "outbound_draft_batch",
+                id: draft.draft_batch_id.clone(),
+            })?;
+
+        let batch_is_posted = matches!(&batch.approval_state, ApprovalState::Posted)
+            || !self.posted_actions_for_batch(&batch.id)?.is_empty();
+        if batch_is_posted {
+            return Err(StorageError::Conflict {
+                entity: "outbound_draft_revision",
+                id: format!("{draft_id}:posted_batch_edit_rejected"),
+            });
+        }
+
+        let now = time::now_ts();
+        let tx = self.conn.unchecked_transaction()?;
+
+        // Latest existing revision for this draft, if any.
+        let latest: Option<(String, i64)> = tx
+            .query_row(
+                "SELECT id, revision_index
+                 FROM outbound_draft_revisions
+                 WHERE draft_id = ?1
+                 ORDER BY revision_index DESC
+                 LIMIT 1",
+                params![draft_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+
+        // Lazily seed revision 0 (original generated body) on the first revise.
+        let (supersedes_id, next_index) = match latest {
+            Some((id, index)) => (Some(id), index + 1),
+            None => {
+                let original_id = format!("draftrev-{draft_id}-0");
+                tx.execute(
+                    "INSERT INTO outbound_draft_revisions (
+                        id, draft_id, revision_index, body, author_kind,
+                        supersedes_revision_id, row_version, created_at
+                    ) VALUES (?1, ?2, 0, ?3, ?4, NULL, 0, ?5)",
+                    params![
+                        original_id,
+                        draft_id,
+                        draft.body,
+                        RevisionAuthorKind::Agent.as_str(),
+                        now,
+                    ],
+                )?;
+                (Some(original_id), 1_i64)
+            }
+        };
+
+        let revision_id = format!("draftrev-{draft_id}-{next_index}");
+        tx.execute(
+            "INSERT INTO outbound_draft_revisions (
+                id, draft_id, revision_index, body, author_kind,
+                supersedes_revision_id, row_version, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+            params![
+                revision_id,
+                draft_id,
+                next_index,
+                new_body,
+                author_kind.as_str(),
+                supersedes_id,
+                now,
+            ],
+        )?;
+
+        // Mirror the newest body onto the canonical draft row and drop the
+        // edited draft out of Approved (so the readback/posting path is truthful
+        // and fail-closed).
+        tx.execute(
+            "UPDATE outbound_draft_items
+             SET body = ?1,
+                 approval_state = CASE WHEN approval_state = 'Approved' THEN 'Drafted' ELSE approval_state END,
+                 row_version = row_version + 1,
+                 updated_at = ?2
+             WHERE id = ?3",
+            params![new_body, now, draft_id],
+        )?;
+
+        // A live (non-revoked) batch approval is invalidated by any edit.
+        let has_live_approval: bool = tx.query_row(
+            "SELECT COUNT(*)
+                 FROM outbound_batch_approval_tokens
+                 WHERE draft_batch_id = ?1 AND revoked_at IS NULL",
+            params![batch.id],
+            |row| row.get::<_, i64>(0),
+        )? > 0;
+        if has_live_approval {
+            tx.execute(
+                "UPDATE outbound_batch_approval_tokens
+                 SET revoked_at = ?1,
+                     revocation_reason_code = ?2,
+                     row_version = row_version + 1,
+                     updated_at = ?1
+                 WHERE draft_batch_id = ?3 AND revoked_at IS NULL",
+                params![
+                    now,
+                    OUTBOUND_APPROVAL_REVOKED_REASON_DRAFT_REVISED,
+                    batch.id,
+                ],
+            )?;
+            tx.execute(
+                "UPDATE outbound_draft_items
+                 SET approval_state = 'Drafted',
+                     row_version = row_version + 1,
+                     updated_at = ?1
+                 WHERE draft_batch_id = ?2 AND approval_state = 'Approved'",
+                params![now, batch.id],
+            )?;
+            tx.execute(
+                "UPDATE outbound_draft_batches
+                 SET approval_state = 'Drafted',
+                     approved_at = NULL,
+                     row_version = row_version + 1,
+                     updated_at = ?1
+                 WHERE id = ?2 AND approval_state = 'Approved'",
+                params![now, batch.id],
+            )?;
+        }
+
+        tx.commit()?;
+
+        Ok(OutboundDraftRevisionRecord {
+            id: revision_id,
+            draft_id: draft_id.to_owned(),
+            revision_index: next_index,
+            body: new_body.to_owned(),
+            author_kind,
+            supersedes_revision_id: supersedes_id,
+            created_at: now,
+        })
+    }
+
+    /// Full revision lineage for a draft, oldest first (revision 0 = original
+    /// generated body). Empty until the draft has been revised at least once.
+    pub fn outbound_draft_revisions(
+        &self,
+        draft_id: &str,
+    ) -> Result<Vec<OutboundDraftRevisionRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, draft_id, revision_index, body, author_kind, supersedes_revision_id, created_at
+             FROM outbound_draft_revisions
+             WHERE draft_id = ?1
+             ORDER BY revision_index ASC",
+        )?;
+        let rows = stmt.query_map(params![draft_id], |row| {
+            let author_kind: String = row.get(4)?;
+            Ok(OutboundDraftRevisionRecord {
+                id: row.get(0)?,
+                draft_id: row.get(1)?,
+                revision_index: row.get(2)?,
+                body: row.get(3)?,
+                author_kind: RevisionAuthorKind::parse(&author_kind)
+                    .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?,
+                supersedes_revision_id: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?;
+
+        let mut revisions = Vec::new();
+        for row in rows {
+            revisions.push(row?);
+        }
+        Ok(revisions)
+    }
+
+    /// The current (latest) draft body used by posting/readback. Returns the
+    /// newest revision body when the draft has been revised, otherwise the
+    /// canonical draft row body (they are kept identical, so this is the single
+    /// authoritative body accessor for surfaces that want explicit semantics).
+    pub fn current_outbound_draft_body(&self, draft_id: &str) -> Result<Option<String>> {
+        let latest_revision_body: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT body
+                 FROM outbound_draft_revisions
+                 WHERE draft_id = ?1
+                 ORDER BY revision_index DESC
+                 LIMIT 1",
+                params![draft_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(body) = latest_revision_body {
+            return Ok(Some(body));
+        }
+        Ok(self.outbound_draft_item(draft_id)?.map(|draft| draft.body))
+    }
+
+    /// The typed reason a batch's approval token was revoked, if it was revoked
+    /// (e.g. [`OUTBOUND_APPROVAL_REVOKED_REASON_DRAFT_REVISED`]). Lets surfaces
+    /// explain a fail-closed approval invalidation without re-deriving it.
+    pub fn outbound_approval_revocation_reason(&self, batch_id: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT revocation_reason_code
+                 FROM outbound_batch_approval_tokens
+                 WHERE draft_batch_id = ?1",
+                params![batch_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(Option::flatten)
+            .map_err(StorageError::from)
     }
 
     pub fn store_outbound_approval_token(&self, approval: &OutboundApprovalToken) -> Result<()> {
@@ -6981,6 +7279,16 @@ impl RogerStore {
                     params![time::now_ts()],
                 )?;
                 self.conn.pragma_update(None, "user_version", 17)?;
+            }
+
+            if version < 18 {
+                self.conn.execute_batch(MIGRATION_0018)?;
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at)
+                    VALUES (18, 'outbound_draft_revisions', ?1)",
+                    params![time::now_ts()],
+                )?;
+                self.conn.pragma_update(None, "user_version", 18)?;
             }
 
             if migration_class.requires_sidecar_invalidation() {

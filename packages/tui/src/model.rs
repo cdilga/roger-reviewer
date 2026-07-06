@@ -55,6 +55,10 @@ pub enum KeyOutcome {
 /// the session list is not a second peer workspace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
+    /// Explicit session-reentry disambiguation. Listed only when the caller
+    /// hands the cockpit picker candidates (a `PickerRequired` resolution);
+    /// Esc falls back to the full session finder (`Home`).
+    Picker,
     Home,
     SessionHome,
     Findings,
@@ -163,6 +167,81 @@ pub struct SessionRow {
     pub updated_at: i64,
 }
 
+/// One disambiguation candidate for the session picker. The CLI produces these
+/// from `SessionReentryResolution::PickerRequired`; the picker lists only the
+/// candidate sessions for a single repo/PR so the operator can choose which one
+/// to open. `continuity_tier` is optional because the finder projection does
+/// not always carry it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PickerCandidate {
+    pub session_id: String,
+    pub repository: String,
+    pub pull_request: u64,
+    pub provider: String,
+    pub attention_state: String,
+    pub continuity_tier: Option<String>,
+    pub updated_at: i64,
+}
+
+/// Cockpit entry payload. Carries the resolved single session (opens session
+/// home directly) and/or disambiguation candidates (opens the picker). Both
+/// empty means the full session finder is the entry screen.
+#[derive(Clone, Debug, Default)]
+pub struct CockpitEntry {
+    pub initial_session_id: Option<String>,
+    pub picker_candidates: Option<Vec<PickerCandidate>>,
+}
+
+impl CockpitEntry {
+    /// Entry that opens on a resolved single session (or the finder when
+    /// `None`), with no picker candidates.
+    pub fn from_session(initial_session_id: Option<String>) -> Self {
+        Self {
+            initial_session_id,
+            picker_candidates: None,
+        }
+    }
+}
+
+/// Side effect the pure reducer cannot perform itself. The runtime layer drains
+/// this after each key and performs the terminal-coupled work (currently:
+/// suspend the TUI and open `$EDITOR` on a draft body).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModelEffect {
+    /// Open `$EDITOR` on the draft body, then call
+    /// [`CockpitModel::apply_draft_revision`] with the edited text.
+    EditDraft { draft_id: String, body: String },
+}
+
+/// Session-level retrieval/memory posture for the status strip and Search
+/// screen. Projected from the storage semantic-component state.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryPostureRow {
+    /// Default retrieval posture: `hybrid` when the semantic lane is
+    /// operational, otherwise `lexical_only`.
+    pub retrieval_mode: String,
+    pub semantic_operational: bool,
+    pub assets_verified: bool,
+    pub embedder_available: bool,
+    pub embedder_backend: Option<String>,
+    pub degraded_reasons: Vec<String>,
+}
+
+impl MemoryPostureRow {
+    /// One-line summary for the status strip (`retrieval_mode` + semantic
+    /// posture + degraded count).
+    pub fn summary(&self) -> String {
+        let semantic = if self.semantic_operational {
+            "operational".to_owned()
+        } else if self.degraded_reasons.is_empty() {
+            "degraded".to_owned()
+        } else {
+            format!("degraded({})", self.degraded_reasons.len())
+        };
+        format!("retrieval_mode={} semantic={semantic}", self.retrieval_mode)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionHomeView {
     pub findings_total: usize,
@@ -172,6 +251,11 @@ pub struct SessionHomeView {
     pub outbound_counts: Vec<(String, usize)>,
     pub latest_run_id: Option<String>,
     pub latest_run_kind: Option<String>,
+    /// Count of worker stage results submitted for the latest run. Zero with a
+    /// present `latest_run_id` means the run exists but the worker has not
+    /// submitted stage results yet (used by the explained empty-findings
+    /// state).
+    pub latest_run_stage_count: usize,
     pub run_count: usize,
     pub draft_count: usize,
     pub posted_action_count: usize,
@@ -367,6 +451,10 @@ pub struct CockpitModel {
     pub overlay: Overlay,
     pub input_mode: InputMode,
 
+    // Session picker (disambiguation state)
+    pub picker_candidates: Vec<PickerCandidate>,
+    pub picker_cursor: usize,
+
     // Home / global session finder
     pub sessions: Vec<SessionRow>,
     pub session_filter: String,
@@ -400,22 +488,47 @@ pub struct CockpitModel {
     pub search: Option<SearchView>,
     pub search_cursor: usize,
 
+    /// Session-level retrieval/memory posture (status strip + Search screen).
+    pub memory_posture: Option<MemoryPostureRow>,
+
+    /// Side effect the runtime layer must perform (e.g. suspend + open
+    /// `$EDITOR`). Drained by the runtime after each key via [`Self::take_effect`].
+    pub pending_effect: Option<ModelEffect>,
+
     /// One-line status notice (last action result or degraded-state note).
     pub notice: Option<String>,
 }
 
 impl CockpitModel {
-    /// Build the entry model. With a resolved session the cockpit opens on
-    /// session home; otherwise (including ambiguity) Review Home is the entry
-    /// screen.
+    /// Build the entry model from a resolved single session id (or the finder
+    /// when `None`). Thin wrapper over [`Self::bootstrap_with_entry`] so the
+    /// original call site keeps working unchanged.
     pub fn bootstrap(
         backend: &mut dyn CockpitBackend,
         initial_session_id: Option<&str>,
+    ) -> Result<Self, String> {
+        Self::bootstrap_with_entry(
+            backend,
+            &CockpitEntry::from_session(initial_session_id.map(str::to_owned)),
+        )
+    }
+
+    /// Build the entry model from a full [`CockpitEntry`].
+    ///
+    /// Priority: picker candidates (disambiguation) win — the cockpit opens on
+    /// [`Screen::Picker`]. Otherwise a resolved single session opens session
+    /// home; otherwise (including ambiguity with no candidates) Review Home is
+    /// the entry screen.
+    pub fn bootstrap_with_entry(
+        backend: &mut dyn CockpitBackend,
+        entry: &CockpitEntry,
     ) -> Result<Self, String> {
         let mut model = Self {
             screen: Screen::Home,
             overlay: Overlay::None,
             input_mode: InputMode::None,
+            picker_candidates: Vec::new(),
+            picker_cursor: 0,
             sessions: Vec::new(),
             session_filter: String::new(),
             session_cursor: 0,
@@ -438,10 +551,27 @@ impl CockpitModel {
             search_input: String::new(),
             search: None,
             search_cursor: 0,
+            memory_posture: None,
+            pending_effect: None,
             notice: None,
         };
         model.sessions = backend.list_sessions()?;
-        if let Some(session_id) = initial_session_id {
+        // Best-effort posture load so the status strip is truthful from entry;
+        // a failure degrades to "unknown" rather than blocking the cockpit.
+        model.memory_posture = backend.memory_posture().ok();
+
+        let candidates = entry
+            .picker_candidates
+            .as_ref()
+            .filter(|candidates| !candidates.is_empty());
+        if let Some(candidates) = candidates {
+            model.picker_candidates = candidates.clone();
+            model.picker_cursor = 0;
+            model.screen = Screen::Picker;
+            return Ok(model);
+        }
+
+        if let Some(session_id) = entry.initial_session_id.as_deref() {
             if model
                 .sessions
                 .iter()
@@ -456,6 +586,11 @@ impl CockpitModel {
             }
         }
         Ok(model)
+    }
+
+    /// Drain the pending runtime effect (editor suspension, etc.).
+    pub fn take_effect(&mut self) -> Option<ModelEffect> {
+        self.pending_effect.take()
     }
 
     // --- derived views (pure) -------------------------------------------------
@@ -574,6 +709,37 @@ impl CockpitModel {
         }
     }
 
+    /// Explain why the findings queue is empty and what to do next, using the
+    /// loaded session home (latest run + worker stage results). Distinguishes:
+    /// (a) no review run yet, (b) a run exists but the worker has not submitted
+    /// stage results yet, (c) a run completed with zero findings.
+    pub fn findings_empty_explanation(&self) -> Vec<String> {
+        let pr_hint = self
+            .active_session
+            .as_ref()
+            .map(|session| format!("--pr {}", session.pull_request))
+            .unwrap_or_else(|| "--pr <number>".to_owned());
+        match &self.home {
+            // (a) No run has been persisted for this session yet.
+            Some(home) if home.latest_run_id.is_none() => vec![
+                "no review run yet for this session".to_owned(),
+                format!("run rr review {pr_hint} to start a review"),
+            ],
+            // (b) A run exists but the worker has submitted no stage results.
+            Some(home) if home.latest_run_stage_count == 0 => vec![
+                "a review run exists but the worker has not submitted results yet".to_owned(),
+                "check rr status for the worker/session state".to_owned(),
+            ],
+            // (c) A run completed with worker results but produced no findings.
+            Some(_) => vec![
+                "the latest review run completed with zero findings".to_owned(),
+                "nothing to triage for this run".to_owned(),
+            ],
+            // No session home loaded (should not happen on the findings screen).
+            None => vec!["no findings materialized for this session yet".to_owned()],
+        }
+    }
+
     pub fn timeline_entries(&self) -> Vec<TimelineEntry> {
         let Some(timeline) = &self.timeline else {
             return Vec::new();
@@ -644,6 +810,7 @@ impl CockpitModel {
         }
 
         match self.screen {
+            Screen::Picker => self.handle_picker_key(key, backend),
             Screen::Home => self.handle_home_screen_key(key, backend),
             Screen::SessionHome => self.handle_session_home_key(key, backend),
             Screen::Findings => self.handle_findings_key(key, backend),
@@ -773,6 +940,56 @@ impl CockpitModel {
         }
     }
 
+    fn handle_picker_key(&mut self, key: CockpitKey, backend: &mut dyn CockpitBackend) {
+        match key {
+            CockpitKey::Up | CockpitKey::Char('k') => move_cursor_up(&mut self.picker_cursor),
+            CockpitKey::Down | CockpitKey::Char('j') => {
+                move_cursor_down(&mut self.picker_cursor, self.picker_candidates.len());
+            }
+            CockpitKey::Enter => self.open_picker_selection(backend),
+            CockpitKey::Esc => {
+                // Fall back to the full session finder.
+                self.screen = Screen::Home;
+                self.notice = Some("picker dismissed — showing the full session finder".to_owned());
+                self.reload_sessions(backend);
+            }
+            _ => {}
+        }
+    }
+
+    /// Open the session home for the highlighted picker candidate. Prefers the
+    /// canonical [`SessionRow`] from the finder when present, otherwise
+    /// synthesizes one from the candidate so the picker still works when the
+    /// finder projection is filtered differently.
+    fn open_picker_selection(&mut self, backend: &mut dyn CockpitBackend) {
+        let Some(candidate) = self.picker_candidates.get(self.picker_cursor).cloned() else {
+            return;
+        };
+        let session = self
+            .sessions
+            .iter()
+            .find(|row| row.session_id == candidate.session_id)
+            .cloned()
+            .unwrap_or_else(|| SessionRow {
+                session_id: candidate.session_id.clone(),
+                repository: candidate.repository.clone(),
+                pull_request: candidate.pull_request,
+                provider: candidate.provider.clone(),
+                attention_state: candidate.attention_state.clone(),
+                updated_at: candidate.updated_at,
+            });
+        match backend.load_session_home(&session.session_id) {
+            Ok(home) => {
+                self.active_session = Some(session);
+                self.home = Some(home);
+                self.screen = Screen::SessionHome;
+                self.notice = None;
+                self.reset_per_session_state();
+            }
+            Err(err) => self.notice = Some(format!("error: {err}")),
+        }
+    }
+
     fn handle_home_screen_key(&mut self, key: CockpitKey, backend: &mut dyn CockpitBackend) {
         match key {
             CockpitKey::Up | CockpitKey::Char('k') => move_cursor_up(&mut self.session_cursor),
@@ -796,7 +1013,7 @@ impl CockpitModel {
             CockpitKey::Char('f') => self.open_findings(backend),
             CockpitKey::Char('d') => self.open_drafts(backend),
             CockpitKey::Char('t') => self.open_timeline(backend),
-            CockpitKey::Char('s') => self.open_search(),
+            CockpitKey::Char('s') => self.open_search(backend),
             CockpitKey::Char('c') => self.notice = Some(CLARIFY_HINT.to_owned()),
             CockpitKey::Esc => {
                 self.screen = Screen::Home;
@@ -914,11 +1131,57 @@ impl CockpitModel {
             CockpitKey::Down | CockpitKey::Char('j') => {
                 move_cursor_down(&mut self.item_cursor, self.batch_items.len());
             }
+            CockpitKey::Char('e') => self.request_draft_edit(),
             CockpitKey::Esc => {
                 self.screen = Screen::Drafts;
                 self.open_batch_id = None;
             }
             _ => {}
+        }
+    }
+
+    /// Emit the editor-suspension effect for the focused draft item. The runtime
+    /// layer opens `$EDITOR` on the body and calls back into
+    /// [`Self::apply_draft_revision`] with the edited text.
+    fn request_draft_edit(&mut self) {
+        let Some(item) = self.batch_items.get(self.item_cursor) else {
+            return;
+        };
+        self.pending_effect = Some(ModelEffect::EditDraft {
+            draft_id: item.draft_id.clone(),
+            body: item.body.clone(),
+        });
+    }
+
+    /// Persist an edited draft body through the same storage revision path a
+    /// future `rr` draft-edit command will use, then reload the batch items so
+    /// the read-only preview reflects the revision truthfully. Called by the
+    /// runtime after the operator's editor exits.
+    pub fn apply_draft_revision(
+        &mut self,
+        draft_id: &str,
+        new_body: &str,
+        backend: &mut dyn CockpitBackend,
+    ) {
+        match backend.revise_draft_body(draft_id, new_body) {
+            Ok(()) => {
+                if let Some(batch_id) = self.open_batch_id.clone() {
+                    match backend.load_batch_items(&batch_id) {
+                        Ok(items) => {
+                            self.batch_items = items;
+                            self.item_cursor = self
+                                .item_cursor
+                                .min(self.batch_items.len().saturating_sub(1));
+                        }
+                        Err(err) => {
+                            self.notice = Some(format!("error: {err}"));
+                            return;
+                        }
+                    }
+                }
+                self.notice = Some(format!("revised draft {draft_id} body"));
+            }
+            Err(err) => self.notice = Some(format!("draft edit failed: {err}")),
         }
     }
 
@@ -975,19 +1238,23 @@ impl CockpitModel {
                 self.home = Some(home);
                 self.screen = Screen::SessionHome;
                 self.notice = None;
-                // Session switch resets per-session working state.
-                self.selected_findings.clear();
-                self.finding_filter.clear();
-                self.finding_cursor = 0;
-                self.finding_detail = None;
-                self.search = None;
-                self.search_input.clear();
-                self.search_cursor = 0;
-                self.timeline = None;
-                self.timeline_cursor = 0;
+                self.reset_per_session_state();
             }
             Err(err) => self.notice = Some(format!("error: {err}")),
         }
+    }
+
+    /// Reset per-session working state on a session switch.
+    fn reset_per_session_state(&mut self) {
+        self.selected_findings.clear();
+        self.finding_filter.clear();
+        self.finding_cursor = 0;
+        self.finding_detail = None;
+        self.search = None;
+        self.search_input.clear();
+        self.search_cursor = 0;
+        self.timeline = None;
+        self.timeline_cursor = 0;
     }
 
     fn open_session_home_for_active(&mut self, backend: &mut dyn CockpitBackend) {
@@ -1080,10 +1347,15 @@ impl CockpitModel {
         }
     }
 
-    fn open_search(&mut self) {
+    fn open_search(&mut self, backend: &mut dyn CockpitBackend) {
         if self.active_session.is_none() {
             self.notice = Some("open a session before searching its repo scope".to_owned());
             return;
+        }
+        // Refresh the memory posture so the Search screen and status strip show
+        // the current retrieval mode and any degraded reasons.
+        if let Ok(posture) = backend.memory_posture() {
+            self.memory_posture = Some(posture);
         }
         self.screen = Screen::Search;
         self.input_mode = InputMode::SearchQuery;

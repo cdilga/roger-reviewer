@@ -203,3 +203,109 @@ fn triage_robot_arg_validation_matches_outbound_command_conformance() {
     );
     assert_eq!(bad_state_payload["data"]["requested_state"], "approved");
 }
+
+#[test]
+fn global_help_leads_with_the_seven_verbs_and_hides_bridge() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = runtime_for(&temp);
+
+    let help = run_rr(&["--help"], &runtime);
+    assert_eq!(help.exit_code, 0, "{}", help.stderr);
+    assert!(help.stdout.contains("The seven verbs:"), "{}", help.stdout);
+    for verb in [
+        "rr doctor",
+        "rr queue",
+        "rr review",
+        "rr open",
+        "rr findings",
+        "rr send",
+        "rr setup",
+    ] {
+        assert!(
+            help.stdout.contains(verb),
+            "missing {verb} in help:\n{}",
+            help.stdout
+        );
+    }
+    // Container forms are advertised.
+    assert!(help.stdout.contains("rr send post"), "{}", help.stdout);
+    assert!(
+        help.stdout.contains("rr setup extension"),
+        "{}",
+        help.stdout
+    );
+    assert!(help.stdout.contains("rr api docs"), "{}", help.stdout);
+    // bridge disappears from operator help, and the aspirational line is gone.
+    assert!(
+        !help.stdout.contains("rr bridge "),
+        "bridge leaked into help:\n{}",
+        help.stdout
+    );
+    assert!(!help.stdout.contains("moving toward"), "{}", help.stdout);
+}
+
+#[test]
+fn per_command_help_is_available_at_any_position_exit_zero() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = runtime_for(&temp);
+
+    for (args, needle) in [
+        (&["review", "--help"][..], "rr review"),
+        (&["review", "--pr", "5", "-h"][..], "rr review"),
+        (&["send", "--help"][..], "rr send"),
+        (&["send", "post", "--help"][..], "rr send"),
+        (&["setup", "--help"][..], "rr setup"),
+        (&["setup", "assets", "-h"][..], "rr setup"),
+        (&["api", "docs", "--help"][..], "rr api docs"),
+        (&["findings", "--help"][..], "rr findings"),
+    ] {
+        let result = run_rr(args, &runtime);
+        assert_eq!(
+            result.exit_code, 0,
+            "args={args:?} stderr={}",
+            result.stderr
+        );
+        assert!(
+            result.stderr.is_empty(),
+            "args={args:?} stderr={}",
+            result.stderr
+        );
+        assert!(
+            result.stdout.contains(needle),
+            "args={args:?} missing {needle}:\n{}",
+            result.stdout
+        );
+    }
+}
+
+#[test]
+fn send_and_findings_containers_route_to_underlying_robot_schema_ids() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = runtime_for(&temp);
+
+    // rr send post emits the post schema id (blocked on missing draft, but the
+    // envelope proves the routing).
+    let post = run_rr(&["send", "post", "--batch", "missing", "--robot"], &runtime);
+    let post_payload = parse_robot_payload(&post.stdout);
+    assert_eq!(post_payload["schema_id"], "rr.robot.post.v1");
+
+    // rr findings --sessions routes to the sessions handler.
+    let sessions = run_rr(&["findings", "--sessions", "--robot"], &runtime);
+    let sessions_payload = parse_robot_payload(&sessions.stdout);
+    assert_eq!(sessions_payload["schema_id"], "rr.robot.sessions.v1");
+
+    // rr findings --query routes to the search handler.
+    let search = run_rr(&["findings", "--query", "auth", "--robot"], &runtime);
+    let search_payload = parse_robot_payload(&search.stdout);
+    assert_eq!(search_payload["schema_id"], "rr.robot.search.v1");
+}
+
+#[test]
+fn send_edit_is_reserved_not_unknown() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = runtime_for(&temp);
+
+    let edit = run_rr(&["send", "edit", "--draft", "d1"], &runtime);
+    assert_eq!(edit.exit_code, 2, "{}", edit.stdout);
+    assert!(edit.stderr.contains("not yet available"), "{}", edit.stderr);
+}

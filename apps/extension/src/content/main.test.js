@@ -7,6 +7,9 @@ const {
   BRIDGE_DISCONNECT_GUIDANCE,
   STATUS_MIRROR_SETTLE_TIMEOUT_MS,
   formatLaunchSuccessStatus,
+  describeLaunchProgress,
+  handleLaunchProgressMessage,
+  LISTING_STATUS_CLASS,
   requestStatusMirror,
   triggerLaunch,
   GITHUB_ACTION_BUTTON_CLASS,
@@ -2162,4 +2165,142 @@ test('ziv8.4 fixture: fail-closed rendering when the bridge is unavailable or er
   assert.equal(controlB.children[1].dataset.state, 'error');
   assert.match(controlB.children[1].textContent, /Bridge preflight failed/);
   assert.match(controlB.children[1].textContent, /rr extension doctor/);
+});
+
+// --- ack/progress protocol: launch-progress rendering -----------------------
+
+test('describeLaunchProgress maps host stages to loud, human status lines', () => {
+  assert.equal(describeLaunchProgress('host_started'), 'Roger host connected — running preflight…');
+  assert.equal(describeLaunchProgress('preflight_ok'), 'Launching review…');
+  // Unknown/future stages render as nothing rather than a raw enum token.
+  assert.equal(describeLaunchProgress('something_new'), null);
+  assert.equal(describeLaunchProgress(undefined), null);
+});
+
+test('handleLaunchProgressMessage renders progress into the PR-detail panel status', () => {
+  const dom = makePanelDom();
+  const previousWindow = global.window;
+  const previousDocument = global.document;
+  global.window = { location: { pathname: '/acme/widgets/pull/42', search: '' } };
+  global.document = dom.documentStub;
+  try {
+    const handled = handleLaunchProgressMessage(
+      {
+        type: 'roger_bridge_launch_progress',
+        stage: 'host_started',
+        intent: { action: 'start_review', owner: 'acme', repo: 'widgets', pr_number: 42 },
+      },
+      dom.documentStub
+    );
+    assert.equal(handled, true);
+    assert.equal(dom.statusNode.hidden, false);
+    assert.equal(dom.statusNode.textContent, 'Roger host connected — running preflight…');
+    assert.equal(dom.infoNode.textContent, 'Roger host connected — running preflight…');
+
+    // A second stage supersedes the first in the same persistent line.
+    handleLaunchProgressMessage(
+      {
+        type: 'roger_bridge_launch_progress',
+        stage: 'preflight_ok',
+        intent: { action: 'start_review', owner: 'acme', repo: 'widgets', pr_number: 42 },
+      },
+      dom.documentStub
+    );
+    assert.equal(dom.statusNode.textContent, 'Launching review…');
+  } finally {
+    global.window = previousWindow;
+    global.document = previousDocument;
+  }
+});
+
+test('handleLaunchProgressMessage ignores progress for a different PR', () => {
+  const dom = makePanelDom();
+  const previousWindow = global.window;
+  const previousDocument = global.document;
+  global.window = { location: { pathname: '/acme/widgets/pull/42', search: '' } };
+  global.document = dom.documentStub;
+  try {
+    const handled = handleLaunchProgressMessage(
+      {
+        type: 'roger_bridge_launch_progress',
+        stage: 'host_started',
+        intent: { action: 'start_review', owner: 'acme', repo: 'widgets', pr_number: 999 },
+      },
+      dom.documentStub
+    );
+    assert.equal(handled, false);
+    assert.equal(dom.statusNode.hidden, true);
+    assert.equal(dom.statusNode.textContent, '');
+  } finally {
+    global.window = previousWindow;
+    global.document = previousDocument;
+  }
+});
+
+test('handleLaunchProgressMessage routes progress to the matching listing row status', () => {
+  const { doc, context } = makeListingPageFixture();
+  ensurePrListingRowControls(doc, context, { chrome: { runtime: {} } });
+  const control = listingControlForOwner(doc, 'cdilga', 'roger-reviewer', 101);
+  assert.ok(control, 'row control must be mounted for the test');
+
+  const previousWindow = global.window;
+  // Listing route: parsePullRequestContext returns null so the panel branch is
+  // skipped and only the row is updated.
+  global.window = { location: { pathname: '/cdilga/roger-reviewer/pulls', search: '' } };
+  try {
+    const handled = handleLaunchProgressMessage(
+      {
+        type: 'roger_bridge_launch_progress',
+        stage: 'host_started',
+        intent: { action: 'start_review', owner: 'cdilga', repo: 'roger-reviewer', pr_number: 101 },
+      },
+      doc
+    );
+    assert.equal(handled, true);
+    const statusNode = control.children[1];
+    assert.equal(statusNode.hidden, false);
+    assert.equal(statusNode.textContent, 'Roger host connected — running preflight…');
+    assert.equal(statusNode.dataset.state, 'pending');
+
+    // A non-matching row is untouched.
+    const other = listingControlForOwner(doc, 'cdilga', 'roger-reviewer', 102);
+    assert.equal(other.children[1].hidden, true);
+  } finally {
+    global.window = previousWindow;
+  }
+});
+
+test('status probe silent degrade now renders a visible mirror-unavailable note', () => {
+  const dom = makePanelDom();
+  const previousDocument = global.document;
+  const previousChrome = global.chrome;
+  global.document = dom.documentStub;
+  delete global.chrome;
+  try {
+    requestStatusMirror(TEST_CONTEXT);
+    assert.match(dom.infoNode.textContent, /Local status mirror unavailable/i);
+  } finally {
+    global.document = previousDocument;
+    if (previousChrome === undefined) {
+      delete global.chrome;
+    } else {
+      global.chrome = previousChrome;
+    }
+  }
+});
+
+test('manifest content_scripts cover both the PR-detail and PR-listing routes', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const manifestPath = path.join(__dirname, '..', '..', 'manifest.template.json');
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  const matches = (manifest.content_scripts || []).flatMap((entry) => entry.matches || []);
+  assert.ok(
+    matches.some((m) => m.includes('/pull/')),
+    'content_scripts must match the PR-detail route (…/pull/*)'
+  );
+  assert.ok(
+    matches.some((m) => m.includes('/pulls')),
+    'content_scripts must match the PR-listing route (…/pulls*) so row controls are not dead code'
+  );
 });

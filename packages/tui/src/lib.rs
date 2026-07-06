@@ -25,11 +25,12 @@ mod view;
 
 pub use backend::{CockpitBackend, StoreCockpitBackend};
 pub use model::{
-    APPROVE_CONFIRMATION_WORD, ApproveOutcome, CLARIFY_HINT, CockpitKey, CockpitModel,
-    DecisionEventRow, DraftBatchRow, DraftItemRow, ELEVATED_MUTATION_HINT, EMPTY_STORE_HINT,
-    EvidenceRow, FindingDetail, FindingRow, GroupKey, InputMode, KeyOutcome, LAUNCH_DEFERRED_HINT,
-    OutboundLinkRow, Overlay, PostedActionRow, Screen, SearchHitRow, SearchView, SessionHomeView,
-    SessionRow, SortKey, StageResultRow, TimelineEntry, TimelineRunRow, TimelineView, TriageAction,
+    APPROVE_CONFIRMATION_WORD, ApproveOutcome, CLARIFY_HINT, CockpitEntry, CockpitKey,
+    CockpitModel, DecisionEventRow, DraftBatchRow, DraftItemRow, ELEVATED_MUTATION_HINT,
+    EMPTY_STORE_HINT, EvidenceRow, FindingDetail, FindingRow, GroupKey, InputMode, KeyOutcome,
+    LAUNCH_DEFERRED_HINT, MemoryPostureRow, ModelEffect, OutboundLinkRow, Overlay, PickerCandidate,
+    PostedActionRow, Screen, SearchHitRow, SearchView, SessionHomeView, SessionRow, SortKey,
+    StageResultRow, TimelineEntry, TimelineRunRow, TimelineView, TriageAction,
 };
 
 use roger_storage::{RogerStore, StorageError};
@@ -83,7 +84,25 @@ impl std::error::Error for TuiError {}
 ///
 /// Interactive-only: callers must verify TTY posture before invoking; this
 /// function assumes stdin/stdout are an interactive terminal.
+///
+/// Thin wrapper over [`run_cockpit_with_entry`] that opens on the config's
+/// resolved single session (or the finder). Existing callers keep working
+/// unchanged; the session-picker path uses [`run_cockpit_with_entry`].
 pub fn run_cockpit(config: RogerTuiConfig) -> Result<TuiExit, TuiError> {
+    let entry = CockpitEntry::from_session(config.initial_session_id.clone());
+    run_cockpit_with_entry(config, entry)
+}
+
+/// Open the operator cockpit for a full [`CockpitEntry`].
+///
+/// When `entry.picker_candidates` is present and non-empty the cockpit opens on
+/// the disambiguation picker; otherwise it behaves like [`run_cockpit`]. The
+/// CLI stitches `SessionReentryResolution::PickerRequired` candidates here.
+/// `entry.initial_session_id` takes precedence over `config.initial_session_id`.
+pub fn run_cockpit_with_entry(
+    config: RogerTuiConfig,
+    entry: CockpitEntry,
+) -> Result<TuiExit, TuiError> {
     let store = match RogerStore::open(&config.store_root) {
         Ok(store) => store,
         Err(StorageError::Conflict { entity, id }) if entity == "store_migration_policy" => {
@@ -97,13 +116,19 @@ pub fn run_cockpit(config: RogerTuiConfig) -> Result<TuiExit, TuiError> {
     };
 
     let mut backend = StoreCockpitBackend::new(store, config.repo.clone(), config.pr);
-    let model = CockpitModel::bootstrap(&mut backend, config.initial_session_id.as_deref())
-        .map_err(TuiError::Storage)?;
+    let model =
+        CockpitModel::bootstrap_with_entry(&mut backend, &entry).map_err(TuiError::Storage)?;
 
     #[cfg(unix)]
     {
-        run_ftui_program(app::CockpitApp::new(model, backend))
-            .map_err(|err| TuiError::Terminal(err.to_string()))?;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        let force_repaint = Arc::new(AtomicBool::new(false));
+        run_ftui_program(
+            app::CockpitApp::new(model, backend, Arc::clone(&force_repaint)),
+            force_repaint,
+        )
+        .map_err(|err| TuiError::Terminal(err.to_string()))?;
         Ok(TuiExit::Quit)
     }
     // The interactive event source is termios-based; Windows support is a
@@ -120,7 +145,10 @@ pub fn run_cockpit(config: RogerTuiConfig) -> Result<TuiExit, TuiError> {
 /// Drive the cockpit through the ftui runtime with the Roger-owned raw-mode
 /// TTY event source (see `tty.rs` for why ftui's own backends are not used).
 #[cfg(unix)]
-fn run_ftui_program(cockpit: app::CockpitApp) -> std::io::Result<()> {
+fn run_ftui_program(
+    cockpit: app::CockpitApp,
+    force_repaint: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::io::Result<()> {
     use ftui::runtime::{BackendFeatures, Program, ProgramConfig};
     use ftui::{TerminalCapabilities, TerminalWriter};
 
@@ -134,7 +162,7 @@ fn run_ftui_program(cockpit: app::CockpitApp) -> std::io::Result<()> {
     // Ctrl-C as a key event; no ftui signal interception layer is installed.
     config.intercept_signals = false;
 
-    let events = tty::RogerTtyEventSource::open()?;
+    let events = tty::RogerTtyEventSource::open(force_repaint)?;
     let capabilities = TerminalCapabilities::with_overrides();
     let writer = TerminalWriter::with_diff_config(
         std::io::stdout(),

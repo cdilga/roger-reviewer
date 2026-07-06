@@ -2,6 +2,7 @@
 
 use roger_bridge::{BridgeLaunchIntent, BridgeResponse};
 use roger_cli::CliRuntime;
+use serde_json::Value;
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
@@ -28,19 +29,60 @@ fn encode_native_intent(intent: &BridgeLaunchIntent) -> Vec<u8> {
     wire
 }
 
+/// Split a native-messaging byte stream into its length-prefixed JSON frames.
+fn decode_native_frames(stdout: &[u8]) -> Vec<Value> {
+    let mut frames = Vec::new();
+    let mut offset = 0;
+    while offset + 4 <= stdout.len() {
+        let len = u32::from_le_bytes([
+            stdout[offset],
+            stdout[offset + 1],
+            stdout[offset + 2],
+            stdout[offset + 3],
+        ]) as usize;
+        offset += 4;
+        assert!(
+            offset + len <= stdout.len(),
+            "native host frame length prefix overruns buffer"
+        );
+        let frame: Value = serde_json::from_slice(&stdout[offset..offset + len])
+            .expect("decode native host frame payload");
+        frames.push(frame);
+        offset += len;
+    }
+    assert_eq!(offset, stdout.len(), "trailing bytes after final frame");
+    frames
+}
+
+/// The launch path now streams ack/progress frames ahead of the final response.
+/// The first frame must be the `host_started` ack; the final frame is the
+/// `BridgeResponse`; any progress frames in between carry the launch-progress
+/// schema. Returns the decoded final response.
 fn decode_native_response(stdout: &[u8]) -> BridgeResponse {
-    assert!(
-        stdout.len() >= 4,
-        "native host output missing length prefix: {} bytes",
-        stdout.len()
-    );
-    let len = u32::from_le_bytes([stdout[0], stdout[1], stdout[2], stdout[3]]) as usize;
+    let frames = decode_native_frames(stdout);
+    assert!(!frames.is_empty(), "native host produced no frames");
+
+    let (last, progress) = frames.split_last().expect("at least one frame");
     assert_eq!(
-        stdout.len(),
-        4 + len,
-        "native host output length prefix mismatch"
+        progress
+            .first()
+            .and_then(|f| f.get("stage"))
+            .and_then(|s| s.as_str()),
+        Some("host_started"),
+        "first frame must be the host_started ack"
     );
-    serde_json::from_slice(&stdout[4..]).expect("decode native host response payload")
+    for frame in progress {
+        assert_eq!(
+            frame.get("schema").and_then(|s| s.as_str()),
+            Some("roger.bridge.launch-progress.v1"),
+            "non-final frames must be launch-progress frames"
+        );
+    }
+    assert!(
+        last.get("schema").is_none(),
+        "final response frame must not carry the launch-progress schema"
+    );
+    serde_json::from_value(last.clone()).expect("decode native host response payload")
 }
 
 fn prepend_path(dir: &Path) -> OsString {

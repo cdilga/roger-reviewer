@@ -1057,9 +1057,11 @@ function requestStatusMirror(context) {
   };
 
   // Reused launch-only degrade branch: the panel can still start Roger actions,
-  // it just does not own live local session state.
+  // it just does not own live local session state. The default message is a
+  // VISIBLE one-line "mirror unavailable" note — the status probe used to
+  // degrade silently (showing nothing), which hid a real broken-mirror signal.
   const degradeToLaunchOnly = (
-    message = 'Launch-only mode. Open Roger locally (`rr status`) for authoritative detail.'
+    message = 'Local status mirror unavailable — launch-only mode. Open Roger locally (`rr status`) for authoritative detail.'
   ) => {
     applyMirroredModel(null, null);
     clearAttentionBadge();
@@ -2269,6 +2271,109 @@ function bootstrapRogerPanel() {
 
   refreshPanelForCurrentPage(document);
   registerNavigationHooks(document);
+  registerLaunchProgressListener(document);
+}
+
+// Map a host launch-progress stage to the persistent one-liner Roger renders
+// while a launch is in flight. Unknown stages return null (rendered as nothing)
+// so a future stage never surfaces a raw enum token to the user.
+function describeLaunchProgress(stage) {
+  if (stage === 'host_started') {
+    return 'Roger host connected — running preflight…';
+  }
+  if (stage === 'preflight_ok') {
+    return 'Launching review…';
+  }
+  return null;
+}
+
+// Render a host launch-progress frame into the persistent status areas of
+// whichever surface the progressing launch belongs to. The PR-detail panel is
+// updated only when the frame's target matches the visible PR; a matching
+// listing row (if present) gets its own row-local status. Best-effort and
+// side-effect scoped: it never resolves any launch promise or clears a result.
+function handleLaunchProgressMessage(message, rootDocument) {
+  const doc =
+    rootDocument || (typeof document !== 'undefined' ? document : null);
+  if (!message || message.type !== 'roger_bridge_launch_progress' || !doc) {
+    return false;
+  }
+
+  const text = describeLaunchProgress(message.stage);
+  if (!text) {
+    return false;
+  }
+
+  const intent = message.intent && typeof message.intent === 'object' ? message.intent : {};
+  let rendered = false;
+
+  // PR-detail panel: only when the progressing target is the visible PR.
+  const context = parsePullRequestContext();
+  if (
+    context &&
+    context.owner === intent.owner &&
+    context.repo === intent.repo &&
+    Number(context.pr_number) === Number(intent.pr_number)
+  ) {
+    setStatus(text, false, { revealInline: true });
+    setInfoMessage(text);
+    rendered = true;
+  }
+
+  // Listing row: route to the matching row's status node when one is mounted.
+  if (
+    typeof intent.owner === 'string' &&
+    typeof intent.repo === 'string' &&
+    typeof doc.getElementById === 'function'
+  ) {
+    const controlId = listingControlIdForTarget({
+      owner: intent.owner,
+      repo: intent.repo,
+      pr_number: intent.pr_number,
+    });
+    const control = doc.getElementById(controlId);
+    const statusNode = findListingStatusNode(control);
+    if (statusNode) {
+      setListingRowStatus(statusNode, text, 'pending');
+      rendered = true;
+    }
+  }
+
+  return rendered;
+}
+
+// Locate a listing control's status node, preferring the real-DOM querySelector
+// and falling back to a direct child scan (keeps this robust across DOM shims).
+function findListingStatusNode(control) {
+  if (!control) {
+    return null;
+  }
+  if (typeof control.querySelector === 'function') {
+    const viaQuery = control.querySelector(`.${LISTING_STATUS_CLASS}`);
+    if (viaQuery) {
+      return viaQuery;
+    }
+  }
+  const children = Array.isArray(control.children) ? control.children : [];
+  for (const child of children) {
+    const className = typeof child.className === 'string' ? child.className : '';
+    if (className.split(/\s+/).includes(LISTING_STATUS_CLASS)) {
+      return child;
+    }
+  }
+  return null;
+}
+
+// Listen for the background worker's launch-progress fan-out (delivered over
+// chrome.tabs.sendMessage to this content script). Registered once at bootstrap.
+function registerLaunchProgressListener(rootDocument) {
+  if (typeof chrome === 'undefined' || !chrome.runtime?.onMessage?.addListener) {
+    return;
+  }
+  chrome.runtime.onMessage.addListener((message) => {
+    handleLaunchProgressMessage(message, rootDocument);
+    return false;
+  });
 }
 
 function formatLaunchSuccessStatus(response) {
@@ -2414,6 +2519,9 @@ if (typeof module !== 'undefined' && module.exports) {
     BRIDGE_DISCONNECT_GUIDANCE,
     STATUS_MIRROR_SETTLE_TIMEOUT_MS,
     formatLaunchSuccessStatus,
+    describeLaunchProgress,
+    handleLaunchProgressMessage,
+    registerLaunchProgressListener,
     requestStatusMirror,
     triggerLaunch,
     GITHUB_ACTION_BUTTON_CLASS,

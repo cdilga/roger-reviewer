@@ -140,6 +140,18 @@ function appendGuidance(message, guidance) {
   return `${normalizedBase} ${extra}`.trim();
 }
 
+// Map a host launch-progress stage to the one-liner the popup shows in its
+// subtitle while a launch is in flight (mirrors the in-page panel wording).
+function describeLaunchProgress(stage) {
+  if (stage === 'host_started') {
+    return 'Roger host connected — running preflight…';
+  }
+  if (stage === 'preflight_ok') {
+    return 'Launching review…';
+  }
+  return null;
+}
+
 function routePopupAction(action, context, dispatch) {
   if (typeof dispatch !== 'function') {
     throw new Error('Popup action dispatcher must be a function.');
@@ -448,9 +460,35 @@ async function syncPopupActionModel(context) {
   }
 }
 
+// Render the background worker's launch-progress fan-out (delivered to the
+// popup over the runtime broadcast, since the popup is not a tab) into the
+// subtitle. Best-effort: a dropped frame never affects the final launch result.
+function handleLaunchProgressMessage(message) {
+  if (!message || message.type !== 'roger_bridge_launch_progress') {
+    return false;
+  }
+  const text = describeLaunchProgress(message.stage);
+  if (!text) {
+    return false;
+  }
+  setSubtitle(text);
+  return true;
+}
+
+function registerLaunchProgressListener() {
+  if (typeof chrome === 'undefined' || !chrome.runtime?.onMessage?.addListener) {
+    return;
+  }
+  chrome.runtime.onMessage.addListener((message) => {
+    handleLaunchProgressMessage(message);
+    return false;
+  });
+}
+
 async function bootstrapPopup() {
   try {
     wireInfoAffordance();
+    registerLaunchProgressListener();
     renderBuildLabel(readExtensionBuildLabel());
     const activeTab = await queryActiveTab();
     const viewModel = buildPopupViewModel(activeTab?.url || '');
@@ -473,6 +511,9 @@ if (typeof module !== 'undefined' && module.exports) {
     ACTIONS,
     BRIDGE_DISCONNECT_GUIDANCE,
     appendGuidance,
+    describeLaunchProgress,
+    handleLaunchProgressMessage,
+    registerLaunchProgressListener,
     NON_PR_SUBTITLE,
     PR_SUBTITLE,
     FINDINGS_VISIBLE_ATTENTION_STATES,
