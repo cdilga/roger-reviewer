@@ -75,6 +75,20 @@ fn tui_human_mode_fails_closed_without_interactive_terminal() {
 }
 
 #[test]
+fn open_alias_routes_to_tui_cockpit() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = runtime(temp.path().join("store"), temp.path().to_path_buf());
+
+    let result = run_rr(&["open"], &runtime);
+    assert_ne!(result.exit_code, 0, "non-TTY human launch must fail closed");
+    let combined = format!("{}{}", result.stdout, result.stderr);
+    assert!(
+        combined.contains("rr tui requires an interactive terminal"),
+        "{combined}"
+    );
+}
+
+#[test]
 fn tui_rejects_unsupported_flags() {
     let temp = tempdir().expect("tempdir");
     let runtime = runtime(temp.path().join("store"), temp.path().to_path_buf());

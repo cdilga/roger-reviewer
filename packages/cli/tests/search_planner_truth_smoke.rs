@@ -153,8 +153,7 @@ fn search_robot_surfaces_recovery_scan_as_healthy_empty_fallback() {
     assert_eq!(payload["schema_id"], "rr.robot.search.v1");
     assert_eq!(payload["outcome"], "empty");
     assert_eq!(
-        payload["data"]["fallback"]["semantic_available"],
-        false,
+        payload["data"]["fallback"]["semantic_available"], false,
         "{}",
         search.stdout
     );

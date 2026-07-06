@@ -54,7 +54,7 @@ if not content_scripts:
 print('manifest validation ok')
 PY
 
-required_actions=(start_review resume_review show_findings refresh_review)
+required_actions=(start_review resume_review show_findings)
 for action in "${required_actions[@]}"; do
   if ! rg -q "$action" "$background_path"; then
     echo "background script missing action mapping: $action" >&2

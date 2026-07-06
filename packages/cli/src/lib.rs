@@ -44,10 +44,9 @@ use roger_storage::{
     OutboundSurfaceProjection, PriorReviewLookupQuery, PriorReviewRetrievalMode,
     ResolveSessionLaunchBinding, ResolveSessionLocalRoot, ResolveSessionReentry,
     ReviewLaunchFinalizationError, ReviewSessionRecord, RogerStore, SemanticAssetManifest,
-    SemanticComponentState, SemanticEmbedderAdapter, SessionBindingResolution,
-    SessionFinderEntry, SessionFinderQuery, SessionLaunchBindingRecord, SessionReentryResolution,
-    StorageError, StorageLayout, UpdateLaunchAttempt, derive_finding_fingerprint,
-    semantic_embedder_status,
+    SemanticComponentState, SemanticEmbedderAdapter, SessionBindingResolution, SessionFinderEntry,
+    SessionFinderQuery, SessionLaunchBindingRecord, SessionReentryResolution, StorageError,
+    StorageLayout, UpdateLaunchAttempt, derive_finding_fingerprint, semantic_embedder_status,
 };
 use rusqlite::{Connection as SqliteConnection, OpenFlags};
 use serde::{Serialize, de::DeserializeOwned};
@@ -600,7 +599,7 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         "resume" => CommandKind::Resume,
         "return" => CommandKind::Return,
         "sessions" => CommandKind::Sessions,
-        "prs" => CommandKind::Prs,
+        "prs" | "queue" => CommandKind::Prs,
         "search" => CommandKind::Search,
         "triage" => CommandKind::Triage,
         "draft" => CommandKind::Draft,
@@ -612,7 +611,7 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
         "robot-docs" => CommandKind::RobotDocs,
         "findings" => CommandKind::Findings,
         "status" => CommandKind::Status,
-        "tui" => CommandKind::Tui,
+        "tui" | "open" => CommandKind::Tui,
         "assets" => CommandKind::Assets,
         "-h" | "--help" | "help" => {
             return Err("help requested".to_owned());
@@ -1034,8 +1033,7 @@ fn parse_args(argv: &[String]) -> Result<ParsedArgs, String> {
     // session or PR target. Accepting --session/--pr silently (inert) would
     // break the deliberate per-command flag-gating discipline and mislead the
     // operator, so reject them as command-irrelevant for rr search.
-    if parsed.command == CommandKind::Search
-        && (parsed.session_id.is_some() || parsed.pr.is_some())
+    if parsed.command == CommandKind::Search && (parsed.session_id.is_some() || parsed.pr.is_some())
     {
         return Err(
             "--session/--pr are not valid for rr search; rr search is corpus-scoped and does not bind a review session or PR target".to_owned(),
@@ -2917,9 +2915,13 @@ fn handle_doctor(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             // a recommendation to rerun doctor against it would immediately fail
             // closed; do not list it as a doctor-serviceable target.
             return blocked_response(
-                format!("rr doctor cannot resolve provider '{}': {}", parsed.provider, err.message),
+                format!(
+                    "rr doctor cannot resolve provider '{}': {}",
+                    parsed.provider, err.message
+                ),
                 vec![
-                    "rerun rr doctor with one of: opencode, codex, gemini, claude, copilot".to_owned(),
+                    "rerun rr doctor with one of: opencode, codex, gemini, claude, copilot"
+                        .to_owned(),
                 ],
                 json!({
                     "reason_code": err.reason_code,
@@ -6669,7 +6671,8 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let planned_not_live_providers = runtime_planned_not_live_review_providers(runtime);
     if !supported_providers.contains(&parsed.provider.as_str()) {
         let mut repair_actions = vec![
-            "use --provider opencode for tier-b CLI continuity on the current live CLI surface".to_owned(),
+            "use --provider opencode for tier-b CLI continuity on the current live CLI surface"
+                .to_owned(),
             "use --provider codex for bounded tier-a start/reseed support".to_owned(),
             "use --provider gemini for bounded tier-a start/reseed support".to_owned(),
             "use --provider claude for bounded tier-a start/reseed support".to_owned(),
@@ -9140,27 +9143,28 @@ fn handle_assets_install(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRe
     // the probe proves it loads + runs inference. Any network/load failure is a
     // fail-closed blocked outcome — we never record an unverifiable model.
     let model = roger_storage::FastEmbedModel::default();
-    let probe = match roger_storage::probe_semantic_embedder(roger_storage::FastEmbedAdapterConfig {
-        model,
-        cache_dir: asset_root.clone(),
-        show_download_progress: false,
-    }) {
-        Ok(probe) => probe,
-        Err(err) => {
-            return blocked_response(
-                format!("failed to download or load the semantic model: {err}"),
-                vec![
-                    "confirm network access to huggingface.co and retry rr assets install"
-                        .to_owned(),
-                ],
-                json!({
-                    "subcommand": "install",
-                    "reason_code": "semantic_model_download_or_load_failed",
-                    "model_id": model.model_id(),
-                }),
-            );
-        }
-    };
+    let probe =
+        match roger_storage::probe_semantic_embedder(roger_storage::FastEmbedAdapterConfig {
+            model,
+            cache_dir: asset_root.clone(),
+            show_download_progress: false,
+        }) {
+            Ok(probe) => probe,
+            Err(err) => {
+                return blocked_response(
+                    format!("failed to download or load the semantic model: {err}"),
+                    vec![
+                        "confirm network access to huggingface.co and retry rr assets install"
+                            .to_owned(),
+                    ],
+                    json!({
+                        "subcommand": "install",
+                        "reason_code": "semantic_model_download_or_load_failed",
+                        "model_id": model.model_id(),
+                    }),
+                );
+            }
+        };
 
     // Digest the exact on-disk model tree the embedder loaded. This is the
     // stable, re-verifiable proof recorded in the manifest; `rr assets verify`
@@ -9578,7 +9582,9 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         (
             mode.as_str(),
             "semantic_assets_unverified",
-            json!("run rr assets install --asset semantic-default to enable hybrid semantic retrieval"),
+            json!(
+                "run rr assets install --asset semantic-default to enable hybrid semantic retrieval"
+            ),
         )
     } else if !embedder_operational {
         (
@@ -9590,7 +9596,9 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         (
             mode.as_str(),
             "semantic_sidecar_or_candidates_unavailable",
-            json!("semantic assets verified but the semantic index/candidates are not yet ready; lexical fallback is serving results"),
+            json!(
+                "semantic assets verified but the semantic index/candidates are not yet ready; lexical fallback is serving results"
+            ),
         )
     };
     let fallback = json!({
@@ -14639,9 +14647,7 @@ fn runtime_planned_not_live_review_providers(_runtime: &CliRuntime) -> Vec<&'sta
     Vec::new()
 }
 
-fn runtime_feature_gated_disabled_review_providers(
-    _runtime: &CliRuntime,
-) -> Vec<&'static str> {
+fn runtime_feature_gated_disabled_review_providers(_runtime: &CliRuntime) -> Vec<&'static str> {
     if copilot_feature_gated_launch_enabled(session_copilot::PROVIDER_ID) {
         Vec::new()
     } else {
@@ -14813,7 +14819,10 @@ fn blocked_picker_response(reason: String, candidates: Vec<SessionFinderEntry>) 
             vec!["session inference is ambiguous; explicit selection is required".to_owned()]
         }
         PickerBlockKind::SingleBlocked => {
-            vec!["the matching review session is blocked and cannot be auto-selected; see reason".to_owned()]
+            vec![
+                "the matching review session is blocked and cannot be auto-selected; see reason"
+                    .to_owned(),
+            ]
         }
     };
     let repair_actions = match kind {
@@ -15398,7 +15407,77 @@ fn next_id(prefix: &str) -> String {
 }
 
 fn usage_text() -> &'static str {
-    "Roger Reviewer (rr) — local-first pull request review for GitHub.\nDurable sessions, structured findings, and an explicit approval gate before\nanything is posted back to GitHub.\n\nUsage:\n  rr <command> [options]\n\nNew here? Try:\n  rr doctor                                    check your local + provider setup\n  rr prs                                       list open PRs as a review queue\n  rr review --pr <number> --provider opencode  start reviewing a PR\n\nReview:\n  rr prs [--repo owner/repo] [--limit <n>] [--robot]\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude|copilot] [--dry-run] [--robot]\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]\n  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr tui [--repo owner/repo] [--pr <number>] [--session <id>]\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]\n  rr search --query <text> [--query-mode auto|exact_lookup|recall|related_context|candidate_audit] [--repo owner/repo] [--limit <n>] [--robot]\n\nOutbound (explicit, gated):\n  rr triage [--repo owner/repo] [--pr <number>] [--session <id>] --finding <id>... --state <state> [--robot]\n  rr draft [--repo owner/repo] [--pr <number>] [--session <id>] (--finding <id>... | --all-findings) [--robot]\n  rr approve [--repo owner/repo] [--pr <number>] [--session <id>] --batch <draft-batch-id> [--robot]\n  rr post [--repo owner/repo] [--pr <number>] [--session <id>] --batch <draft-batch-id> [--robot]\n\nSetup & health:\n  rr init [--robot]\n  rr doctor [--provider opencode|codex|gemini|claude|copilot|pi-agent] [--robot]\n  rr update [--repo owner/repo] [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--api-root <url>] [--download-root <url>] [--target <triple>] [--yes|-y] [--dry-run] [--robot]\n  rr extension doctor [--browser edge|chrome|brave] [--install-root <path>] [--package-dir <path>] [--robot]\n  rr extension fetch [--version <YYYY.MM.DD[-rc.N]>] [--download-root <url>] [--repo owner/repo] [--robot]\n  rr extension setup [--browser edge|chrome|brave] [--install-root <path>] [--package-dir <path>] [--robot]\n  rr extension uninstall [--install-root <path>] [--robot]\n\nIntegration & agents (advanced):\n  rr agent <operation> --task-file <path> [--request-file <path>] [--context-file <path>] [--capability-file <path>]\n  rr bridge export-contracts [--robot]\n  rr bridge install [--extension-id <id>] [--bridge-binary <path>] [--install-root <path>] [--robot]\n  rr bridge pack-extension [--output-dir <path>] [--robot]\n  rr bridge uninstall [--install-root <path>] [--robot]\n  rr bridge verify-contracts [--robot]\n  rr robot-docs [guide|commands|schemas|workflows] [--robot]\n\nAgent transport:\n  - rr agent is the dedicated in-session worker transport; it is separate from --robot\n  - current live rr agent operations cover context/status/search/finding/artifact reads, advisory clarification or follow-up proposals, and worker.submit_stage_result\n  - rr agent emits rr.agent.response.v1 envelopes over the canonical worker operation response payload instead of reusing the --robot surface\n\nProvider support on the current live CLI surface:\n  - opencode is the first-class tier-b continuity path; rr resume can reopen and rr return is supported\n  - codex, gemini, and claude are bounded tier-a providers; start/reseed/raw-capture only, no locator reopen or rr return\n  - copilot is feature-gated bounded tier-b support; enable with RR_ENABLE_COPILOT_PROVIDER=1 for verified start, locator/session-id reopen, rr return, and honest ResumeBundle reseed fallback\n  - pi-agent is not part of the current live CLI surface\n\nBootstrap notes:\n  - the Roger store bootstraps automatically on first use; rr init stays available as an explicit idempotent bootstrap\n  - rr init bootstraps Roger-owned local store state only and records a local init marker\n  - rr init does not verify provider auth/install readiness\n  - rr doctor verifies local bootstrap and provider prerequisites but defers auth proof to first launch\n\nOutbound notes:\n  - rr triage records the operator's local triage decision; rr draft only accepts findings triaged to accepted\n  - rr triage --state accepts accepted, ignored, needs_follow_up, or resolved; new and stale are Roger-derived\n  - rr draft materializes Roger-owned local draft batches only; it does not approve or post to GitHub\n  - rr approve records a local approval token for one exact stored batch payload and target tuple; it does not post to GitHub\n  - rr post executes only one exact Roger-approved stored batch on the bound target and returns a truthful success/partial/failure envelope\n  - draft selection is explicit in this slice: pass one or more --finding ids or --all-findings, then approve with --batch\n  - stale persisted review state fails closed before Roger derives or approves outbound payloads\n\nExtension notes:\n  - rr extension setup/doctor resolve the unpacked package in order: explicit --package-dir, Roger dev workspace pack output, then the installed layout under <store_root>/bridge/extension-package/<version>/roger-extension-unpacked\n  - rr extension fetch downloads the published extension.zip for this binary's release (or --version), verifies it against the release checksums, and installs it into the installed layout; local/unpublished builds fail closed\n  - branded Google Chrome 137+ ignores --load-extension: load the unpacked package once via chrome://extensions (Developer mode -> Load unpacked); Edge/Brave still honor the flag-based launch\n\nUpdate notes:\n  - default rr update apply prompts for confirmation on interactive TTY\n  - pass --yes|-y for non-interactive apply confirmation; --robot apply requires --yes|-y\n  - --dry-run and --robot without --yes are non-mutating metadata checks\n  - local/unpublished builds fail closed; migration-capable updates are deferred for now\n\nMore:\n  - most commands accept --robot for a structured JSON envelope (see each command's options above)\n  - machine-readable command and schema reference: rr robot-docs [guide|commands|schemas|workflows]\n  - update in place with: rr update"
+    r#"Roger Reviewer (rr) — local-first pull request review for GitHub.
+Durable sessions, structured findings, and an explicit approval gate before
+anything is posted back to GitHub.
+
+Usage:
+  rr <command> [options]
+
+Primary flow:
+  rr doctor                                    check local + provider setup
+  rr queue                                     list open PRs needing review
+  rr review --pr <number>                      start a review
+  rr resume --pr <number>                      re-enter an existing review
+  rr open                                      open the local review cockpit
+
+Core commands:
+  rr queue [--repo owner/repo] [--limit <n>] [--robot]        alias for rr prs
+  rr prs [--repo owner/repo] [--limit <n>] [--robot]
+  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude|copilot] [--dry-run] [--robot]
+  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]
+  rr open [--repo owner/repo] [--pr <number>] [--session <id>] alias for rr tui
+  rr tui [--repo owner/repo] [--pr <number>] [--session <id>]
+  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]
+  rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]
+  rr search --query <text> [--query-mode auto|exact_lookup|recall|related_context|candidate_audit] [--repo owner/repo] [--limit <n>] [--robot]
+
+Send to GitHub, explicitly gated:
+  rr triage --finding <id>... --state accepted|ignored|needs_follow_up|resolved [--session <id>] [--robot]
+  rr draft (--finding <id>... | --all-findings) [--session <id>] [--robot]
+  rr approve --batch <draft-batch-id> [--session <id>] [--robot]
+  rr post --batch <draft-batch-id> [--session <id>] [--robot]
+
+Setup:
+  rr init [--robot]
+  rr doctor [--provider opencode|codex|gemini|claude|copilot|pi-agent] [--robot]
+  rr update [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--yes|-y] [--dry-run] [--robot]
+  rr extension setup|doctor|fetch|uninstall [--browser edge|chrome|brave] [--robot]
+
+Advanced / machine interfaces:
+  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]
+  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]
+  rr bridge export-contracts|verify-contracts|pack-extension|install|uninstall [--robot]
+  rr assets install|status|verify [--robot]
+  rr robot-docs [guide|commands|schemas|workflows] [--robot]
+  rr agent <operation> --task-file <path> [--request-file <path>] [--context-file <path>] [--capability-file <path>]
+
+Agent transport:
+  - rr agent is the dedicated in-session worker transport; it is separate from --robot
+  - current live rr agent operations cover context/status/search/finding/artifact reads, advisory clarification or follow-up proposals, and worker.submit_stage_result
+  - rr agent emits rr.agent.response.v1 envelopes over the canonical worker operation response payload instead of reusing the --robot surface
+
+Provider support on the current live CLI surface:
+  - opencode is the first-class tier-b continuity path; rr resume can reopen and rr return is supported
+  - codex, gemini, and claude are bounded tier-a providers; start/reseed/raw-capture only, no locator reopen or rr return
+  - copilot is feature-gated bounded tier-b support; enable with RR_ENABLE_COPILOT_PROVIDER=1 for verified start, locator/session-id reopen, rr return, and honest ResumeBundle reseed fallback
+  - pi-agent is not part of the current live CLI surface
+
+Safety notes:
+  - rr triage records local triage only
+  - rr draft materializes local draft batches only
+  - rr approve records a local approval token only
+  - rr post executes only one exact Roger-approved stored batch
+  - stale persisted review state fails closed before Roger derives, approves, or posts outbound payloads
+
+Browser note:
+  - Chrome 137+ ignores --load-extension; load the unpacked package once via chrome://extensions
+  - Edge and Brave still honor the guided preloaded-extension launch path
+
+More:
+  - machine-readable command and schema reference: rr robot-docs [guide|commands|schemas|workflows]
+  - compatibility names stay supported while the operator surface moves toward: doctor, queue, review, open, findings, send, setup
+"#
 }
 
 #[cfg(test)]
@@ -15429,7 +15508,8 @@ mod tests {
         // be mislabeled "session inference is ambiguous; ... ({} candidates)"
         // with a self-referential "--session <id>" repair the caller had
         // already satisfied. The truthful block surfaces the concrete reason.
-        let reason = "launch binding is stale: binding cwd is outside current worktree root".to_owned();
+        let reason =
+            "launch binding is stale: binding cwd is outside current worktree root".to_owned();
         assert!(matches!(
             classify_picker_block(&reason, &[finder_entry(2)]),
             PickerBlockKind::SingleBlocked
@@ -15454,16 +15534,24 @@ mod tests {
     #[test]
     fn picker_block_classification_covers_no_match_and_genuine_ambiguity() {
         assert!(matches!(
-            classify_picker_block("no matching repo-local session found for pull request 9", &[]),
+            classify_picker_block(
+                "no matching repo-local session found for pull request 9",
+                &[]
+            ),
             PickerBlockKind::NoMatch
         ));
         let multi = vec![finder_entry(2), finder_entry(6)];
         assert!(matches!(
-            classify_picker_block("multiple repo-local sessions found; open session picker", &multi),
+            classify_picker_block(
+                "multiple repo-local sessions found; open session picker",
+                &multi
+            ),
             PickerBlockKind::Ambiguous
         ));
-        let response =
-            blocked_picker_response("ambiguous repo-local session match; picker required".to_owned(), multi);
+        let response = blocked_picker_response(
+            "ambiguous repo-local session match; picker required".to_owned(),
+            multi,
+        );
         assert!(
             response.message.contains("multiple review sessions match"),
             "genuine ambiguity must still offer the picker: {}",

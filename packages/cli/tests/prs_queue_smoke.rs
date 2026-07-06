@@ -445,6 +445,25 @@ fn prs_human_output_renders_compact_aligned_table() {
 }
 
 #[test]
+fn queue_alias_routes_to_prs_review_queue() {
+    let temp = tempdir().expect("tempdir");
+    let (_guard, _log_path) = install_fake_gh(&temp, FakeGhMode::ListPayload(TWO_OPEN_PRS_PAYLOAD));
+    let repo = init_repo(&temp);
+    let runtime = CliRuntime {
+        cwd: repo,
+        store_root: temp.path().join("roger-store"),
+        opencode_bin: "opencode".to_owned(),
+    };
+
+    let result = run_rr(&["queue", "--robot"], &runtime);
+    assert_eq!(result.exit_code, 0, "{}", result.stderr);
+    let payload = parse_robot_payload(&result.stdout);
+    assert_eq!(payload["schema_id"], "rr.robot.prs.v1");
+    assert_eq!(payload["command"], "rr prs");
+    assert_eq!(payload["data"]["items"].as_array().expect("items").len(), 2);
+}
+
+#[test]
 fn prs_robot_compact_format_projects_queue_essentials() {
     let temp = tempdir().expect("tempdir");
     let (_guard, _log_path) = install_fake_gh(&temp, FakeGhMode::ListPayload(TWO_OPEN_PRS_PAYLOAD));

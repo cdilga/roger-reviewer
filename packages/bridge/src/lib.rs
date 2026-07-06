@@ -207,10 +207,9 @@ pub enum NativeBridgeMessage {
 pub fn read_native_bridge_message<R: Read>(reader: &mut R) -> Result<NativeBridgeMessage> {
     let value = read_native_value(reader)?;
     if value.get("type").and_then(|v| v.as_str()) == Some("roger_bridge_status") {
-        let probe: BridgeStatusProbe = serde_json::from_value(value)
-            .map_err(|e| BridgeError::NativeMessagingReadError(format!(
-                "invalid status probe payload: {e}"
-            )))?;
+        let probe: BridgeStatusProbe = serde_json::from_value(value).map_err(|e| {
+            BridgeError::NativeMessagingReadError(format!("invalid status probe payload: {e}"))
+        })?;
         return Ok(NativeBridgeMessage::StatusProbe(probe));
     }
     let intent: BridgeLaunchIntent = serde_json::from_value(value).map_err(|e| {
@@ -234,9 +233,8 @@ fn read_native_value<R: Read>(reader: &mut R) -> Result<serde_json::Value> {
     reader.read_exact(&mut body).map_err(|e| {
         BridgeError::NativeMessagingReadError(format!("failed to read message body: {e}"))
     })?;
-    serde_json::from_slice(&body).map_err(|e| {
-        BridgeError::NativeMessagingReadError(format!("invalid message JSON: {e}"))
-    })
+    serde_json::from_slice(&body)
+        .map_err(|e| BridgeError::NativeMessagingReadError(format!("invalid message JSON: {e}")))
 }
 
 /// Write an arbitrary serializable native message (used for status-probe

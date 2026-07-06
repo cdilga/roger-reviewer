@@ -155,27 +155,32 @@ artifacts, see [docs/DEV_MACHINE_ONBOARDING.md](docs/DEV_MACHINE_ONBOARDING.md).
 
 ## Commands
 
+Roger's operator surface is intentionally organized around a small set of
+verbs: check the environment, choose work, review, inspect, and send only after
+explicit approval. Older exact command names remain supported as compatibility
+aliases where noted.
+
 | Command | What it does |
 | --- | --- |
-| `rr prs` | List open pull requests as a review queue joined with local Roger state |
+| `rr doctor --provider opencode` | Run local + provider preflight checks with fail-closed guidance |
+| `rr queue` (`rr prs`) | List open pull requests as a review queue joined with local Roger state |
 | `rr review --pr 123 --provider opencode` | Start a review for a pull request |
 | `rr resume --pr 123` | Re-enter the existing review for that pull request |
-| `rr tui` | Open the local review cockpit (sessions, findings, drafts, timeline, search) |
-| `rr init` | Optional explicit bootstrap; the store auto-creates on first use |
-| `rr doctor --provider opencode` | Run local + provider preflight checks with fail-closed guidance |
+| `rr open` (`rr tui`) | Open the local review cockpit (sessions, findings, drafts, timeline, search) |
 | `rr status` | Show the current session, attention state, and next step |
 | `rr findings` | Inspect the structured findings Roger has materialized |
+| `rr search --query "auth"` | Search prior local review memory and evidence |
 | `rr triage --finding <id> --state accepted` | Record your local triage decision on a finding |
 | `rr draft --finding <id>` | Materialize a local outbound draft batch from accepted findings |
 | `rr approve --batch <id>` | Record a local approval token for one exact draft batch |
 | `rr post --batch <id>` | Post one approved batch to GitHub and record the audit trail |
-| `rr sessions` | List local review sessions |
-| `rr search --query "auth"` | Search prior local review memory and evidence |
+| `rr init` | Optional explicit bootstrap; the store auto-creates on first use |
 | `rr return --pr 123` | Rebind a dropped-out bare OpenCode or feature-gated Copilot session back to Roger |
 | `rr update` | Self-update `rr` from the latest published GitHub release |
 | `rr extension fetch` | Download and verify the published extension package for this release |
 | `rr extension setup --browser edge` | Set up the optional browser companion |
 | `rr extension doctor --browser edge` | Verify the browser companion path |
+| `rr sessions` | List local review sessions; mostly useful for automation and recovery |
 
 ## Blessed Paths
 

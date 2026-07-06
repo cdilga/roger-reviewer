@@ -21,6 +21,19 @@ const {
   deriveActionModel,
   mountInto,
   parsePullRequestContext,
+  parsePullRequestListContext,
+  isOpenOnlyListingQuery,
+  parsePullTargetHref,
+  extractPrListingRowTargets,
+  PR_LISTING_ROUTE,
+  LISTING_START_LABEL,
+  LISTING_CONTROL_CLASS,
+  LISTING_BUTTON_CLASS,
+  listingControlIdForTarget,
+  createListingRowControl,
+  ensurePrListingRowControls,
+  removeAllListingControls,
+  refreshPrListingControls,
   pickInlineAnchorSelector,
   resolvePanelPlacement,
   setStatus,
@@ -1274,4 +1287,879 @@ test('requestStatusMirror settles exactly once: a late worker reply after the fa
     global.setTimeout = previousSetTimeout;
     global.clearTimeout = previousClearTimeout;
   }
+});
+
+// ---------------------------------------------------------------------------
+// PR-listing route + row-target discovery (bead ziv8.1)
+// ---------------------------------------------------------------------------
+
+function makeListingNode(tagName, props = {}) {
+  const attributes = new Map();
+  if (props.href) {
+    attributes.set('href', props.href);
+  }
+  if (props.ariaLabel) {
+    attributes.set('aria-label', props.ariaLabel);
+  }
+  if (props.testid) {
+    attributes.set('data-testid', props.testid);
+  }
+  return {
+    tagName: String(tagName).toUpperCase(),
+    className: props.className || '',
+    textContent: props.textContent || '',
+    dataset: {},
+    children: [],
+    parentElement: null,
+    getAttribute(name) {
+      return attributes.has(name) ? attributes.get(name) : null;
+    },
+    setAttribute(name, value) {
+      attributes.set(name, String(value));
+    },
+    appendChild(child) {
+      this.children.push(child);
+      child.parentElement = this;
+      return child;
+    },
+  };
+}
+
+function makeListingDocument(roots) {
+  const body = makeListingNode('BODY');
+  for (const root of roots) {
+    body.appendChild(root);
+  }
+  return {
+    body,
+    querySelectorAll(selector) {
+      if (selector !== 'a[href]') {
+        return [];
+      }
+      const out = [];
+      const walk = (node) => {
+        for (const child of node.children) {
+          if (child.tagName === 'A' && child.getAttribute('href')) {
+            out.push(child);
+          }
+          walk(child);
+        }
+      };
+      walk(body);
+      return out;
+    },
+  };
+}
+
+// Build a list row container with one primary PR link, an optional review-state
+// marker, and any number of extra (possibly foreign/non-PR) links.
+function makeListingRow({ testid = 'issue-row', className, href, state, extraLinks = [] } = {}) {
+  const row = makeListingNode('DIV', { testid, className });
+  if (state) {
+    row.appendChild(makeListingNode('SPAN', { ariaLabel: `${state} pull request` }));
+  }
+  if (href) {
+    row.appendChild(makeListingNode('A', { href }));
+  }
+  for (const link of extraLinks) {
+    row.appendChild(makeListingNode('A', { href: link }));
+  }
+  return row;
+}
+
+const LISTING_REPO_CONTEXT = {
+  owner: 'octo',
+  repo: 'roger-reviewer',
+  route: PR_LISTING_ROUTE,
+  openOnly: true,
+};
+
+test('parsePullRequestListContext recognizes repository PR list routes', () => {
+  const base = parsePullRequestListContext({
+    pathname: '/octo/roger-reviewer/pulls',
+    search: '',
+  });
+  assert.equal(base.route, PR_LISTING_ROUTE);
+  assert.equal(base.owner, 'octo');
+  assert.equal(base.repo, 'roger-reviewer');
+  assert.equal(base.openOnly, true);
+
+  const filtered = parsePullRequestListContext({
+    pathname: '/octo/roger-reviewer/pulls',
+    search: '?q=is%3Apr+is%3Aopen',
+  });
+  assert.equal(filtered.route, PR_LISTING_ROUTE);
+  assert.equal(filtered.openOnly, true);
+
+  const closedFilter = parsePullRequestListContext({
+    pathname: '/octo/roger-reviewer/pulls',
+    search: '?q=is%3Apr+is%3Aclosed',
+  });
+  assert.equal(closedFilter.route, PR_LISTING_ROUTE);
+  assert.equal(closedFilter.openOnly, false);
+});
+
+test('parsePullRequestListContext stays separate from the PR-detail route', () => {
+  // Detail pages and other non-listing pages never resolve as a listing route.
+  assert.equal(
+    parsePullRequestListContext({ pathname: '/octo/roger-reviewer/pull/42', search: '' }),
+    null
+  );
+  assert.equal(
+    parsePullRequestListContext({ pathname: '/octo/roger-reviewer', search: '' }),
+    null
+  );
+  assert.equal(
+    parsePullRequestListContext({ pathname: '/octo/roger-reviewer/issues', search: '' }),
+    null
+  );
+  assert.equal(parsePullRequestListContext({ pathname: '/', search: '' }), null);
+  // The global cross-repo /pulls dashboard is out of scope.
+  assert.equal(parsePullRequestListContext({ pathname: '/pulls', search: '' }), null);
+
+  // SPA navigation: detail -> list flips discovery on without disturbing the
+  // PR-detail route contract.
+  const detailLoc = { pathname: '/octo/roger-reviewer/pull/42', search: '' };
+  const listLoc = { pathname: '/octo/roger-reviewer/pulls', search: '' };
+  assert.equal(parsePullRequestListContext(detailLoc), null);
+  assert.equal(parsePullRequestListContext(listLoc).route, PR_LISTING_ROUTE);
+});
+
+test('isOpenOnlyListingQuery treats default and is:open as open-only', () => {
+  assert.equal(isOpenOnlyListingQuery(''), true);
+  assert.equal(isOpenOnlyListingQuery('?page=2'), true);
+  assert.equal(isOpenOnlyListingQuery('?q=is%3Aopen'), true);
+  assert.equal(isOpenOnlyListingQuery('?q=is%3Aclosed'), false);
+  assert.equal(isOpenOnlyListingQuery('?q=is%3Amerged'), false);
+  assert.equal(isOpenOnlyListingQuery('?q=is%3Apr+is%3Aall'), false);
+  // A query with no explicit state qualifier can surface closed PRs, so it is
+  // not treated as open-only.
+  assert.equal(isOpenOnlyListingQuery('?q=is%3Apr+author%3Aocto'), false);
+});
+
+test('parsePullTargetHref normalizes repo PR links and rejects others', () => {
+  assert.deepEqual(parsePullTargetHref('/octo/roger-reviewer/pull/7', 'octo', 'roger-reviewer'), {
+    owner: 'octo',
+    repo: 'roger-reviewer',
+    pr_number: 7,
+  });
+  // Sub-page links normalize to the base PR target.
+  assert.deepEqual(
+    parsePullTargetHref('/octo/roger-reviewer/pull/7/files', 'octo', 'roger-reviewer'),
+    { owner: 'octo', repo: 'roger-reviewer', pr_number: 7 }
+  );
+  // Absolute hrefs resolve the same way.
+  assert.deepEqual(
+    parsePullTargetHref('https://github.com/octo/roger-reviewer/pull/9', 'octo', 'roger-reviewer'),
+    { owner: 'octo', repo: 'roger-reviewer', pr_number: 9 }
+  );
+  // Foreign repos and non-PR links are rejected.
+  assert.equal(parsePullTargetHref('/other/repo/pull/3', 'octo', 'roger-reviewer'), null);
+  assert.equal(parsePullTargetHref('/octo/roger-reviewer/issues/3', 'octo', 'roger-reviewer'), null);
+  assert.equal(parsePullTargetHref('/octo/roger-reviewer/compare', 'octo', 'roger-reviewer'), null);
+  assert.equal(parsePullTargetHref('/octo/roger-reviewer/pull/abc', 'octo', 'roger-reviewer'), null);
+});
+
+test('extractPrListingRowTargets dedups per row and ignores foreign/non-PR links', () => {
+  const row1 = makeListingRow({
+    href: '/octo/roger-reviewer/pull/10',
+    state: 'open',
+    extraLinks: ['/octo/roger-reviewer/pull/10', '/octo/roger-reviewer/pull/10/files'],
+  });
+  const row2 = makeListingRow({
+    href: '/octo/roger-reviewer/pull/11',
+    state: 'open',
+    extraLinks: ['/other/repo/pull/99', '/octo/roger-reviewer/issues/5'],
+  });
+  const dom = makeListingDocument([row1, row2]);
+
+  const targets = extractPrListingRowTargets(dom, LISTING_REPO_CONTEXT);
+  assert.equal(targets.length, 2);
+  assert.deepEqual(
+    targets.map((t) => t.pr_number).sort((a, b) => a - b),
+    [10, 11]
+  );
+  assert.equal(targets[0].row_node, row1);
+  assert.equal(targets[1].row_node, row2);
+  assert.equal(targets[0].owner, 'octo');
+  assert.equal(targets[0].repo, 'roger-reviewer');
+});
+
+test('extractPrListingRowTargets recognizes classic js-issue-row containers', () => {
+  const classicRow = makeListingNode('DIV', { className: 'js-issue-row' });
+  classicRow.appendChild(
+    makeListingNode('SPAN', { className: 'octicon octicon-git-pull-request color-fg-open' })
+  );
+  classicRow.appendChild(makeListingNode('A', { href: '/octo/roger-reviewer/pull/50' }));
+  const dom = makeListingDocument([classicRow]);
+
+  const targets = extractPrListingRowTargets(dom, LISTING_REPO_CONTEXT);
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0].pr_number, 50);
+  assert.equal(targets[0].row_node, classicRow);
+});
+
+test('extractPrListingRowTargets excludes closed and merged rows but keeps drafts', () => {
+  const dom = makeListingDocument([
+    makeListingRow({ href: '/octo/roger-reviewer/pull/1', state: 'open' }),
+    makeListingRow({ href: '/octo/roger-reviewer/pull/2', state: 'closed' }),
+    makeListingRow({ href: '/octo/roger-reviewer/pull/3', state: 'merged' }),
+    makeListingRow({ href: '/octo/roger-reviewer/pull/4', state: 'draft' }),
+  ]);
+
+  const targets = extractPrListingRowTargets(dom, LISTING_REPO_CONTEXT);
+  assert.deepEqual(
+    targets.map((t) => t.pr_number).sort((a, b) => a - b),
+    [1, 4]
+  );
+});
+
+test('extractPrListingRowTargets includes stateless rows only on open-only routes', () => {
+  const statelessRow = () => makeListingRow({ href: '/octo/roger-reviewer/pull/20' });
+
+  const openOnly = extractPrListingRowTargets(
+    makeListingDocument([statelessRow()]),
+    LISTING_REPO_CONTEXT
+  );
+  assert.equal(openOnly.length, 1);
+
+  const broad = extractPrListingRowTargets(makeListingDocument([statelessRow()]), {
+    ...LISTING_REPO_CONTEXT,
+    openOnly: false,
+  });
+  assert.equal(broad.length, 0);
+});
+
+test('extractPrListingRowTargets degrades when PR links are not inside a row container', () => {
+  // A repository-level action bar link to a PR (no list-row container) must not
+  // produce a misplaced target.
+  const actionBar = makeListingNode('DIV', { className: 'gh-header-actions' });
+  actionBar.appendChild(makeListingNode('A', { href: '/octo/roger-reviewer/pull/77' }));
+  const dom = makeListingDocument([actionBar]);
+  assert.deepEqual(extractPrListingRowTargets(dom, LISTING_REPO_CONTEXT), []);
+
+  // Non-listing context and malformed documents degrade to no targets.
+  assert.deepEqual(extractPrListingRowTargets(dom, null), []);
+  assert.deepEqual(extractPrListingRowTargets(dom, { route: 'pr_detail' }), []);
+  assert.deepEqual(extractPrListingRowTargets(null, LISTING_REPO_CONTEXT), []);
+});
+
+test('extractPrListingRowTargets is idempotent and side-effect free across rerenders', () => {
+  const row1 = makeListingRow({ href: '/octo/roger-reviewer/pull/30', state: 'open' });
+  const row2 = makeListingRow({ href: '/octo/roger-reviewer/pull/31', state: 'open' });
+  const dom = makeListingDocument([row1, row2]);
+  const childCountBefore = row1.children.length;
+
+  const first = extractPrListingRowTargets(dom, LISTING_REPO_CONTEXT);
+  const second = extractPrListingRowTargets(dom, LISTING_REPO_CONTEXT);
+
+  assert.equal(first.length, 2);
+  assert.equal(second.length, 2);
+  assert.deepEqual(
+    first.map((t) => t.pr_number),
+    second.map((t) => t.pr_number)
+  );
+  assert.equal(first[0].row_node, second[0].row_node);
+  // Extraction never mutates the DOM it reads.
+  assert.equal(dom.body.children.length, 2);
+  assert.equal(row1.children.length, childCountBefore);
+});
+
+test('extractPrListingRowTargets collapses duplicate rerendered rows for the same PR', () => {
+  // PJAX/Turbo can transiently double-render a row; the unique-target contract
+  // must keep one target rather than two.
+  const dom = makeListingDocument([
+    makeListingRow({ href: '/octo/roger-reviewer/pull/40', state: 'open' }),
+    makeListingRow({ href: '/octo/roger-reviewer/pull/40', state: 'open' }),
+  ]);
+
+  const targets = extractPrListingRowTargets(dom, LISTING_REPO_CONTEXT);
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0].pr_number, 40);
+});
+
+// ---------------------------------------------------------------------------
+// PR-listing row control rendering (bead ziv8.2)
+// ---------------------------------------------------------------------------
+
+function makeRenderNode(tagName, props = {}) {
+  const attrs = new Map();
+  if (props.href) {
+    attrs.set('href', props.href);
+  }
+  if (props.ariaLabel) {
+    attrs.set('aria-label', props.ariaLabel);
+  }
+  if (props.testid) {
+    attrs.set('data-testid', props.testid);
+  }
+  return {
+    tagName: String(tagName).toUpperCase(),
+    id: props.id || '',
+    className: props.className || '',
+    textContent: props.textContent || '',
+    disabled: false,
+    dataset: {},
+    style: {},
+    children: [],
+    parentElement: null,
+    _listeners: {},
+    getAttribute(name) {
+      return attrs.has(name) ? attrs.get(name) : null;
+    },
+    setAttribute(name, value) {
+      attrs.set(name, String(value));
+    },
+    appendChild(child) {
+      this.children.push(child);
+      child.parentElement = this;
+      return child;
+    },
+    remove() {
+      const parent = this.parentElement;
+      if (parent) {
+        const index = parent.children.indexOf(this);
+        if (index >= 0) {
+          parent.children.splice(index, 1);
+        }
+        this.parentElement = null;
+      }
+    },
+    addEventListener(type, fn) {
+      if (!this._listeners[type]) {
+        this._listeners[type] = [];
+      }
+      this._listeners[type].push(fn);
+    },
+    click() {
+      for (const fn of this._listeners.click || []) {
+        fn();
+      }
+    },
+  };
+}
+
+function makeRenderDocument(rootNodes) {
+  const head = makeRenderNode('HEAD');
+  const body = makeRenderNode('BODY');
+  for (const node of rootNodes) {
+    body.appendChild(node);
+  }
+  const collectAll = () => {
+    const out = [];
+    const walk = (node) => {
+      for (const child of node.children) {
+        out.push(child);
+        walk(child);
+      }
+    };
+    walk(head);
+    walk(body);
+    return out;
+  };
+  return {
+    head,
+    body,
+    createElement(tag) {
+      return makeRenderNode(tag);
+    },
+    getElementById(id) {
+      for (const node of collectAll()) {
+        if (node.id === id) {
+          return node;
+        }
+      }
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector === 'a[href]') {
+        return collectAll().filter((n) => n.tagName === 'A' && n.getAttribute('href'));
+      }
+      if (selector === `.${LISTING_CONTROL_CLASS}`) {
+        return collectAll().filter(
+          (n) =>
+            typeof n.className === 'string' &&
+            n.className.split(/\s+/).includes(LISTING_CONTROL_CLASS)
+        );
+      }
+      return [];
+    },
+  };
+}
+
+function makeRenderRow({ testid = 'issue-row', href, state } = {}) {
+  const row = makeRenderNode('DIV', { testid });
+  if (state) {
+    row.appendChild(makeRenderNode('SPAN', { ariaLabel: `${state} pull request` }));
+  }
+  if (href) {
+    row.appendChild(makeRenderNode('A', { href }));
+  }
+  return row;
+}
+
+function listingButtonsIn(node, out = []) {
+  for (const child of node.children) {
+    if (child.tagName === 'BUTTON') {
+      out.push(child);
+    }
+    listingButtonsIn(child, out);
+  }
+  return out;
+}
+
+test('ensurePrListingRowControls renders one start control per eligible open row', () => {
+  const openRow = makeRenderRow({ href: '/octo/roger-reviewer/pull/1', state: 'open' });
+  const closedRow = makeRenderRow({ href: '/octo/roger-reviewer/pull/2', state: 'closed' });
+  const draftRow = makeRenderRow({ href: '/octo/roger-reviewer/pull/3', state: 'draft' });
+  const doc = makeRenderDocument([openRow, closedRow, draftRow]);
+
+  const mounted = ensurePrListingRowControls(doc, LISTING_REPO_CONTEXT);
+  // open + draft are eligible; closed is not.
+  assert.equal(mounted.length, 2);
+
+  const controls = doc.querySelectorAll(`.${LISTING_CONTROL_CLASS}`);
+  assert.equal(controls.length, 2);
+  // Controls live inside the eligible rows, never outside a PR row.
+  assert.equal(controls[0].parentElement, openRow);
+  assert.equal(controls[1].parentElement, draftRow);
+  assert.equal(
+    closedRow.children.some(
+      (c) => typeof c.className === 'string' && c.className.includes(LISTING_CONTROL_CLASS)
+    ),
+    false
+  );
+});
+
+test('ensurePrListingRowControls is idempotent under rerenders', () => {
+  const row = makeRenderRow({ href: '/octo/roger-reviewer/pull/5', state: 'open' });
+  const doc = makeRenderDocument([row]);
+
+  const first = ensurePrListingRowControls(doc, LISTING_REPO_CONTEXT);
+  const second = ensurePrListingRowControls(doc, LISTING_REPO_CONTEXT);
+
+  assert.equal(first.length, 1);
+  assert.equal(second.length, 0);
+  assert.equal(doc.querySelectorAll(`.${LISTING_CONTROL_CLASS}`).length, 1);
+});
+
+test('listing control exposes the full accessible name and only the start_review action', () => {
+  const row = makeRenderRow({ href: '/octo/roger-reviewer/pull/7', state: 'open' });
+  const doc = makeRenderDocument([row]);
+  ensurePrListingRowControls(doc, LISTING_REPO_CONTEXT);
+
+  const controlId = listingControlIdForTarget({
+    owner: 'octo',
+    repo: 'roger-reviewer',
+    pr_number: 7,
+  });
+  const control = doc.getElementById(controlId);
+  assert.ok(control);
+  const button = control.children[0];
+  // Accessible name is the full label even if CSS ellipsizes the visible text.
+  assert.equal(button.getAttribute('aria-label'), LISTING_START_LABEL);
+  assert.equal(button.dataset.action, 'start_review');
+  assert.equal(button.dataset.owner, 'octo');
+  assert.equal(button.dataset.repo, 'roger-reviewer');
+  assert.equal(button.dataset.prNumber, '7');
+
+  // The listing surface renders only the start control: no resume / findings /
+  // approval / posting actions.
+  const buttons = listingButtonsIn(doc.body);
+  assert.equal(buttons.length, 1);
+  assert.equal(
+    buttons.every((b) => b.dataset.action === 'start_review'),
+    true
+  );
+});
+
+test('clicking one row control marks pending state only on that row', () => {
+  const rowA = makeRenderRow({ href: '/octo/roger-reviewer/pull/10', state: 'open' });
+  const rowB = makeRenderRow({ href: '/octo/roger-reviewer/pull/11', state: 'open' });
+  const doc = makeRenderDocument([rowA, rowB]);
+  const launched = [];
+  ensurePrListingRowControls(doc, LISTING_REPO_CONTEXT, {
+    onLaunch: (target) => launched.push(target.pr_number),
+  });
+
+  const btnA = doc.getElementById(
+    listingControlIdForTarget({ owner: 'octo', repo: 'roger-reviewer', pr_number: 10 })
+  ).children[0];
+  const btnB = doc.getElementById(
+    listingControlIdForTarget({ owner: 'octo', repo: 'roger-reviewer', pr_number: 11 })
+  ).children[0];
+
+  btnA.click();
+  assert.equal(btnA.disabled, true);
+  assert.equal(btnA.dataset.rrLaunching, 'true');
+  // Row B is untouched: one row launching never rewrites the others.
+  assert.equal(btnB.disabled, false);
+  assert.equal(btnB.dataset.rrLaunching, undefined);
+  assert.deepEqual(launched, [10]);
+});
+
+test('ensureListingStyles injects a single theme-aware style node', () => {
+  const row = makeRenderRow({ href: '/octo/roger-reviewer/pull/30', state: 'open' });
+  const doc = makeRenderDocument([row]);
+  ensurePrListingRowControls(doc, LISTING_REPO_CONTEXT);
+  ensurePrListingRowControls(doc, LISTING_REPO_CONTEXT);
+
+  const styleNodes = doc.head.children.filter((n) => n.tagName === 'STYLE');
+  assert.equal(styleNodes.length, 1);
+  // Theme-aware: resolves from Primer button + accent tokens so light and dark
+  // both stay legible.
+  assert.match(styleNodes[0].textContent, /button-default-bgColor-rest/);
+  assert.match(styleNodes[0].textContent, /fgColor-accent/);
+  // Fit handling for narrow GitHub list widths.
+  assert.match(styleNodes[0].textContent, /text-overflow:\s*ellipsis/);
+  assert.match(styleNodes[0].textContent, /white-space:\s*nowrap/);
+});
+
+test('refreshPrListingControls injects on PR-list routes and clears off-route', () => {
+  const row = makeRenderRow({ href: '/octo/roger-reviewer/pull/20', state: 'open' });
+  const doc = makeRenderDocument([row]);
+  const previousWindow = global.window;
+  try {
+    global.window = { location: { pathname: '/octo/roger-reviewer/pulls', search: '' } };
+    refreshPrListingControls(doc);
+    assert.equal(doc.querySelectorAll(`.${LISTING_CONTROL_CLASS}`).length, 1);
+
+    // SPA navigation onto a PR-detail route is not a list route: controls clear.
+    global.window = { location: { pathname: '/octo/roger-reviewer/pull/20', search: '' } };
+    refreshPrListingControls(doc);
+    assert.equal(doc.querySelectorAll(`.${LISTING_CONTROL_CLASS}`).length, 0);
+  } finally {
+    global.window = previousWindow;
+  }
+});
+
+test('removeAllListingControls strips injected controls', () => {
+  const row = makeRenderRow({ href: '/octo/roger-reviewer/pull/60', state: 'open' });
+  const doc = makeRenderDocument([row]);
+  ensurePrListingRowControls(doc, LISTING_REPO_CONTEXT);
+  assert.equal(doc.querySelectorAll(`.${LISTING_CONTROL_CLASS}`).length, 1);
+
+  removeAllListingControls(doc);
+  assert.equal(doc.querySelectorAll(`.${LISTING_CONTROL_CLASS}`).length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// PR-listing row launch dispatch through the bridge (bead ziv8.3)
+// ---------------------------------------------------------------------------
+
+function listingControlFor(doc, prNumber) {
+  return doc.getElementById(
+    listingControlIdForTarget({ owner: 'octo', repo: 'roger-reviewer', pr_number: prNumber })
+  );
+}
+
+test('row launch sends the exact start_review payload for each PR row', () => {
+  const sent = [];
+  const chromeStub = {
+    runtime: {
+      lastError: null,
+      sendMessage(msg, cb) {
+        sent.push(msg);
+        cb({ ok: true, mode: 'native_messaging', attention_state: 'awaiting_user_input' });
+      },
+    },
+  };
+  const doc = makeRenderDocument([
+    makeRenderRow({ href: '/octo/roger-reviewer/pull/10', state: 'open' }),
+    makeRenderRow({ href: '/octo/roger-reviewer/pull/11', state: 'open' }),
+  ]);
+  ensurePrListingRowControls(doc, LISTING_REPO_CONTEXT, { chrome: chromeStub });
+
+  listingControlFor(doc, 10).children[0].click();
+  listingControlFor(doc, 11).children[0].click();
+
+  assert.equal(sent.length, 2);
+  // Only the existing start_review bridge action is ever used — no approval,
+  // posting, or gh write path.
+  assert.deepEqual(sent[0], {
+    type: 'roger_bridge_launch',
+    intent: { action: 'start_review', owner: 'octo', repo: 'roger-reviewer', pr_number: 10 },
+  });
+  assert.deepEqual(sent[1], {
+    type: 'roger_bridge_launch',
+    intent: { action: 'start_review', owner: 'octo', repo: 'roger-reviewer', pr_number: 11 },
+  });
+});
+
+test('successful launch writes row-local status with target PR and session id', () => {
+  const chromeStub = {
+    runtime: {
+      lastError: null,
+      sendMessage(msg, cb) {
+        cb({
+          ok: true,
+          mode: 'native_messaging',
+          attention_state: 'awaiting_user_input',
+          message: 'Launch intent dispatched.',
+          session_id: 'sess-42',
+        });
+      },
+    },
+  };
+  const doc = makeRenderDocument([
+    makeRenderRow({ href: '/octo/roger-reviewer/pull/10', state: 'open' }),
+    makeRenderRow({ href: '/octo/roger-reviewer/pull/11', state: 'open' }),
+  ]);
+  ensurePrListingRowControls(doc, LISTING_REPO_CONTEXT, { chrome: chromeStub });
+
+  const controlA = listingControlFor(doc, 10);
+  controlA.children[0].click();
+  const statusA = controlA.children[1];
+  assert.equal(statusA.hidden, false);
+  assert.equal(statusA.dataset.state, 'success');
+  assert.match(statusA.textContent, /octo\/roger-reviewer#10/);
+  assert.match(statusA.textContent, /sess-42/);
+  // Button is restored after the launch settles.
+  assert.equal(controlA.children[0].disabled, false);
+
+  // Per-row isolation: row 11 was never touched.
+  const statusB = listingControlFor(doc, 11).children[1];
+  assert.equal(statusB.hidden, true);
+  assert.equal(listingControlFor(doc, 11).children[0].disabled, false);
+});
+
+test('launch with no usable bridge surfaces a loud row-local error', () => {
+  const doc = makeRenderDocument([makeRenderRow({ href: '/octo/roger-reviewer/pull/10', state: 'open' })]);
+  // A chrome surface with no sendMessage is the "bridge unavailable" case.
+  ensurePrListingRowControls(doc, LISTING_REPO_CONTEXT, { chrome: { runtime: {} } });
+
+  const control = listingControlFor(doc, 10);
+  control.children[0].click();
+  const status = control.children[1];
+  assert.equal(status.dataset.state, 'error');
+  assert.match(status.textContent, /Bridge unavailable/i);
+});
+
+test('bridge failure envelope shows a persistent row-local error (no auto-hide)', () => {
+  const chromeStub = {
+    runtime: {
+      lastError: null,
+      sendMessage(msg, cb) {
+        cb({ ok: false, message: 'Native host missing.', guidance: 'Run `rr extension setup`.' });
+      },
+    },
+  };
+  const doc = makeRenderDocument([makeRenderRow({ href: '/octo/roger-reviewer/pull/12', state: 'open' })]);
+  ensurePrListingRowControls(doc, LISTING_REPO_CONTEXT, { chrome: chromeStub });
+
+  const control = listingControlFor(doc, 12);
+  control.children[0].click();
+  const status = control.children[1];
+  assert.equal(status.dataset.state, 'error');
+  assert.match(status.textContent, /Native host missing/);
+  assert.match(status.textContent, /rr extension setup/);
+  // The error stays visible: there is no auto-hide timer on the row status.
+  assert.equal(status.hidden, false);
+});
+
+test('chrome.runtime.lastError surfaces bridge disconnect guidance', () => {
+  const chromeStub = {
+    runtime: {
+      lastError: { message: 'port closed' },
+      sendMessage(msg, cb) {
+        cb(undefined);
+      },
+    },
+  };
+  const doc = makeRenderDocument([makeRenderRow({ href: '/octo/roger-reviewer/pull/13', state: 'open' })]);
+  ensurePrListingRowControls(doc, LISTING_REPO_CONTEXT, { chrome: chromeStub });
+
+  const control = listingControlFor(doc, 13);
+  control.children[0].click();
+  const status = control.children[1];
+  assert.equal(status.dataset.state, 'error');
+  assert.match(status.textContent, /port closed/);
+  assert.match(status.textContent, /rr extension setup/);
+});
+
+test('custom_url_fallback launch reports a row-local fallback success', () => {
+  const chromeStub = {
+    runtime: {
+      lastError: null,
+      sendMessage(msg, cb) {
+        cb({ ok: true, mode: 'custom_url_fallback' });
+      },
+    },
+  };
+  const doc = makeRenderDocument([makeRenderRow({ href: '/octo/roger-reviewer/pull/14', state: 'open' })]);
+  ensurePrListingRowControls(doc, LISTING_REPO_CONTEXT, { chrome: chromeStub });
+
+  const control = listingControlFor(doc, 14);
+  control.children[0].click();
+  const status = control.children[1];
+  assert.equal(status.dataset.state, 'success');
+  assert.match(status.textContent, /URL fallback/i);
+});
+
+// ---------------------------------------------------------------------------
+// PR-listing review kickoff: realistic full-page fixture (bead ziv8.4)
+//
+// Deterministic fixture modeled on the product surface /cdilga/roger-reviewer/pulls:
+// a repo header with a `New pull request` button, a filter/search subnav, a
+// labels/milestones control bar, a stray repo-level PR shortcut link, and a list
+// container with open + closed PR rows. Proves the full kickoff lane (route ->
+// extract -> inject -> reinject -> dispatch) without live GitHub, and that Roger
+// never disturbs repository-level chrome.
+// ---------------------------------------------------------------------------
+
+function appendChildNode(parent, tag, props) {
+  return parent.appendChild(makeRenderNode(tag, props));
+}
+
+function hasListingControlWithin(node) {
+  for (const child of node.children) {
+    if (
+      typeof child.className === 'string' &&
+      child.className.split(/\s+/).includes(LISTING_CONTROL_CLASS)
+    ) {
+      return true;
+    }
+    if (hasListingControlWithin(child)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function makeListingPageFixture() {
+  const owner = 'cdilga';
+  const repo = 'roger-reviewer';
+
+  // Repo-level header / toolbar Roger must not disturb.
+  const header = makeRenderNode('DIV', { className: 'repo-header gh-header-actions' });
+  appendChildNode(header, 'A', { href: `/${owner}/${repo}/compare`, textContent: 'New pull request' });
+  // A stray repo-level link straight to a PR (e.g. a "latest PR" shortcut) that
+  // is NOT inside a list row — must never receive a control.
+  appendChildNode(header, 'A', { href: `/${owner}/${repo}/pull/999`, textContent: 'Latest PR' });
+
+  // Filter / search subnav with same-page query links.
+  const subnav = makeRenderNode('DIV', { className: 'subnav table-list-header' });
+  appendChildNode(subnav, 'A', { href: `/${owner}/${repo}/pulls?q=is%3Apr+is%3Aopen`, textContent: 'Open' });
+  appendChildNode(subnav, 'A', { href: `/${owner}/${repo}/pulls?q=is%3Apr+is%3Aclosed`, textContent: 'Closed' });
+  appendChildNode(subnav, 'A', { href: `/${owner}/${repo}/labels`, textContent: 'Labels' });
+  appendChildNode(subnav, 'A', { href: `/${owner}/${repo}/milestones`, textContent: 'Milestones' });
+
+  // List container with open + closed PR rows.
+  const list = makeRenderNode('DIV', { className: 'js-navigation-container' });
+  const rowOpenA = makeRenderRow({ href: `/${owner}/${repo}/pull/101`, state: 'open' });
+  const rowOpenB = makeRenderRow({ href: `/${owner}/${repo}/pull/102`, state: 'open' });
+  const rowClosed = makeRenderRow({ href: `/${owner}/${repo}/pull/100`, state: 'closed' });
+  list.appendChild(rowOpenA);
+  list.appendChild(rowOpenB);
+  list.appendChild(rowClosed);
+
+  const doc = makeRenderDocument([header, subnav, list]);
+  const context = parsePullRequestListContext({ pathname: `/${owner}/${repo}/pulls`, search: '' });
+  return { doc, context, header, subnav, list, rowOpenA, rowOpenB, rowClosed };
+}
+
+function listingControlForOwner(doc, owner, repo, prNumber) {
+  return doc.getElementById(listingControlIdForTarget({ owner, repo, pr_number: prNumber }));
+}
+
+test('ziv8.4 fixture: recognizes the list route and extracts only open PR row targets', () => {
+  const { doc, context } = makeListingPageFixture();
+  assert.equal(context.route, PR_LISTING_ROUTE);
+  assert.equal(context.owner, 'cdilga');
+  assert.equal(context.openOnly, true);
+
+  const targets = extractPrListingRowTargets(doc, context);
+  // Only the two open rows — never the closed row, the New PR / compare link,
+  // the labels/milestones links, the same-page filter links, or the stray
+  // repo-level PR shortcut.
+  assert.deepEqual(
+    targets.map((t) => t.pr_number).sort((a, b) => a - b),
+    [101, 102]
+  );
+});
+
+test('ziv8.4 fixture: injects controls only into open PR rows, never repo-level chrome', () => {
+  const { doc, context, header, subnav, rowClosed } = makeListingPageFixture();
+  const mounted = ensurePrListingRowControls(doc, context, { chrome: { runtime: {} } });
+  assert.equal(mounted.length, 2);
+  assert.equal(doc.querySelectorAll(`.${LISTING_CONTROL_CLASS}`).length, 2);
+
+  // No control anywhere in the repo header (New pull request / stray PR link) or
+  // the filter/labels/milestones subnav.
+  assert.equal(hasListingControlWithin(header), false);
+  assert.equal(hasListingControlWithin(subnav), false);
+  // No control on the closed row.
+  assert.equal(hasListingControlWithin(rowClosed), false);
+  // Controls live inside the open rows.
+  assert.ok(listingControlForOwner(doc, 'cdilga', 'roger-reviewer', 101));
+  assert.ok(listingControlForOwner(doc, 'cdilga', 'roger-reviewer', 102));
+});
+
+test('ziv8.4 fixture: reinjection after Morph/SPA rerender does not duplicate controls', () => {
+  const { doc, context, list } = makeListingPageFixture();
+  ensurePrListingRowControls(doc, context, { chrome: { runtime: {} } });
+  assert.equal(doc.querySelectorAll(`.${LISTING_CONTROL_CLASS}`).length, 2);
+
+  // Idempotent rerun on the unchanged DOM.
+  ensurePrListingRowControls(doc, context, { chrome: { runtime: {} } });
+  assert.equal(doc.querySelectorAll(`.${LISTING_CONTROL_CLASS}`).length, 2);
+
+  // Morph adds a duplicate row for PR 101 and a brand-new open row 103.
+  list.appendChild(makeRenderRow({ href: '/cdilga/roger-reviewer/pull/101', state: 'open' }));
+  list.appendChild(makeRenderRow({ href: '/cdilga/roger-reviewer/pull/103', state: 'open' }));
+  ensurePrListingRowControls(doc, context, { chrome: { runtime: {} } });
+
+  // 101 stays single (unique target), 102 + 103 present => 3 controls total.
+  assert.equal(doc.querySelectorAll(`.${LISTING_CONTROL_CLASS}`).length, 3);
+  assert.ok(listingControlForOwner(doc, 'cdilga', 'roger-reviewer', 103));
+});
+
+test('ziv8.4 fixture: exact bridge payloads for two row launches', () => {
+  const { doc, context } = makeListingPageFixture();
+  const sent = [];
+  const chromeStub = {
+    runtime: {
+      lastError: null,
+      sendMessage(msg, cb) {
+        sent.push(msg);
+        cb({ ok: true, mode: 'native_messaging', attention_state: 'awaiting_user_input', session_id: 's' + msg.intent.pr_number });
+      },
+    },
+  };
+  ensurePrListingRowControls(doc, context, { chrome: chromeStub });
+
+  listingControlForOwner(doc, 'cdilga', 'roger-reviewer', 101).children[0].click();
+  listingControlForOwner(doc, 'cdilga', 'roger-reviewer', 102).children[0].click();
+
+  assert.deepEqual(sent, [
+    { type: 'roger_bridge_launch', intent: { action: 'start_review', owner: 'cdilga', repo: 'roger-reviewer', pr_number: 101 } },
+    { type: 'roger_bridge_launch', intent: { action: 'start_review', owner: 'cdilga', repo: 'roger-reviewer', pr_number: 102 } },
+  ]);
+});
+
+test('ziv8.4 fixture: fail-closed rendering when the bridge is unavailable or errors', () => {
+  // Bridge unavailable.
+  const fixtureA = makeListingPageFixture();
+  ensurePrListingRowControls(fixtureA.doc, fixtureA.context, { chrome: { runtime: {} } });
+  const controlA = listingControlForOwner(fixtureA.doc, 'cdilga', 'roger-reviewer', 101);
+  controlA.children[0].click();
+  assert.equal(controlA.children[1].dataset.state, 'error');
+  assert.match(controlA.children[1].textContent, /Bridge unavailable/i);
+
+  // Error envelope from the bridge.
+  const fixtureB = makeListingPageFixture();
+  const chromeStub = {
+    runtime: {
+      lastError: null,
+      sendMessage(msg, cb) {
+        cb({ ok: false, message: 'Bridge preflight failed.', guidance: 'Run `rr extension doctor`.' });
+      },
+    },
+  };
+  ensurePrListingRowControls(fixtureB.doc, fixtureB.context, { chrome: chromeStub });
+  const controlB = listingControlForOwner(fixtureB.doc, 'cdilga', 'roger-reviewer', 102);
+  controlB.children[0].click();
+  assert.equal(controlB.children[1].dataset.state, 'error');
+  assert.match(controlB.children[1].textContent, /Bridge preflight failed/);
+  assert.match(controlB.children[1].textContent, /rr extension doctor/);
 });

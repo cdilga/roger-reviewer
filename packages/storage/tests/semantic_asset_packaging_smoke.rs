@@ -100,7 +100,10 @@ fn semantic_model_tree_digest_is_stable_and_content_sensitive() -> Result<()> {
     assert!(first.starts_with("sha256:"));
 
     // Mutating any model file changes the digest (fail-closed re-verify).
-    fs::write(root.join("snapshots/abc/model.onnx"), b"onnx-bytes-tampered")?;
+    fs::write(
+        root.join("snapshots/abc/model.onnx"),
+        b"onnx-bytes-tampered",
+    )?;
     let mutated = semantic_model_tree_digest(&root)?;
     assert_ne!(first, mutated, "digest must be content-sensitive");
     Ok(())
@@ -116,7 +119,10 @@ fn semantic_asset_verification_succeeds_for_installed_model_tree() -> Result<()>
     // the manifest's artifact_rel_path pointing at the root itself (".").
     fs::create_dir_all(asset_root.join("models/snapshots/rev"))?;
     fs::write(asset_root.join("models/snapshots/rev/model.onnx"), b"onnx")?;
-    fs::write(asset_root.join("models/snapshots/rev/tokenizer.json"), b"tok")?;
+    fs::write(
+        asset_root.join("models/snapshots/rev/tokenizer.json"),
+        b"tok",
+    )?;
 
     let digest = semantic_model_tree_digest(&asset_root)?;
     let manifest = SemanticAssetManifest {
@@ -133,7 +139,10 @@ fn semantic_asset_verification_succeeds_for_installed_model_tree() -> Result<()>
     assert!(verification.verified, "tree manifest should verify clean");
 
     // Tampering with a model file flips verification to fail-closed.
-    fs::write(asset_root.join("models/snapshots/rev/model.onnx"), b"tampered")?;
+    fs::write(
+        asset_root.join("models/snapshots/rev/model.onnx"),
+        b"tampered",
+    )?;
     let after = store.verify_semantic_asset_manifest()?;
     assert!(!after.verified);
     assert!(

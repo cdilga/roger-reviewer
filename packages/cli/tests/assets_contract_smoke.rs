@@ -20,7 +20,10 @@ fn runtime_with_store(store_root: std::path::PathBuf, cwd: std::path::PathBuf) -
 }
 
 fn run_rr(args: &[&str], runtime: &CliRuntime) -> roger_cli::CliRunResult {
-    let argv = args.iter().map(|value| value.to_string()).collect::<Vec<_>>();
+    let argv = args
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
     run(&argv, runtime)
 }
 
@@ -113,7 +116,10 @@ fn rr_assets_verify_reports_repair_needed_on_digest_mismatch() {
     assert_eq!(verify.exit_code, 4, "{}", verify.stderr);
     let value = parse_robot(&verify.stdout);
     assert_eq!(value["outcome"], "repair_needed");
-    assert_eq!(value["data"]["reason_code"], "semantic_asset_digest_mismatch");
+    assert_eq!(
+        value["data"]["reason_code"],
+        "semantic_asset_digest_mismatch"
+    );
 }
 
 #[test]
@@ -126,7 +132,13 @@ fn rr_assets_install_blocks_when_feature_not_compiled() {
     // model loader to install for. Install must fail-closed honestly, never
     // silently write a manifest no embedder can back.
     let install = run_rr(
-        &["assets", "install", "--asset", "semantic-default", "--robot"],
+        &[
+            "assets",
+            "install",
+            "--asset",
+            "semantic-default",
+            "--robot",
+        ],
         &runtime,
     );
     assert_eq!(install.exit_code, 3, "{}", install.stderr);

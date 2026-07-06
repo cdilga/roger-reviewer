@@ -175,6 +175,685 @@ function parsePullRequestContext() {
   };
 }
 
+// ---------------------------------------------------------------------------
+// GitHub PR-listing route + row-target discovery (bead ziv8.1).
+//
+// This block is intentionally discovery-only: it recognizes repository PR-list
+// routes and extracts row-level PR targets as a pure, testable contract. It
+// does NOT render any controls (that is ziv8.2) and is deliberately kept
+// separate from the PR-detail panel path above so `/owner/repo/pull/<n>`
+// behavior does not regress.
+// ---------------------------------------------------------------------------
+
+const PR_LISTING_ROUTE = 'pr_listing';
+
+// Row containers Roger is willing to anchor a row target onto. Anchored on
+// stable list-item containers rather than cosmetic text wrappers. If a
+// `/pull/<n>` link is not inside one of these within a bounded climb, Roger
+// degrades to no target rather than risk attaching to a repository-level
+// action bar, breadcrumb, or unrelated chrome.
+const PR_LISTING_ROW_TESTIDS = new Set(['list-view-item', 'issue-row']);
+const PR_LISTING_ROW_MAX_CLIMB = 12;
+
+// Roger's PR list view defaults to GitHub's implicit `is:open` scope. A `q`
+// query that explicitly broadens to closed/merged/all is treated as not
+// open-only; an explicit `is:open` (or no query at all) is open-only.
+function isOpenOnlyListingQuery(search) {
+  if (typeof search !== 'string' || search.trim() === '') {
+    return true;
+  }
+
+  let params;
+  try {
+    params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);
+  } catch {
+    return false;
+  }
+
+  if (!params.has('q')) {
+    return true;
+  }
+
+  const q = (params.get('q') || '').toLowerCase();
+  if (q.trim() === '') {
+    return true;
+  }
+  if (/\bis:closed\b/.test(q) || /\bis:merged\b/.test(q) || /\bis:all\b/.test(q)) {
+    return false;
+  }
+  if (/\bis:open\b/.test(q)) {
+    return true;
+  }
+  // A query with no explicit state qualifier can still surface closed PRs on
+  // GitHub, so stay conservative and do not treat it as open-only.
+  return false;
+}
+
+// Recognize repository PR-list routes such as `/owner/repo/pulls` and its
+// filtered variants. Returns null for PR-detail pages, the global `/pulls`
+// dashboard, and every non-listing page. Accepts an optional location-like
+// object so SPA navigation can be exercised deterministically in tests.
+function parsePullRequestListContext(locationLike) {
+  const loc =
+    locationLike || (typeof window !== 'undefined' ? window.location : null);
+  if (!loc || typeof loc.pathname !== 'string') {
+    return null;
+  }
+
+  const match = loc.pathname.match(/^\/([^/]+)\/([^/]+)\/pulls\/?$/);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    owner: decodeURIComponent(match[1]),
+    repo: decodeURIComponent(match[2]),
+    route: PR_LISTING_ROUTE,
+    openOnly: isOpenOnlyListingQuery(loc.search || ''),
+  };
+}
+
+// Parse a candidate href into a `/owner/repo/pull/<n>` target, but only when it
+// belongs to the listing's current repository. Absolute and relative hrefs and
+// sub-pages (`/pull/<n>/files`) are all normalized to the base PR target;
+// non-PR links (issues, compare, other repos) return null.
+function parsePullTargetHref(href, owner, repo) {
+  if (typeof href !== 'string') {
+    return null;
+  }
+
+  let path = href;
+  const schemeMatch = href.match(/^https?:\/\/[^/]+(\/.*)$/i);
+  if (schemeMatch) {
+    path = schemeMatch[1];
+  }
+
+  const match = path.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:[/?#].*)?$/);
+  if (!match) {
+    return null;
+  }
+
+  const hrefOwner = decodeURIComponent(match[1]);
+  const hrefRepo = decodeURIComponent(match[2]);
+  if (owner && repo && (hrefOwner !== owner || hrefRepo !== repo)) {
+    return null;
+  }
+
+  const prNumber = Number(match[3]);
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    return null;
+  }
+
+  return { owner: hrefOwner, repo: hrefRepo, pr_number: prNumber };
+}
+
+function readNodeClassName(node) {
+  if (!node) {
+    return '';
+  }
+  if (typeof node.className === 'string') {
+    return node.className;
+  }
+  if (typeof node.getAttribute === 'function') {
+    return node.getAttribute('class') || '';
+  }
+  return '';
+}
+
+function readNodeTestId(node) {
+  if (!node) {
+    return '';
+  }
+  if (typeof node.getAttribute === 'function') {
+    const attr = node.getAttribute('data-testid');
+    if (attr) {
+      return attr;
+    }
+  }
+  if (node.dataset && typeof node.dataset.testid === 'string') {
+    return node.dataset.testid;
+  }
+  return '';
+}
+
+function isPrListingRowNode(node) {
+  if (!node || typeof node !== 'object') {
+    return false;
+  }
+
+  const testId = readNodeTestId(node);
+  if (testId && PR_LISTING_ROW_TESTIDS.has(testId)) {
+    return true;
+  }
+
+  const className = readNodeClassName(node);
+  if (/\bjs-issue-row\b/.test(className)) {
+    return true;
+  }
+
+  const tag = (node.tagName || '').toUpperCase();
+  if (tag === 'LI' && /\bListItem\b/.test(className)) {
+    return true;
+  }
+
+  return false;
+}
+
+// Climb from a `/pull/<n>` link to its enclosing list-row container, bounded so
+// a stray link never resolves to distant page chrome.
+function findPrListingRowNode(anchor) {
+  let node = anchor;
+  let depth = 0;
+  while (node && depth < PR_LISTING_ROW_MAX_CLIMB) {
+    if (isPrListingRowNode(node)) {
+      return node;
+    }
+    node = node.parentElement || null;
+    depth += 1;
+  }
+  return null;
+}
+
+function* walkElementDescendants(node) {
+  const children = node && node.children ? Array.from(node.children) : [];
+  for (const child of children) {
+    yield child;
+    yield* walkElementDescendants(child);
+  }
+}
+
+// Read an open/closed/merged/draft signal off a single node from GitHub's
+// state markers (Primer color classes, aria-labels, or the react state label).
+function readNodeReviewState(node) {
+  if (!node || typeof node !== 'object') {
+    return null;
+  }
+
+  const className = readNodeClassName(node).toLowerCase();
+  if (/\bstate--merged\b/.test(className) || /\bcolor-fg-done\b/.test(className)) {
+    return 'merged';
+  }
+  if (/\bstate--closed\b/.test(className) || /\bcolor-fg-closed\b/.test(className)) {
+    return 'closed';
+  }
+  if (/\bstate--open\b/.test(className) || /\bcolor-fg-open\b/.test(className)) {
+    return 'open';
+  }
+
+  const label =
+    typeof node.getAttribute === 'function'
+      ? (node.getAttribute('aria-label') || '').toLowerCase().trim()
+      : '';
+  if (label) {
+    if (label.includes('merged')) {
+      return 'merged';
+    }
+    if (label.includes('closed')) {
+      return 'closed';
+    }
+    if (label.includes('draft')) {
+      return 'draft';
+    }
+    if (label.includes('open')) {
+      return 'open';
+    }
+  }
+
+  const testId = readNodeTestId(node).toLowerCase();
+  if (testId === 'issue-pr-state-label' || testId === 'pr-state') {
+    const text = (node.textContent || '').toLowerCase();
+    if (text.includes('merged')) {
+      return 'merged';
+    }
+    if (text.includes('closed')) {
+      return 'closed';
+    }
+    if (text.includes('draft')) {
+      return 'draft';
+    }
+    if (text.includes('open')) {
+      return 'open';
+    }
+  }
+
+  return null;
+}
+
+// Resolve a row's review state. Closed/merged signals win over open if both are
+// present so Roger never treats a closed row as eligible.
+function detectRowReviewState(row) {
+  let found = readNodeReviewState(row);
+  if (found === 'closed' || found === 'merged') {
+    return found;
+  }
+  for (const node of walkElementDescendants(row)) {
+    const state = readNodeReviewState(node);
+    if (state === 'closed' || state === 'merged') {
+      return state;
+    }
+    if (state && !found) {
+      found = state;
+    }
+  }
+  return found;
+}
+
+// Draft PRs are an open sub-state, so they remain eligible. Indeterminate rows
+// (no detectable state marker) are eligible only when the listing route is
+// explicitly open-only.
+function isRowOpenEligible(row, openOnly) {
+  const state = detectRowReviewState(row);
+  if (state === 'closed' || state === 'merged') {
+    return false;
+  }
+  if (state === 'open' || state === 'draft') {
+    return true;
+  }
+  return openOnly === true;
+}
+
+// Extract unique, open-eligible row-level PR targets from a rendered PR list.
+// Pure and side-effect free: it reads the DOM and returns
+// `{ owner, repo, pr_number, row_node }` records. Repeated calls on an
+// unchanged DOM return the same target set (idempotent by construction), and it
+// returns [] for unrecognized DOM or a non-listing context rather than
+// attaching anything.
+function extractPrListingRowTargets(rootDocument, listingContext) {
+  if (!rootDocument || typeof rootDocument.querySelectorAll !== 'function') {
+    return [];
+  }
+  if (!listingContext || listingContext.route !== PR_LISTING_ROUTE) {
+    return [];
+  }
+
+  const { owner, repo, openOnly } = listingContext;
+  const anchors = rootDocument.querySelectorAll('a[href]');
+  const targets = [];
+  const seenRows = new Set();
+  const seenKeys = new Set();
+
+  for (const anchor of anchors) {
+    const href =
+      typeof anchor.getAttribute === 'function' ? anchor.getAttribute('href') : null;
+    const parsed = parsePullTargetHref(href, owner, repo);
+    if (!parsed) {
+      continue;
+    }
+
+    const row = findPrListingRowNode(anchor);
+    if (!row) {
+      // Degrade: a PR link outside any recognized row container (action bar,
+      // breadcrumb, unknown DOM) gets no target rather than a misplaced one.
+      continue;
+    }
+    if (seenRows.has(row)) {
+      // Collapse duplicate `/pull/<n>` links inside the same row to one target.
+      continue;
+    }
+    seenRows.add(row);
+
+    if (!isRowOpenEligible(row, openOnly)) {
+      continue;
+    }
+
+    const key = `${parsed.owner}/${parsed.repo}#${parsed.pr_number}`;
+    if (seenKeys.has(key)) {
+      continue;
+    }
+    seenKeys.add(key);
+
+    targets.push({
+      owner: parsed.owner,
+      repo: parsed.repo,
+      pr_number: parsed.pr_number,
+      row_node: row,
+    });
+  }
+
+  return targets;
+}
+
+// ---------------------------------------------------------------------------
+// GitHub PR-listing row controls (bead ziv8.2).
+//
+// Renders one additive, GitHub-native "Start Review in Roger" control per
+// discovered open PR row. Deliberately does NOT reuse the single global
+// PR-detail PANEL_ID node (a list page holds many PR targets), keeps per-row UI
+// state local, and stays idempotent under Turbo/PJAX/Morph rerenders. Outbound
+// dispatch through the bridge is bead ziv8.3; here the control owns rendering,
+// placement, accessibility, and a safe row-local launching affordance only.
+// ---------------------------------------------------------------------------
+
+const LISTING_STYLE_ID = 'roger-reviewer-listing-style';
+const LISTING_CONTROL_CLASS = 'rr-listing-control';
+const LISTING_BUTTON_CLASS = 'rr-listing-button';
+const LISTING_STATUS_CLASS = 'rr-listing-status';
+const LISTING_ROW_MOUNTED_ATTR = 'data-rr-listing-mounted';
+const LISTING_START_LABEL = 'Start Review in Roger';
+// The button always carries the full accessible name via aria-label. The
+// visible text may be ellipsized by CSS at narrow GitHub list widths, but the
+// accessible name stays "Start Review in Roger".
+const LISTING_GITHUB_BUTTON_CLASS = 'btn btn-sm';
+
+function listingControlIdForTarget(target) {
+  return `roger-reviewer-listing-${target.owner}-${target.repo}-${target.pr_number}`.replace(
+    /[^a-zA-Z0-9_-]/g,
+    '-'
+  );
+}
+
+function ensureListingStyles(rootDocument) {
+  if (!rootDocument || typeof rootDocument.createElement !== 'function') {
+    return;
+  }
+  if (
+    typeof rootDocument.getElementById === 'function' &&
+    rootDocument.getElementById(LISTING_STYLE_ID)
+  ) {
+    return;
+  }
+
+  const styleNode = rootDocument.createElement('style');
+  styleNode.id = LISTING_STYLE_ID;
+  styleNode.textContent = `
+.${LISTING_CONTROL_CLASS} {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  vertical-align: middle;
+  max-width: 100%;
+}
+
+.${LISTING_BUTTON_CLASS} {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--button-default-borderColor-rest, var(--borderColor-default, #d0d7de));
+  border-radius: 6px;
+  background: var(--button-default-bgColor-rest, var(--bgColor-default, #ffffff));
+  color: var(--button-default-fgColor-rest, var(--fgColor-default, #1f2328));
+  font-size: 12px;
+  line-height: 1.25;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.${LISTING_BUTTON_CLASS}:hover:not(:disabled) {
+  background: var(--button-default-bgColor-hover, var(--bgColor-muted, #f3f4f6));
+  border-color: var(--button-default-borderColor-hover, var(--borderColor-emphasis, #8c959f));
+}
+
+.${LISTING_BUTTON_CLASS}:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.${LISTING_BUTTON_CLASS} .${LISTING_BUTTON_CLASS}-accent {
+  color: var(--fgColor-accent, #0969da);
+  font-weight: 700;
+}
+
+.${LISTING_STATUS_CLASS} {
+  display: inline-block;
+  margin-left: 6px;
+  max-width: 320px;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--fgColor-muted, #656d76);
+  white-space: normal;
+  vertical-align: middle;
+}
+
+.${LISTING_STATUS_CLASS}[data-state="error"] {
+  color: var(--fgColor-danger, #d1242f);
+}
+
+.${LISTING_STATUS_CLASS}[data-state="success"] {
+  color: var(--fgColor-success, #1a7f37);
+}
+  `.trim();
+
+  const styleHost = rootDocument.head || rootDocument.documentElement || rootDocument.body;
+  if (styleHost && typeof styleHost.appendChild === 'function') {
+    styleHost.appendChild(styleNode);
+  }
+}
+
+// Row-local status writer. Touches ONLY the passed row status node so a launch
+// in one row never rewrites the PR-detail panel or other rows. Status is
+// deliberately persistent (no auto-hide timer) so launch failures stay visible
+// until the next action supersedes them.
+function setListingRowStatus(statusNode, message, state) {
+  if (!statusNode) {
+    return;
+  }
+  if (!message) {
+    statusNode.hidden = true;
+    statusNode.textContent = '';
+    statusNode.dataset.state = '';
+    return;
+  }
+  statusNode.hidden = false;
+  statusNode.textContent = message;
+  statusNode.dataset.state = state || 'info';
+}
+
+// Dispatch a row launch through Roger's existing daemonless bridge using the
+// already-supported `start_review` action. Keeps failure handling as loud as
+// the PR-detail triggerLaunch() path (native host missing, forbidden origin,
+// invalid/blocked response, missing session id) but writes only this row's
+// button + status. The chrome surface is injectable for tests.
+function dispatchListingRowLaunch(target, button, statusNode, options = {}) {
+  const chromeApi = options.chrome || (typeof chrome !== 'undefined' ? chrome : null);
+
+  const restoreButton = () => {
+    if (button) {
+      button.disabled = false;
+      button.dataset.rrLaunching = 'false';
+    }
+  };
+
+  if (!chromeApi || !chromeApi.runtime || typeof chromeApi.runtime.sendMessage !== 'function') {
+    restoreButton();
+    setListingRowStatus(
+      statusNode,
+      'Bridge unavailable in browser context. Open Roger locally and run `rr` manually.',
+      'error'
+    );
+    return;
+  }
+
+  setListingRowStatus(
+    statusNode,
+    `Dispatching review for ${target.owner}/${target.repo}#${target.pr_number}…`,
+    'pending'
+  );
+
+  chromeApi.runtime.sendMessage(
+    {
+      type: 'roger_bridge_launch',
+      intent: {
+        action: 'start_review',
+        owner: target.owner,
+        repo: target.repo,
+        pr_number: target.pr_number,
+      },
+    },
+    (response) => {
+      restoreButton();
+
+      if (chromeApi.runtime.lastError) {
+        setListingRowStatus(
+          statusNode,
+          appendGuidance(
+            `Bridge error: ${chromeApi.runtime.lastError.message}`,
+            BRIDGE_DISCONNECT_GUIDANCE
+          ),
+          'error'
+        );
+        return;
+      }
+
+      if (!response) {
+        setListingRowStatus(
+          statusNode,
+          appendGuidance('No bridge response.', BRIDGE_DISCONNECT_GUIDANCE),
+          'error'
+        );
+        return;
+      }
+
+      if (!response.ok) {
+        setListingRowStatus(statusNode, appendGuidance(response.message, response.guidance), 'error');
+        return;
+      }
+
+      if (response.mode === 'custom_url_fallback') {
+        setListingRowStatus(
+          statusNode,
+          'Launched via URL fallback. Open Roger locally for authoritative status.',
+          'success'
+        );
+        return;
+      }
+
+      // Success (native_messaging or generic ok). Anchor the row status on this
+      // row's target and include the returned session id when present.
+      const base = formatLaunchSuccessStatus(response);
+      const targetTag = `${target.owner}/${target.repo}#${target.pr_number}`;
+      const message = base.includes(`#${target.pr_number}`) ? base : `${targetTag}: ${base}`;
+      setListingRowStatus(statusNode, message, 'success');
+    }
+  );
+}
+
+// Row-local launch affordance. Disables and marks ONLY this row's button while a
+// launch is in flight so a single row launching never rewrites other rows. By
+// default it dispatches through the bridge; tests/other callers can override
+// with options.onLaunch.
+function handleListingRowLaunch(target, button, statusNode, options = {}) {
+  if (button) {
+    button.disabled = true;
+    button.dataset.rrLaunching = 'true';
+  }
+  if (typeof options.onLaunch === 'function') {
+    options.onLaunch(target, button, statusNode);
+    return;
+  }
+  dispatchListingRowLaunch(target, button, statusNode, options);
+}
+
+function createListingRowControl(target, rootDocument, options = {}) {
+  const control = rootDocument.createElement('span');
+  control.id = listingControlIdForTarget(target);
+  control.className = LISTING_CONTROL_CLASS;
+
+  const button = rootDocument.createElement('button');
+  button.type = 'button';
+  button.className = `${LISTING_BUTTON_CLASS} ${LISTING_GITHUB_BUTTON_CLASS}`;
+  button.textContent = LISTING_START_LABEL;
+  // Accessible name is always the full label even if CSS ellipsizes the text.
+  button.setAttribute('aria-label', LISTING_START_LABEL);
+  button.dataset.action = 'start_review';
+  button.dataset.owner = target.owner;
+  button.dataset.repo = target.repo;
+  button.dataset.prNumber = String(target.pr_number);
+
+  const statusNode = rootDocument.createElement('span');
+  statusNode.className = LISTING_STATUS_CLASS;
+  statusNode.hidden = true;
+
+  if (typeof button.addEventListener === 'function') {
+    button.addEventListener('click', () =>
+      handleListingRowLaunch(target, button, statusNode, options)
+    );
+  }
+
+  control.appendChild(button);
+  control.appendChild(statusNode);
+  return control;
+}
+
+function rowHasListingControl(row, controlId) {
+  if (row && row.id === controlId) {
+    return true;
+  }
+  for (const node of walkElementDescendants(row)) {
+    if (node && node.id === controlId) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Inject exactly one Roger start control into each discovered open PR row.
+// Idempotent: an already-mounted row is left untouched, so repeated calls after
+// DOM mutation or SPA navigation never duplicate controls.
+function ensurePrListingRowControls(rootDocument, listingContext, options = {}) {
+  const targets = extractPrListingRowTargets(rootDocument, listingContext);
+  if (targets.length === 0) {
+    return [];
+  }
+
+  ensureListingStyles(rootDocument);
+
+  const mounted = [];
+  for (const target of targets) {
+    const row = target.row_node;
+    if (!row || typeof rootDocument.createElement !== 'function') {
+      continue;
+    }
+
+    const controlId = listingControlIdForTarget(target);
+    if (rowHasListingControl(row, controlId)) {
+      continue;
+    }
+
+    const control = createListingRowControl(target, rootDocument, options);
+    if (typeof row.appendChild === 'function') {
+      row.appendChild(control);
+      if (typeof row.setAttribute === 'function') {
+        row.setAttribute(LISTING_ROW_MOUNTED_ATTR, controlId);
+      }
+      mounted.push(control);
+    }
+  }
+
+  return mounted;
+}
+
+// Remove all listing controls (used when navigating away from a PR list, e.g.
+// onto a PR-detail page) so stale controls never linger on a non-listing route.
+function removeAllListingControls(rootDocument) {
+  if (!rootDocument || typeof rootDocument.querySelectorAll !== 'function') {
+    return;
+  }
+  const controls = rootDocument.querySelectorAll(`.${LISTING_CONTROL_CLASS}`);
+  for (const control of controls) {
+    if (control && typeof control.remove === 'function') {
+      control.remove();
+    }
+  }
+}
+
+// Bridge the listing-control lifecycle into the existing navigation refresh.
+// On a PR-list route it injects row controls; on any other route it clears
+// them. Kept fully separate from the PR-detail panel path.
+function refreshPrListingControls(rootDocument, options = {}) {
+  const listingContext = parsePullRequestListContext();
+  if (!listingContext) {
+    removeAllListingControls(rootDocument);
+    return;
+  }
+  ensurePrListingRowControls(rootDocument, listingContext, options);
+}
+
 function readExtensionBuildLabel() {
   if (typeof chrome === 'undefined' || !chrome.runtime?.getManifest) {
     return '';
@@ -1518,6 +2197,9 @@ function refreshPanelForCurrentPage(rootDocument) {
     lastPanelMode = null;
     lastAttentionState = null;
     lastSessionCount = null;
+    // On non-detail routes (including PR-list pages) the listing controls own
+    // their own lifecycle, separate from the detail panel.
+    refreshPrListingControls(rootDocument);
     return;
   }
 
@@ -1536,6 +2218,10 @@ function refreshPanelForCurrentPage(rootDocument) {
     setInfoMessage(DEFAULT_INFO_MESSAGE);
     requestStatusMirror(context);
   }
+
+  // A PR-detail page is never a PR-list route, so this clears any stale listing
+  // controls without touching the detail panel.
+  refreshPrListingControls(rootDocument);
 }
 
 function scheduleRefresh(rootDocument) {
@@ -1745,6 +2431,22 @@ if (typeof module !== 'undefined' && module.exports) {
     mountInto,
     normalizeSessionCount,
     parsePullRequestContext,
+    parsePullRequestListContext,
+    isOpenOnlyListingQuery,
+    parsePullTargetHref,
+    extractPrListingRowTargets,
+    PR_LISTING_ROUTE,
+    LISTING_START_LABEL,
+    LISTING_CONTROL_CLASS,
+    LISTING_BUTTON_CLASS,
+    LISTING_STATUS_CLASS,
+    listingControlIdForTarget,
+    createListingRowControl,
+    ensurePrListingRowControls,
+    removeAllListingControls,
+    refreshPrListingControls,
+    dispatchListingRowLaunch,
+    setListingRowStatus,
     pickInlineAnchorSelector,
     readExtensionBuildLabel,
     readRuntimeAssetUrl,
