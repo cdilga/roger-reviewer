@@ -1,132 +1,130 @@
-# CLI Surface Simplification Contract
+# CLI Surface Simplification Contract (v2)
 
-This contract defines the intended Roger CLI shape after the current
-local/devbox reconciliation. It is an implementation-facing support contract,
-not a historical planning note.
+This contract defines the target Roger CLI shape. It is an
+implementation-facing support contract and the grammar authority for
+Track 1 of `docs/PRODUCT_SURFACE_RECOVERY_AND_RELEASE_PLAN.md`.
 
 ## Goal
 
 Roger's CLI should feel like one local review product, not a bag of plumbing
-verbs. The operator should learn a small vocabulary:
+verbs. The operator learns seven words:
 
 - `rr doctor`: check whether Roger can run
 - `rr queue`: choose review work
 - `rr review`: start or re-enter review work
 - `rr open`: use the local cockpit
 - `rr findings`: inspect and search review output
-- `rr send`: explicitly prepare/approve/post outbound communication
+- `rr send`: explicitly triage/draft/edit/approve/post outbound communication
 - `rr setup`: install, update, and repair local integrations
 
-Existing commands remain supported until their replacements are live and
-covered. Compatibility must be quiet and truthful: old commands can stay as
-aliases, but help, README, and guided repair text should prefer the simpler
-names.
+Two machine surfaces stay explicit and out of the operator's way:
 
-## Command Units
+- `rr api docs <topic>`: machine-contract documentation (robot-docs)
+- `rr agent <op>`: the in-session worker transport (unchanged)
 
-| Unit | Preferred command | Current live backing command | Scope |
-| --- | --- | --- | --- |
-| Environment | `rr doctor` | `rr doctor`, `rr init`, `rr assets *` | Bootstrap, provider preflight, semantic assets, local store health |
-| Work queue | `rr queue` | `rr prs` | Read-only open-PR queue joined with local Roger state |
-| Review entry | `rr review` | `rr review`, `rr resume`, `rr return` | Start, resume, and explicit bare-harness return |
-| Cockpit | `rr open` | `rr tui` | Interactive local workspace |
-| Findings | `rr findings` | `rr findings`, `rr status`, `rr search`, `rr sessions` | Readback, attention, evidence, prior-review search |
-| Outbound | `rr send` | `rr triage`, `rr draft`, `rr approve`, `rr post` | Local triage/draft/approval plus the only GitHub posting path |
-| Setup | `rr setup` | `rr extension *`, `rr bridge *`, `rr update` | Browser companion, Native Messaging host, update path |
-| Machine API | `rr api` | `rr robot-docs`, `rr agent` | Robot docs and worker transport |
+Existing commands remain supported as quiet compatibility aliases. Help,
+README, and guided repair text prefer the simple names.
 
-## Current Implementation Slice
-
-Landed in this slice:
-
-- `rr queue` aliases the proven `rr prs` queue handler.
-- `rr open` aliases the proven `rr tui` cockpit handler.
-- `rr --help` presents the simplified vocabulary first.
-- README command guidance presents `queue` and `open` as preferred names while
-  keeping `prs` and `tui` visible as compatibility names.
-
-Still intentionally not moved in this slice:
-
-- outbound commands remain top-level `triage`, `draft`, `approve`, and `post`
-  until `rr send` has a fail-closed parser and robot-schema compatibility plan
-- extension/bridge/update/assets commands remain separate until `rr setup`
-  can delegate without hiding mutation-capable flows
-- `rr robot-docs` and `rr agent` remain explicit because they are machine
-  interfaces, not normal operator workflow
-
-## Target Syntax
-
-The desired final operator syntax is:
+## Target grammar (final)
 
 ```sh
 rr doctor [--provider opencode|codex|gemini|claude|copilot]
 rr queue [--repo owner/repo] [--limit n]
-rr review [--pr n] [--repo owner/repo] [--provider p]
-rr review --resume [--pr n|--session id]
-rr open [--pr n|--session id]
-rr findings [--pr n|--session id] [--query text]
-rr send accept --finding id...
-rr send draft (--finding id...|--all)
-rr send approve --batch id
-rr send post --batch id
-rr setup extension --browser edge|chrome|brave
-rr setup update [--dry-run|--yes]
+rr review [--pr n] [--repo owner/repo] [--provider p] [--interactive]
+rr review --resume [--pr n | --session id]
+rr open [--pr n | --session id]
+rr findings [--pr n | --session id]
+rr findings --query <text> [--repo owner/repo]      # prior-review search
+rr findings --sessions [--repo owner/repo]          # session listing
+rr send triage --finding <id>... --state <state>
+rr send draft (--finding <id>... | --all-findings)
+rr send edit --draft <id> (--body-file <f> | --editor)
+rr send approve --batch <id>
+rr send post --batch <id>
+rr setup extension [--browser edge|chrome|brave]
+rr setup doctor [--browser b] [--live]
+rr setup fetch [--version YYYY.MM.DD]
+rr setup update [--dry-run | --yes]
+rr setup assets install|status|verify
+rr setup uninstall
 rr api docs guide|commands|schemas|workflows
+rr agent <operation> [--task-file ...]
 ```
 
-Compatibility mapping:
+## Compatibility mapping (all old names stay routable)
 
-- `rr prs` -> `rr queue`
-- `rr tui` -> `rr open`
-- `rr sessions` -> `rr findings --sessions` or a cockpit picker
-- `rr search` -> `rr findings --query`
-- `rr triage|draft|approve|post` -> `rr send *`
-- `rr extension|bridge|assets|update` -> `rr setup *`
-- `rr robot-docs` -> `rr api docs`
+| Old | New preferred | Routing rule |
+| --- | --- | --- |
+| `rr prs` | `rr queue` | same enum variant (landed) |
+| `rr tui` | `rr open` | same enum variant (landed) |
+| `rr resume` | `rr review --resume` | both route to the resume handler |
+| `rr return` | `rr return` (unchanged) | stays top-level; it is a deliberate, narrow verb |
+| `rr search --query q` | `rr findings --query q` | routes to search handler |
+| `rr sessions` | `rr findings --sessions` | routes to sessions handler |
+| `rr triage/draft/approve/post` | `rr send <sub>` | container routes to the same fail-closed handlers |
+| `rr extension <sub>` | `rr setup <sub>` | `setup extension` = `extension setup`; `setup doctor/fetch/uninstall` map 1:1 |
+| `rr update` | `rr setup update` | same handler |
+| `rr assets <sub>` | `rr setup assets <sub>` | same handlers |
+| `rr init` | (absorbed) | store auto-bootstraps; `init` stays as hidden compat |
+| `rr bridge <sub>` | (hidden) | dev/repair surface; removed from operator help, kept routable |
+| `rr robot-docs` | `rr api docs` | same handler |
 
-## Non-Negotiables
+## Parser and help requirements
 
-- `rr send post` must remain visibly elevated and bound to an exact locally
+1. **Container parsing** follows the established `bridge`/`extension`/`assets`
+   positional-subcommand pattern (`parse_args`, `packages/cli/src/lib.rs`).
+2. **Per-command help**: `--help`/`-h` at any argv position prints usage for
+   the named command (or the global help for bare `rr --help`). The current
+   behavior (`--help` recognized only as the first token; `rr review --help`
+   → "unknown flag") is a bug this contract fixes.
+3. **Positive flag whitelists for every command.** The ten commands that
+   currently lack one (`review, resume, return, sessions, search, status,
+   findings, bridge, extension, robot-docs`) gain explicit "rr X only
+   supports ..." rejection messages, same style as the nine that have one.
+4. `--dry-run` is rejected (not silently ignored) by every command that does
+   not implement it.
+5. `rr --help` leads with the seven verbs and the primary flow; machine and
+   repair surfaces live in a short trailing section; `bridge` disappears from
+   help entirely.
+
+## Robot schema stability
+
+- Aliases emit the **underlying** command's schema id (e.g. `rr send post
+  --robot` emits `rr.robot.post.v1`; `rr findings --query --robot` emits
+  `rr.robot.search.v1`; `rr setup update --robot` emits `rr.robot.update.v1`).
+  No new schema ids in this slice; `rr api docs schemas` documents the
+  alias→schema mapping truthfully.
+- `rr agent` remains a separate transport and continues to reject `--robot`.
+- Exit-code contract unchanged (`docs/ROBOT_CLI_CONTRACT.md`).
+
+## Non-negotiables
+
+- `rr send post` remains visibly elevated and bound to an exact locally
   approved draft batch.
-- No alias may bypass stale-state, target-binding, approval-token, or provider
-  capability checks.
-- Browser setup and Native Messaging repair must not be presented as ordinary
+- `rr send edit` on an approved draft invalidates the approval token and
+  fails closed toward re-approval; it never edits a posted batch.
+- No alias may bypass stale-state, target-binding, approval-token, or
+  provider capability checks — containers route to the same handlers, they do
+  not reimplement them.
+- Browser setup and native-messaging repair are never presented as ordinary
   review actions.
-- Robot schemas must remain stable. New preferred names may be aliases over
-  existing schema ids until an explicit schema migration exists.
-- Machine surfaces must not crowd normal `rr --help`.
+- Machine surfaces do not crowd `rr --help`.
 
-## Reconciliation Decisions
+## Landed so far
 
-Keep from the local branch:
-
-- Edge `connectNative` launch path
-- live CDP panel-interaction E2E harness
-- Docker install/update E2E
-- release UX/help polish
-- undated `nightly` Rust toolchain policy until dated nightly has current CI
-  proof across cross-target release lanes
-
-Keep from devbox:
-
-- PR-listing route detection and row-level review kickoff controls
-- PR-listing row bridge dispatch and full-page fixture coverage
-- manifest validator fix that removes unsupported `refresh_review`
-- bead JSONL/rebuild repair helper scripts, updated as repair tooling rather
-  than product scope
-
-Do not merge wholesale:
-
-- the dated-nightly release-toolchain commit remains a separate decision
-  because prior release history shows cross-target builds can fail when the
-  local toolchain pin and CI target installation channel diverge
+- `rr queue` / `rr open` aliases (commit `0297076`).
+- Help text leads with simplified vocabulary (partial; still names `send`
+  and `setup` before they exist — this contract closes that gap).
 
 ## Acceptance
 
-A slice that claims CLI simplification progress must prove:
+A slice claiming Track 1 completion must prove:
 
-- `rr --help` leads with the simplified vocabulary
-- preferred aliases work and route to the same fail-closed handlers
-- README uses preferred names first
-- robot docs remain truthful about the underlying command/schema ids
-- extension and outbound mutation flows remain visibly explicit
+- every grammar line above parses and routes to the correct handler
+  (parser-level unit tests, alias × handler matrix)
+- per-command `--help` works at any argv position for all commands
+- every command has a positive flag whitelist with actionable rejection text
+- `rr --help` output matches the seven-verb structure; README uses preferred
+  names first; robot docs describe the alias→schema mapping
+- outbound and setup mutation flows remain visibly explicit
+- full workspace test suite green
