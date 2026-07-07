@@ -8,7 +8,8 @@
 
 use crate::model::{
     APPROVE_CONFIRMATION_WORD, CLARIFY_HINT, CockpitModel, ELEVATED_MUTATION_HINT,
-    EMPTY_STORE_HINT, FindingRow, InputMode, LAUNCH_DEFERRED_HINT, Overlay, Screen, TimelineEntry,
+    EMPTY_STORE_HINT, FindingRow, InputMode, LAUNCH_DEFERRED_HINT, Overlay, Screen, SearchMode,
+    TimelineEntry,
 };
 
 /// Minimum total width before the inspector pane is rendered side-by-side.
@@ -148,7 +149,15 @@ impl CockpitModel {
             }
             Screen::DraftItems => "j/k move  e edit draft  Esc drafts  ? help  q quit".to_owned(),
             Screen::Timeline => "j/k move  Esc home  ? help  q quit".to_owned(),
-            Screen::Search => "j/k move  / new query  Esc home  ? help  q quit".to_owned(),
+            Screen::Search => match self.search_mode {
+                SearchMode::Hits => {
+                    "j/k move  / new query  m review-requests  Esc home  ? help  q quit".to_owned()
+                }
+                SearchMode::Reviews => {
+                    "j/k move  a accept  x reject  m back to hits  Esc home  ? help  q quit"
+                        .to_owned()
+                }
+            },
         }
     }
 
@@ -564,11 +573,23 @@ impl CockpitModel {
         } else {
             ""
         };
-        lines.push(format!("query: {}{caret}", self.search_input));
+        let lane = match self.search_mode {
+            SearchMode::Hits => "hits",
+            SearchMode::Reviews => "memory-review",
+        };
+        lines.push(format!(
+            "query: {}{caret}   [lane: {lane}  (m toggles)]",
+            self.search_input
+        ));
         // Session-level retrieval/memory posture line (distinct from the
-        // per-query retrieval_mode reported by the lookup result below).
+        // per-query retrieval_mode reported by the lookup result below). Includes
+        // the count of pending memory-review requests awaiting operator action.
         if let Some(posture) = &self.memory_posture {
-            lines.push(format!("memory posture: {}", posture.summary()));
+            lines.push(format!(
+                "memory posture: {}  pending_reviews={}",
+                posture.summary(),
+                self.memory_reviews.len()
+            ));
             if let Some(backend) = &posture.embedder_backend {
                 lines.push(format!("  embedder backend: {backend}"));
             }
@@ -576,8 +597,16 @@ impl CockpitModel {
                 lines.push(format!("  posture degraded: {reason}"));
             }
         } else {
-            lines.push("memory posture: unknown (projection unavailable)".to_owned());
+            lines.push(format!(
+                "memory posture: unknown (projection unavailable)  pending_reviews={}",
+                self.memory_reviews.len()
+            ));
         }
+
+        if self.search_mode == SearchMode::Reviews {
+            return self.render_memory_reviews(lines);
+        }
+
         let Some(view) = &self.search else {
             lines.push(String::new());
             lines.push(
@@ -620,6 +649,32 @@ impl CockpitModel {
                 hit.outbound_state,
                 hit.fused_score,
                 hit.title
+            ));
+        }
+        (lines, cursor_line)
+    }
+
+    /// Render the pending memory-review operator surface.
+    fn render_memory_reviews(&self, mut lines: Vec<String>) -> (Vec<String>, usize) {
+        lines.push(String::new());
+        lines.push("pending memory-review requests (a accept  x reject)".to_owned());
+        if self.memory_reviews.is_empty() {
+            lines.push(String::new());
+            lines.push("no pending memory-review requests in this repo scope".to_owned());
+            return (lines, 0);
+        }
+        let mut cursor_line = 0;
+        for (idx, row) in self.memory_reviews.iter().enumerate() {
+            if idx == self.memory_review_cursor {
+                cursor_line = lines.len();
+            }
+            lines.push(format!(
+                "{} {}  {}/{}  {}",
+                cursor_marker(idx == self.memory_review_cursor),
+                row.id,
+                row.source,
+                row.request_kind,
+                row.statement
             ));
         }
         (lines, cursor_line)
@@ -900,6 +955,30 @@ impl CockpitModel {
     }
 
     fn inspect_search_hit(&self) -> Vec<String> {
+        if self.search_mode == SearchMode::Reviews {
+            let Some(row) = self.memory_reviews.get(self.memory_review_cursor) else {
+                return vec!["no pending memory-review request focused".to_owned()];
+            };
+            let mut lines = vec![
+                "inspector — memory review request".to_owned(),
+                String::new(),
+                format!("id       {}", row.id),
+                format!("source   {}", row.source),
+                format!("kind     {}", row.request_kind),
+                format!("status   {}", row.status),
+                format!("norm_key {}", row.normalized_key),
+                String::new(),
+                "statement".to_owned(),
+            ];
+            if row.statement.is_empty() {
+                lines.push("  (no statement)".to_owned());
+            } else {
+                for statement_line in row.statement.lines().take(8) {
+                    lines.push(format!("  {statement_line}"));
+                }
+            }
+            return lines;
+        }
         let Some(view) = &self.search else {
             return vec!["no search executed yet".to_owned()];
         };

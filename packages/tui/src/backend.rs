@@ -7,13 +7,14 @@
 
 use crate::model::{
     ApproveOutcome, DecisionEventRow, DraftBatchRow, DraftItemRow, EvidenceRow, FindingDetail,
-    FindingRow, MemoryPostureRow, OutboundLinkRow, PostedActionRow, SearchHitRow, SearchView,
-    SessionHomeView, SessionRow, StageResultRow, TimelineRunRow, TimelineView, TriageAction,
-    bump_count,
+    FindingRow, MemoryPostureRow, MemoryReviewResolutionRow, MemoryReviewRow, OutboundLinkRow,
+    PostedActionRow, SearchHitRow, SearchView, SessionHomeView, SessionRow, StageResultRow,
+    TimelineRunRow, TimelineView, TriageAction, bump_count,
 };
 use roger_storage::{
     OutboundBatchApproval, PriorReviewLookupQuery, PriorReviewRetrievalMode, RogerStore,
-    SessionFinderQuery, projected_outbound_batch_state,
+    SemanticEmbedderAdapter, SessionFinderQuery, UpdateIndexState, projected_outbound_batch_state,
+    semantic_embedder_status,
 };
 
 /// Maximum sessions projected into the cockpit session finder screen.
@@ -50,6 +51,21 @@ pub trait CockpitBackend {
     /// Persist an edited outbound-draft body through the storage revision path
     /// (same author/audit semantics a future `rr` draft-edit command uses).
     fn revise_draft_body(&mut self, draft_id: &str, new_body: &str) -> Result<(), String>;
+    /// List pending memory review requests in this repo scope (the operator
+    /// promotion-review surface). Read-only projection.
+    fn list_pending_memory_reviews(
+        &mut self,
+        repository: &str,
+    ) -> Result<Vec<MemoryReviewRow>, String>;
+    /// Resolve (accept/reject) a pending memory review request through storage.
+    /// Accept is the first production `memory_items` writer; the mutation is
+    /// local-only (not GitHub-elevated), so it uses plain keys with a clear
+    /// notice rather than the elevation gate.
+    fn resolve_memory_review(
+        &mut self,
+        request_id: &str,
+        accept: bool,
+    ) -> Result<MemoryReviewResolutionRow, String>;
 }
 
 pub struct StoreCockpitBackend {
@@ -327,6 +343,55 @@ impl CockpitBackend for StoreCockpitBackend {
         query: &str,
     ) -> Result<SearchView, String> {
         let scope_key = format!("repo:{repository}");
+
+        // Real semantic posture (mirrors `rr search`): the semantic lane is
+        // eligible only when assets verify AND the embedder is available. Never
+        // hardcode "off" — that contradicted this backend's own posture line.
+        let component_state = self.store.semantic_component_state().ok();
+        let assets_verified = component_state
+            .as_ref()
+            .map(|state| state.assets_verified)
+            .unwrap_or(false);
+        let embedder_available = component_state
+            .as_ref()
+            .map(|state| state.embedder_available)
+            .unwrap_or(false);
+        let semantic_assets_verified = assets_verified && embedder_available;
+
+        // When the lane is operational, mark this repo scope's semantic index
+        // ready so the lookup's readiness gate can flip to hybrid (same design as
+        // `rr search`: candidates are embedded live from the canonical corpus).
+        if semantic_assets_verified {
+            let scope_index_key = format!("semantic:repo:{repository}");
+            let digest = self
+                .store
+                .semantic_asset_manifest()
+                .ok()
+                .flatten()
+                .map(|manifest| manifest.artifact_digest);
+            let _ = self.store.upsert_index_state(UpdateIndexState {
+                scope_key: &scope_index_key,
+                generation: roger_app_core::time::now_ts(),
+                status: "ready",
+                artifact_digest: digest.as_deref(),
+            });
+        }
+
+        let semantic_candidates = if semantic_assets_verified {
+            let mut embedder = build_cockpit_semantic_embedder(&self.store);
+            self.store
+                .generate_semantic_candidates(
+                    &scope_key,
+                    repository,
+                    query,
+                    &mut embedder,
+                    SEARCH_LIMIT + 1,
+                )
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
         let lookup = self
             .store
             .prior_review_lookup(PriorReviewLookupQuery {
@@ -337,8 +402,8 @@ impl CockpitBackend for StoreCockpitBackend {
                 include_tentative_candidates: false,
                 allow_project_scope: false,
                 allow_org_scope: false,
-                semantic_assets_verified: false,
-                semantic_candidates: Vec::new(),
+                semantic_assets_verified,
+                semantic_candidates,
             })
             .map_err(|err| format!("failed to run prior-review lookup: {err}"))?;
         Ok(SearchView {
@@ -398,6 +463,74 @@ impl CockpitBackend for StoreCockpitBackend {
             )
             .map(|_| ())
             .map_err(|err| format!("draft revision failed: {err}"))
+    }
+
+    fn list_pending_memory_reviews(
+        &mut self,
+        repository: &str,
+    ) -> Result<Vec<MemoryReviewRow>, String> {
+        let scope_key = format!("repo:{repository}");
+        let records = self
+            .store
+            .pending_memory_review_requests(Some(&scope_key), SEARCH_LIMIT)
+            .map_err(|err| format!("failed to load pending memory reviews: {err}"))?;
+        Ok(records
+            .into_iter()
+            .map(|record| MemoryReviewRow {
+                id: record.id,
+                source: record.source,
+                request_kind: record.request_kind,
+                statement: record.statement,
+                normalized_key: record.normalized_key,
+                status: record.status,
+                created_at: record.created_at,
+            })
+            .collect())
+    }
+
+    fn resolve_memory_review(
+        &mut self,
+        request_id: &str,
+        accept: bool,
+    ) -> Result<MemoryReviewResolutionRow, String> {
+        let decision = if accept {
+            roger_storage::MemoryReviewDecision::Accept
+        } else {
+            roger_storage::MemoryReviewDecision::Reject
+        };
+        let outcome = self
+            .store
+            .resolve_memory_review_request(request_id, decision, "operator:tui")
+            .map_err(|err| format!("failed to resolve memory review: {err}"))?;
+        Ok(MemoryReviewResolutionRow {
+            id: outcome.request.id,
+            status: outcome.request.status,
+            resulting_memory_item_id: outcome.resulting_memory_item_id,
+            materialized_new_item: outcome.materialized_new_item,
+        })
+    }
+}
+
+/// Build the cockpit's semantic embedder the same way `rr search` does: a live
+/// FastEmbed adapter when the feature is compiled and the model is installed,
+/// otherwise a non-ready stub so `generate_semantic_candidates` returns empty
+/// and search stays honestly lexical-only.
+fn build_cockpit_semantic_embedder(store: &RogerStore) -> SemanticEmbedderAdapter {
+    let status = semantic_embedder_status();
+    if !status.available {
+        return SemanticEmbedderAdapter::default_for_runtime();
+    }
+    let cache_dir = store.layout().semantic_asset_root();
+    let config = roger_storage::FastEmbedAdapterConfig {
+        model: roger_storage::FastEmbedModel::default(),
+        cache_dir,
+        show_download_progress: false,
+    };
+    match SemanticEmbedderAdapter::try_fastembed(config) {
+        Ok(adapter) => adapter,
+        Err(err) => SemanticEmbedderAdapter::unavailable(format!(
+            "FastEmbed adapter could not load installed semantic model: {err}"
+        )),
     }
 }
 

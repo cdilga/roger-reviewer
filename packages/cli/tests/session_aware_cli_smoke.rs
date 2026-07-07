@@ -238,8 +238,11 @@ fn seed_prior_review_lookup_records(
             scope_key: &scope_key,
             memory_class: "procedural",
             state: "proven",
-            statement: "approval refresh should reconfirm posting safety",
-            normalized_key: "approval refresh reconfirm posting safety",
+            // Contains every token of the multi-token recall/candidate queries
+            // ("approval token stale refresh") so multi-token AND matching still
+            // surfaces this promoted memory truthfully.
+            statement: "approval token stale refresh should reconfirm posting safety",
+            normalized_key: "approval token stale refresh reconfirm posting safety",
             anchor_digest: Some("anchor:approval-refresh"),
             source_kind: "manual",
         })
@@ -4674,6 +4677,16 @@ fn rr_agent_supports_search_artifact_and_advisory_operations() {
     assert_eq!(
         memory_review_operation["payload"]["requested_scopes"],
         json!(["repo"])
+    );
+    // Durable write path (a): the previously write-only memory-review proposal is
+    // now persisted as a pending review request; the persisted id is surfaced
+    // additively on the transport response envelope.
+    let persisted_review_id = memory_review_payload["persisted_memory_review_request_id"]
+        .as_str()
+        .expect("persisted memory review request id");
+    assert!(
+        persisted_review_id.starts_with("mrr-"),
+        "persisted id should be a durable review-request id: {persisted_review_id}"
     );
 
     let follow_up_request_path = temp.path().join("worker-follow-up-request.json");

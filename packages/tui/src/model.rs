@@ -411,6 +411,36 @@ pub struct SearchView {
     pub hits: Vec<SearchHitRow>,
 }
 
+/// One pending memory-review request row in the operator promotion-review view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryReviewRow {
+    pub id: String,
+    pub source: String,
+    pub request_kind: String,
+    pub statement: String,
+    pub normalized_key: String,
+    pub status: String,
+    pub created_at: i64,
+}
+
+/// Outcome of resolving a memory-review request through the cockpit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryReviewResolutionRow {
+    pub id: String,
+    pub status: String,
+    pub resulting_memory_item_id: Option<String>,
+    pub materialized_new_item: bool,
+}
+
+/// Which lane the Search screen is showing: prior-review hits or the pending
+/// memory-review requests operator surface.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SearchMode {
+    #[default]
+    Hits,
+    Reviews,
+}
+
 /// Result of the in-process elevated approval (same storage path as
 /// `rr approve`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -488,6 +518,13 @@ pub struct CockpitModel {
     pub search: Option<SearchView>,
     pub search_cursor: usize,
 
+    /// Whether the Search screen is showing prior-review hits or the pending
+    /// memory-review operator surface.
+    pub search_mode: SearchMode,
+    /// Pending memory-review requests for the active repo scope.
+    pub memory_reviews: Vec<MemoryReviewRow>,
+    pub memory_review_cursor: usize,
+
     /// Session-level retrieval/memory posture (status strip + Search screen).
     pub memory_posture: Option<MemoryPostureRow>,
 
@@ -551,6 +588,9 @@ impl CockpitModel {
             search_input: String::new(),
             search: None,
             search_cursor: 0,
+            search_mode: SearchMode::Hits,
+            memory_reviews: Vec::new(),
+            memory_review_cursor: 0,
             memory_posture: None,
             pending_effect: None,
             notice: None,
@@ -1198,15 +1238,92 @@ impl CockpitModel {
     }
 
     fn handle_search_key(&mut self, key: CockpitKey, backend: &mut dyn CockpitBackend) {
-        match key {
-            CockpitKey::Up | CockpitKey::Char('k') => move_cursor_up(&mut self.search_cursor),
-            CockpitKey::Down | CockpitKey::Char('j') => {
-                let len = self.search.as_ref().map_or(0, |view| view.hits.len());
-                move_cursor_down(&mut self.search_cursor, len);
+        match self.search_mode {
+            SearchMode::Hits => match key {
+                CockpitKey::Up | CockpitKey::Char('k') => move_cursor_up(&mut self.search_cursor),
+                CockpitKey::Down | CockpitKey::Char('j') => {
+                    let len = self.search.as_ref().map_or(0, |view| view.hits.len());
+                    move_cursor_down(&mut self.search_cursor, len);
+                }
+                CockpitKey::Char('/') => self.input_mode = InputMode::SearchQuery,
+                CockpitKey::Char('m') => self.toggle_search_mode(backend),
+                CockpitKey::Esc => self.open_session_home_for_active(backend),
+                _ => {}
+            },
+            SearchMode::Reviews => match key {
+                CockpitKey::Up | CockpitKey::Char('k') => {
+                    move_cursor_up(&mut self.memory_review_cursor)
+                }
+                CockpitKey::Down | CockpitKey::Char('j') => {
+                    move_cursor_down(&mut self.memory_review_cursor, self.memory_reviews.len());
+                }
+                CockpitKey::Char('a') => self.resolve_current_review(true, backend),
+                CockpitKey::Char('x') => self.resolve_current_review(false, backend),
+                CockpitKey::Char('m') => self.toggle_search_mode(backend),
+                CockpitKey::Esc => self.open_session_home_for_active(backend),
+                _ => {}
+            },
+        }
+    }
+
+    /// Toggle the Search screen between prior-review hits and the pending
+    /// memory-review operator surface, refreshing the review list on entry.
+    fn toggle_search_mode(&mut self, backend: &mut dyn CockpitBackend) {
+        self.search_mode = match self.search_mode {
+            SearchMode::Hits => SearchMode::Reviews,
+            SearchMode::Reviews => SearchMode::Hits,
+        };
+        if self.search_mode == SearchMode::Reviews {
+            self.reload_memory_reviews(backend);
+            self.input_mode = InputMode::None;
+        }
+        self.notice = None;
+    }
+
+    fn reload_memory_reviews(&mut self, backend: &mut dyn CockpitBackend) {
+        let Some(session) = self.active_session.clone() else {
+            return;
+        };
+        match backend.list_pending_memory_reviews(&session.repository) {
+            Ok(reviews) => {
+                self.memory_reviews = reviews;
+                if self.memory_review_cursor >= self.memory_reviews.len() {
+                    self.memory_review_cursor = self.memory_reviews.len().saturating_sub(1);
+                }
             }
-            CockpitKey::Char('/') => self.input_mode = InputMode::SearchQuery,
-            CockpitKey::Esc => self.open_session_home_for_active(backend),
-            _ => {}
+            Err(err) => self.notice = Some(format!("error: {err}")),
+        }
+    }
+
+    /// Accept or reject the focused pending memory-review request. Acceptance is
+    /// the first production memory-item writer; this is a local-only mutation, so
+    /// plain keys are fine but the result notice makes the effect explicit.
+    fn resolve_current_review(&mut self, accept: bool, backend: &mut dyn CockpitBackend) {
+        let Some(row) = self.memory_reviews.get(self.memory_review_cursor).cloned() else {
+            self.notice = Some("no pending memory-review request focused".to_owned());
+            return;
+        };
+        match backend.resolve_memory_review(&row.id, accept) {
+            Ok(resolution) => {
+                let verb = if accept { "accepted" } else { "rejected" };
+                self.notice = Some(if accept {
+                    match &resolution.resulting_memory_item_id {
+                        Some(memory_id) => format!(
+                            "review {verb}: memory item {memory_id} {}",
+                            if resolution.materialized_new_item {
+                                "created"
+                            } else {
+                                "updated"
+                            }
+                        ),
+                        None => format!("review {verb}"),
+                    }
+                } else {
+                    format!("review {verb}")
+                });
+                self.reload_memory_reviews(backend);
+            }
+            Err(err) => self.notice = Some(format!("error: {err}")),
         }
     }
 
@@ -1253,6 +1370,9 @@ impl CockpitModel {
         self.search = None;
         self.search_input.clear();
         self.search_cursor = 0;
+        self.search_mode = SearchMode::Hits;
+        self.memory_reviews.clear();
+        self.memory_review_cursor = 0;
         self.timeline = None;
         self.timeline_cursor = 0;
     }
@@ -1357,6 +1477,15 @@ impl CockpitModel {
         if let Ok(posture) = backend.memory_posture() {
             self.memory_posture = Some(posture);
         }
+        // Load pending memory-review requests so the posture line can surface the
+        // count even before the operator toggles into the review lane.
+        if let Some(session) = self.active_session.clone() {
+            self.memory_reviews = backend
+                .list_pending_memory_reviews(&session.repository)
+                .unwrap_or_default();
+        }
+        self.search_mode = SearchMode::Hits;
+        self.memory_review_cursor = 0;
         self.screen = Screen::Search;
         self.input_mode = InputMode::SearchQuery;
         self.notice = None;

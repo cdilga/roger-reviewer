@@ -2,8 +2,9 @@ use crate::backend::CockpitBackend;
 use crate::model::{
     ApproveOutcome, CLARIFY_HINT, CockpitEntry, CockpitKey, CockpitModel, DecisionEventRow,
     DraftBatchRow, DraftItemRow, ELEVATED_MUTATION_HINT, EMPTY_STORE_HINT, EvidenceRow,
-    FindingDetail, FindingRow, GroupKey, InputMode, KeyOutcome, MemoryPostureRow, ModelEffect,
-    OutboundLinkRow, Overlay, PickerCandidate, PostedActionRow, Screen, SearchHitRow, SearchView,
+    FindingDetail, FindingRow, GroupKey, InputMode, KeyOutcome, MemoryPostureRow,
+    MemoryReviewResolutionRow, MemoryReviewRow, ModelEffect, OutboundLinkRow, Overlay,
+    PickerCandidate, PostedActionRow, Screen, SearchHitRow, SearchMode, SearchView,
     SessionHomeView, SessionRow, SortKey, StageResultRow, TimelineEntry, TimelineRunRow,
     TimelineView, TriageAction,
 };
@@ -33,6 +34,12 @@ struct FakeBackend {
     /// Recorded `revise_draft_body(draft_id, new_body)` calls.
     revise_calls: Vec<(String, String)>,
     fail_revise: bool,
+    /// Pending memory-review requests returned by `list_pending_memory_reviews`.
+    memory_reviews: Vec<MemoryReviewRow>,
+    fail_memory_reviews: bool,
+    /// Recorded `resolve_memory_review(request_id, accept)` calls.
+    resolve_review_calls: Vec<(String, bool)>,
+    fail_resolve_review: bool,
 }
 
 impl CockpitBackend for FakeBackend {
@@ -163,6 +170,44 @@ impl CockpitBackend for FakeBackend {
             item.body = new_body.to_owned();
         }
         Ok(())
+    }
+
+    fn list_pending_memory_reviews(
+        &mut self,
+        _repository: &str,
+    ) -> Result<Vec<MemoryReviewRow>, String> {
+        if self.fail_memory_reviews {
+            return Err("memory review load failed".to_owned());
+        }
+        Ok(self.memory_reviews.clone())
+    }
+
+    fn resolve_memory_review(
+        &mut self,
+        request_id: &str,
+        accept: bool,
+    ) -> Result<MemoryReviewResolutionRow, String> {
+        self.resolve_review_calls
+            .push((request_id.to_owned(), accept));
+        if self.fail_resolve_review {
+            return Err("resolution rejected by storage".to_owned());
+        }
+        // Drop the resolved request from the pending list, mirroring storage.
+        self.memory_reviews.retain(|row| row.id != request_id);
+        Ok(MemoryReviewResolutionRow {
+            id: request_id.to_owned(),
+            status: if accept {
+                "accepted".to_owned()
+            } else {
+                "rejected".to_owned()
+            },
+            resulting_memory_item_id: if accept {
+                Some(format!("mem-{request_id}"))
+            } else {
+                None
+            },
+            materialized_new_item: accept,
+        })
     }
 }
 
@@ -1523,6 +1568,90 @@ fn memory_posture_failure_degrades_to_unknown() {
     );
     let rendered = model.render_lines(200, 30).join("\n");
     assert!(rendered.contains("memory posture: unknown"), "{rendered}");
+}
+
+fn seed_pending_reviews(backend: &mut FakeBackend) {
+    backend.memory_reviews = vec![
+        MemoryReviewRow {
+            id: "mrr-1".to_owned(),
+            source: "worker".to_owned(),
+            request_kind: "promote".to_owned(),
+            statement: "Prefer explicit fallback gate".to_owned(),
+            normalized_key: "prefer explicit fallback gate".to_owned(),
+            status: "pending_review".to_owned(),
+            created_at: 1,
+        },
+        MemoryReviewRow {
+            id: "mrr-2".to_owned(),
+            source: "operator".to_owned(),
+            request_kind: "promote".to_owned(),
+            statement: "Anchor drift needs a recheck".to_owned(),
+            normalized_key: "anchor drift needs a recheck".to_owned(),
+            status: "pending_review".to_owned(),
+            created_at: 2,
+        },
+    ];
+}
+
+#[test]
+fn search_posture_line_surfaces_pending_review_count() {
+    let mut backend = populated_backend();
+    seed_pending_reviews(&mut backend);
+    let mut model = bootstrap(&mut backend);
+    keys(
+        &mut model,
+        &mut backend,
+        &[CockpitKey::Enter, CockpitKey::Char('s')],
+    );
+    let rendered = model.render_lines(200, 30).join("\n");
+    assert!(rendered.contains("pending_reviews=2"), "{rendered}");
+}
+
+#[test]
+fn search_screen_memory_review_lane_accepts_and_rejects() {
+    let mut backend = populated_backend();
+    seed_pending_reviews(&mut backend);
+    let mut model = bootstrap(&mut backend);
+    // Open Search, leave the query input (empty Enter), then toggle to the
+    // memory-review lane with 'm'.
+    keys(
+        &mut model,
+        &mut backend,
+        &[
+            CockpitKey::Enter,
+            CockpitKey::Char('s'),
+            CockpitKey::Enter,
+            CockpitKey::Char('m'),
+        ],
+    );
+    assert_eq!(model.search_mode, SearchMode::Reviews);
+    let rendered = model.render_lines(200, 30).join("\n");
+    assert!(
+        rendered.contains("pending memory-review requests"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("mrr-1"), "{rendered}");
+
+    // Accept the focused request: local-only mutation via plain 'a'.
+    keys(&mut model, &mut backend, &[CockpitKey::Char('a')]);
+    assert_eq!(
+        backend.resolve_review_calls,
+        vec![("mrr-1".to_owned(), true)]
+    );
+    let notice = model.notice.clone().unwrap_or_default();
+    assert!(notice.contains("accepted"), "{notice}");
+    assert!(notice.contains("created"), "{notice}");
+    // The resolved request drops out of the pending list.
+    assert_eq!(model.memory_reviews.len(), 1);
+    assert_eq!(model.memory_reviews[0].id, "mrr-2");
+
+    // Reject the remaining request with 'x'.
+    keys(&mut model, &mut backend, &[CockpitKey::Char('x')]);
+    assert_eq!(
+        backend.resolve_review_calls,
+        vec![("mrr-1".to_owned(), true), ("mrr-2".to_owned(), false)]
+    );
+    assert!(model.memory_reviews.is_empty());
 }
 
 // --- explained empty findings states ----------------------------------------

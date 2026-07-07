@@ -15,12 +15,12 @@ use roger_app_core::{
     SessionLocator, Surface, WorkerArtifactExcerpt, WorkerArtifactExcerptRequest,
     WorkerCapabilityProfile, WorkerContextPacket, WorkerEvidenceLocation, WorkerFindingDetail,
     WorkerFindingDetailRequest, WorkerFindingListResponse, WorkerFindingSummary,
-    WorkerGatewaySnapshot, WorkerGitHubPosture, WorkerMutationPosture, WorkerOperation,
-    WorkerOperationRequestEnvelope, WorkerRecallEnvelope, WorkerSearchMemoryRequest,
-    WorkerSearchMemoryResponse, WorkerStageOutcome, WorkerStageResult, WorkerStatusSnapshot,
-    WorkerTransportKind, execute_agent_transport_request, execute_explicit_posting_flow,
-    materialize_search_plan, outbound_target_tuple_json, route_harness_command,
-    safe_harness_command_bindings, validate_outbound_draft_batch_linkage,
+    WorkerGatewaySnapshot, WorkerGitHubPosture, WorkerMemoryReviewRequest, WorkerMutationPosture,
+    WorkerOperation, WorkerOperationRequestEnvelope, WorkerRecallEnvelope,
+    WorkerSearchMemoryRequest, WorkerSearchMemoryResponse, WorkerStageOutcome, WorkerStageResult,
+    WorkerStatusSnapshot, WorkerTransportKind, execute_agent_transport_request,
+    execute_explicit_posting_flow, materialize_search_plan, outbound_target_tuple_json,
+    route_harness_command, safe_harness_command_bindings, validate_outbound_draft_batch_linkage,
 };
 use roger_bridge::{
     BridgePreflight, NativeHostManifest, SupportedBrowser, SupportedOs,
@@ -39,15 +39,17 @@ use roger_session_opencode::{
     OpenCodeAdapter, OpenCodeReturnPath, OpenCodeSessionPath, rr_return_to_roger_session,
 };
 use roger_storage::{
-    CreateLaunchAttempt, CreateMaterializedFinding, CreateReviewRun, CreateReviewSession,
-    CreateSessionLaunchBinding, CreateWorkerStageResult, FinalizeExistingSessionLaunchAttempt,
-    FinalizeReviewLaunchAttempt, LaunchAttemptAction, LaunchAttemptState, LaunchSurface,
-    OutboundSurfaceProjection, PriorReviewLookupQuery, PriorReviewRetrievalMode,
-    ResolveSessionLaunchBinding, ResolveSessionLocalRoot, ResolveSessionReentry,
-    ReviewLaunchFinalizationError, ReviewSessionRecord, RogerStore, SemanticAssetManifest,
-    SemanticComponentState, SemanticEmbedderAdapter, SessionBindingResolution, SessionFinderEntry,
-    SessionFinderQuery, SessionLaunchBindingRecord, SessionReentryResolution, StorageError,
-    StorageLayout, UpdateLaunchAttempt, derive_finding_fingerprint, semantic_embedder_status,
+    CreateLaunchAttempt, CreateMaterializedFinding, CreateMemoryReviewRequest, CreateReviewRun,
+    CreateReviewSession, CreateSessionLaunchBinding, CreateWorkerStageResult,
+    FinalizeExistingSessionLaunchAttempt, FinalizeReviewLaunchAttempt, LaunchAttemptAction,
+    LaunchAttemptState, LaunchSurface, MemoryReviewRequestKind, MemoryReviewRequestRecord,
+    MemoryReviewSource, OutboundSurfaceProjection, PriorReviewLookupQuery,
+    PriorReviewRetrievalMode, ResolveSessionLaunchBinding, ResolveSessionLocalRoot,
+    ResolveSessionReentry, ReviewLaunchFinalizationError, ReviewSessionRecord, RogerStore,
+    SemanticAssetManifest, SemanticComponentState, SemanticEmbedderAdapter,
+    SessionBindingResolution, SessionFinderEntry, SessionFinderQuery, SessionLaunchBindingRecord,
+    SessionReentryResolution, StorageError, StorageLayout, UpdateLaunchAttempt,
+    derive_finding_fingerprint, normalize_memory_key, semantic_embedder_status,
 };
 use rusqlite::{Connection as SqliteConnection, OpenFlags};
 use serde::{Serialize, de::DeserializeOwned};
@@ -3008,7 +3010,117 @@ fn handle_agent(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         return agent_error_response(AgentTransportErrorCode::ValidationFailed, message);
     }
 
-    agent_command_response(envelope)
+    // A validated memory-review proposal is now durable: persist a pending
+    // review request row so the previously write-only worker proposal becomes
+    // auditable and operator-resolvable. The transport echo shape stays stable;
+    // the persisted id is surfaced additively on the command envelope.
+    let mut persisted_review_request_id: Option<String> = None;
+    if envelope.status == AgentTransportResponseStatus::Succeeded
+        && request.operation == "worker.request_memory_review"
+    {
+        match request
+            .payload
+            .clone()
+            .ok_or_else(|| "memory review request is missing its payload".to_owned())
+            .and_then(|payload| {
+                serde_json::from_value::<WorkerMemoryReviewRequest>(payload)
+                    .map_err(|err| format!("failed to decode memory review request: {err}"))
+            }) {
+            Ok(review_request) => {
+                let scope_key = format!("repo:{}", session.review_target.repository);
+                let review_run_id = store
+                    .latest_review_run(&session.id)
+                    .ok()
+                    .flatten()
+                    .map(|run| run.id);
+                let (persisted, _skipped) = persist_worker_memory_reviews(
+                    &store,
+                    &scope_key,
+                    &session.id,
+                    review_run_id.as_deref(),
+                    std::slice::from_ref(&review_request),
+                    MemoryReviewSource::Worker,
+                );
+                persisted_review_request_id = persisted.into_iter().next();
+            }
+            Err(message) => {
+                return agent_error_response(AgentTransportErrorCode::ValidationFailed, message);
+            }
+        }
+    }
+
+    let mut response = agent_command_response(envelope);
+    if let Some(id) = persisted_review_request_id
+        && let Some(object) = response.data.as_object_mut()
+    {
+        object.insert("persisted_memory_review_request_id".to_owned(), json!(id));
+    }
+    response
+}
+
+fn memory_review_request_to_json(record: MemoryReviewRequestRecord) -> Value {
+    json!({
+        "id": record.id,
+        "review_session_id": record.review_session_id,
+        "review_run_id": record.review_run_id,
+        "source": record.source,
+        "request_kind": record.request_kind,
+        "statement": record.statement,
+        "normalized_key": record.normalized_key,
+        "scope_key": record.scope_key,
+        "memory_class": record.memory_class,
+        "rationale": record.rationale,
+        "status": record.status,
+        "created_at": record.created_at,
+        "resolved_at": record.resolved_at,
+        "resolution_actor": record.resolution_actor,
+        "resulting_memory_item_id": record.resulting_memory_item_id,
+    })
+}
+
+/// Persist worker memory-review proposals as durable pending review requests.
+/// Defensive: entries with an empty query are skipped (returned in the skipped
+/// list) rather than aborting the whole ingest. All proposals map to the
+/// `promote` request kind in this slice; the statement is the proposal query and
+/// the dedup key is its normalized form.
+fn persist_worker_memory_reviews(
+    store: &RogerStore,
+    scope_key: &str,
+    session_id: &str,
+    review_run_id: Option<&str>,
+    requests: &[WorkerMemoryReviewRequest],
+    source: MemoryReviewSource,
+) -> (Vec<String>, Vec<String>) {
+    let mut persisted = Vec::new();
+    let mut skipped = Vec::new();
+    for request in requests {
+        let statement = request.query.trim();
+        if statement.is_empty() {
+            skipped.push(format!("{}: empty query", request.id));
+            continue;
+        }
+        let normalized_key = normalize_memory_key(statement);
+        if normalized_key.is_empty() {
+            skipped.push(format!("{}: empty normalized key", request.id));
+            continue;
+        }
+        match store.create_memory_review_request(CreateMemoryReviewRequest {
+            review_session_id: session_id,
+            review_run_id,
+            source,
+            request_kind: MemoryReviewRequestKind::Promote,
+            statement,
+            normalized_key: &normalized_key,
+            scope_key,
+            memory_class: "semantic",
+            rationale: request.rationale.as_deref(),
+            external_ref: Some(&request.id),
+        }) {
+            Ok(record) => persisted.push(record.id),
+            Err(err) => skipped.push(format!("{}: {err}", request.id)),
+        }
+    }
+    (persisted, skipped)
 }
 
 /// Answer a companion-tier bounded status probe from the browser extension.
@@ -3183,6 +3295,21 @@ fn persist_accepted_stage_result(
             })
             .map_err(|err| format!("failed to materialize finding from stage result: {err}"))?;
         materialized_count += 1;
+    }
+
+    // A stage result carrying memory-review proposals persists them as durable
+    // pending review requests too (previously the accumulated JSON blob was
+    // write-only). Defensive: malformed proposals are skipped, not fatal.
+    if !result.memory_review_requests.is_empty() {
+        let scope_key = format!("repo:{}", session.review_target.repository);
+        persist_worker_memory_reviews(
+            store,
+            &scope_key,
+            &session.id,
+            Some(result.review_run_id.as_str()),
+            &result.memory_review_requests,
+            MemoryReviewSource::Worker,
+        );
     }
 
     // A completed pass that materialized findings moves the session into the
@@ -4135,6 +4262,77 @@ fn handle_doctor(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                     "{} is not a live rr review provider in this slice, so there is no rr review auth path to preflight; auth verification is not applicable until the provider is admitted as a live review lane",
                     provider.provider
                 ),
+            }),
+        );
+    }
+
+    // Semantic/memory posture: a non-fatal informational check that surfaces the
+    // semantic asset state and recommends the install repair action when hybrid
+    // retrieval is unavailable (contract: rr doctor surfaces semantic posture).
+    // Opening the store here is best-effort; a missing/unopenable store defers
+    // to bootstrap rather than blocking the doctor run.
+    if layout.db_path.is_file() {
+        match RogerStore::open(&runtime.store_root)
+            .and_then(|store| store.semantic_component_state())
+        {
+            Ok(state) => {
+                if state.operational {
+                    push_check(
+                        "semantic_assets_operational",
+                        "semantic retrieval assets are installed and verified",
+                        "verified",
+                        None,
+                        json!({
+                            "operational": true,
+                            "assets_verified": state.assets_verified,
+                            "embedder_available": state.embedder_available,
+                            "embedder_backend": state.embedder_backend,
+                            "retrieval_mode": "hybrid",
+                        }),
+                    );
+                } else {
+                    push_check(
+                        "semantic_assets_operational",
+                        "semantic retrieval assets are installed and verified",
+                        "deferred",
+                        Some("semantic_assets_unverified"),
+                        json!({
+                            "operational": false,
+                            "assets_verified": state.assets_verified,
+                            "embedder_available": state.embedder_available,
+                            "embedder_backend": state.embedder_backend,
+                            "retrieval_mode": "lexical_only",
+                            "degraded_reasons": state.degraded_reasons,
+                            "guidance": "hybrid semantic retrieval is unavailable; lexical-only search stays fully functional",
+                        }),
+                    );
+                    repair_actions.insert(
+                        "run rr assets install --asset semantic-default to enable hybrid semantic retrieval"
+                            .to_owned(),
+                        (),
+                    );
+                }
+            }
+            Err(_) => {
+                push_check(
+                    "semantic_assets_operational",
+                    "semantic retrieval assets are installed and verified",
+                    "deferred",
+                    Some("semantic_posture_probe_deferred"),
+                    json!({
+                        "guidance": "semantic posture is probed on first store-backed use; lexical-only search stays fully functional",
+                    }),
+                );
+            }
+        }
+    } else {
+        push_check(
+            "semantic_assets_operational",
+            "semantic retrieval assets are installed and verified",
+            "deferred",
+            Some("store_auto_bootstrap_pending"),
+            json!({
+                "guidance": "semantic posture is probed once the store is bootstrapped; lexical-only search stays fully functional",
             }),
         );
     }
@@ -10611,7 +10809,11 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         requested_retrieval_classes: &[],
         anchor_hints: &[],
         supports_candidate_audit: true,
-        supports_promotion_review: false,
+        // `rr search` (operator + robot) supports promotion_review as a
+        // read-only listing surface for pending MemoryReviewRequest rows. The
+        // worker `search_memory` path keeps promotion_review unsupported so
+        // workers cannot drive promotion review.
+        supports_promotion_review: true,
         semantic_assets_verified,
     }) {
         Ok(plan) => plan,
@@ -10792,6 +10994,25 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let mode = retrieval_mode;
     let count = items.len();
 
+    // promotion_review is a read-only listing surface for pending
+    // MemoryReviewRequest rows. The count is always surfaced (posture); the full
+    // list is projected only when the operator asked for promotion_review.
+    let pending_review_count = store
+        .count_pending_memory_review_requests(Some(&scope_key))
+        .unwrap_or(0);
+    let is_promotion_review = search_plan.query_plan.resolved_query_mode.as_str()
+        == roger_app_core::SearchQueryMode::PromotionReview.as_str();
+    let pending_review_requests: Vec<Value> = if is_promotion_review {
+        store
+            .pending_memory_review_requests(Some(&scope_key), limit)
+            .unwrap_or_default()
+            .into_iter()
+            .map(memory_review_request_to_json)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     // Hybrid, lexical_only, and recovery_scan are all HEALTHY retrieval modes:
     // the lexical canonical-DB scan is the always-on exit-0 default, and a stale
     // sidecar recovery scan still returns real results. A true lexical-scan
@@ -10799,7 +11020,7 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     // (mapped to an Error outcome), so we never reach here in that case.
     // Therefore: results -> Complete (exit 0), zero results -> Empty (exit 0).
     // Degraded is no longer emitted for default installs.
-    let outcome = if count == 0 {
+    let outcome = if count == 0 && pending_review_requests.is_empty() {
         OutcomeKind::Empty
     } else {
         OutcomeKind::Complete
@@ -10869,6 +11090,8 @@ fn handle_search(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             "fallback": fallback,
             "scope_bucket": scope_bucket,
             "lane_counts": lane_counts,
+            "pending_review_count": pending_review_count,
+            "pending_review_requests": pending_review_requests,
         }),
         warnings,
         repair_actions: Vec::new(),
@@ -15360,6 +15583,42 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         })
     };
 
+    // Semantic/memory posture block: retrieval mode, semantic asset state, and
+    // the count of pending memory review requests awaiting operator resolution
+    // in this repo scope (contract: rr status surfaces semantic asset posture).
+    let memory_posture = {
+        let component_state = store.semantic_component_state().ok();
+        let scope_key = format!("repo:{}", session.review_target.repository);
+        let pending_review_count = store
+            .count_pending_memory_review_requests(Some(&scope_key))
+            .unwrap_or(0);
+        let operational = component_state
+            .as_ref()
+            .map(|state| state.operational)
+            .unwrap_or(false);
+        json!({
+            "scope_key": scope_key,
+            "retrieval_mode": if operational { "hybrid" } else { "lexical_only" },
+            "semantic_operational": operational,
+            "assets_verified": component_state
+                .as_ref()
+                .map(|state| state.assets_verified)
+                .unwrap_or(false),
+            "embedder_available": component_state
+                .as_ref()
+                .map(|state| state.embedder_available)
+                .unwrap_or(false),
+            "embedder_backend": component_state
+                .as_ref()
+                .and_then(|state| state.embedder_backend.clone()),
+            "degraded_reasons": component_state
+                .as_ref()
+                .map(|state| state.degraded_reasons.clone())
+                .unwrap_or_default(),
+            "pending_review_count": pending_review_count,
+        })
+    };
+
     CommandResponse {
         outcome: OutcomeKind::Complete,
         data: json!({
@@ -15368,6 +15627,7 @@ fn handle_status(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 "branch": branch,
                 "repository": session.review_target.repository,
             },
+            "memory": memory_posture,
             "session": {
                 "id": session.id,
                 "resume_mode": if session.provider == "opencode" { "opencode_bound" } else { "bounded_provider" },
