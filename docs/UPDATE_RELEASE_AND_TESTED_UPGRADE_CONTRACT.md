@@ -286,6 +286,43 @@ For `0.1.x`, this is the only Roger-owned path that may claim:
 - rename-with-backup replacement
 - immediate rollback restore on replacement failure
 
+#### Post-binary extension refresh phase
+
+`rr update` primarily replaces the `rr` binary. As of this slice it also runs a
+best-effort **extension refresh phase** immediately after a successful,
+non-dry-run in-place binary replacement, so browser integration keeps matching
+the newly installed binary instead of silently drifting behind it.
+
+The refresh phase is strictly bounded:
+
+- **Gated on prior setup.** It runs only when extension integration was ever
+  configured on this machine — the persisted `<store_root>/bridge/extension-id`
+  registry exists, or at least one `<store_root>/bridge/extension-package/<version>/`
+  directory exists. If neither is present, the phase is skipped silently and the
+  update envelope reports `extension_refresh.attempted = false`.
+- **What it does.** When integration is present it (1) fetches and verifies the
+  new version's published extension package into the standard per-version layout
+  `<store_root>/bridge/extension-package/<version>/roger-extension-unpacked`
+  (in-process; it never shells out to `rr`), and (2) rewrites the
+  Native Messaging host launcher and manifest for every browser that already has
+  a Roger host manifest present, reusing the existing extension id.
+- **Degrade, never roll back.** The binary update has already succeeded before
+  this phase runs. Any failure here — missing published extension asset,
+  checksum mismatch, unresolvable extension id, unwritable host manifest,
+  unsupported host OS — must NOT roll back or fail the binary update. It degrades
+  into a typed `extension_refresh_failed: <reason>` warning on the update
+  envelope plus a repair action pointing the operator at `rr extension fetch`
+  followed by `rr extension setup`.
+- **Envelope shape.** On a completed apply the update envelope carries an
+  `extension_refresh` object (`attempted`, `package_refreshed`, `version`,
+  `package_dir`, `native_hosts_rewritten`, `warnings`). On success it also emits
+  the warning `extension package refreshed to <version>; reload the unpacked
+  extension in your browser`.
+
+This keeps the update lane's hard guarantees binary-scoped (confirmation,
+layout inspection, rename-with-backup, rollback) while making extension/host
+freshness an explicit, degrade-only companion step rather than an untracked gap.
+
 ## Channel, Version, And Release Discovery Semantics
 
 Release identity remains defined by

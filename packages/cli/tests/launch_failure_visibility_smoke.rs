@@ -141,7 +141,11 @@ fn parse_robot_payload(output: &Output) -> Value {
     assert!(
         parsed.is_ok(),
         "robot payload should be JSON ({}): stdout={} stderr={}",
-        parsed.as_ref().err().map(ToString::to_string).unwrap_or_default(),
+        parsed
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -169,7 +173,10 @@ fn assert_loud_human_failure(output: &Output, expected_reason_fragment: &str) {
         .find(|line| line.starts_with("error: "))
         .map_or_else(
             || {
-                assert!(false, "expected one-line `error:` reason on stderr, got: {stderr}");
+                assert!(
+                    false,
+                    "expected one-line `error:` reason on stderr, got: {stderr}"
+                );
                 unreachable!()
             },
             |line| line,

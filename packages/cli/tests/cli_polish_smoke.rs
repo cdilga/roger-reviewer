@@ -68,7 +68,10 @@ fn sessions_unknown_attention_state_fails_closed_with_blocked_envelope() {
     let temp = tempdir().expect("tempdir");
     let runtime = runtime_for(&temp);
 
-    let blocked = run_rr(&["sessions", "--attention", "bogus_state", "--robot"], &runtime);
+    let blocked = run_rr(
+        &["sessions", "--attention", "bogus_state", "--robot"],
+        &runtime,
+    );
     assert_eq!(blocked.exit_code, 3, "{}", blocked.stderr);
     let payload = parse_robot_payload(&blocked.stdout);
     assert_eq!(payload["schema_id"], "rr.robot.sessions.v1");
@@ -137,14 +140,20 @@ fn findings_with_no_session_yet_returns_empty_exit_zero() {
 
     // No session exists for this target yet. rr findings must mirror rr status /
     // rr sessions and return empty/exit-0 rather than blocking with exit 3.
-    let findings = run_rr(&["findings", "--repo", "owner/repo", "--pr", "99", "--robot"], &runtime);
+    let findings = run_rr(
+        &["findings", "--repo", "owner/repo", "--pr", "99", "--robot"],
+        &runtime,
+    );
     assert_eq!(findings.exit_code, 0, "{}", findings.stderr);
     let findings_payload = parse_robot_payload(&findings.stdout);
     assert_eq!(findings_payload["outcome"], "empty");
     assert_eq!(findings_payload["data"]["count"], 0);
 
     // rr status agrees: empty/exit-0 for the same no-session-yet target.
-    let status = run_rr(&["status", "--repo", "owner/repo", "--pr", "99", "--robot"], &runtime);
+    let status = run_rr(
+        &["status", "--repo", "owner/repo", "--pr", "99", "--robot"],
+        &runtime,
+    );
     assert_eq!(status.exit_code, 0, "{}", status.stderr);
     assert_eq!(parse_robot_payload(&status.stdout)["outcome"], "empty");
 }
