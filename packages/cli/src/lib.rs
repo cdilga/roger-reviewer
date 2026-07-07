@@ -4505,7 +4505,9 @@ fn extension_guided_browser_command(
 /// Installed-mode launch guidance when the dev guided-browser script is not
 /// available. Live-tested truth (2026-06): branded Google Chrome >= 137
 /// ignores --load-extension, so Chrome needs one manual "Load unpacked" pass
-/// via chrome://extensions; Edge and Brave still honor the flag-based launch.
+/// via chrome://extensions; Edge 150+ ignores it too (live-verified 2026-07-07),
+/// so Edge also needs one manual Load-unpacked pass; Brave still honored the
+/// flag-based launch at last verification.
 fn extension_inline_browser_launch_guidance(
     browser: &SupportedBrowser,
     profile_root: &Path,
@@ -4517,8 +4519,11 @@ fn extension_inline_browser_launch_guidance(
         SupportedBrowser::Chrome => format!(
             "branded Google Chrome 137+ ignores --load-extension: open chrome://extensions, enable 'Developer mode', click 'Load unpacked', select {package_dir}, then open {start_url}"
         ),
-        SupportedBrowser::Edge | SupportedBrowser::Brave => format!(
-            "launch {browser_label} once with --user-data-dir={} --load-extension={} --disable-extensions-except={} {} (Edge/Brave honor flag-based extension load; branded Chrome 137+ does not)",
+        SupportedBrowser::Edge => format!(
+            "Microsoft Edge 150+ ignores --load-extension: open edge://extensions, enable 'Developer mode', click 'Load unpacked', select {package_dir}, then open {start_url}"
+        ),
+        SupportedBrowser::Brave => format!(
+            "launch {browser_label} once with --user-data-dir={} --load-extension={} --disable-extensions-except={} {} (Brave still honored flag-based extension load at last verification; branded Chrome 137+ and Edge 150+ do not)",
             profile_root.display(),
             package_dir,
             package_dir,
@@ -17497,7 +17502,7 @@ Safety notes:
 
 Browser note:
   - Chrome 137+ ignores --load-extension; load the unpacked package once via chrome://extensions
-  - Edge and Brave still honor the guided preloaded-extension launch path
+  - Edge 150+ ignores --load-extension too; load the unpacked package once via edge://extensions (Brave still honored the flag-based launch at last verification)
 
 Update note:
   - after a successful binary replacement, if extension integration was ever set up, rr setup update also refreshes the extension package and rewrites native-messaging host manifests; failures here degrade to extension_refresh_failed warnings and never roll back the binary update
@@ -20172,8 +20177,9 @@ mod tests {
             "installed mode must not reference the dev guided-browser script: {guided_command}"
         );
         assert!(
-            guided_command.contains("--load-extension="),
-            "edge guidance should surface flag-based launch: {guided_command}"
+            guided_command.contains("Load unpacked")
+                && guided_command.contains("edge://extensions"),
+            "edge guidance must direct a manual Load-unpacked pass (Edge 150+ ignores --load-extension, live-verified 2026-07-07): {guided_command}"
         );
         let rendered = setup.stdout.to_string();
         assert!(

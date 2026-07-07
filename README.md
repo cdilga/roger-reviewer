@@ -310,7 +310,9 @@ Roger's browser companion is optional and bounded.
   Roger source checkout is required
 - browser truth note: branded Google Chrome 137+ ignores `--load-extension`,
   so Chrome needs one manual "Load unpacked" pass via `chrome://extensions`;
-  Edge and Brave still honor the flag-based launch
+  Edge 150+ ignores it too, so Edge needs the same one manual "Load
+  unpacked" pass via edge://extensions; Brave still honored the flag-based
+  launch at last verification
 - the browser lane is for launch, resume, and bounded mirror convenience;
   approval and posting stay local and explicit
 
