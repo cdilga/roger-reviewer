@@ -52,6 +52,48 @@ const RESUME_PRIMARY_ATTENTION_STATES = new Set([
 const DEFAULT_INFO_MESSAGE =
   'Launch Roger locally from this pull request. For authoritative connection and review state, use Roger itself rather than this GitHub panel.';
 
+// ---------------------------------------------------------------------------
+// Read-only findings staging (bead rr-self-exploration-review-workbench-
+// recovery-tmmn.5, findings half).
+//
+// This surface renders Roger's LOCAL findings as a bounded, read-only mirror
+// inside the PR-detail panel. It is deliberately non-mutating: no draft-body
+// editing, no triage controls, no clarification kickoff (those live in
+// rr-ext-draft-staging-clarify-lane-ciy4). The renderer consumes a normalized
+// findings payload whose item shape mirrors the real `rr findings --robot`
+// projection (packages/cli/src/lib.rs handle_findings): finding_id, title,
+// triage_state, outbound_state, evidence_count. severity / summary / file
+// anchor are accepted opportunistically so the view lights up the moment the
+// Rust projection is extended to carry them; today it degrades honestly.
+// ---------------------------------------------------------------------------
+const FINDINGS_SECTION_ID = 'roger-reviewer-findings';
+const FINDINGS_BODY_ID = 'roger-reviewer-findings-body';
+const FINDINGS_BUTTON_ID = 'roger-reviewer-findings-button';
+const FINDINGS_BUTTON_LABEL = 'Show local findings';
+// Fixed staging caption. This surface is a bounded read-only mirror; all
+// mutation (edit/approve/send) happens in Roger itself, never here.
+const FINDINGS_READONLY_CAPTION =
+  'Local Roger state (read-only) — edit and approve in rr open / rr send';
+const FINDINGS_NOT_RELAYED_MESSAGE =
+  'Roger ran locally, but the browser bridge did not relay finding detail for this pull request.';
+const FINDINGS_LOCAL_GUIDANCE =
+  'Run `rr review` to generate findings, or open `rr tui` for the authoritative local view.';
+const FINDINGS_EMPTY_MESSAGE =
+  'No local Roger findings are staged for this pull request yet.';
+const FINDINGS_EMPTY_GUIDANCE =
+  'Run `rr review` to generate findings, or open `rr tui` to inspect Roger state.';
+// Triage groups, most-actionable first. Any triage state Roger later adds that
+// is not listed here sorts after these, alphabetically, so an unknown state is
+// surfaced rather than dropped.
+const FINDINGS_TRIAGE_ORDER = [
+  'new',
+  'confirmed',
+  'in_progress',
+  'needs_info',
+  'resolved',
+  'dismissed',
+];
+
 const ATTENTION_STYLES = {
   awaiting_user_input: {
     label: 'Awaiting user input',
@@ -1829,6 +1871,156 @@ ${buildDarkThemeBlocks(`#${PANEL_ID}`)}
 #${PANEL_ID} .roger-panel-status--error {
   color: var(--fgColor-danger, #d1242f);
 }
+
+#${FINDINGS_SECTION_ID} {
+  display: block;
+  margin: 12px 0 0 0;
+}
+
+/* The inline placement is GitHub's compact header action strip; a dense
+   findings list belongs in the rail/modal card, not the header. */
+#${PANEL_ID}.roger-panel--inline #${FINDINGS_SECTION_ID} {
+  display: none;
+}
+
+#${FINDINGS_SECTION_ID} .rr-findings-header {
+  display: flex;
+}
+
+#${FINDINGS_SECTION_ID} .rr-findings-button {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+#${FINDINGS_SECTION_ID} .rr-findings-caption {
+  margin: 8px 0 6px 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--rr-panel-muted);
+  font-style: italic;
+}
+
+#${FINDINGS_SECTION_ID} .rr-findings-summary {
+  margin: 0 0 8px 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--rr-panel-text);
+}
+
+#${FINDINGS_SECTION_ID} .rr-findings-note {
+  margin: 6px 0 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--rr-panel-border);
+  background: color-mix(in srgb, var(--rr-panel-surface) 92%, var(--rr-panel-surface-muted) 8%);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--rr-panel-muted);
+}
+
+#${FINDINGS_SECTION_ID} .rr-findings-note--error {
+  color: var(--fgColor-danger, #d1242f);
+  border-color: color-mix(in srgb, var(--fgColor-danger, #d1242f) 45%, var(--rr-panel-border));
+}
+
+#${FINDINGS_SECTION_ID} .rr-findings-note--warning {
+  color: var(--fgColor-attention, #9a6700);
+}
+
+#${FINDINGS_SECTION_ID} .rr-findings-group {
+  margin: 0 0 10px 0;
+}
+
+#${FINDINGS_SECTION_ID} .rr-findings-group-title {
+  margin: 0 0 4px 0;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--rr-panel-muted);
+}
+
+#${FINDINGS_SECTION_ID} .rr-findings-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+
+#${FINDINGS_SECTION_ID} .rr-findings-item {
+  padding: 8px 10px;
+  border: 1px solid var(--rr-panel-border);
+  border-radius: 8px;
+  background: var(--rr-panel-surface);
+}
+
+#${FINDINGS_SECTION_ID} .rr-findings-item-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--rr-panel-text);
+}
+
+#${FINDINGS_SECTION_ID} .rr-findings-item-summary {
+  margin: 3px 0 0 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--rr-panel-muted);
+}
+
+#${FINDINGS_SECTION_ID} .rr-findings-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 6px 0 0 0;
+}
+
+#${FINDINGS_SECTION_ID} .rr-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  border: 1px solid var(--rr-panel-border-strong);
+  color: var(--rr-panel-muted);
+  background: var(--rr-panel-surface-muted);
+}
+
+#${FINDINGS_SECTION_ID} .rr-badge--triage {
+  color: var(--fgColor-accent, #0969da);
+  border-color: color-mix(in srgb, var(--fgColor-accent, #0969da) 40%, var(--rr-panel-border-strong));
+}
+
+#${FINDINGS_SECTION_ID} .rr-badge--outbound {
+  color: var(--rr-panel-text);
+}
+
+#${FINDINGS_SECTION_ID} .rr-badge--severity {
+  color: var(--fgColor-danger, #d1242f);
+  border-color: color-mix(in srgb, var(--fgColor-danger, #d1242f) 40%, var(--rr-panel-border-strong));
+}
+
+#${FINDINGS_SECTION_ID} .rr-findings-anchor {
+  margin: 6px 0 0 0;
+  font-family: var(
+    --fontStack-monospace,
+    ui-monospace,
+    SFMono-Regular,
+    SF Mono,
+    Menlo,
+    Consolas,
+    monospace
+  );
+  font-size: 11px;
+  color: var(--rr-panel-muted);
+  word-break: break-all;
+}
   `.trim();
 
   const styleHost = rootDocument.head || rootDocument.documentElement || rootDocument.body;
@@ -2014,6 +2206,480 @@ function createBrandChip(rootDocument) {
   return chip;
 }
 
+// ---------------------------------------------------------------------------
+// Findings staging helpers (read-only). Pure and DOM-shim friendly so they can
+// be unit-tested without a full browser: every builder takes an injected
+// `rootDocument` whose `createElement` returns element-like nodes.
+// ---------------------------------------------------------------------------
+
+function makeEl(rootDocument, tag, className, text) {
+  const el = rootDocument.createElement(tag);
+  if (className) {
+    el.className = className;
+  }
+  if (text !== null && text !== undefined) {
+    el.textContent = text;
+  }
+  return el;
+}
+
+function clearChildren(node) {
+  if (!node) {
+    return;
+  }
+  if (typeof node.replaceChildren === 'function') {
+    node.replaceChildren();
+    return;
+  }
+  if (Array.isArray(node.children)) {
+    for (const child of node.children) {
+      if (child) {
+        child.parentElement = null;
+      }
+    }
+    node.children.length = 0;
+  }
+}
+
+// Turn a snake_case enum token (triage_state, outbound_state, severity) into a
+// human label without inventing meaning: `not_drafted` -> `Not Drafted`.
+function humanizeToken(token) {
+  return String(token)
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (ch) => ch.toUpperCase());
+}
+
+function normalizeFindingsWarnings(obj) {
+  if (!obj || typeof obj !== 'object' || !Array.isArray(obj.warnings)) {
+    return [];
+  }
+  return obj.warnings
+    .filter((entry) => typeof entry === 'string' && entry.trim().length > 0)
+    .map((entry) => entry.trim());
+}
+
+function readFindingsGuidance(obj) {
+  if (!obj || typeof obj !== 'object') {
+    return null;
+  }
+  const guidance = normalizeGuidanceText(obj.guidance);
+  return guidance || null;
+}
+
+// Best-effort file anchor. The current `rr findings --robot` projection does
+// NOT carry a file path (only an evidence_count), so this returns null today.
+// It accepts the several shapes a future projection is likely to use so the
+// anchor line lights up without a JS change once the Rust lane adds it.
+function normalizeFindingsFileAnchor(raw) {
+  if (typeof raw.file_anchor === 'string' && raw.file_anchor.trim().length > 0) {
+    return raw.file_anchor.trim();
+  }
+  const path =
+    typeof raw.file_path === 'string' && raw.file_path.trim().length > 0
+      ? raw.file_path.trim()
+      : typeof raw.path === 'string' && raw.path.trim().length > 0
+        ? raw.path.trim()
+        : null;
+  if (!path) {
+    return null;
+  }
+  const line = Number.isFinite(raw.line)
+    ? raw.line
+    : Number.isFinite(raw.start_line)
+      ? raw.start_line
+      : null;
+  return line ? `${path}:${line}` : path;
+}
+
+function normalizeFindingsItem(raw) {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+  const title =
+    typeof raw.title === 'string' && raw.title.trim().length > 0 ? raw.title.trim() : null;
+  const findingId =
+    typeof raw.finding_id === 'string' && raw.finding_id.trim().length > 0
+      ? raw.finding_id.trim()
+      : null;
+  if (!title && !findingId) {
+    // A finding with neither a title nor an id carries no usable claim; drop it
+    // rather than render an empty row.
+    return null;
+  }
+  const triageState =
+    typeof raw.triage_state === 'string' && raw.triage_state.trim().length > 0
+      ? raw.triage_state.trim()
+      : 'unknown';
+  const outboundState =
+    typeof raw.outbound_state === 'string' && raw.outbound_state.trim().length > 0
+      ? raw.outbound_state.trim()
+      : null;
+  const severity =
+    typeof raw.severity === 'string' && raw.severity.trim().length > 0
+      ? raw.severity.trim()
+      : null;
+  const summary =
+    typeof raw.summary === 'string' && raw.summary.trim().length > 0
+      ? raw.summary.trim()
+      : typeof raw.normalized_summary === 'string' && raw.normalized_summary.trim().length > 0
+        ? raw.normalized_summary.trim()
+        : null;
+  const evidenceCount =
+    Number.isFinite(raw.evidence_count) && raw.evidence_count >= 0
+      ? Math.floor(raw.evidence_count)
+      : null;
+
+  return {
+    finding_id: findingId,
+    title: title || findingId,
+    triage_state: triageState,
+    outbound_state: outboundState,
+    severity,
+    summary,
+    file_anchor: normalizeFindingsFileAnchor(raw),
+    evidence_count: evidenceCount,
+  };
+}
+
+// Normalize whatever the bridge relayed into a bounded findings payload.
+//
+// GROUND TRUTH: today's BridgeResponse (packages/bridge/src/lib.rs) does NOT
+// carry findings items at all — it strips the `rr findings --robot` envelope
+// down to session_id + attention snapshot. So `relayed` is almost always false
+// against the current host and the renderer shows an honest "detail not
+// relayed" note. The moment the Rust lane adds a `findings` field (an object
+// `{ items, count, warnings }` or a bare array) this normalizer picks it up and
+// the full staged list renders with no further JS change.
+function normalizeFindingsPayload(response) {
+  if (!response || typeof response !== 'object') {
+    return { relayed: false, items: [], count: 0, warnings: [], guidance: null };
+  }
+
+  const source =
+    response.findings && typeof response.findings === 'object' && !Array.isArray(response.findings)
+      ? response.findings
+      : response;
+
+  let rawItems = null;
+  if (Array.isArray(response.findings)) {
+    rawItems = response.findings;
+  } else if (Array.isArray(source.items)) {
+    rawItems = source.items;
+  } else if (Array.isArray(response.items)) {
+    rawItems = response.items;
+  }
+
+  const warnings =
+    normalizeFindingsWarnings(source).length > 0
+      ? normalizeFindingsWarnings(source)
+      : normalizeFindingsWarnings(response);
+  const guidance = readFindingsGuidance(source) || readFindingsGuidance(response);
+
+  if (rawItems === null) {
+    return { relayed: false, items: [], count: 0, warnings, guidance };
+  }
+
+  const items = rawItems.map(normalizeFindingsItem).filter(Boolean);
+  const count = Number.isFinite(source.count) ? Math.floor(source.count) : items.length;
+  const emptyExplanation =
+    typeof source.empty_explanation === 'string' && source.empty_explanation.trim().length > 0
+      ? source.empty_explanation.trim()
+      : null;
+
+  return { relayed: true, items, count, warnings, guidance, empty_explanation: emptyExplanation };
+}
+
+function triageRank(state) {
+  const idx = FINDINGS_TRIAGE_ORDER.indexOf(state);
+  return idx === -1 ? FINDINGS_TRIAGE_ORDER.length : idx;
+}
+
+// Group findings by triage state, most-actionable first (new leads), with
+// unknown/late states sorted after the known set alphabetically. Item order
+// within a group is preserved.
+function groupFindingsByTriage(items) {
+  const groups = new Map();
+  for (const item of items) {
+    const key = item.triage_state || 'unknown';
+    if (!groups.has(key)) {
+      groups.set(key, []);
+    }
+    groups.get(key).push(item);
+  }
+  return Array.from(groups.entries())
+    .map(([state, groupItems]) => ({ state, items: groupItems }))
+    .sort((a, b) => {
+      const rankA = triageRank(a.state);
+      const rankB = triageRank(b.state);
+      if (rankA !== rankB) {
+        return rankA - rankB;
+      }
+      return a.state.localeCompare(b.state);
+    });
+}
+
+function makeFindingsBadge(rootDocument, kind, value, label) {
+  const badge = makeEl(rootDocument, 'span', `rr-badge rr-badge--${kind}`, label);
+  badge.dataset.kind = kind;
+  badge.dataset.value = String(value);
+  return badge;
+}
+
+function createFindingItemNode(item, rootDocument) {
+  const li = makeEl(rootDocument, 'li', 'rr-findings-item');
+  if (item.finding_id) {
+    li.dataset.findingId = item.finding_id;
+  }
+
+  li.appendChild(makeEl(rootDocument, 'p', 'rr-findings-item-title', item.title));
+
+  if (item.summary) {
+    li.appendChild(makeEl(rootDocument, 'p', 'rr-findings-item-summary', item.summary));
+  }
+
+  const badges = makeEl(rootDocument, 'div', 'rr-findings-badges');
+  if (item.severity) {
+    badges.appendChild(
+      makeFindingsBadge(rootDocument, 'severity', item.severity, `Severity: ${humanizeToken(item.severity)}`)
+    );
+  }
+  badges.appendChild(
+    makeFindingsBadge(rootDocument, 'triage', item.triage_state, `Triage: ${humanizeToken(item.triage_state)}`)
+  );
+  if (item.outbound_state) {
+    badges.appendChild(
+      makeFindingsBadge(rootDocument, 'outbound', item.outbound_state, `Outbound: ${humanizeToken(item.outbound_state)}`)
+    );
+  }
+  li.appendChild(badges);
+
+  // File anchor when the projection carries one; otherwise fall back to the
+  // evidence-location count that today's projection does expose.
+  if (item.file_anchor) {
+    li.appendChild(makeEl(rootDocument, 'p', 'rr-findings-anchor', item.file_anchor));
+  } else if (item.evidence_count && item.evidence_count > 0) {
+    li.appendChild(
+      makeEl(
+        rootDocument,
+        'p',
+        'rr-findings-anchor rr-findings-anchor--evidence',
+        `${item.evidence_count} evidence location${item.evidence_count === 1 ? '' : 's'}`
+      )
+    );
+  }
+
+  return li;
+}
+
+function appendFindingsWarnings(bodyNode, warnings, rootDocument) {
+  if (!Array.isArray(warnings) || warnings.length === 0) {
+    return;
+  }
+  bodyNode.appendChild(
+    makeEl(rootDocument, 'p', 'rr-findings-note rr-findings-note--warning', `Warnings: ${warnings.join('; ')}`)
+  );
+}
+
+// Render the read-only findings staging body. Accepts either a raw bridge
+// response or an already-normalized payload. Always leads with the fixed
+// read-only caption, then renders exactly one of: the honest "detail not
+// relayed" degrade, the honest empty state, or the grouped staged list. Returns
+// the normalized payload so callers can mirror a truthful status line.
+function renderFindingsStaging(bodyNode, payload, rootDocument) {
+  if (!bodyNode || !rootDocument || typeof rootDocument.createElement !== 'function') {
+    return null;
+  }
+
+  const normalized =
+    payload && typeof payload === 'object' && typeof payload.relayed === 'boolean'
+      ? payload
+      : normalizeFindingsPayload(payload);
+
+  clearChildren(bodyNode);
+  bodyNode.appendChild(makeEl(rootDocument, 'p', 'rr-findings-caption', FINDINGS_READONLY_CAPTION));
+
+  if (!normalized.relayed) {
+    bodyNode.appendChild(
+      makeEl(
+        rootDocument,
+        'p',
+        'rr-findings-note rr-findings-note--degraded',
+        appendGuidance(FINDINGS_NOT_RELAYED_MESSAGE, normalized.guidance || FINDINGS_LOCAL_GUIDANCE)
+      )
+    );
+    appendFindingsWarnings(bodyNode, normalized.warnings, rootDocument);
+    return normalized;
+  }
+
+  if (normalized.count === 0 || normalized.items.length === 0) {
+    const explanation = normalized.empty_explanation || FINDINGS_EMPTY_MESSAGE;
+    bodyNode.appendChild(
+      makeEl(
+        rootDocument,
+        'p',
+        'rr-findings-note rr-findings-note--empty',
+        appendGuidance(explanation, normalized.guidance || FINDINGS_EMPTY_GUIDANCE)
+      )
+    );
+    appendFindingsWarnings(bodyNode, normalized.warnings, rootDocument);
+    return normalized;
+  }
+
+  const groups = groupFindingsByTriage(normalized.items);
+  const countLabels = groups.map(
+    (group) => `${group.items.length} ${humanizeToken(group.state).toLowerCase()}`
+  );
+  bodyNode.appendChild(
+    makeEl(
+      rootDocument,
+      'p',
+      'rr-findings-summary',
+      `${normalized.items.length} finding${normalized.items.length === 1 ? '' : 's'} — ${countLabels.join(', ')}`
+    )
+  );
+
+  for (const group of groups) {
+    const groupEl = makeEl(rootDocument, 'div', 'rr-findings-group');
+    groupEl.dataset.triage = group.state;
+    groupEl.appendChild(
+      makeEl(
+        rootDocument,
+        'p',
+        'rr-findings-group-title',
+        `${humanizeToken(group.state)} (${group.items.length})`
+      )
+    );
+    const list = makeEl(rootDocument, 'ul', 'rr-findings-list');
+    for (const item of group.items) {
+      list.appendChild(createFindingItemNode(item, rootDocument));
+    }
+    groupEl.appendChild(list);
+    bodyNode.appendChild(groupEl);
+  }
+
+  appendFindingsWarnings(bodyNode, normalized.warnings, rootDocument);
+  return normalized;
+}
+
+// Dispatch the read-only `show_findings` intent through the existing background
+// launch path and render the result into the findings body. Failure handling
+// matches the launch-path conventions: it writes both the persistent status
+// line and a body note, and never fails silently.
+function handleShowFindings(context, button, options = {}) {
+  const rootDocument =
+    options.document || (typeof document !== 'undefined' ? document : null);
+  const chromeApi = options.chrome || (typeof chrome !== 'undefined' ? chrome : null);
+  const bodyNode = rootDocument ? rootDocument.getElementById(FINDINGS_BODY_ID) : null;
+
+  const renderNote = (message, isError) => {
+    setStatus(message, isError, { revealInline: true });
+    if (bodyNode && rootDocument) {
+      clearChildren(bodyNode);
+      bodyNode.appendChild(makeEl(rootDocument, 'p', 'rr-findings-caption', FINDINGS_READONLY_CAPTION));
+      bodyNode.appendChild(
+        makeEl(rootDocument, 'p', `rr-findings-note rr-findings-note--${isError ? 'error' : 'info'}`, message)
+      );
+    }
+  };
+
+  if (!chromeApi || !chromeApi.runtime || typeof chromeApi.runtime.sendMessage !== 'function') {
+    renderNote('Bridge unavailable in browser context. Open Roger locally and run `rr findings`.', true);
+    return;
+  }
+
+  const previousText = button ? button.textContent : '';
+  if (button) {
+    button.disabled = true;
+    button.textContent = '…';
+  }
+  setStatus('Loading local Roger findings…', false, { revealInline: true });
+
+  chromeApi.runtime.sendMessage(
+    {
+      type: 'roger_bridge_launch',
+      intent: {
+        action: 'show_findings',
+        owner: context.owner,
+        repo: context.repo,
+        pr_number: context.pr_number,
+      },
+    },
+    (response) => {
+      if (button) {
+        button.disabled = false;
+        button.textContent = previousText;
+      }
+
+      if (chromeApi.runtime.lastError) {
+        renderNote(
+          appendGuidance(`Bridge error: ${chromeApi.runtime.lastError.message}`, BRIDGE_DISCONNECT_GUIDANCE),
+          true
+        );
+        return;
+      }
+
+      if (!response) {
+        renderNote(appendGuidance('No bridge response.', BRIDGE_DISCONNECT_GUIDANCE), true);
+        return;
+      }
+
+      if (!response.ok) {
+        renderNote(appendGuidance(response.message, response.guidance), true);
+        return;
+      }
+
+      const payload = normalizeFindingsPayload(response);
+      if (bodyNode && rootDocument) {
+        renderFindingsStaging(bodyNode, payload, rootDocument);
+      }
+
+      let statusMessage;
+      if (!payload.relayed) {
+        statusMessage = appendGuidance(
+          FINDINGS_NOT_RELAYED_MESSAGE,
+          payload.guidance || FINDINGS_LOCAL_GUIDANCE
+        );
+      } else if (payload.count > 0) {
+        statusMessage = `Loaded ${payload.count} local finding${payload.count === 1 ? '' : 's'}.`;
+      } else {
+        statusMessage = appendGuidance(
+          FINDINGS_EMPTY_MESSAGE,
+          payload.guidance || FINDINGS_EMPTY_GUIDANCE
+        );
+      }
+      setStatus(statusMessage, false, { revealInline: true });
+    }
+  );
+}
+
+function createFindingsSection(context, rootDocument) {
+  const section = rootDocument.createElement('section');
+  section.id = FINDINGS_SECTION_ID;
+  section.className = 'rr-findings';
+
+  const header = rootDocument.createElement('div');
+  header.className = 'rr-findings-header';
+
+  const button = rootDocument.createElement('button');
+  button.id = FINDINGS_BUTTON_ID;
+  button.type = 'button';
+  button.className = 'rr-findings-button roger-panel-button roger-panel-button--tertiary';
+  button.textContent = FINDINGS_BUTTON_LABEL;
+  button.setAttribute('aria-label', FINDINGS_BUTTON_LABEL);
+  if (typeof button.addEventListener === 'function') {
+    button.addEventListener('click', () => handleShowFindings(context, button));
+  }
+  header.appendChild(button);
+  section.appendChild(header);
+
+  const body = rootDocument.createElement('div');
+  body.id = FINDINGS_BODY_ID;
+  body.className = 'rr-findings-body';
+  section.appendChild(body);
+
+  return section;
+}
+
 function createPanel(context, rootDocument) {
   ensurePanelStyles(rootDocument);
 
@@ -2103,6 +2769,8 @@ function createPanel(context, rootDocument) {
   status.className = 'roger-panel-status roger-panel-status--ok';
   status.hidden = true;
   panel.appendChild(status);
+
+  panel.appendChild(createFindingsSection(context, rootDocument));
 
   return panel;
 }
@@ -2524,6 +3192,18 @@ if (typeof module !== 'undefined' && module.exports) {
     registerLaunchProgressListener,
     requestStatusMirror,
     triggerLaunch,
+    handleShowFindings,
+    normalizeFindingsPayload,
+    renderFindingsStaging,
+    groupFindingsByTriage,
+    createFindingsSection,
+    FINDINGS_SECTION_ID,
+    FINDINGS_BODY_ID,
+    FINDINGS_BUTTON_ID,
+    FINDINGS_BUTTON_LABEL,
+    FINDINGS_READONLY_CAPTION,
+    FINDINGS_NOT_RELAYED_MESSAGE,
+    FINDINGS_EMPTY_MESSAGE,
     GITHUB_ACTION_BUTTON_CLASS,
     INLINE_ANCHOR_SELECTORS,
     MODAL_FALLBACK_STATUS,

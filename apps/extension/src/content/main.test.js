@@ -40,6 +40,14 @@ const {
   pickInlineAnchorSelector,
   resolvePanelPlacement,
   setStatus,
+  handleShowFindings,
+  normalizeFindingsPayload,
+  renderFindingsStaging,
+  groupFindingsByTriage,
+  FINDINGS_BODY_ID,
+  FINDINGS_READONLY_CAPTION,
+  FINDINGS_NOT_RELAYED_MESSAGE,
+  FINDINGS_EMPTY_MESSAGE,
 } = require('./main.js');
 
 function createParent() {
@@ -2302,5 +2310,325 @@ test('manifest content_scripts cover both the PR-detail and PR-listing routes', 
   assert.ok(
     matches.some((m) => m.includes('/pulls')),
     'content_scripts must match the PR-listing route (…/pulls*) so row controls are not dead code'
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Read-only findings staging (bead rr-self-exploration-review-workbench-
+// recovery-tmmn.5). The renderer's item shape mirrors the real
+// `rr findings --robot` projection (packages/cli/src/lib.rs handle_findings):
+// finding_id, fingerprint, title, triage_state, outbound_state, evidence_count.
+// ---------------------------------------------------------------------------
+
+function findFindingsNodes(root, className) {
+  return findNodes(
+    root,
+    (node) =>
+      typeof node.className === 'string' &&
+      node.className.split(/\s+/).includes(className)
+  );
+}
+
+function findingsText(root, className) {
+  return findFindingsNodes(root, className).map((node) => node.textContent);
+}
+
+function makeFindingsEnv() {
+  const body = createTestElement('div');
+  body.id = FINDINGS_BODY_ID;
+  const statusNode = {
+    textContent: '',
+    hidden: true,
+    parentElement: { classList: { contains: () => false } },
+    classList: createStatusClassList(),
+  };
+  const documentStub = {
+    createElement: (tag) => createTestElement(tag),
+    getElementById(id) {
+      if (id === FINDINGS_BODY_ID) {
+        return body;
+      }
+      if (id === 'roger-reviewer-status') {
+        return statusNode;
+      }
+      return null;
+    },
+  };
+  return { body, statusNode, documentStub };
+}
+
+function makeFindingsChromeStub({ response, lastError = null } = {}) {
+  const sent = [];
+  const stub = {
+    runtime: {
+      lastError: null,
+      sendMessage(payload, callback) {
+        sent.push(payload);
+        if (lastError) {
+          stub.runtime.lastError = { message: lastError };
+          callback(undefined);
+          stub.runtime.lastError = null;
+          return;
+        }
+        callback(response);
+      },
+    },
+  };
+  return { stub, sent };
+}
+
+const RELAYED_FINDINGS_RESPONSE = {
+  ok: true,
+  action: 'show_findings',
+  session_id: 'session-42',
+  attention_state: 'findings_ready',
+  findings: {
+    count: 3,
+    warnings: ['reranker degraded to lexical fallback'],
+    items: [
+      {
+        finding_id: 'f1',
+        fingerprint: 'fp1',
+        title: 'Unbounded retry loop in worker',
+        triage_state: 'new',
+        outbound_state: 'not_drafted',
+        evidence_count: 2,
+      },
+      {
+        finding_id: 'f2',
+        fingerprint: 'fp2',
+        title: 'Missing auth check on delete route',
+        triage_state: 'new',
+        outbound_state: 'drafted',
+        evidence_count: 1,
+      },
+      {
+        finding_id: 'f3',
+        fingerprint: 'fp3',
+        title: 'Typo in log message',
+        triage_state: 'dismissed',
+        outbound_state: 'not_drafted',
+        evidence_count: 0,
+      },
+    ],
+  },
+};
+
+test('normalizeFindingsPayload lifts a relayed findings envelope into normalized items', () => {
+  const payload = normalizeFindingsPayload(RELAYED_FINDINGS_RESPONSE);
+  assert.equal(payload.relayed, true);
+  assert.equal(payload.count, 3);
+  assert.equal(payload.items.length, 3);
+  assert.deepEqual(payload.warnings, ['reranker degraded to lexical fallback']);
+  const first = payload.items[0];
+  assert.equal(first.finding_id, 'f1');
+  assert.equal(first.title, 'Unbounded retry loop in worker');
+  assert.equal(first.triage_state, 'new');
+  assert.equal(first.outbound_state, 'not_drafted');
+  assert.equal(first.evidence_count, 2);
+});
+
+test('normalizeFindingsPayload reports the honest not-relayed degrade when the bridge omits findings detail', () => {
+  // The current BridgeResponse (packages/bridge/src/lib.rs) strips findings
+  // items down to session_id + attention snapshot, so a real successful
+  // show_findings response carries no items at all.
+  const payload = normalizeFindingsPayload({
+    ok: true,
+    action: 'show_findings',
+    session_id: 'session-42',
+    attention_state: 'findings_ready',
+    message: 'rr findings completed for acme/widgets#42',
+    guidance: 'Open `rr tui` for the authoritative view.',
+  });
+  assert.equal(payload.relayed, false);
+  assert.equal(payload.count, 0);
+  assert.equal(payload.items.length, 0);
+  assert.equal(payload.guidance, 'Open `rr tui` for the authoritative view.');
+});
+
+test('normalizeFindingsItem drops entries with neither title nor finding_id', () => {
+  const payload = normalizeFindingsPayload({
+    findings: { items: [{ triage_state: 'new' }, { finding_id: 'ok', title: 'Real' }] },
+  });
+  assert.equal(payload.items.length, 1);
+  assert.equal(payload.items[0].finding_id, 'ok');
+});
+
+test('groupFindingsByTriage sorts new before dismissed and preserves in-group order', () => {
+  const payload = normalizeFindingsPayload(RELAYED_FINDINGS_RESPONSE);
+  const groups = groupFindingsByTriage(payload.items);
+  assert.deepEqual(
+    groups.map((group) => group.state),
+    ['new', 'dismissed']
+  );
+  assert.equal(groups[0].items.length, 2);
+  assert.deepEqual(
+    groups[0].items.map((item) => item.finding_id),
+    ['f1', 'f2']
+  );
+  assert.equal(groups[1].items.length, 1);
+});
+
+test('renderFindingsStaging renders a grouped read-only staged list with counts, badges, and caption', () => {
+  const env = makeFindingsEnv();
+  const payload = renderFindingsStaging(
+    env.body,
+    RELAYED_FINDINGS_RESPONSE,
+    env.documentStub
+  );
+
+  assert.equal(payload.relayed, true);
+  // Fixed read-only caption is always present.
+  assert.deepEqual(findingsText(env.body, 'rr-findings-caption'), [FINDINGS_READONLY_CAPTION]);
+  // Total counts, new group first.
+  assert.deepEqual(findingsText(env.body, 'rr-findings-summary'), [
+    '3 findings — 2 new, 1 dismissed',
+  ]);
+  assert.deepEqual(findingsText(env.body, 'rr-findings-group-title'), [
+    'New (2)',
+    'Dismissed (1)',
+  ]);
+  // Item titles rendered in group order (new leads).
+  assert.deepEqual(findingsText(env.body, 'rr-findings-item-title'), [
+    'Unbounded retry loop in worker',
+    'Missing auth check on delete route',
+    'Typo in log message',
+  ]);
+  // Triage + outbound badges present.
+  const triageBadges = findingsText(env.body, 'rr-badge--triage');
+  assert.ok(triageBadges.every((text) => text.startsWith('Triage: ')));
+  const outboundBadges = findingsText(env.body, 'rr-badge--outbound');
+  assert.ok(outboundBadges.includes('Outbound: Drafted'));
+  assert.ok(outboundBadges.includes('Outbound: Not Drafted'));
+  // Evidence-count anchor for findings that have evidence; none for the 0 case.
+  const anchors = findingsText(env.body, 'rr-findings-anchor');
+  assert.ok(anchors.includes('2 evidence locations'));
+  assert.ok(anchors.includes('1 evidence location'));
+  assert.equal(anchors.length, 2);
+  // Envelope warnings surfaced, never swallowed.
+  const warningNotes = findingsText(env.body, 'rr-findings-note--warning');
+  assert.equal(warningNotes.length, 1);
+  assert.match(warningNotes[0], /reranker degraded to lexical fallback/);
+});
+
+test('renderFindingsStaging renders the honest empty state with guidance and caption', () => {
+  const env = makeFindingsEnv();
+  renderFindingsStaging(
+    env.body,
+    { ok: true, findings: { count: 0, items: [], warnings: [] }, guidance: 'Open `rr tui` for detail.' },
+    env.documentStub
+  );
+
+  assert.deepEqual(findingsText(env.body, 'rr-findings-caption'), [FINDINGS_READONLY_CAPTION]);
+  const emptyNotes = findingsText(env.body, 'rr-findings-note--empty');
+  assert.equal(emptyNotes.length, 1);
+  assert.match(emptyNotes[0], new RegExp(FINDINGS_EMPTY_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(emptyNotes[0], /Open `rr tui` for detail\./);
+  // No list content in the empty case.
+  assert.equal(findingsText(env.body, 'rr-findings-item-title').length, 0);
+});
+
+test('renderFindingsStaging renders the honest not-relayed degrade when the bridge omits findings detail', () => {
+  const env = makeFindingsEnv();
+  renderFindingsStaging(
+    env.body,
+    { ok: true, action: 'show_findings', session_id: 's', guidance: 'Open `rr tui`.' },
+    env.documentStub
+  );
+
+  assert.deepEqual(findingsText(env.body, 'rr-findings-caption'), [FINDINGS_READONLY_CAPTION]);
+  const degradedNotes = findingsText(env.body, 'rr-findings-note--degraded');
+  assert.equal(degradedNotes.length, 1);
+  assert.match(
+    degradedNotes[0],
+    new RegExp(FINDINGS_NOT_RELAYED_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  );
+  assert.match(degradedNotes[0], /Open `rr tui`\./);
+});
+
+test('handleShowFindings dispatches show_findings through the existing bridge launch path', () => {
+  const env = makeFindingsEnv();
+  const { stub, sent } = makeFindingsChromeStub({ response: RELAYED_FINDINGS_RESPONSE });
+  const button = { textContent: 'Show local findings', disabled: false };
+
+  withPanelGlobals({ documentStub: env.documentStub, chromeStub: stub }, () => {
+    handleShowFindings(TEST_CONTEXT, button);
+  });
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].type, 'roger_bridge_launch');
+  assert.deepEqual(sent[0].intent, {
+    action: 'show_findings',
+    owner: 'acme',
+    repo: 'widgets',
+    pr_number: 42,
+  });
+  // Button restored after dispatch settles.
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, 'Show local findings');
+  // List rendered into the body, and a truthful status line written.
+  assert.deepEqual(findingsText(env.body, 'rr-findings-summary'), [
+    '3 findings — 2 new, 1 dismissed',
+  ]);
+  assert.equal(env.statusNode.hidden, false);
+  assert.match(env.statusNode.textContent, /Loaded 3 local findings\./);
+});
+
+test('handleShowFindings surfaces bridge failure guidance loudly, never silently', () => {
+  const env = makeFindingsEnv();
+  const { stub } = makeFindingsChromeStub({
+    response: {
+      ok: false,
+      mode: 'bridge_cli_outcome_not_safe',
+      action: 'show_findings',
+      message: 'rr findings reported bridge-unsafe outcome.',
+      guidance: 'Open Roger locally and rerun `rr findings` for authoritative details.',
+    },
+  });
+  const button = { textContent: 'Show local findings', disabled: false };
+
+  withPanelGlobals({ documentStub: env.documentStub, chromeStub: stub }, () => {
+    handleShowFindings(TEST_CONTEXT, button);
+  });
+
+  // Body carries a loud error note with message + guidance and the caption.
+  assert.deepEqual(findingsText(env.body, 'rr-findings-caption'), [FINDINGS_READONLY_CAPTION]);
+  const errorNotes = findingsText(env.body, 'rr-findings-note--error');
+  assert.equal(errorNotes.length, 1);
+  assert.match(errorNotes[0], /rr findings reported bridge-unsafe outcome\./);
+  assert.match(errorNotes[0], /Open Roger locally and rerun `rr findings`/);
+  // Persistent status line mirrors the same failure as an error.
+  assert.equal(env.statusNode.hidden, false);
+  assert.equal(env.statusNode.classList.contains('roger-panel-status--error'), true);
+  assert.match(env.statusNode.textContent, /rr findings reported bridge-unsafe outcome\./);
+});
+
+test('handleShowFindings renders the honest not-relayed note for a stripped-down bridge success', () => {
+  const env = makeFindingsEnv();
+  const { stub } = makeFindingsChromeStub({
+    response: {
+      ok: true,
+      action: 'show_findings',
+      session_id: 'session-42',
+      attention_state: 'findings_ready',
+      message: 'rr findings completed for acme/widgets#42',
+    },
+  });
+  const button = { textContent: 'Show local findings', disabled: false };
+
+  withPanelGlobals({ documentStub: env.documentStub, chromeStub: stub }, () => {
+    handleShowFindings(TEST_CONTEXT, button);
+  });
+
+  const degradedNotes = findingsText(env.body, 'rr-findings-note--degraded');
+  assert.equal(degradedNotes.length, 1);
+  assert.match(
+    degradedNotes[0],
+    new RegExp(FINDINGS_NOT_RELAYED_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  );
+  assert.equal(env.statusNode.hidden, false);
+  assert.match(
+    env.statusNode.textContent,
+    new RegExp(FINDINGS_NOT_RELAYED_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
   );
 });
