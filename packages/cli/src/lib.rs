@@ -56,7 +56,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
+use std::process::{Command as ProcessCommand, Stdio};
 use std::result::Result;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -299,6 +299,7 @@ struct ParsedArgs {
     // the old direct invocations.
     resume_requested: bool,
     findings_sessions: bool,
+    interactive: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -717,6 +718,7 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
         provider: "opencode".to_owned(),
         resume_requested: false,
         findings_sessions: false,
+        interactive: false,
     };
 
     let mut i = 1;
@@ -999,6 +1001,10 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
                 parsed.findings_sessions = true;
                 i += 1;
             }
+            "--interactive" => {
+                parsed.interactive = true;
+                i += 1;
+            }
             positional => {
                 if positional.starts_with('-') {
                     return Err(format!("unknown flag: {positional}"));
@@ -1110,6 +1116,34 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
             );
         }
         _ => {}
+    }
+
+    if parsed.interactive {
+        // --interactive hands the terminal to Copilot for a live session. It is
+        // only valid for the launch-shaped commands, only for the feature-gated
+        // Copilot provider, and never alongside --robot (which promises a
+        // machine-readable envelope, not a terminal handoff).
+        if !matches!(
+            parsed.command,
+            CommandKind::Review | CommandKind::Resume | CommandKind::Return
+        ) {
+            return Err(
+                "--interactive is only supported by rr review, rr resume, and rr return".to_owned(),
+            );
+        }
+        if parsed.robot {
+            return Err(
+                "--robot and --interactive cannot be combined; --interactive hands the terminal to Copilot instead of emitting a robot envelope".to_owned(),
+            );
+        }
+        if parsed.provider != session_copilot::PROVIDER_ID {
+            return Err("--interactive is only supported with --provider copilot".to_owned());
+        }
+        if !copilot_admission_gate_enabled() {
+            return Err(
+                "--interactive requires the Copilot provider gate; set RR_ENABLE_COPILOT_PROVIDER=1".to_owned(),
+            );
+        }
     }
 
     if parsed.command == CommandKind::Bridge && parsed.bridge_command.is_none() {
@@ -1689,7 +1723,11 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
 
     if parsed.command == CommandKind::Resume {
         // resume supports --dry-run (preflight); reached via rr resume or rr review --resume.
-        if parsed.provider != "opencode"
+        // --provider is otherwise session-derived; copilot is admitted only for
+        // the explicit --interactive terminal handoff (gate checked above).
+        let provider_allowed = parsed.provider == "opencode"
+            || (parsed.provider == session_copilot::PROVIDER_ID && parsed.interactive);
+        if !provider_allowed
             || !parsed.attention_states.is_empty()
             || parsed.limit.is_some()
             || parsed.query_text.is_some()
@@ -1731,7 +1769,11 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
         if parsed.dry_run {
             return Err("rr return does not support --dry-run".to_owned());
         }
-        if parsed.provider != "opencode"
+        // --provider is otherwise session-derived; copilot is admitted only for
+        // the explicit --interactive terminal handoff (gate checked above).
+        let provider_allowed = parsed.provider == "opencode"
+            || (parsed.provider == session_copilot::PROVIDER_ID && parsed.interactive);
+        if !provider_allowed
             || !parsed.attention_states.is_empty()
             || parsed.limit.is_some()
             || parsed.query_text.is_some()
@@ -4975,6 +5017,333 @@ fn handle_extension_uninstall(parsed: &ParsedArgs, runtime: &CliRuntime) -> Comm
     uninstall
 }
 
+/// Successful outcome of fetching + installing a published extension package.
+#[derive(Clone, Debug)]
+struct ExtensionFetchOutcome {
+    version: String,
+    tag: String,
+    archive_name: String,
+    archive_sha256: String,
+    archive_url: String,
+    install_metadata_url: String,
+    checksums_url: String,
+    checksums_legacy_fallback: bool,
+    package_dir: PathBuf,
+    fetch_manifest_path: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExtensionFetchFailureKind {
+    /// Fail-closed contract violation (blocked envelope for the command surface).
+    Blocked,
+    /// Internal/filesystem error (error envelope for the command surface).
+    Error,
+}
+
+/// Typed failure from the shared extension fetch core. The command surface maps
+/// this into a `blocked`/`error` envelope; the update refresh phase degrades it
+/// into a non-fatal `extension_refresh_failed: <reason>` warning.
+#[derive(Clone, Debug)]
+struct ExtensionFetchFailure {
+    kind: ExtensionFetchFailureKind,
+    reason_code: &'static str,
+    message: String,
+    repair_actions: Vec<String>,
+    /// Reason-specific extra fields (never includes reason_code/subcommand).
+    detail: Value,
+}
+
+/// Downloads the published extension.zip release asset for `version`, verifies
+/// it against the release checksums manifest, and unpacks it into the installed
+/// layout <store_root>/bridge/extension-package/<version>/roger-extension-unpacked.
+///
+/// This is the callable core shared by `rr extension fetch` and the in-place
+/// update extension-refresh phase. It never shells out to `rr`.
+fn fetch_and_install_extension_package_core(
+    store_root: &Path,
+    repo: &str,
+    version: &str,
+    download_root: &str,
+) -> std::result::Result<ExtensionFetchOutcome, ExtensionFetchFailure> {
+    let _ = repo;
+    let tag = format!("v{version}");
+
+    let install_metadata_name = format!("release-install-metadata-{version}.json");
+    let install_metadata_url = format!("{download_root}/{tag}/{install_metadata_name}");
+    let install_metadata_text =
+        fetch_url_with_curl(&install_metadata_url).map_err(|err| ExtensionFetchFailure {
+            kind: ExtensionFetchFailureKind::Blocked,
+            reason_code: "install_metadata_missing",
+            message: format!("failed to fetch install metadata bundle: {err}"),
+            repair_actions: vec![
+                "confirm the release tag is published".to_owned(),
+                "or pass --version for a known published CalVer release".to_owned(),
+            ],
+            detail: json!({ "url": install_metadata_url }),
+        })?;
+    let install_metadata: Value =
+        serde_json::from_str(&install_metadata_text).map_err(|err| ExtensionFetchFailure {
+            kind: ExtensionFetchFailureKind::Blocked,
+            reason_code: "install_metadata_invalid_json",
+            message: format!("install metadata bundle is invalid JSON: {err}"),
+            repair_actions: vec!["re-run release verification for this tag".to_owned()],
+            detail: json!({}),
+        })?;
+    if install_metadata.get("schema").and_then(Value::as_str)
+        != Some("roger.release.install-metadata.v1")
+    {
+        return Err(ExtensionFetchFailure {
+            kind: ExtensionFetchFailureKind::Blocked,
+            reason_code: "install_metadata_schema_mismatch",
+            message: "install metadata schema mismatch; refusing extension fetch".to_owned(),
+            repair_actions: vec!["rebuild release metadata bundle for this tag".to_owned()],
+            detail: json!({}),
+        });
+    }
+    let release = install_metadata.get("release").and_then(Value::as_object);
+    if release
+        .and_then(|value| value.get("version"))
+        .and_then(Value::as_str)
+        != Some(version)
+    {
+        return Err(ExtensionFetchFailure {
+            kind: ExtensionFetchFailureKind::Blocked,
+            reason_code: "install_metadata_version_mismatch",
+            message: "install metadata release.version mismatch".to_owned(),
+            repair_actions: vec!["verify release metadata and republish artifacts".to_owned()],
+            detail: json!({}),
+        });
+    }
+
+    let artifact_stem = release
+        .and_then(|value| value.get("artifact_stem"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("roger-reviewer-{version}"));
+    let checksums_name = install_metadata
+        .get("checksums_name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty() && !name.contains('/') && !name.contains('\\'))
+        .unwrap_or("SHA256SUMS")
+        .to_owned();
+    let archive_name = format!("{artifact_stem}-extension.zip");
+
+    let checksums_fetch =
+        fetch_checksums_manifest_with_fallback(download_root, &tag, &checksums_name).map_err(
+            |err| ExtensionFetchFailure {
+                kind: ExtensionFetchFailureKind::Blocked,
+                reason_code: "checksums_missing",
+                message: err.message,
+                repair_actions: vec!["rebuild/upload checksums for this tag".to_owned()],
+                detail: json!({ "attempted_urls": err.attempted_urls }),
+            },
+        )?;
+    let expected_archive_sha = checksums_entry_for_archive(&checksums_fetch.text, &archive_name)
+        .map_err(|err| ExtensionFetchFailure {
+            kind: ExtensionFetchFailureKind::Blocked,
+            reason_code: "extension_asset_missing",
+            message: format!(
+                "release {tag} does not publish a verifiable extension package asset: {err}"
+            ),
+            repair_actions: vec![
+                "confirm this release shipped the extension lane (extension.zip asset)".to_owned(),
+                "or run rr extension setup from a Roger dev workspace to pack from source"
+                    .to_owned(),
+            ],
+            detail: json!({
+                "archive_name": archive_name,
+                "checksums_url": checksums_fetch.url,
+            }),
+        })?;
+
+    let version_root = installed_extension_package_root(store_root).join(version);
+    let staging_root = version_root.join(format!(".staging-{}", next_id("extension-fetch")));
+    fs::create_dir_all(&staging_root).map_err(|err| ExtensionFetchFailure {
+        kind: ExtensionFetchFailureKind::Error,
+        reason_code: "extension_staging_unwritable",
+        message: format!(
+            "failed to create extension fetch staging directory {}: {err}",
+            staging_root.display()
+        ),
+        repair_actions: Vec::new(),
+        detail: json!({}),
+    })?;
+    let cleanup_staging = |staging_root: &Path| {
+        let _ = fs::remove_dir_all(staging_root);
+    };
+
+    let archive_url = format!("{download_root}/{tag}/{archive_name}");
+    let archive_path = staging_root.join(&archive_name);
+    if let Err(err) = download_url_to_path(&archive_url, &archive_path) {
+        cleanup_staging(&staging_root);
+        return Err(ExtensionFetchFailure {
+            kind: ExtensionFetchFailureKind::Blocked,
+            reason_code: "extension_archive_download_failed",
+            message: format!("failed to download extension package archive: {err}"),
+            repair_actions: vec![
+                "confirm the release published the extension.zip asset".to_owned(),
+            ],
+            detail: json!({ "url": archive_url }),
+        });
+    }
+    let observed_archive_sha = match sha256_for_file(&archive_path) {
+        Ok(value) => value,
+        Err(err) => {
+            cleanup_staging(&staging_root);
+            return Err(ExtensionFetchFailure {
+                kind: ExtensionFetchFailureKind::Error,
+                reason_code: "extension_archive_hash_failed",
+                message: err,
+                repair_actions: Vec::new(),
+                detail: json!({}),
+            });
+        }
+    };
+    if observed_archive_sha != expected_archive_sha.to_ascii_lowercase() {
+        cleanup_staging(&staging_root);
+        return Err(ExtensionFetchFailure {
+            kind: ExtensionFetchFailureKind::Blocked,
+            reason_code: "extension_archive_checksum_mismatch",
+            message: format!(
+                "extension archive checksum mismatch for {archive_name}: expected {}, got {observed_archive_sha}; refusing to install",
+                expected_archive_sha.to_ascii_lowercase()
+            ),
+            repair_actions: vec![
+                "re-run rr extension fetch; if the mismatch persists, the release assets need re-verification"
+                    .to_owned(),
+            ],
+            detail: json!({
+                "archive_name": archive_name,
+                "expected_sha256": expected_archive_sha.to_ascii_lowercase(),
+                "observed_sha256": observed_archive_sha,
+            }),
+        });
+    }
+
+    let staged_unpacked = staging_root.join("roger-extension-unpacked");
+    if let Err(err) = fs::create_dir_all(&staged_unpacked) {
+        cleanup_staging(&staging_root);
+        return Err(ExtensionFetchFailure {
+            kind: ExtensionFetchFailureKind::Error,
+            reason_code: "extension_unpack_dir_unwritable",
+            message: format!(
+                "failed to create staged unpack directory {}: {err}",
+                staged_unpacked.display()
+            ),
+            repair_actions: Vec::new(),
+            detail: json!({}),
+        });
+    }
+    if let Err(err) = extract_zip_archive(&archive_path, &staged_unpacked) {
+        cleanup_staging(&staging_root);
+        return Err(ExtensionFetchFailure {
+            kind: ExtensionFetchFailureKind::Error,
+            reason_code: "extension_archive_unpack_failed",
+            message: format!("failed to unpack extension archive: {err}"),
+            repair_actions: Vec::new(),
+            detail: json!({}),
+        });
+    }
+    if !installed_extension_package_is_usable(&staged_unpacked) {
+        cleanup_staging(&staging_root);
+        return Err(ExtensionFetchFailure {
+            kind: ExtensionFetchFailureKind::Blocked,
+            reason_code: "extension_archive_layout_invalid",
+            message:
+                "downloaded extension archive does not contain manifest.json at the package root"
+                    .to_owned(),
+            repair_actions: vec![
+                "re-verify the published extension.zip asset for this tag".to_owned(),
+            ],
+            detail: json!({ "archive_name": archive_name }),
+        });
+    }
+
+    let package_dir = installed_extension_package_dir(store_root, version);
+    if package_dir.exists() {
+        if let Err(err) = fs::remove_dir_all(&package_dir) {
+            cleanup_staging(&staging_root);
+            return Err(ExtensionFetchFailure {
+                kind: ExtensionFetchFailureKind::Error,
+                reason_code: "extension_package_replace_failed",
+                message: format!(
+                    "failed to replace existing extension package {}: {err}",
+                    package_dir.display()
+                ),
+                repair_actions: Vec::new(),
+                detail: json!({}),
+            });
+        }
+    }
+    if let Err(err) = fs::rename(&staged_unpacked, &package_dir) {
+        cleanup_staging(&staging_root);
+        return Err(ExtensionFetchFailure {
+            kind: ExtensionFetchFailureKind::Error,
+            reason_code: "extension_package_install_failed",
+            message: format!(
+                "failed to move verified extension package into place at {}: {err}",
+                package_dir.display()
+            ),
+            repair_actions: Vec::new(),
+            detail: json!({}),
+        });
+    }
+    cleanup_staging(&staging_root);
+
+    let fetch_manifest_path = version_root.join("fetch-manifest.json");
+    let fetch_manifest = json!({
+        "schema": "roger.extension.fetch-manifest.v1",
+        "version": version,
+        "tag": tag,
+        "archive_name": archive_name,
+        "archive_sha256": expected_archive_sha.to_ascii_lowercase(),
+        "archive_url": archive_url,
+        "checksums_url": checksums_fetch.url,
+        "checksums_legacy_fallback": checksums_fetch.legacy_fallback_used,
+        "package_dir": package_dir.to_string_lossy().to_string(),
+        "fetched_at_epoch_seconds": time::now_ts(),
+    });
+    match serde_json::to_vec_pretty(&fetch_manifest) {
+        Ok(mut bytes) => {
+            bytes.push(b'\n');
+            if let Err(err) = fs::write(&fetch_manifest_path, &bytes) {
+                return Err(ExtensionFetchFailure {
+                    kind: ExtensionFetchFailureKind::Error,
+                    reason_code: "extension_fetch_manifest_unwritable",
+                    message: format!(
+                        "failed to record extension fetch manifest {}: {err}",
+                        fetch_manifest_path.display()
+                    ),
+                    repair_actions: Vec::new(),
+                    detail: json!({}),
+                });
+            }
+        }
+        Err(err) => {
+            return Err(ExtensionFetchFailure {
+                kind: ExtensionFetchFailureKind::Error,
+                reason_code: "extension_fetch_manifest_encode_failed",
+                message: format!("failed to serialize extension fetch manifest: {err}"),
+                repair_actions: Vec::new(),
+                detail: json!({}),
+            });
+        }
+    }
+
+    Ok(ExtensionFetchOutcome {
+        version: version.to_owned(),
+        tag,
+        archive_name,
+        archive_sha256: expected_archive_sha.to_ascii_lowercase(),
+        archive_url,
+        install_metadata_url,
+        checksums_url: checksums_fetch.url,
+        checksums_legacy_fallback: checksums_fetch.legacy_fallback_used,
+        package_dir,
+        fetch_manifest_path,
+    })
+}
+
 /// Downloads the published extension.zip release asset for this binary's
 /// release version (or an explicit --version), verifies it against the
 /// release checksums manifest, and unpacks it into the installed layout
@@ -5011,269 +5380,60 @@ fn handle_extension_fetch(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandR
             json!({"subcommand": "fetch", "reason_code": "local_or_unpublished_build"}),
         );
     };
-    let tag = format!("v{version}");
     let download_root = parsed
         .update_download_root
         .clone()
         .unwrap_or_else(|| format!("https://github.com/{repo}/releases/download"));
 
-    let install_metadata_name = format!("release-install-metadata-{version}.json");
-    let install_metadata_url = format!("{download_root}/{tag}/{install_metadata_name}");
-    let install_metadata_text = match fetch_url_with_curl(&install_metadata_url) {
-        Ok(text) => text,
-        Err(err) => {
-            return blocked_response(
-                format!("failed to fetch install metadata bundle: {err}"),
-                vec![
-                    "confirm the release tag is published".to_owned(),
-                    "or pass --version for a known published CalVer release".to_owned(),
-                ],
-                json!({
-                    "subcommand": "fetch",
-                    "reason_code": "install_metadata_missing",
-                    "url": install_metadata_url,
-                }),
-            );
-        }
-    };
-    let install_metadata: Value = match serde_json::from_str(&install_metadata_text) {
-        Ok(value) => value,
-        Err(err) => {
-            return blocked_response(
-                format!("install metadata bundle is invalid JSON: {err}"),
-                vec!["re-run release verification for this tag".to_owned()],
-                json!({"subcommand": "fetch", "reason_code": "install_metadata_invalid_json"}),
-            );
-        }
-    };
-    if install_metadata.get("schema").and_then(Value::as_str)
-        != Some("roger.release.install-metadata.v1")
-    {
-        return blocked_response(
-            "install metadata schema mismatch; refusing extension fetch".to_owned(),
-            vec!["rebuild release metadata bundle for this tag".to_owned()],
-            json!({"subcommand": "fetch", "reason_code": "install_metadata_schema_mismatch"}),
-        );
-    }
-    let release = install_metadata.get("release").and_then(Value::as_object);
-    if release
-        .and_then(|value| value.get("version"))
-        .and_then(Value::as_str)
-        != Some(version.as_str())
-    {
-        return blocked_response(
-            "install metadata release.version mismatch".to_owned(),
-            vec!["verify release metadata and republish artifacts".to_owned()],
-            json!({"subcommand": "fetch", "reason_code": "install_metadata_version_mismatch"}),
-        );
-    }
-
-    let artifact_stem = release
-        .and_then(|value| value.get("artifact_stem"))
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| format!("roger-reviewer-{version}"));
-    let checksums_name = install_metadata
-        .get("checksums_name")
-        .and_then(Value::as_str)
-        .filter(|name| !name.is_empty() && !name.contains('/') && !name.contains('\\'))
-        .unwrap_or("SHA256SUMS")
-        .to_owned();
-    let archive_name = format!("{artifact_stem}-extension.zip");
-
-    let checksums_fetch =
-        match fetch_checksums_manifest_with_fallback(&download_root, &tag, &checksums_name) {
-            Ok(fetch) => fetch,
-            Err(err) => {
-                return blocked_response(
-                    err.message,
-                    vec!["rebuild/upload checksums for this tag".to_owned()],
-                    json!({
-                        "subcommand": "fetch",
-                        "reason_code": "checksums_missing",
-                        "attempted_urls": err.attempted_urls,
-                    }),
-                );
-            }
-        };
-    let expected_archive_sha =
-        match checksums_entry_for_archive(&checksums_fetch.text, &archive_name) {
-            Ok(value) => value,
-            Err(err) => {
-                return blocked_response(
-                    format!(
-                        "release {tag} does not publish a verifiable extension package asset: {err}"
-                    ),
-                    vec![
-                        "confirm this release shipped the extension lane (extension.zip asset)"
-                            .to_owned(),
-                        "or run rr extension setup from a Roger dev workspace to pack from source"
-                            .to_owned(),
-                    ],
-                    json!({
-                        "subcommand": "fetch",
-                        "reason_code": "extension_asset_missing",
-                        "archive_name": archive_name,
-                        "checksums_url": checksums_fetch.url,
-                    }),
-                );
-            }
-        };
-
-    let version_root = installed_extension_package_root(&runtime.store_root).join(&version);
-    let staging_root = version_root.join(format!(".staging-{}", next_id("extension-fetch")));
-    if let Err(err) = fs::create_dir_all(&staging_root) {
-        return error_response(format!(
-            "failed to create extension fetch staging directory {}: {err}",
-            staging_root.display()
-        ));
-    }
-    let cleanup_staging = |staging_root: &Path| {
-        let _ = fs::remove_dir_all(staging_root);
-    };
-
-    let archive_url = format!("{download_root}/{tag}/{archive_name}");
-    let archive_path = staging_root.join(&archive_name);
-    if let Err(err) = download_url_to_path(&archive_url, &archive_path) {
-        cleanup_staging(&staging_root);
-        return blocked_response(
-            format!("failed to download extension package archive: {err}"),
-            vec!["confirm the release published the extension.zip asset".to_owned()],
-            json!({
+    match fetch_and_install_extension_package_core(
+        &runtime.store_root,
+        &repo,
+        &version,
+        &download_root,
+    ) {
+        Ok(outcome) => CommandResponse {
+            outcome: OutcomeKind::Complete,
+            data: json!({
                 "subcommand": "fetch",
-                "reason_code": "extension_archive_download_failed",
-                "url": archive_url,
+                "version": outcome.version,
+                "tag": outcome.tag,
+                "archive": {
+                    "name": outcome.archive_name,
+                    "sha256": outcome.archive_sha256,
+                    "url": outcome.archive_url,
+                },
+                "metadata_urls": {
+                    "install_metadata": outcome.install_metadata_url,
+                    "checksums": outcome.checksums_url,
+                },
+                "checksums_legacy_fallback": outcome.checksums_legacy_fallback,
+                "package_dir": outcome.package_dir.to_string_lossy().to_string(),
+                "fetch_manifest_path": outcome.fetch_manifest_path.to_string_lossy().to_string(),
             }),
-        );
-    }
-    let observed_archive_sha = match sha256_for_file(&archive_path) {
-        Ok(value) => value,
-        Err(err) => {
-            cleanup_staging(&staging_root);
-            return error_response(err);
-        }
-    };
-    if observed_archive_sha != expected_archive_sha.to_ascii_lowercase() {
-        cleanup_staging(&staging_root);
-        return blocked_response(
-            format!(
-                "extension archive checksum mismatch for {archive_name}: expected {}, got {observed_archive_sha}; refusing to install",
-                expected_archive_sha.to_ascii_lowercase()
+            warnings: Vec::new(),
+            repair_actions: vec![format!(
+                "run rr extension setup --browser <edge|chrome|brave> to register the fetched package ({})",
+                outcome.package_dir.to_string_lossy()
+            )],
+            message: format!(
+                "extension package {} fetched, verified, and installed",
+                outcome.version
             ),
-            vec![
-                "re-run rr extension fetch; if the mismatch persists, the release assets need re-verification"
-                    .to_owned(),
-            ],
-            json!({
-                "subcommand": "fetch",
-                "reason_code": "extension_archive_checksum_mismatch",
-                "archive_name": archive_name,
-                "expected_sha256": expected_archive_sha.to_ascii_lowercase(),
-                "observed_sha256": observed_archive_sha,
-            }),
-        );
-    }
-
-    let staged_unpacked = staging_root.join("roger-extension-unpacked");
-    if let Err(err) = fs::create_dir_all(&staged_unpacked) {
-        cleanup_staging(&staging_root);
-        return error_response(format!(
-            "failed to create staged unpack directory {}: {err}",
-            staged_unpacked.display()
-        ));
-    }
-    if let Err(err) = extract_zip_archive(&archive_path, &staged_unpacked) {
-        cleanup_staging(&staging_root);
-        return error_response(format!("failed to unpack extension archive: {err}"));
-    }
-    if !installed_extension_package_is_usable(&staged_unpacked) {
-        cleanup_staging(&staging_root);
-        return blocked_response(
-            "downloaded extension archive does not contain manifest.json at the package root"
-                .to_owned(),
-            vec!["re-verify the published extension.zip asset for this tag".to_owned()],
-            json!({
-                "subcommand": "fetch",
-                "reason_code": "extension_archive_layout_invalid",
-                "archive_name": archive_name,
-            }),
-        );
-    }
-
-    let package_dir = installed_extension_package_dir(&runtime.store_root, &version);
-    if package_dir.exists() {
-        if let Err(err) = fs::remove_dir_all(&package_dir) {
-            cleanup_staging(&staging_root);
-            return error_response(format!(
-                "failed to replace existing extension package {}: {err}",
-                package_dir.display()
-            ));
-        }
-    }
-    if let Err(err) = fs::rename(&staged_unpacked, &package_dir) {
-        cleanup_staging(&staging_root);
-        return error_response(format!(
-            "failed to move verified extension package into place at {}: {err}",
-            package_dir.display()
-        ));
-    }
-    cleanup_staging(&staging_root);
-
-    let fetch_manifest_path = version_root.join("fetch-manifest.json");
-    let fetch_manifest = json!({
-        "schema": "roger.extension.fetch-manifest.v1",
-        "version": version,
-        "tag": tag,
-        "archive_name": archive_name,
-        "archive_sha256": expected_archive_sha.to_ascii_lowercase(),
-        "archive_url": archive_url,
-        "checksums_url": checksums_fetch.url,
-        "checksums_legacy_fallback": checksums_fetch.legacy_fallback_used,
-        "package_dir": package_dir.to_string_lossy().to_string(),
-        "fetched_at_epoch_seconds": time::now_ts(),
-    });
-    match serde_json::to_vec_pretty(&fetch_manifest) {
-        Ok(mut bytes) => {
-            bytes.push(b'\n');
-            if let Err(err) = fs::write(&fetch_manifest_path, &bytes) {
-                return error_response(format!(
-                    "failed to record extension fetch manifest {}: {err}",
-                    fetch_manifest_path.display()
-                ));
+        },
+        Err(failure) => match failure.kind {
+            ExtensionFetchFailureKind::Error => error_response(failure.message),
+            ExtensionFetchFailureKind::Blocked => {
+                let mut data = serde_json::Map::new();
+                data.insert("subcommand".to_owned(), json!("fetch"));
+                data.insert("reason_code".to_owned(), json!(failure.reason_code));
+                if let Some(extra) = failure.detail.as_object() {
+                    for (key, value) in extra {
+                        data.insert(key.clone(), value.clone());
+                    }
+                }
+                blocked_response(failure.message, failure.repair_actions, Value::Object(data))
             }
-        }
-        Err(err) => {
-            return error_response(format!(
-                "failed to serialize extension fetch manifest: {err}"
-            ));
-        }
-    }
-
-    CommandResponse {
-        outcome: OutcomeKind::Complete,
-        data: json!({
-            "subcommand": "fetch",
-            "version": version,
-            "tag": tag,
-            "archive": {
-                "name": archive_name,
-                "sha256": expected_archive_sha.to_ascii_lowercase(),
-                "url": archive_url,
-            },
-            "metadata_urls": {
-                "install_metadata": install_metadata_url,
-                "checksums": checksums_fetch.url,
-            },
-            "checksums_legacy_fallback": checksums_fetch.legacy_fallback_used,
-            "package_dir": package_dir.to_string_lossy().to_string(),
-            "fetch_manifest_path": fetch_manifest_path.to_string_lossy().to_string(),
-        }),
-        warnings: Vec::new(),
-        repair_actions: vec![format!(
-            "run rr extension setup --browser <edge|chrome|brave> to register the fetched package ({})",
-            package_dir.to_string_lossy()
-        )],
-        message: format!("extension package {version} fetched, verified, and installed"),
+        },
     }
 }
 
@@ -6451,11 +6611,16 @@ struct CopilotReviewLaunchOutcome {
     session_path: String,
     continuity_quality: ContinuityQuality,
     artifact_refs: Vec<String>,
+    hook_audit_event_count: usize,
+    interactive: bool,
 }
 
 #[derive(Debug, Serialize)]
 struct CopilotInvocationContext {
     mode: &'static str,
+    /// "interactive" (terminal handoff) or "batch" (captured output).
+    execution_mode: &'static str,
+    interactive: bool,
     binary_path: String,
     launch_root: String,
     review_target: ReviewTarget,
@@ -6463,6 +6628,8 @@ struct CopilotInvocationContext {
     verification_source: &'static str,
     session_start_artifact_path: String,
     launch_capture_path: String,
+    hook_audit_dir: String,
+    hook_audit_event_count: usize,
     stdout_preview: Vec<String>,
     stderr_preview: Vec<String>,
     artifact_refs: Vec<String>,
@@ -6517,6 +6684,56 @@ fn copilot_launch_capture_path(store_root: &Path, attempt_id: &str) -> PathBuf {
         .join("provider/copilot/launch-attempts")
         .join(attempt_id)
         .join("launch-capture.json")
+}
+
+/// Environment variable the Roger-owned Copilot hook scripts read to decide
+/// where to append their audit jsonl. The CLI now always sets this for launches
+/// so hook denials/transcript references are captured as Roger evidence.
+const ENV_COPILOT_HOOK_AUDIT_DIR: &str = "RR_COPILOT_HOOK_AUDIT_DIR";
+
+/// Session/attempt-scoped directory the Roger-owned Copilot hooks write their
+/// audit jsonl into (denials, transcript references, lifecycle events). Roger
+/// exports this via `RR_COPILOT_HOOK_AUDIT_DIR` in the child environment.
+fn copilot_hook_audit_dir(store_root: &Path, attempt_id: &str) -> PathBuf {
+    store_root
+        .join("provider/copilot/launch-attempts")
+        .join(attempt_id)
+        .join("hook-audit")
+}
+
+/// Result of scanning a Copilot hook audit directory after a session ends.
+#[derive(Clone, Debug, Default)]
+struct CopilotHookAuditScan {
+    /// Absolute paths of the `*.jsonl` audit files that were written.
+    artifact_refs: Vec<String>,
+    /// Total number of recorded hook audit events (jsonl lines across files).
+    event_count: usize,
+}
+
+/// Scan the per-attempt hook audit directory for jsonl artifacts the hooks
+/// emitted and count the recorded events. Missing directory means no hooks
+/// fired, which is a valid zero-result rather than an error.
+fn scan_copilot_hook_audit_dir(audit_dir: &Path) -> CopilotHookAuditScan {
+    let mut files: Vec<PathBuf> = Vec::new();
+    if let Ok(entries) = fs::read_dir(audit_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+
+    let mut scan = CopilotHookAuditScan::default();
+    for path in files {
+        let event_count = fs::read_to_string(&path)
+            .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count())
+            .unwrap_or(0);
+        scan.event_count += event_count;
+        scan.artifact_refs.push(path.to_string_lossy().into_owned());
+    }
+    scan
 }
 
 fn copilot_projected_provider_capability(runtime: &CliRuntime) -> Value {
@@ -6649,12 +6866,16 @@ fn preview_output_lines(text: &str) -> Vec<String> {
 struct CopilotLaunchCaptureRecord {
     schema_id: &'static str,
     mode: &'static str,
+    execution_mode: &'static str,
+    interactive: bool,
     binary_path: String,
     launch_root: String,
     exit_status: Option<i32>,
     stdout: String,
     stderr: String,
     session_start_artifact_path: String,
+    hook_audit_dir: String,
+    hook_audit_event_count: usize,
     artifact_refs: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_start_payload: Option<CopilotSessionStartPayload>,
@@ -6710,6 +6931,7 @@ fn normalized_path_string(path: &Path) -> String {
         .into_owned()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn launch_copilot_session(
     runtime: &CliRuntime,
     target: &ReviewTarget,
@@ -6720,12 +6942,16 @@ fn launch_copilot_session(
     session_path: &str,
     continuity_quality: ContinuityQuality,
     expected_session_id: Option<&str>,
+    interactive: bool,
 ) -> std::result::Result<CopilotReviewLaunchOutcome, CopilotLaunchError> {
+    let execution_mode = if interactive { "interactive" } else { "batch" };
     let launch_root = copilot_launch_root(binding_context, runtime);
     let launch_root_string = normalized_path_string(&launch_root);
     let session_start_artifact =
         copilot_session_start_artifact_path(&runtime.store_root, attempt_id);
     let launch_capture_path = copilot_launch_capture_path(&runtime.store_root, attempt_id);
+    let hook_audit_dir = copilot_hook_audit_dir(&runtime.store_root, attempt_id);
+    let hook_audit_dir_string = hook_audit_dir.to_string_lossy().into_owned();
     let Some(artifact_parent) = session_start_artifact.parent() else {
         return Err(CopilotLaunchError {
             state: LaunchAttemptState::FailedSpawn,
@@ -6816,7 +7042,25 @@ fn launch_copilot_session(
         });
     }
 
-    let output = ProcessCommand::new(&copilot_binary_path)
+    // Ensure the session-scoped hook audit directory exists so both the child
+    // hooks and Roger's post-exit scan share a stable path.
+    if let Err(err) = fs::create_dir_all(&hook_audit_dir) {
+        return Err(CopilotLaunchError {
+            state: LaunchAttemptState::FailedSpawn,
+            reason_code: "copilot_hook_audit_dir_unwritable",
+            detail: format!(
+                "failed to create Copilot hook audit directory {}: {err}",
+                hook_audit_dir.display()
+            ),
+            repair_actions: vec![
+                "repair Roger store write permissions and re-run the Copilot launch".to_owned(),
+            ],
+            extra_data: json!({ "hook_audit_dir": hook_audit_dir_string }),
+        });
+    }
+
+    let mut process_command = ProcessCommand::new(&copilot_binary_path);
+    process_command
         .args(command.iter().skip(1))
         .current_dir(&launch_root)
         .env(
@@ -6845,35 +7089,63 @@ fn launch_copilot_session(
             session_copilot::ENV_COPILOT_CUSTOM_INSTRUCTIONS_DIGEST,
             &custom_instructions_digest_sha256,
         )
-        .output()
-        .map_err(|err| CopilotLaunchError {
-            state: LaunchAttemptState::FailedSpawn,
-            reason_code: "copilot_start_failed",
-            detail: format!(
-                "failed to invoke Copilot binary '{}': {err}",
-                copilot_binary_path
-            ),
-            repair_actions: vec![format!(
-                "install the GitHub Copilot CLI binary or set {}=/absolute/path/to/copilot",
-                ENV_COPILOT_BIN
-            )],
-            extra_data: json!({
-                "binary_path": copilot_binary_path,
-                "launch_root": launch_root_string,
-            }),
-        })?;
+        // Audit wiring: the Roger-owned hooks append denial/transcript/lifecycle
+        // jsonl here for both batch and interactive launches.
+        .env(ENV_COPILOT_HOOK_AUDIT_DIR, &hook_audit_dir);
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let spawn_error = |err: std::io::Error| CopilotLaunchError {
+        state: LaunchAttemptState::FailedSpawn,
+        reason_code: "copilot_start_failed",
+        detail: format!(
+            "failed to invoke Copilot binary '{}': {err}",
+            copilot_binary_path
+        ),
+        repair_actions: vec![format!(
+            "install the GitHub Copilot CLI binary or set {}=/absolute/path/to/copilot",
+            ENV_COPILOT_BIN
+        )],
+        extra_data: json!({
+            "binary_path": copilot_binary_path,
+            "launch_root": launch_root_string,
+        }),
+    };
+
+    // Both modes share identical post-exit verification; only the process
+    // execution differs. Interactive mode hands the real terminal to Copilot via
+    // inherited stdio (like the OpenCode reopen path); batch mode captures
+    // stdout/stderr for evidence.
+    let (exit_status, stdout, stderr) = if interactive {
+        let mut child = process_command
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(spawn_error)?;
+        let status = child.wait().map_err(spawn_error)?;
+        (status, String::new(), String::new())
+    } else {
+        let output = process_command.output().map_err(spawn_error)?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        (output.status, stdout, stderr)
+    };
+
+    // Session has ended: scan the hook audit directory for recorded evidence.
+    let hook_audit_scan = scan_copilot_hook_audit_dir(&hook_audit_dir);
+
     let base_capture = CopilotLaunchCaptureRecord {
         schema_id: "rr.copilot.launch_capture.v1",
         mode,
+        execution_mode,
+        interactive,
         binary_path: copilot_binary_path.clone(),
         launch_root: launch_root_string.clone(),
-        exit_status: output.status.code(),
+        exit_status: exit_status.code(),
         stdout: stdout.clone(),
         stderr: stderr.clone(),
         session_start_artifact_path: session_start_artifact.to_string_lossy().into_owned(),
+        hook_audit_dir: hook_audit_dir_string.clone(),
+        hook_audit_event_count: hook_audit_scan.event_count,
         artifact_refs: Vec::new(),
         session_start_payload: None,
     };
@@ -6893,16 +7165,16 @@ fn launch_copilot_session(
         }
     })?;
 
-    if !output.status.success() {
+    if !exit_status.success() {
         let detail = if stderr.trim().is_empty() {
             format!(
                 "Copilot exited with status {} before Roger observed a verified session-start hook",
-                output.status
+                exit_status
             )
         } else {
             format!(
                 "Copilot exited with status {} before Roger observed a verified session-start hook: {}",
-                output.status,
+                exit_status,
                 stderr.trim()
             )
         };
@@ -6916,7 +7188,7 @@ fn launch_copilot_session(
             extra_data: json!({
                 "binary_path": copilot_binary_path,
                 "launch_root": launch_root_string,
-                "exit_status": output.status.code(),
+                "exit_status": exit_status.code(),
                 "stdout_preview": preview_output_lines(&stdout),
                 "stderr_preview": preview_output_lines(&stderr),
                 "session_start_artifact_path": session_start_artifact.to_string_lossy(),
@@ -7070,11 +7342,18 @@ fn launch_copilot_session(
         });
     }
 
-    let artifact_refs = merge_copilot_artifact_refs(
+    let mut artifact_refs = merge_copilot_artifact_refs(
         &session_start_artifact,
         &launch_capture_path,
         &payload.artifact_refs,
     );
+    // Fold the scanned hook audit jsonl files into the same evidence artifact
+    // ref set the launch capture / resume bundle / invocation context all share.
+    for audit_ref in &hook_audit_scan.artifact_refs {
+        if !artifact_refs.iter().any(|existing| existing == audit_ref) {
+            artifact_refs.push(audit_ref.clone());
+        }
+    }
     let updated_capture = CopilotLaunchCaptureRecord {
         artifact_refs: artifact_refs.clone(),
         session_start_payload: Some(payload.clone()),
@@ -7098,6 +7377,8 @@ fn launch_copilot_session(
 
     let invocation_context_json = serde_json::to_string(&CopilotInvocationContext {
         mode,
+        execution_mode,
+        interactive,
         binary_path: copilot_binary_path,
         launch_root: launch_root_string,
         review_target: target.clone(),
@@ -7105,6 +7386,8 @@ fn launch_copilot_session(
         verification_source: "session_start_hook_artifact",
         session_start_artifact_path: session_start_artifact.to_string_lossy().into_owned(),
         launch_capture_path: launch_capture_path.to_string_lossy().into_owned(),
+        hook_audit_dir: hook_audit_dir_string,
+        hook_audit_event_count: hook_audit_scan.event_count,
         stdout_preview: preview_output_lines(&stdout),
         stderr_preview: preview_output_lines(&stderr),
         artifact_refs: artifact_refs.clone(),
@@ -7136,6 +7419,8 @@ fn launch_copilot_session(
         session_path: session_path.to_owned(),
         continuity_quality,
         artifact_refs,
+        hook_audit_event_count: hook_audit_scan.event_count,
+        interactive,
     })
 }
 
@@ -7144,6 +7429,7 @@ fn launch_copilot_review_session(
     target: &ReviewTarget,
     attempt_id: &str,
     binding_context: &LaunchBindingContext,
+    interactive: bool,
 ) -> std::result::Result<CopilotReviewLaunchOutcome, CopilotLaunchError> {
     let seed_prompt = format!(
         "Roger review start for {} PR #{} in review-only posture. Keep all findings local to Roger; do not post to GitHub and do not modify repository files.",
@@ -7159,6 +7445,7 @@ fn launch_copilot_review_session(
         "hook_verified_start",
         ContinuityQuality::Degraded,
         None,
+        interactive,
     )
 }
 
@@ -7196,6 +7483,7 @@ fn launch_copilot_resume_or_return_session(
     binding_context: &LaunchBindingContext,
     session_locator: Option<&SessionLocator>,
     resume_bundle: Option<&ResumeBundle>,
+    interactive: bool,
 ) -> std::result::Result<CopilotContinuityLaunchOutcome, CopilotLaunchError> {
     if let Some(locator) = session_locator {
         match launch_copilot_session(
@@ -7208,6 +7496,7 @@ fn launch_copilot_resume_or_return_session(
             "reopened_by_locator",
             ContinuityQuality::Usable,
             Some(&locator.session_id),
+            interactive,
         ) {
             Ok(linkage) => {
                 return Ok(CopilotContinuityLaunchOutcome {
@@ -7247,6 +7536,7 @@ fn launch_copilot_resume_or_return_session(
         "reseeded_from_bundle",
         ContinuityQuality::Degraded,
         None,
+        interactive,
     )?;
 
     Ok(CopilotContinuityLaunchOutcome {
@@ -7406,6 +7696,8 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             Some(reason),
         )
     };
+    let mut copilot_interactive = false;
+    let mut copilot_hook_audit_event_count = 0usize;
     let (session_locator, session_path, continuity_quality, mut warnings, bundle_artifact_refs) =
         match parsed.provider.as_str() {
             "opencode" => {
@@ -7536,6 +7828,7 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                     &target,
                     &attempt_id,
                     &binding_context,
+                    parsed.interactive,
                 ) {
                     Ok(linkage) => linkage,
                     Err(err) => {
@@ -7578,13 +7871,23 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                         );
                     }
                 };
+                copilot_interactive = linkage.interactive;
+                copilot_hook_audit_event_count = linkage.hook_audit_event_count;
+                let mut copilot_warnings: Vec<String> =
+                    provider_support_warning("copilot", "rr review")
+                        .into_iter()
+                        .collect();
+                if linkage.hook_audit_event_count > 0 {
+                    copilot_warnings.push(format!(
+                        "captured {} hook audit events",
+                        linkage.hook_audit_event_count
+                    ));
+                }
                 (
                     linkage.locator,
                     linkage.session_path,
                     linkage.continuity_quality,
-                    provider_support_warning("copilot", "rr review")
-                        .into_iter()
-                        .collect(),
+                    copilot_warnings,
                     linkage.artifact_refs,
                 )
             }
@@ -7837,6 +8140,9 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             "session_path": session_path,
             "target_verification": target_verification,
             "continuity_quality": continuity_state_label(&continuity_quality),
+            "launch_execution_mode": if copilot_interactive { "interactive" } else { "batch" },
+            "interactive": copilot_interactive,
+            "hook_audit_event_count": copilot_hook_audit_event_count,
             "provider_capability": runtime_provider_capability(runtime, &parsed.provider),
             "routine_surface": runtime_routine_surface_projection(
                 runtime,
@@ -8270,6 +8576,8 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         None => None,
     };
 
+    let mut copilot_interactive = false;
+    let mut copilot_hook_audit_event_count = 0usize;
     let (
         session_locator,
         resume_path,
@@ -8509,6 +8817,7 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 &binding_context,
                 session.session_locator.as_ref(),
                 resume_bundle.as_ref(),
+                parsed.interactive,
             ) {
                 Ok(linkage) => linkage,
                 Err(err) => {
@@ -8552,15 +8861,25 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                     );
                 }
             };
+            copilot_interactive = continuity.linkage.interactive;
+            copilot_hook_audit_event_count = continuity.linkage.hook_audit_event_count;
+            let mut copilot_warnings: Vec<String> =
+                provider_support_warning(&session.provider, "rr resume")
+                    .into_iter()
+                    .collect();
+            if continuity.linkage.hook_audit_event_count > 0 {
+                copilot_warnings.push(format!(
+                    "captured {} hook audit events",
+                    continuity.linkage.hook_audit_event_count
+                ));
+            }
             (
                 continuity.linkage.locator,
                 continuity.linkage.session_path,
                 continuity.terminal_state,
                 continuity.linkage.continuity_quality,
                 continuity.decision_reason,
-                provider_support_warning(&session.provider, "rr resume")
-                    .into_iter()
-                    .collect(),
+                copilot_warnings,
             )
         }
         _ => unreachable!("provider validated above"),
@@ -8703,6 +9022,9 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             "resume_path": resume_path,
             "continuity_quality": continuity_state_label(&continuity_quality),
             "decision_reason": decision_reason,
+            "launch_execution_mode": if copilot_interactive { "interactive" } else { "batch" },
+            "interactive": copilot_interactive,
+            "hook_audit_event_count": copilot_hook_audit_event_count,
             "provider_capability": provider_capability.clone(),
             "routine_surface": routine_surface.clone(),
         }),
@@ -8838,6 +9160,8 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         None
     };
 
+    let mut copilot_interactive = false;
+    let mut copilot_hook_audit_event_count = 0usize;
     let (
         provider_session_locator,
         return_path,
@@ -8918,6 +9242,7 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 &binding_context,
                 session.session_locator.as_ref(),
                 resume_bundle.as_ref(),
+                parsed.interactive,
             ) {
                 Ok(linkage) => linkage,
                 Err(err) => {
@@ -8962,6 +9287,8 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 }
             };
 
+            copilot_interactive = continuity.linkage.interactive;
+            copilot_hook_audit_event_count = continuity.linkage.hook_audit_event_count;
             (
                 continuity.linkage.locator,
                 continuity.linkage.session_path,
@@ -9091,6 +9418,12 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         warnings.push(warning);
         repair_actions.extend(actions);
     }
+    if copilot_hook_audit_event_count > 0 {
+        warnings.push(format!(
+            "captured {} hook audit events",
+            copilot_hook_audit_event_count
+        ));
+    }
 
     CommandResponse {
         outcome: if degraded {
@@ -9110,6 +9443,9 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 "return_path": return_path,
                 "continuity_quality": continuity_state_label(&continuity_quality),
                 "decision_reason": decision_reason,
+                "launch_execution_mode": if copilot_interactive { "interactive" } else { "batch" },
+                "interactive": copilot_interactive,
+                "hook_audit_event_count": copilot_hook_audit_event_count,
             })
         },
         warnings,
@@ -11171,6 +11507,203 @@ fn migration_policy_payload() -> Value {
     })
 }
 
+/// True when Roger extension integration was ever set up on this machine: the
+/// persisted extension-id registry exists, or at least one per-version package
+/// directory was fetched/packed under the store bridge layout.
+fn extension_integration_ever_configured(store_root: &Path) -> bool {
+    if extension_id_registry_path(store_root).is_file() {
+        return true;
+    }
+    fs::read_dir(installed_extension_package_root(store_root))
+        .map(|entries| entries.flatten().any(|entry| entry.path().is_dir()))
+        .unwrap_or(false)
+}
+
+/// Recovers the extension id already registered in a Native Messaging host
+/// manifest by parsing its `chrome-extension://<id>/` allowed origin.
+fn extension_id_from_native_manifest(manifest_path: &Path) -> Option<String> {
+    let text = fs::read_to_string(manifest_path).ok()?;
+    let manifest: NativeHostManifest = serde_json::from_str(&text).ok()?;
+    manifest.allowed_origins.iter().find_map(|origin| {
+        origin
+            .strip_prefix("chrome-extension://")
+            .and_then(|rest| rest.strip_suffix('/'))
+            .filter(|id| !id.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+/// Non-fatal report from the post-update extension refresh phase.
+struct ExtensionRefreshReport {
+    data: Value,
+    warnings: Vec<String>,
+    repair_actions: Vec<String>,
+}
+
+/// After a successful in-place binary replacement, refresh the fetched
+/// extension package and rewrite native-messaging host launcher + manifests so
+/// the browser integration keeps matching the newly installed binary.
+///
+/// This phase is best-effort: any failure degrades into a typed
+/// `extension_refresh_failed: <reason>` warning plus repair guidance and never
+/// rolls back or fails the binary update. Returns `None` (skip silently) when
+/// extension integration was never configured on this machine.
+fn refresh_extension_after_update(
+    runtime: &CliRuntime,
+    repo: &str,
+    version: &str,
+    download_root: &str,
+    bridge_binary: &Path,
+) -> Option<ExtensionRefreshReport> {
+    if !extension_integration_ever_configured(&runtime.store_root) {
+        return None;
+    }
+
+    let mut warnings = Vec::new();
+    let mut repair_actions = Vec::new();
+
+    // 1. Fetch + install the new version's extension package (in-process; no
+    //    shelling out to rr).
+    let fetch =
+        fetch_and_install_extension_package_core(&runtime.store_root, repo, version, download_root);
+    let package_refreshed = fetch.is_ok();
+    let package_dir = match &fetch {
+        Ok(outcome) => Some(outcome.package_dir.to_string_lossy().to_string()),
+        Err(failure) => {
+            warnings.push(format!(
+                "extension_refresh_failed: {} ({})",
+                failure.reason_code, failure.message
+            ));
+            repair_actions.push(format!(
+                "run rr extension fetch --version {version} to refresh the extension package"
+            ));
+            None
+        }
+    };
+
+    // 2. Rewrite the native-messaging host launcher + manifest for every browser
+    //    that already has a Roger host manifest present, keeping the existing
+    //    extension id.
+    let mut rewritten_browsers: Vec<String> = Vec::new();
+    match (SupportedOs::current(), default_extension_install_root()) {
+        (Some(host_os), Some(install_root)) => {
+            let browsers = [
+                SupportedBrowser::Chrome,
+                SupportedBrowser::Edge,
+                SupportedBrowser::Brave,
+            ];
+            let extension_id = discover_stored_or_env_extension_id(runtime)
+                .map(|(id, _source)| id)
+                .or_else(|| {
+                    browsers.iter().find_map(|browser| {
+                        let manifest_path =
+                            native_host_install_path_for(browser, host_os, &install_root);
+                        manifest_path
+                            .exists()
+                            .then(|| extension_id_from_native_manifest(&manifest_path))
+                            .flatten()
+                    })
+                });
+
+            match extension_id {
+                Some(extension_id) => {
+                    for browser in browsers {
+                        let manifest_path =
+                            native_host_install_path_for(&browser, host_os, &install_root);
+                        if !manifest_path.exists() {
+                            continue;
+                        }
+                        let launcher_path = native_host_launcher_path(&manifest_path, host_os);
+                        if let Err(err) =
+                            write_native_host_launcher(&launcher_path, bridge_binary, host_os)
+                        {
+                            warnings.push(format!(
+                                "extension_refresh_failed: native_host_launcher_rewrite ({err})"
+                            ));
+                            continue;
+                        }
+                        let manifest = NativeHostManifest::for_roger(&launcher_path, &extension_id);
+                        let manifest_bytes = match serde_json::to_vec_pretty(&manifest) {
+                            Ok(mut bytes) => {
+                                bytes.push(b'\n');
+                                bytes
+                            }
+                            Err(err) => {
+                                warnings.push(format!(
+                                    "extension_refresh_failed: native_host_manifest_encode ({err})"
+                                ));
+                                continue;
+                            }
+                        };
+                        if let Err(err) = fs::write(&manifest_path, &manifest_bytes) {
+                            warnings.push(format!(
+                                "extension_refresh_failed: native_host_manifest_rewrite ({err})"
+                            ));
+                            continue;
+                        }
+                        rewritten_browsers.push(supported_browser_label(browser).to_owned());
+                    }
+                }
+                None => {
+                    warnings.push(
+                        "extension_refresh_failed: extension_id_unknown (native host manifests left unchanged; existing extension id could not be resolved)"
+                            .to_owned(),
+                    );
+                    repair_actions.push(
+                        "run rr extension setup --browser <edge|chrome|brave> to re-register the native host"
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        (None, _) => warnings.push(
+            "extension_refresh_failed: unsupported_host_os (native host manifests left unchanged)"
+                .to_owned(),
+        ),
+        (_, None) => warnings.push(
+            "extension_refresh_failed: install_root_unresolved (HOME is missing; native host manifests left unchanged)"
+                .to_owned(),
+        ),
+    }
+
+    if package_refreshed {
+        warnings.push(format!(
+            "extension package refreshed to {version}; reload the unpacked extension in your browser"
+        ));
+    }
+    if package_refreshed || !rewritten_browsers.is_empty() {
+        repair_actions.push(
+            "reload the unpacked Roger extension in your browser to pick up the refreshed package"
+                .to_owned(),
+        );
+    }
+    // If the refresh degraded, always leave a coherent re-setup path.
+    if warnings
+        .iter()
+        .any(|warning| warning.starts_with("extension_refresh_failed:"))
+    {
+        repair_actions.push(
+            "run rr extension setup --browser <edge|chrome|brave> after rr extension fetch to fully repair extension integration"
+                .to_owned(),
+        );
+    }
+
+    let data = json!({
+        "attempted": true,
+        "package_refreshed": package_refreshed,
+        "version": version,
+        "package_dir": package_dir,
+        "native_hosts_rewritten": rewritten_browsers,
+        "warnings": warnings.clone(),
+    });
+
+    Some(ExtensionRefreshReport {
+        data,
+        warnings,
+        repair_actions,
+    })
+}
+
 fn handle_update(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let repo = parsed
         .repo
@@ -11813,6 +12346,22 @@ fn handle_update(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         }
     };
 
+    // Post-binary refresh: keep browser integration matching the new binary.
+    // Best-effort — failures degrade to typed warnings and never roll back the
+    // binary update that already succeeded above.
+    let extension_refresh = refresh_extension_after_update(
+        runtime,
+        &repo,
+        &target_version,
+        &download_root,
+        &apply_outcome.install_path,
+    );
+    let (extension_refresh_value, refresh_warnings, refresh_repair_actions) =
+        match extension_refresh {
+            Some(report) => (report.data, report.warnings, report.repair_actions),
+            None => (json!({ "attempted": false }), Vec::new(), Vec::new()),
+        };
+
     CommandResponse {
         outcome: OutcomeKind::Complete,
         data: json!({
@@ -11848,10 +12397,11 @@ fn handle_update(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 "backup_path": apply_outcome.backup_path.to_string_lossy(),
                 "rollback_strategy": "rename_with_immediate_restore_on_failure",
             },
+            "extension_refresh": extension_refresh_value,
             "recommended_install_command": recommended_command,
         }),
-        warnings: Vec::new(),
-        repair_actions: Vec::new(),
+        warnings: refresh_warnings,
+        repair_actions: refresh_repair_actions,
         message: format!("rr updated from {} to {}", current_version, target_version),
     }
 }
@@ -16515,10 +17065,10 @@ Primary flow:
 
 Choose and enter review work:
   rr queue [--repo owner/repo] [--limit <n>] [--robot]
-  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude|copilot] [--dry-run] [--robot]
-  rr review --resume [--pr <number> | --session <id>] [--repo owner/repo] [--dry-run] [--robot]
+  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude|copilot] [--interactive] [--dry-run] [--robot]
+  rr review --resume [--pr <number> | --session <id>] [--repo owner/repo] [--interactive] [--dry-run] [--robot]
   rr open [--repo owner/repo] [--pr <number>] [--session <id>]
-  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]
+  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--interactive] [--robot]
 
 Inspect and search review output:
   rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]
@@ -16561,6 +17111,7 @@ Provider support on the current live CLI surface:
   - opencode is the first-class tier-b continuity path; rr resume can reopen and rr return is supported
   - codex, gemini, and claude are bounded tier-a providers; start/reseed/raw-capture only, no locator reopen or rr return
   - copilot is feature-gated bounded tier-b support; enable with RR_ENABLE_COPILOT_PROVIDER=1 for verified start, locator/session-id reopen, rr return, and honest ResumeBundle reseed fallback
+  - copilot review/resume/return accept --interactive (Copilot only, gate on, not with --robot) to hand the terminal to Copilot with inherited stdio; Roger still runs verified-start checks + session binding after exit and records hook audit events
   - pi-agent is not part of the current live CLI surface
 
 Safety notes:
@@ -16574,6 +17125,9 @@ Safety notes:
 Browser note:
   - Chrome 137+ ignores --load-extension; load the unpacked package once via chrome://extensions
   - Edge and Brave still honor the guided preloaded-extension launch path
+
+Update note:
+  - after a successful binary replacement, if extension integration was ever set up, rr setup update also refreshes the extension package and rewrites native-messaging host manifests; failures here degrade to extension_refresh_failed warnings and never roll back the binary update
 
 More:
   - machine-readable command and schema reference: rr api docs [guide|commands|schemas|workflows]
