@@ -15604,15 +15604,26 @@ fn handle_findings(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
 
     let mut items = Vec::with_capacity(findings.len());
     for finding in &findings {
-        let evidence_count = match store.count_code_evidence_locations_for_finding(&finding.id) {
-            Ok(count) => count as usize,
+        // Full locations (not just a count) so surfaces that mirror this
+        // projection — the extension staging view in particular — get a real
+        // file anchor for the primary evidence location.
+        let evidence_locations = match store.code_evidence_locations_for_finding(&finding.id) {
+            Ok(locations) => locations,
             Err(err) => {
                 return error_response(format!(
-                    "failed to count evidence locations for finding {}: {err}",
+                    "failed to load evidence locations for finding {}: {err}",
                     finding.id
                 ));
             }
         };
+        let evidence_count = evidence_locations.len();
+        let file_anchor = evidence_locations.first().map(|location| {
+            json!({
+                "path": location.repo_rel_path,
+                "start_line": location.start_line,
+                "end_line": location.end_line,
+            })
+        });
 
         let outbound_projection = match store
             .outbound_surface_projection_for_finding(&finding.id, &finding.outbound_state)
@@ -15630,6 +15641,9 @@ fn handle_findings(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
             "finding_id": finding.id,
             "fingerprint": finding.fingerprint,
             "title": finding.title,
+            "severity": finding.severity,
+            "summary": finding.normalized_summary,
+            "file_anchor": file_anchor,
             "triage_state": finding.triage_state,
             "outbound_state": outbound_projection.state,
             "outbound_detail": {

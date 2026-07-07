@@ -114,6 +114,12 @@ pub struct BridgeResponse {
     /// Bounded bridge failure vocabulary for extension-side launch handling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_kind: Option<BridgeFailureKind>,
+    /// Bounded findings mirror relayed only for `show_findings`: the
+    /// `rr findings --robot` envelope's `{items, count}` plus its warnings, so
+    /// the extension staging view can render real findings without pretending
+    /// to be a source of truth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub findings: Option<serde_json::Value>,
 }
 
 impl BridgeResponse {
@@ -129,6 +135,7 @@ impl BridgeResponse {
             status: None,
             launch_outcome: None,
             failure_kind: None,
+            findings: None,
         }
     }
 
@@ -151,6 +158,7 @@ impl BridgeResponse {
             status: Some(status),
             launch_outcome: launch_outcome.map(str::to_owned),
             failure_kind: None,
+            findings: None,
         }
     }
 
@@ -176,6 +184,7 @@ impl BridgeResponse {
             status: None,
             launch_outcome: launch_outcome.map(str::to_owned),
             failure_kind: failure_kind.into(),
+            findings: None,
         }
     }
 }
@@ -913,14 +922,22 @@ pub fn handle_bridge_intent(
         )
     };
 
-    BridgeResponse::success_with_status(
+    let mut response = BridgeResponse::success_with_status(
         &intent.action,
         &message,
         session_id,
         status,
         success_guidance,
         launch_outcome,
-    )
+    );
+    if intent.action == "show_findings" {
+        response.findings = Some(serde_json::json!({
+            "items": launch_envelope.data.get("items").cloned().unwrap_or(Value::Array(Vec::new())),
+            "count": launch_envelope.data.get("count").cloned().unwrap_or(Value::from(0)),
+            "warnings": launch_envelope.warnings,
+        }));
+    }
+    response
 }
 
 fn normalize_extension_id(value: &str) -> Option<String> {
@@ -1287,6 +1304,80 @@ esac
             Some("rr.robot.status.v1")
         );
         assert!(resp.message.contains("rr review"));
+        assert!(
+            resp.findings.is_none(),
+            "launch responses must not carry a findings mirror"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_bridge_intent_show_findings_relays_items() {
+        let (_stub_dir, stub_rr) = write_stub_roger_binary(
+            "findings",
+            &serde_json::to_string_pretty(&serde_json::json!({
+                "schema_id": "rr.robot.findings.v1",
+                "command": "rr findings",
+                "robot_format": "json",
+                "outcome": "complete",
+                "generated_at": "2026-04-15T00:00:00Z",
+                "exit_code": 0,
+                "warnings": ["semantic assets unverified"],
+                "repair_actions": [],
+                "data": {
+                    "session_id": "session-bridge-1",
+                    "items": [
+                        {
+                            "finding_id": "finding-1",
+                            "title": "unchecked unwrap",
+                            "severity": "high",
+                            "triage_state": "new",
+                            "outbound_state": "not_drafted",
+                            "file_anchor": {"path": "src/lib.rs", "start_line": 10, "end_line": 12},
+                            "evidence_count": 1
+                        }
+                    ],
+                    "count": 1
+                }
+            }))
+            .expect("serialize findings envelope"),
+            0,
+            &serde_json::to_string_pretty(&serde_json::json!({
+                "schema_id": "rr.robot.status.v1",
+                "command": "rr status",
+                "robot_format": "json",
+                "outcome": "complete",
+                "generated_at": "2026-04-15T00:00:01Z",
+                "exit_code": 0,
+                "warnings": [],
+                "repair_actions": [],
+                "data": {
+                    "session": {"id": "session-bridge-1"},
+                    "attention": {"state": "review_launched"}
+                }
+            }))
+            .expect("serialize status envelope"),
+            0,
+        );
+        let preflight = BridgePreflight {
+            roger_binary_found: true,
+            roger_data_dir_exists: true,
+            gh_available: true,
+        };
+        let mut intent = sample_intent();
+        intent.action = "show_findings".to_owned();
+        let resp = handle_bridge_intent(&intent, &preflight, &stub_rr);
+        assert!(resp.ok, "guidance: {:?}", resp.guidance);
+        let findings = resp
+            .findings
+            .expect("show_findings must relay a findings mirror");
+        assert_eq!(findings["count"], 1);
+        assert_eq!(findings["items"][0]["finding_id"], "finding-1");
+        assert_eq!(findings["items"][0]["severity"], "high");
+        assert_eq!(
+            findings["warnings"][0], "semantic assets unverified",
+            "envelope warnings must ride along for honest degrade rendering"
+        );
     }
 
     #[cfg(unix)]
