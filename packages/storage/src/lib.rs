@@ -959,7 +959,7 @@ impl From<Surface> for LaunchSurface {
 }
 
 impl LaunchSurface {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Cli => "cli",
             Self::Tui => "tui",
@@ -968,7 +968,7 @@ impl LaunchSurface {
         }
     }
 
-    fn parse(raw: &str) -> Option<Self> {
+    pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "cli" => Some(Self::Cli),
             "tui" => Some(Self::Tui),
@@ -7235,6 +7235,17 @@ fn binding_local_root_stale_reason(
     binding: &SessionLaunchBindingRecord,
     local_root: ResolveSessionLocalRoot<'_>,
 ) -> Option<String> {
+    // Bridge-origin bindings are launched from the browser's cwd, which is
+    // deliberately untrusted (often a poisoned path under NativeMessagingHosts)
+    // and therefore recorded with no repo-local root. The local-root staleness
+    // invariant exists to protect CLI/TUI launches that carry a real worktree;
+    // recognizing the bridge surface here explicitly exempts those typed
+    // bindings so explicit-session readback stays unblocked without weakening
+    // the invariant for any other surface.
+    if binding.surface == LaunchSurface::Bridge.as_str() {
+        return None;
+    }
+
     if let Some(worktree_root) = local_root.worktree_root {
         return match binding.worktree_root.as_deref() {
             Some(bound_worktree_root) if paths_equivalent(bound_worktree_root, worktree_root) => {
@@ -7330,11 +7341,7 @@ pub fn semantic_model_tree_digest(root: impl AsRef<Path>) -> Result<String> {
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
-fn collect_tree_files(
-    root: &Path,
-    dir: &Path,
-    out: &mut Vec<(String, PathBuf)>,
-) -> Result<()> {
+fn collect_tree_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();

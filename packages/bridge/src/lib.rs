@@ -207,10 +207,9 @@ pub enum NativeBridgeMessage {
 pub fn read_native_bridge_message<R: Read>(reader: &mut R) -> Result<NativeBridgeMessage> {
     let value = read_native_value(reader)?;
     if value.get("type").and_then(|v| v.as_str()) == Some("roger_bridge_status") {
-        let probe: BridgeStatusProbe = serde_json::from_value(value)
-            .map_err(|e| BridgeError::NativeMessagingReadError(format!(
-                "invalid status probe payload: {e}"
-            )))?;
+        let probe: BridgeStatusProbe = serde_json::from_value(value).map_err(|e| {
+            BridgeError::NativeMessagingReadError(format!("invalid status probe payload: {e}"))
+        })?;
         return Ok(NativeBridgeMessage::StatusProbe(probe));
     }
     let intent: BridgeLaunchIntent = serde_json::from_value(value).map_err(|e| {
@@ -234,9 +233,8 @@ fn read_native_value<R: Read>(reader: &mut R) -> Result<serde_json::Value> {
     reader.read_exact(&mut body).map_err(|e| {
         BridgeError::NativeMessagingReadError(format!("failed to read message body: {e}"))
     })?;
-    serde_json::from_slice(&body).map_err(|e| {
-        BridgeError::NativeMessagingReadError(format!("invalid message JSON: {e}"))
-    })
+    serde_json::from_slice(&body)
+        .map_err(|e| BridgeError::NativeMessagingReadError(format!("invalid message JSON: {e}")))
 }
 
 /// Write an arbitrary serializable native message (used for status-probe
@@ -519,21 +517,27 @@ fn bridge_dispatch_spec(intent: &BridgeLaunchIntent) -> Option<BridgeDispatchSpe
     let repo_locator = format!("{}/{}", intent.owner, intent.repo);
     let pr_number = intent.pr_number.to_string();
 
-    let (command_name, mut argv, allowed_outcomes) = match intent.action.as_str() {
+    // `accepts_surface` marks the launch-attempt commands (review/resume) that
+    // record a surface-typed launch attempt/binding; `rr findings` does not, so
+    // it must not receive the bridge-only `--surface` flag.
+    let (command_name, mut argv, allowed_outcomes, accepts_surface) = match intent.action.as_str() {
         "start_review" => (
             "rr review",
             vec!["review".to_owned()],
             &["complete", "degraded"][..],
+            true,
         ),
         "resume_review" => (
             "rr resume",
             vec!["resume".to_owned()],
             &["complete", "degraded"][..],
+            true,
         ),
         "show_findings" => (
             "rr findings",
             vec!["findings".to_owned()],
             &["complete", "empty"][..],
+            false,
         ),
         _ => return None,
     };
@@ -542,6 +546,12 @@ fn bridge_dispatch_spec(intent: &BridgeLaunchIntent) -> Option<BridgeDispatchSpe
     argv.push(repo_locator);
     argv.push("--pr".to_owned());
     argv.push(pr_number);
+    if accepts_surface {
+        // Record the true launch origin so the persisted launch attempt/binding
+        // carry surface=bridge instead of masquerading as a CLI launch.
+        argv.push("--surface".to_owned());
+        argv.push("bridge".to_owned());
+    }
     argv.push("--robot".to_owned());
     argv.push("--robot-format".to_owned());
     argv.push("json".to_owned());
@@ -596,6 +606,29 @@ fn format_rr_command(argv: &[String]) -> String {
     parts.join(" ")
 }
 
+/// Resolve a deliberate, stable directory to anchor bridge-spawned rr children.
+///
+/// The native host inherits the browser's cwd, which is frequently a poisoned
+/// path under NativeMessagingHosts. Spawning rr children there causes the CLI to
+/// infer a browser-controlled repo-local context and record poisoned launch
+/// bindings. Anchoring the child to a neutral root (the store root or the user
+/// home) keeps that inference honest. Store resolution itself stays env/HOME
+/// driven, so relocating the child's cwd never moves the canonical store.
+fn neutral_bridge_launch_dir() -> PathBuf {
+    for candidate in [
+        std::env::var_os("HOME").map(PathBuf::from),
+        std::env::var_os("RR_STORE_ROOT").map(PathBuf::from),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if candidate.is_dir() {
+            return candidate;
+        }
+    }
+    std::env::temp_dir()
+}
+
 fn execute_rr_robot_command(
     action: &str,
     roger_binary_path: &Path,
@@ -604,7 +637,11 @@ fn execute_rr_robot_command(
     allowed_outcomes: &[&str],
 ) -> std::result::Result<RobotEnvelope, BridgeResponse> {
     let rerun_command = format_rr_command(argv);
-    let output = match Command::new(roger_binary_path).args(argv).output() {
+    let output = match Command::new(roger_binary_path)
+        .args(argv)
+        .current_dir(neutral_bridge_launch_dir())
+        .output()
+    {
         Ok(output) => output,
         Err(err) => {
             return Err(BridgeResponse::failure_with_kind(

@@ -16,7 +16,10 @@ use std::process::Command;
 use tempfile::tempdir;
 
 fn run_rr(args: &[&str], runtime: &CliRuntime) -> roger_cli::CliRunResult {
-    let argv = args.iter().map(|value| value.to_string()).collect::<Vec<_>>();
+    let argv = args
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
     run(&argv, runtime)
 }
 
@@ -139,7 +142,13 @@ fn rr_search_flips_to_real_hybrid_after_live_model_install() {
 
     // Install the real model (downloads from HuggingFace, probes inference).
     let install = run_rr(
-        &["assets", "install", "--asset", "semantic-default", "--robot"],
+        &[
+            "assets",
+            "install",
+            "--asset",
+            "semantic-default",
+            "--robot",
+        ],
         &runtime,
     );
     assert_eq!(install.exit_code, 0, "install stderr: {}", install.stderr);

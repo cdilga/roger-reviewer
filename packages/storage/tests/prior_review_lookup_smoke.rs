@@ -510,9 +510,7 @@ fn generate_semantic_candidates_ranks_corpus_by_embedding_similarity() -> Result
         "refresh finding should rank above unrelated: {candidates:?}"
     );
     assert!(
-        candidates
-            .iter()
-            .all(|c| (0.0..=1.0).contains(&c.score)),
+        candidates.iter().all(|c| (0.0..=1.0).contains(&c.score)),
         "scores must be normalized: {candidates:?}"
     );
 
