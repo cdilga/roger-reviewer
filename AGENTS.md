@@ -347,7 +347,7 @@ The first real Roger implementation release is now defined as **`0.1.0`**.
 When this file or the canonical plan says "v1", read that as the `0.1.0`
 release line unless the user explicitly reframes it.
 
-**Versioning posture:** `0.2` is the current product milestone (the
+**Versioning posture:** `0.3` is the current product milestone (the
 communication line). Published releases are CalVer-tagged (`vYYYY.MM.DD`) and
 the Cargo workspace semver stays `0.1.0`; the milestone names the line, the
 CalVer tag is the release identity, and the semver is unchanged. See

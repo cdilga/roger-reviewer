@@ -4,6 +4,71 @@ Roger Reviewer ships on a CalVer release lane (`vYYYY.MM.DD`). This file groups
 the dated releases into the product milestone they belong to. Entries describe
 what actually shipped; aspirational or feature-gated work is called out as such.
 
+## 0.3 (v2026.07.07) — Seven-verb CLI, loud browser companion, editable outbound loop
+
+This release massively simplifies Roger's operator surface and closes the last
+mile on the flows that previously existed only as primitives.
+
+### A seven-verb CLI
+
+- The operator vocabulary is now `rr doctor, queue, review, open, findings,
+  send, setup` plus two explicit machine surfaces (`rr api docs`, `rr agent`).
+  Every old command keeps working as a quiet compatibility alias with an
+  unchanged robot schema id.
+- `rr send triage|draft|edit|approve|post` is the one gated outbound unit;
+  `rr setup extension|doctor|fetch|update|assets|uninstall` is the one
+  install/repair unit; `rr review --resume`, `rr findings --query`, and
+  `rr findings --sessions` fold resume/search/sessions into the core verbs.
+- `rr <command> --help` now works at any argument position, and every command
+  rejects flags it does not support with an actionable message.
+
+### Draft editing, end to end
+
+- New `rr send edit --draft <id> (--body-file | --editor)` and a TUI `e` key
+  revise a local draft body as a durable revision (original always preserved).
+- Editing an approved batch revokes the approval with a typed reason and
+  re-derives the exact-payload binding; re-running `rr send approve` reissues
+  the token for the revised payload. Posted batches refuse edits.
+- Live-proven on a sacrificial PR: the posted GitHub comment was byte-for-byte
+  the revised body, then deleted with verification.
+
+### Browser companion: louder, truer, fresher
+
+- Native host now streams launch progress (`host_started`, `preflight_ok`)
+  before the final result; the extension renders progress, fails fast within
+  10s when the host never answers, and the status mirror degrades visibly
+  instead of silently.
+- PR-listing pages get per-row "Start Review in Roger" controls (the content
+  script now actually loads on `/pulls`), and the PR panel gains a read-only
+  findings staging view (severity/triage/outbound badges with file anchors)
+  over the native bridge.
+- Bridge-origin launches are recorded truthfully (`--surface bridge`) with a
+  neutral working directory, so browser-launched sessions no longer poison
+  repo bindings or block `rr status --session` readback.
+- `rr setup doctor --live` performs a real native-messaging round trip through
+  the installed launcher — the exact path the browser uses — plus a gh
+  preflight, instead of filesystem checks alone.
+- `rr setup update` (and `rr update`) now refreshes the fetched extension
+  package and rewrites native-messaging host manifests after a successful
+  binary swap, so updated users get the repaired companion, not a stale one.
+
+### Copilot: first live proof + interactive drop-in
+
+- Feature-gated Copilot (`RR_ENABLE_COPILOT_PROVIDER=1`) gained
+  `--interactive`: `rr review/resume/return` hand a real terminal to the
+  Copilot CLI and verify the session after exit.
+- First-ever live (non-double) Copilot runs recorded: hook-verified start, the
+  Roger-Review-Driver skill provably loaded in-session, `review_readonly`
+  policy provably denying disallowed tools, transcript references captured,
+  and hook audit events persisted per launch attempt.
+
+### Honesty ledger
+
+- The in-session `rr agent` worker round-trip remains live-unproven on Copilot
+  because the read-only policy denies all bash (tracked as an open bug with a
+  planned fail-closed carve-out); draft-body staging and clarification kickoff
+  from the browser are tracked follow-ons.
+
 ## 0.2 — Provider honesty, search defaults, and release machinery
 
 This milestone made Roger's public surfaces tell one consistent story, fixed the

@@ -24,7 +24,7 @@ This README tracks the current live `rr` CLI surface and the blessed workflows
 we support publicly. The deeper planning and implementation contracts live
 under [`docs/`](docs/).
 
-**Versioning:** `0.2` is the current product milestone. Published releases are
+**Versioning:** `0.3` is the current product milestone. Published releases are
 CalVer-tagged (`vYYYY.MM.DD`), while the Cargo workspace semver stays `0.1.0`.
 The milestone names the communication line; the CalVer tag is the release
 identity. See
