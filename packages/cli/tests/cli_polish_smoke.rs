@@ -301,11 +301,39 @@ fn send_and_findings_containers_route_to_underlying_robot_schema_ids() {
 }
 
 #[test]
-fn send_edit_is_reserved_not_unknown() {
+fn send_edit_routes_to_a_real_command() {
     let temp = tempdir().expect("tempdir");
     let runtime = runtime_for(&temp);
 
-    let edit = run_rr(&["send", "edit", "--draft", "d1"], &runtime);
-    assert_eq!(edit.exit_code, 2, "{}", edit.stdout);
-    assert!(edit.stderr.contains("not yet available"), "{}", edit.stderr);
+    // `rr send edit` is a real command now. Missing a body source is a usage
+    // (exit 2) error, not the old "not yet available" reservation.
+    let missing_body = run_rr(&["send", "edit", "--draft", "d1"], &runtime);
+    assert_eq!(missing_body.exit_code, 2, "{}", missing_body.stdout);
+    assert!(
+        missing_body
+            .stderr
+            .contains("requires --body-file <path> or --editor"),
+        "{}",
+        missing_body.stderr
+    );
+
+    // It is a local human action, not a --robot transport.
+    let robot = run_rr(
+        &[
+            "send",
+            "edit",
+            "--draft",
+            "d1",
+            "--body-file",
+            "/tmp/b",
+            "--robot",
+        ],
+        &runtime,
+    );
+    assert_eq!(robot.exit_code, 2, "{}", robot.stdout);
+    assert!(
+        robot.stderr.contains("does not support --robot"),
+        "{}",
+        robot.stderr
+    );
 }

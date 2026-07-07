@@ -130,6 +130,7 @@ enum CommandKind {
     Search,
     Triage,
     Draft,
+    Edit,
     Approve,
     Post,
     Update,
@@ -158,6 +159,7 @@ impl CommandKind {
             (Self::Search, _) => "rr search",
             (Self::Triage, _) => "rr triage",
             (Self::Draft, _) => "rr draft",
+            (Self::Edit, _) => "rr send edit",
             (Self::Approve, _) => "rr approve",
             (Self::Post, _) => "rr post",
             (Self::Update, _) => "rr update",
@@ -184,6 +186,12 @@ impl CommandKind {
             Self::Search => "rr.robot.search.v1",
             Self::Triage => "rr.robot.triage.v1",
             Self::Draft => "rr.robot.draft.v1",
+            // `rr send edit` is a local, human-only editing action that rejects
+            // --robot at parse time, so this id is never emitted in an
+            // envelope. It is present only to keep the match exhaustive and is
+            // deliberately not a `rr.robot.*` schema id (no new robot schema in
+            // this slice).
+            Self::Edit => "rr.send.edit.v1",
             Self::Approve => "rr.robot.approve.v1",
             Self::Post => "rr.robot.post.v1",
             Self::Update => "rr.robot.update.v1",
@@ -263,6 +271,11 @@ struct ParsedArgs {
     draft_all_findings: bool,
     triage_state: Option<String>,
     batch_id: Option<String>,
+    // `rr send edit` inputs: the outbound draft item id, and exactly one body
+    // source (a file, or an interactive editor seeded with the current body).
+    edit_draft_id: Option<String>,
+    edit_body_file: Option<PathBuf>,
+    edit_editor: bool,
     update_channel: String,
     update_version: Option<String>,
     update_api_root: Option<String>,
@@ -643,6 +656,7 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
         "search" => CommandKind::Search,
         "triage" => CommandKind::Triage,
         "draft" => CommandKind::Draft,
+        "edit" => CommandKind::Edit,
         "approve" => CommandKind::Approve,
         "post" => CommandKind::Post,
         "update" => CommandKind::Update,
@@ -682,6 +696,9 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
         draft_all_findings: false,
         triage_state: None,
         batch_id: None,
+        edit_draft_id: None,
+        edit_body_file: None,
+        edit_editor: false,
         update_channel: "stable".to_owned(),
         update_version: None,
         update_api_root: None,
@@ -786,6 +803,28 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
                     })?;
                 parsed.batch_id = Some(value.clone());
                 i += 2;
+            }
+            "--draft" => {
+                let value = argv
+                    .get(i + 1)
+                    .filter(|candidate| !candidate.starts_with("--"))
+                    .ok_or_else(|| {
+                        "--draft requires an outbound draft id value, not a flag (did you forget the id?)"
+                            .to_owned()
+                    })?;
+                parsed.edit_draft_id = Some(value.clone());
+                i += 2;
+            }
+            "--body-file" => {
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--body-file requires a path value".to_owned())?;
+                parsed.edit_body_file = Some(PathBuf::from(value));
+                i += 2;
+            }
+            "--editor" => {
+                parsed.edit_editor = true;
+                i += 1;
             }
             "--channel" => {
                 let value = argv
@@ -1148,6 +1187,12 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
         return Err("--batch is only supported by rr approve and rr post".to_owned());
     }
 
+    if parsed.command != CommandKind::Edit
+        && (parsed.edit_draft_id.is_some() || parsed.edit_body_file.is_some() || parsed.edit_editor)
+    {
+        return Err("--draft/--body-file/--editor are only supported by rr send edit".to_owned());
+    }
+
     if parsed.command != CommandKind::Extension && parsed.extension_browser.is_some() {
         return Err("--browser is only supported by rr extension".to_owned());
     }
@@ -1280,6 +1325,69 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
             return Err(
                 "rr draft only supports --repo, --pr, --session, --finding, --all-findings, and --robot".to_owned(),
             );
+        }
+    }
+
+    if parsed.command == CommandKind::Edit {
+        // `rr send edit` is a local, human-only editing action. Like rr agent,
+        // it is not a --robot transport: it rejects --robot at parse time
+        // rather than emitting a machine envelope (no new robot schema id in
+        // this slice).
+        if parsed.robot {
+            return Err(
+                "rr send edit is a local editing action and does not support --robot; omit --robot"
+                    .to_owned(),
+            );
+        }
+        if parsed.dry_run {
+            return Err("rr send edit does not support --dry-run".to_owned());
+        }
+        if parsed.edit_draft_id.is_none() {
+            return Err("rr send edit requires --draft <id>".to_owned());
+        }
+        match (parsed.edit_body_file.is_some(), parsed.edit_editor) {
+            (true, true) => {
+                return Err(
+                    "rr send edit accepts either --body-file or --editor, not both".to_owned(),
+                );
+            }
+            (false, false) => {
+                return Err("rr send edit requires --body-file <path> or --editor".to_owned());
+            }
+            _ => {}
+        }
+        if parsed.repo.is_some()
+            || parsed.pr.is_some()
+            || parsed.session_id.is_some()
+            || !parsed.attention_states.is_empty()
+            || parsed.limit.is_some()
+            || parsed.query_text.is_some()
+            || parsed.query_mode.is_some()
+            || parsed.robot_docs_topic.is_some()
+            || parsed.provider != "opencode"
+            || parsed.bridge_command.is_some()
+            || parsed.extension_command.is_some()
+            || parsed.extension_browser.is_some()
+            || parsed.bridge_extension_id.is_some()
+            || parsed.bridge_binary_path.is_some()
+            || parsed.bridge_install_root.is_some()
+            || parsed.bridge_output_dir.is_some()
+            || parsed.update_channel != "stable"
+            || parsed.update_version.is_some()
+            || parsed.update_api_root.is_some()
+            || parsed.update_download_root.is_some()
+            || parsed.update_target.is_some()
+            || parsed.update_yes
+            || parsed.draft_all_findings
+            || !parsed.draft_finding_ids.is_empty()
+            || parsed.batch_id.is_some()
+            || parsed.agent_operation.is_some()
+            || parsed.agent_task_file.is_some()
+            || parsed.agent_request_file.is_some()
+            || parsed.agent_context_file.is_some()
+            || parsed.agent_capability_file.is_some()
+        {
+            return Err("rr send edit only supports --draft, --body-file, and --editor".to_owned());
         }
     }
 
@@ -1969,6 +2077,7 @@ fn execute_command(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
         CommandKind::Search => handle_search(parsed, runtime),
         CommandKind::Triage => handle_triage(parsed, runtime),
         CommandKind::Draft => handle_draft(parsed, runtime),
+        CommandKind::Edit => handle_edit(parsed, runtime),
         CommandKind::Approve => handle_approve(parsed, runtime),
         CommandKind::Post => handle_post(parsed, runtime),
         CommandKind::Update => handle_update(parsed, runtime),
@@ -12756,6 +12865,233 @@ fn approved_batch_ids_for_run(
     Ok(batch_ids)
 }
 
+/// Open `$VISUAL`/`$EDITOR`/`vi` on a temp file seeded with the current draft
+/// body and return the edited text. Interactive-only: a non-terminal caller is
+/// told to use `--body-file` instead (the editor path cannot be driven headless).
+fn edit_body_via_editor(seed: &str) -> std::result::Result<String, String> {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return Err(
+            "rr send edit --editor requires an interactive terminal; use --body-file <path> in non-interactive contexts"
+                .to_owned(),
+        );
+    }
+    let editor = std::env::var("VISUAL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("EDITOR")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| "vi".to_owned());
+
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "rr-send-edit-{}-{}.md",
+        std::process::id(),
+        time::now_ts()
+    ));
+    fs::write(&path, seed).map_err(|err| format!("failed to seed editor temp file: {err}"))?;
+
+    let status = ProcessCommand::new(&editor)
+        .arg(&path)
+        .status()
+        .map_err(|err| format!("failed to launch editor '{editor}': {err}"));
+    let status = match status {
+        Ok(status) => status,
+        Err(err) => {
+            let _ = fs::remove_file(&path);
+            return Err(err);
+        }
+    };
+    if !status.success() {
+        let _ = fs::remove_file(&path);
+        return Err(format!(
+            "editor '{editor}' exited without success; the draft was not revised"
+        ));
+    }
+    let edited =
+        fs::read_to_string(&path).map_err(|err| format!("failed to read edited draft body: {err}"));
+    let _ = fs::remove_file(&path);
+    edited
+}
+
+/// `rr send edit --draft <id> (--body-file <path> | --editor)`: revise a local
+/// outbound draft body. Fail-closed like the other outbound verbs: a missing
+/// draft, an empty body, or a posted batch is rejected; editing an approved
+/// batch revokes its approval (via the storage layer) and forces re-approval.
+fn handle_edit(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
+    let store = match open_store_or_response(runtime, "rr send edit") {
+        Ok(store) => store,
+        Err(response) => return response,
+    };
+
+    // parse_args guarantees --draft is present; stay fail-closed regardless.
+    let Some(draft_id) = parsed.edit_draft_id.as_deref() else {
+        return error_response("rr send edit requires --draft <id>".to_owned());
+    };
+
+    // Existence + batch binding. The canonical draft row body mirrors the
+    // newest revision, so this also gives us the current body for the compare.
+    let draft_item = match store.outbound_draft_item(draft_id) {
+        Ok(item) => item,
+        Err(err) => return error_response(format!("failed to load outbound draft item: {err}")),
+    };
+    let Some(draft_item) = draft_item else {
+        return blocked_response(
+            "rr send edit could not find the requested outbound draft".to_owned(),
+            vec![
+                "inspect rr findings --session <id> --robot to find outbound draft ids".to_owned(),
+            ],
+            json!({
+                "reason_code": "missing_local_state",
+                "draft_id": draft_id,
+            }),
+        );
+    };
+    let batch_id = draft_item.draft_batch_id.clone();
+
+    let current_body = match store.current_outbound_draft_body(draft_id) {
+        Ok(Some(body)) => body,
+        Ok(None) => draft_item.body.clone(),
+        Err(err) => return error_response(format!("failed to load current draft body: {err}")),
+    };
+
+    // Resolve the replacement body from --body-file or --editor (parse enforces
+    // exactly one).
+    let new_body = if let Some(path) = parsed.edit_body_file.as_ref() {
+        match fs::read_to_string(path) {
+            Ok(body) => body,
+            Err(err) => {
+                return error_response(format!(
+                    "failed to read --body-file {}: {err}",
+                    path.display()
+                ));
+            }
+        }
+    } else {
+        match edit_body_via_editor(&current_body) {
+            Ok(body) => body,
+            Err(err) => return error_response(err),
+        }
+    };
+
+    if new_body.trim().is_empty() {
+        return blocked_response(
+            "rr send edit rejected an empty draft body; provide non-empty replacement text"
+                .to_owned(),
+            vec![format!(
+                "re-run rr send edit --draft {draft_id} --body-file <path> with non-empty content"
+            )],
+            json!({
+                "reason_code": "empty_draft_body",
+                "draft_id": draft_id,
+                "draft_batch_id": batch_id,
+            }),
+        );
+    }
+
+    if new_body == current_body {
+        return CommandResponse {
+            outcome: OutcomeKind::Complete,
+            data: json!({
+                "draft_id": draft_id,
+                "draft_batch_id": batch_id,
+                "revised": false,
+            }),
+            warnings: Vec::new(),
+            repair_actions: Vec::new(),
+            message:
+                "rr send edit made no change: the new body is identical to the current draft body (no revision written)"
+                    .to_owned(),
+        };
+    }
+
+    let revision = match store.revise_outbound_draft_body(
+        draft_id,
+        &new_body,
+        roger_storage::RevisionAuthorKind::Operator,
+    ) {
+        Ok(revision) => revision,
+        Err(StorageError::Conflict { entity, id })
+            if entity == "outbound_draft_revision"
+                && id.ends_with(":posted_batch_edit_rejected") =>
+        {
+            return blocked_response(
+                "rr send edit refused to edit a draft whose batch was already posted to GitHub"
+                    .to_owned(),
+                vec![
+                    "posted batches are immutable; start a fresh review pass if new outbound comms are needed"
+                        .to_owned(),
+                    format!("inspect rr status --batch {batch_id} --robot for the posting state"),
+                ],
+                json!({
+                    "reason_code": "posted_batch_edit_rejected",
+                    "draft_id": draft_id,
+                    "draft_batch_id": batch_id,
+                }),
+            );
+        }
+        Err(err) => return error_response(format!("failed to revise outbound draft body: {err}")),
+    };
+
+    let revocation_reason = match store.outbound_approval_revocation_reason(&batch_id) {
+        Ok(reason) => reason,
+        Err(err) => {
+            return error_response(format!(
+                "failed to inspect approval revocation reason: {err}"
+            ));
+        }
+    };
+    let approval_revoked = revocation_reason.as_deref()
+        == Some(roger_storage::OUTBOUND_APPROVAL_REVOKED_REASON_DRAFT_REVISED);
+
+    let approve_command = format!("rr send approve --batch {batch_id}");
+    let repair_actions = if approval_revoked {
+        vec![format!(
+            "editing revoked the batch approval; re-run {approve_command} to re-approve before posting"
+        )]
+    } else {
+        vec![format!(
+            "run {approve_command} when ready to approve the revised batch"
+        )]
+    };
+
+    let message = if approval_revoked {
+        format!(
+            "rr send edit recorded revision {} and revoked the batch approval (reason {}); re-approval is required before posting",
+            revision.revision_index,
+            roger_storage::OUTBOUND_APPROVAL_REVOKED_REASON_DRAFT_REVISED
+        )
+    } else {
+        format!(
+            "rr send edit recorded revision {} for the outbound draft",
+            revision.revision_index
+        )
+    };
+
+    CommandResponse {
+        outcome: OutcomeKind::Complete,
+        data: json!({
+            "draft_id": draft_id,
+            "draft_batch_id": batch_id,
+            "revised": true,
+            "revision_index": revision.revision_index,
+            "revision_id": revision.id,
+            "author_kind": revision.author_kind.as_str(),
+            "approval_revoked": approval_revoked,
+            "approval_revocation_reason": revocation_reason,
+            "queryable_surfaces": {
+                "approve_command": approve_command,
+                "findings_command": "rr findings --robot",
+            },
+        }),
+        warnings: Vec::new(),
+        repair_actions,
+        message,
+    }
+}
+
 fn handle_approve(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let store = match open_store_or_response(runtime, "rr approve") {
         Ok(store) => store,
@@ -14218,6 +14554,27 @@ fn tui_interactive_only_response(reason_code: &str) -> CommandResponse {
     )
 }
 
+/// Map storage session-finder disambiguation candidates into the TUI cockpit's
+/// picker candidates. The finder projection does not carry a continuity tier,
+/// so `continuity_tier` is `None`; every other field maps one-to-one. Kept as a
+/// standalone pure function so it can be unit-tested without a TTY.
+fn picker_candidates_from_finder_entries(
+    entries: &[SessionFinderEntry],
+) -> Vec<roger_tui::PickerCandidate> {
+    entries
+        .iter()
+        .map(|entry| roger_tui::PickerCandidate {
+            session_id: entry.session_id.clone(),
+            repository: entry.repository.clone(),
+            pull_request: entry.pull_request_number,
+            provider: entry.provider.clone(),
+            attention_state: entry.attention_state.clone(),
+            continuity_tier: None,
+            updated_at: entry.updated_at,
+        })
+        .collect()
+}
+
 fn handle_tui(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     // The cockpit is interactive-only by contract: robot callers fail closed
     // toward the existing machine-readable surfaces.
@@ -14239,7 +14596,11 @@ fn handle_tui(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     // the sessions list is the cockpit's entry screen in that case.
     let binding_context = LaunchBindingContext::for_cwd(&runtime.cwd);
     let repository = resolve_repository(parsed.repo.clone(), &runtime.cwd);
-    let initial_session_id = match store.resolve_session_reentry_with_context(
+    // Resolved → open on that single session; PickerRequired → hand the
+    // disambiguation candidates to the cockpit picker (rather than collapsing
+    // to the full finder). Both build a CockpitEntry passed to
+    // run_cockpit_with_entry.
+    let entry = match store.resolve_session_reentry_with_context(
         ResolveSessionReentry {
             explicit_session_id: parsed.session_id.clone(),
             repository: repository.clone(),
@@ -14250,18 +14611,28 @@ fn handle_tui(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         },
         binding_context.storage_local_root(),
     ) {
-        Ok(SessionReentryResolution::Resolved { session, .. }) => Some(session.id),
-        Ok(SessionReentryResolution::PickerRequired { .. }) => None,
+        Ok(SessionReentryResolution::Resolved { session, .. }) => {
+            roger_tui::CockpitEntry::from_session(Some(session.id))
+        }
+        Ok(SessionReentryResolution::PickerRequired { candidates, .. }) => {
+            roger_tui::CockpitEntry {
+                initial_session_id: None,
+                picker_candidates: Some(picker_candidates_from_finder_entries(&candidates)),
+            }
+        }
         Err(err) => return error_response(format!("failed to resolve tui session: {err}")),
     };
     drop(store);
 
-    match roger_tui::run_cockpit(roger_tui::RogerTuiConfig {
-        store_root: runtime.store_root.clone(),
-        repo: parsed.repo.clone(),
-        pr: parsed.pr,
-        initial_session_id,
-    }) {
+    match roger_tui::run_cockpit_with_entry(
+        roger_tui::RogerTuiConfig {
+            store_root: runtime.store_root.clone(),
+            repo: parsed.repo.clone(),
+            pr: parsed.pr,
+            initial_session_id: None,
+        },
+        entry,
+    ) {
         Ok(roger_tui::TuiExit::Quit) => CommandResponse {
             outcome: OutcomeKind::Complete,
             data: json!({
@@ -14564,6 +14935,7 @@ fn render_output(parsed: &ParsedArgs, mut response: CommandResponse) -> CliRunRe
             | CommandKind::Sessions
             | CommandKind::Search
             | CommandKind::Draft
+            | CommandKind::Edit
             | CommandKind::Approve
             | CommandKind::Post
             | CommandKind::RobotDocs
@@ -15942,7 +16314,8 @@ fn next_id(prefix: &str) -> String {
 /// Rewrite the container verbs (`send`, `setup`, `api`) into the underlying
 /// command's argv so parse_args, the flag loop, every check, and every handler
 /// stay byte-identical to the old direct invocations (and emit the same schema
-/// ids). `send edit` is reserved but not yet routable in this build.
+/// ids). `send edit` maps to the `edit` command (a local, human-only draft
+/// revision action that rejects `--robot`).
 fn normalize_container_argv(argv: &[String]) -> Result<Vec<String>, String> {
     fn rebuild(head: &[&str], rest: &[String]) -> Vec<String> {
         let mut out: Vec<String> = head.iter().map(|token| (*token).to_owned()).collect();
@@ -15955,22 +16328,17 @@ fn normalize_container_argv(argv: &[String]) -> Result<Vec<String>, String> {
             let mapped = match argv.get(1).map(String::as_str) {
                 Some("triage") => "triage",
                 Some("draft") => "draft",
+                Some("edit") => "edit",
                 Some("approve") => "approve",
                 Some("post") => "post",
-                Some("edit") => {
-                    return Err(
-                        "rr send edit is not yet available in this build; use rr send triage|draft|approve|post"
-                            .to_owned(),
-                    );
-                }
                 Some(other) if !other.starts_with('-') => {
                     return Err(format!(
-                        "unknown send subcommand: {other} (expected triage, draft, approve, or post)"
+                        "unknown send subcommand: {other} (expected triage, draft, edit, approve, or post)"
                     ));
                 }
                 _ => {
                     return Err(
-                        "rr send requires a subcommand: triage, draft, approve, or post".to_owned(),
+                        "rr send requires a subcommand: triage, draft, edit, approve, or post".to_owned(),
                     );
                 }
             };
@@ -16021,6 +16389,7 @@ fn help_topic_for(argv: &[String]) -> Option<&'static str> {
         "send" => Some("send"),
         "triage" => Some("triage"),
         "draft" => Some("draft"),
+        "edit" => Some("edit"),
         "approve" => Some("approve"),
         "post" => Some("post"),
         "setup" => Some("setup"),
@@ -16071,13 +16440,16 @@ fn command_usage(topic: &str) -> String {
             "rr status — session attention snapshot.\n\nUsage:\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]"
         }
         "send" => {
-            "rr send — explicitly triage/draft/approve/post outbound communication.\n\nUsage:\n  rr send triage --finding <id>... --state accepted|ignored|needs_follow_up|resolved [--session <id>] [--robot]\n  rr send draft (--finding <id>... | --all-findings) [--session <id>] [--robot]\n  rr send approve --batch <draft-batch-id> [--session <id>] [--robot]\n  rr send post --batch <draft-batch-id> [--session <id>] [--robot]\n\nrr send edit is reserved but not yet available in this build.\nEach subcommand routes to the same fail-closed handler as the old rr triage/draft/approve/post name and emits the same robot schema id."
+            "rr send — explicitly triage/draft/edit/approve/post outbound communication.\n\nUsage:\n  rr send triage --finding <id>... --state accepted|ignored|needs_follow_up|resolved [--session <id>] [--robot]\n  rr send draft (--finding <id>... | --all-findings) [--session <id>] [--robot]\n  rr send edit --draft <draft-id> (--body-file <path> | --editor)\n  rr send approve --batch <draft-batch-id> [--session <id>] [--robot]\n  rr send post --batch <draft-batch-id> [--session <id>] [--robot]\n\nrr send edit revises a local outbound draft body; editing an approved batch revokes its approval and forces re-approval. It is a local human action and does not support --robot.\nThe other subcommands route to the same fail-closed handler as the old rr triage/draft/approve/post name and emit the same robot schema id."
         }
         "triage" => {
             "rr triage — record a local triage decision (preferred form: rr send triage).\n\nUsage:\n  rr triage --finding <id>... --state accepted|ignored|needs_follow_up|resolved [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]"
         }
         "draft" => {
             "rr draft — materialize local outbound draft batches (preferred form: rr send draft).\n\nUsage:\n  rr draft (--finding <id>... | --all-findings) [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]"
+        }
+        "edit" => {
+            "rr send edit — revise a local outbound draft body before approval/posting.\n\nUsage:\n  rr send edit --draft <draft-id> --body-file <path>\n  rr send edit --draft <draft-id> --editor\n\n--body-file reads the replacement body from a file; --editor opens $VISUAL/$EDITOR/vi on a temp file seeded with the current body. Exactly one is required. An empty body is rejected, and an unchanged body is a no-op. Editing a draft whose batch was already approved revokes that approval and forces re-approval (rr send approve --batch <id>); a posted batch cannot be edited. Local human action: --robot is not supported."
         }
         "approve" => {
             "rr approve — record a local approval token (preferred form: rr send approve).\n\nUsage:\n  rr approve --batch <draft-batch-id> [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]"
@@ -16157,6 +16529,7 @@ Inspect and search review output:
 Send to GitHub, explicitly gated (rr send <sub>):
   rr send triage --finding <id>... --state accepted|ignored|needs_follow_up|resolved [--session <id>] [--robot]
   rr send draft (--finding <id>... | --all-findings) [--session <id>] [--robot]
+  rr send edit --draft <draft-id> (--body-file <path> | --editor)
   rr send approve --batch <draft-batch-id> [--session <id>] [--robot]
   rr send post --batch <draft-batch-id> [--session <id>] [--robot]
 
@@ -16193,6 +16566,7 @@ Provider support on the current live CLI surface:
 Safety notes:
   - rr triage records local triage only
   - rr draft materializes local draft batches only
+  - rr send edit revises a local draft body only; editing an approved batch revokes the approval and forces re-approval, and a posted batch cannot be edited
   - rr approve records a local approval token only
   - rr post executes only one exact Roger-approved stored batch
   - stale persisted review state fails closed before Roger derives, approves, or posts outbound payloads
@@ -16307,6 +16681,148 @@ mod tests {
             err.contains("--batch requires"),
             "unexpected parse error: {err}"
         );
+    }
+
+    fn argv(tokens: &[&str]) -> Vec<String> {
+        tokens.iter().map(|token| (*token).to_owned()).collect()
+    }
+
+    #[test]
+    fn send_edit_parses_body_file_form() {
+        let parsed = parse_args(&argv(&[
+            "send",
+            "edit",
+            "--draft",
+            "draft-1",
+            "--body-file",
+            "/tmp/body.md",
+        ]))
+        .expect("send edit --body-file must parse");
+        assert_eq!(parsed.command, CommandKind::Edit);
+        assert_eq!(parsed.edit_draft_id.as_deref(), Some("draft-1"));
+        assert_eq!(
+            parsed.edit_body_file.as_deref(),
+            Some(Path::new("/tmp/body.md"))
+        );
+        assert!(!parsed.edit_editor);
+    }
+
+    #[test]
+    fn send_edit_parses_editor_form() {
+        let parsed = parse_args(&argv(&["send", "edit", "--draft", "draft-1", "--editor"]))
+            .expect("send edit --editor must parse");
+        assert_eq!(parsed.command, CommandKind::Edit);
+        assert_eq!(parsed.edit_draft_id.as_deref(), Some("draft-1"));
+        assert!(parsed.edit_editor);
+        assert!(parsed.edit_body_file.is_none());
+    }
+
+    #[test]
+    fn send_edit_requires_a_body_source() {
+        let err = parse_args(&argv(&["send", "edit", "--draft", "draft-1"]))
+            .expect_err("send edit without a body source must be rejected");
+        assert!(
+            err.contains("requires --body-file <path> or --editor"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn send_edit_rejects_both_body_sources() {
+        let err = parse_args(&argv(&[
+            "send",
+            "edit",
+            "--draft",
+            "draft-1",
+            "--body-file",
+            "/tmp/body.md",
+            "--editor",
+        ]))
+        .expect_err("send edit with both body sources must be rejected");
+        assert!(
+            err.contains("either --body-file or --editor, not both"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn send_edit_requires_a_draft_id() {
+        let err = parse_args(&argv(&["send", "edit", "--body-file", "/tmp/body.md"]))
+            .expect_err("send edit without --draft must be rejected");
+        assert!(err.contains("requires --draft"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn send_edit_rejects_robot() {
+        // Same posture as rr agent: a local editing action, not a --robot
+        // transport, so --robot is rejected at parse time.
+        let err = parse_args(&argv(&[
+            "send",
+            "edit",
+            "--draft",
+            "draft-1",
+            "--body-file",
+            "/tmp/body.md",
+            "--robot",
+        ]))
+        .expect_err("send edit must reject --robot");
+        assert!(
+            err.contains("does not support --robot"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn send_edit_rejects_foreign_flags() {
+        let err = parse_args(&argv(&[
+            "send",
+            "edit",
+            "--draft",
+            "draft-1",
+            "--body-file",
+            "/tmp/body.md",
+            "--session",
+            "session-1",
+        ]))
+        .expect_err("send edit must reject unrelated flags");
+        assert!(
+            err.contains("rr send edit only supports --draft, --body-file, and --editor"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn edit_flags_are_rejected_on_other_commands() {
+        let err = parse_args(&argv(&[
+            "approve", "--draft", "draft-1", "--batch", "batch-1",
+        ]))
+        .expect_err("--draft must be edit-only");
+        assert!(
+            err.contains("--draft/--body-file/--editor are only supported by rr send edit"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn picker_candidates_map_finder_entries_one_to_one() {
+        let entries = vec![finder_entry(2), finder_entry(6)];
+        let candidates = picker_candidates_from_finder_entries(&entries);
+        assert_eq!(candidates.len(), 2);
+        for (entry, candidate) in entries.iter().zip(candidates.iter()) {
+            assert_eq!(candidate.session_id, entry.session_id);
+            assert_eq!(candidate.repository, entry.repository);
+            assert_eq!(candidate.pull_request, entry.pull_request_number);
+            assert_eq!(candidate.provider, entry.provider);
+            assert_eq!(candidate.attention_state, entry.attention_state);
+            assert_eq!(candidate.updated_at, entry.updated_at);
+            // The finder projection does not carry a continuity tier.
+            assert_eq!(candidate.continuity_tier, None);
+        }
+    }
+
+    #[test]
+    fn picker_candidates_from_empty_entries_are_empty() {
+        assert!(picker_candidates_from_finder_entries(&[]).is_empty());
     }
 
     #[test]
@@ -19296,9 +19812,11 @@ mod tests {
     }
 
     #[test]
-    fn send_edit_is_reserved_and_unknown_subcommands_are_named() {
-        let edit = pa(&["send", "edit", "--draft", "d1"]).unwrap_err();
-        assert!(edit.contains("not yet available"), "{edit}");
+    fn send_edit_routes_to_edit_and_unknown_subcommands_are_named() {
+        // `rr send edit` is now a real command (routes to CommandKind::Edit).
+        let edit = pa(&["send", "edit", "--draft", "d1", "--body-file", "/tmp/b"]).unwrap();
+        assert_eq!(edit.command, CommandKind::Edit);
+        assert_eq!(edit.edit_draft_id.as_deref(), Some("d1"));
         let bad_send = pa(&["send", "bogus"]).unwrap_err();
         assert!(bad_send.contains("unknown send subcommand"), "{bad_send}");
         let bad_setup = pa(&["setup", "bogus"]).unwrap_err();
