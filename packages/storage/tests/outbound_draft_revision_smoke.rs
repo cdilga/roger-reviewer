@@ -232,6 +232,44 @@ fn editing_approved_draft_revokes_token_and_resets_state_fail_closed() -> Result
         store.current_outbound_draft_body("draft-1")?.as_deref(),
         Some("Revised after approval")
     );
+
+    // The exact-payload binding is re-derived: batch and item digests change
+    // together, so the revoked token's stale digest can never match the
+    // revised payload.
+    let original_digest = batch.payload_digest.clone();
+    assert_ne!(
+        reset_batch.payload_digest, original_digest,
+        "revision must re-derive the batch payload digest"
+    );
+    assert_eq!(
+        store
+            .outbound_draft_item("draft-1")?
+            .expect("draft")
+            .payload_digest,
+        reset_batch.payload_digest,
+        "batch and item digests stay shared after revision"
+    );
+
+    // Re-approval path: reissuing the token row (same id) bound to the revised
+    // digest re-arms it and clears the revocation reason.
+    store.store_outbound_approval_token(&OutboundApprovalToken {
+        id: approval.id.clone(),
+        draft_batch_id: reset_batch.id.clone(),
+        payload_digest: reset_batch.payload_digest.clone(),
+        target_tuple_json: outbound_target_tuple_json(&reset_batch),
+        approved_at: 1_710_001_020,
+        revoked_at: None,
+    })?;
+    let reissued = store
+        .approval_token_for_batch("batch-1")?
+        .expect("reissued approval");
+    assert_eq!(reissued.revoked_at, None, "reissued token must be live");
+    assert_eq!(reissued.payload_digest, reset_batch.payload_digest);
+    assert_eq!(
+        store.outbound_approval_revocation_reason("batch-1")?,
+        None,
+        "re-arming the token must clear the revocation reason"
+    );
     Ok(())
 }
 

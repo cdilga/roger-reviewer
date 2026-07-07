@@ -4142,6 +4142,33 @@ impl RogerStore {
             )?;
         }
 
+        // The batch payload digest binds "one exact payload" across draft,
+        // approval, and post. Bodies just changed, so derive a fresh digest for
+        // the batch and every item in it (they share one digest by design).
+        // The digest is only ever compared between stored rows — never
+        // re-derived from the payload — so a deterministic chain over the
+        // previous digest and the revision content preserves the binding
+        // property: any pre-edit approval can no longer match post-edit rows.
+        let revised_digest = sha256_prefixed(
+            format!("{}\n{}\n{}", batch.payload_digest, revision_id, new_body).as_bytes(),
+        );
+        tx.execute(
+            "UPDATE outbound_draft_batches
+             SET payload_digest = ?1,
+                 row_version = row_version + 1,
+                 updated_at = ?2
+             WHERE id = ?3",
+            params![revised_digest, now, batch.id],
+        )?;
+        tx.execute(
+            "UPDATE outbound_draft_items
+             SET payload_digest = ?1,
+                 row_version = row_version + 1,
+                 updated_at = ?2
+             WHERE draft_batch_id = ?3",
+            params![revised_digest, now, batch.id],
+        )?;
+
         tx.commit()?;
 
         Ok(OutboundDraftRevisionRecord {
@@ -4268,6 +4295,10 @@ impl RogerStore {
                 target_tuple_json = excluded.target_tuple_json,
                 approved_at = excluded.approved_at,
                 revoked_at = excluded.revoked_at,
+                revocation_reason_code = CASE
+                    WHEN excluded.revoked_at IS NULL THEN NULL
+                    ELSE outbound_batch_approval_tokens.revocation_reason_code
+                END,
                 row_version = outbound_batch_approval_tokens.row_version + 1,
                 updated_at = excluded.updated_at",
             params![

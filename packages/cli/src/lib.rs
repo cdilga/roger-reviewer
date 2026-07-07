@@ -14314,8 +14314,21 @@ fn handle_approve(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse 
             return error_response(format!("failed to inspect existing approval token: {err}"));
         }
     };
+    // A token revoked because the operator revised a draft body is explicitly
+    // re-approvable: re-running rr approve IS the explicit human approval of
+    // the revised payload (the batch and item digests were re-derived by the
+    // revision, so the reissued token binds the new exact payload). Any other
+    // revocation reason stays terminal and fail-closed.
+    let reapproval_after_revision = existing_approval
+        .as_ref()
+        .is_some_and(|approval| approval.revoked_at.is_some())
+        && matches!(
+            store.outbound_approval_revocation_reason(&batch.id),
+            Ok(Some(ref reason))
+                if reason == roger_storage::OUTBOUND_APPROVAL_REVOKED_REASON_DRAFT_REVISED
+        );
     if let Some(approval) = &existing_approval {
-        if approval.revoked_at.is_some() {
+        if approval.revoked_at.is_some() && !reapproval_after_revision {
             return blocked_response(
                 "rr approve is blocked because the stored approval token was already revoked"
                     .to_owned(),
@@ -14332,8 +14345,12 @@ fn handle_approve(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse 
                 }),
             );
         }
-        if approval.payload_digest != batch.payload_digest {
-            return blocked_response(
+        if reapproval_after_revision {
+            // Skip the stale digest/target comparisons below: the reissued
+            // token is built from the batch's current (revised) binding.
+        } else {
+            if approval.payload_digest != batch.payload_digest {
+                return blocked_response(
                 "rr approve refused to reuse the stored approval token because its payload digest no longer matches the batch".to_owned(),
                 vec![format!(
                     "re-run rr draft --session {} --finding <finding-id> to materialize a fresh batch",
@@ -14348,9 +14365,9 @@ fn handle_approve(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse 
                     "stored_payload_digest": approval.payload_digest,
                 }),
             );
-        }
-        if approval.target_tuple_json != expected_target_tuple_json {
-            return blocked_response(
+            }
+            if approval.target_tuple_json != expected_target_tuple_json {
+                return blocked_response(
                 "rr approve refused to reuse the stored approval token because its target tuple no longer matches the batch".to_owned(),
                 vec![format!(
                     "re-run rr draft --session {} --finding <finding-id> after reconciling target drift",
@@ -14365,6 +14382,7 @@ fn handle_approve(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse 
                     "stored_target_tuple_json": approval.target_tuple_json,
                 }),
             );
+            }
         }
     }
 
@@ -14389,15 +14407,28 @@ fn handle_approve(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse 
         );
     }
 
-    let approval_needs_insert = existing_approval.is_none();
-    let approval = existing_approval.unwrap_or_else(|| OutboundApprovalToken {
-        id: next_id("approval"),
-        draft_batch_id: batch.id.clone(),
-        payload_digest: batch.payload_digest.clone(),
-        target_tuple_json: expected_target_tuple_json.clone(),
-        approved_at: time::now_ts(),
-        revoked_at: None,
-    });
+    let approval_needs_insert = existing_approval.is_none() || reapproval_after_revision;
+    let approval = match existing_approval {
+        // Reissue the batch's token row (one row per batch by schema) bound to
+        // the revised payload; the upsert clears the revocation.
+        Some(existing) if reapproval_after_revision => OutboundApprovalToken {
+            id: existing.id,
+            draft_batch_id: batch.id.clone(),
+            payload_digest: batch.payload_digest.clone(),
+            target_tuple_json: expected_target_tuple_json.clone(),
+            approved_at: time::now_ts(),
+            revoked_at: None,
+        },
+        Some(existing) => existing,
+        None => OutboundApprovalToken {
+            id: next_id("approval"),
+            draft_batch_id: batch.id.clone(),
+            payload_digest: batch.payload_digest.clone(),
+            target_tuple_json: expected_target_tuple_json.clone(),
+            approved_at: time::now_ts(),
+            revoked_at: None,
+        },
+    };
     let approval_created = !batch_already_approved;
 
     for draft in &drafts {

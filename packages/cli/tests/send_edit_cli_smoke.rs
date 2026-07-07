@@ -416,6 +416,54 @@ fn send_edit_revokes_live_approval_and_forces_reapproval() {
         "revised batch must fall back to Drafted, got {:?}",
         batch.approval_state
     );
+    drop(store);
+
+    // The documented recovery path must actually work: re-running rr send
+    // approve after a revision-revocation reissues the token bound to the
+    // revised payload instead of blocking on the revoked one (P3 live-proof
+    // defect: the batch used to be permanently wedged here).
+    let reapprove = run_rr(
+        &[
+            "send",
+            "approve",
+            "--session",
+            "session-approved",
+            "--batch",
+            &batch_id,
+            "--robot",
+        ],
+        &runtime,
+    );
+    assert_eq!(
+        reapprove.exit_code, 0,
+        "re-approval after revision must succeed: {}{}",
+        reapprove.stdout, reapprove.stderr
+    );
+    let store = RogerStore::open(&runtime.store_root).expect("reopen store");
+    let reissued = store
+        .approval_token_for_batch(&batch_id)
+        .expect("approval lookup")
+        .expect("approval present");
+    assert!(
+        reissued.revoked_at.is_none(),
+        "re-approval must re-arm the token"
+    );
+    let rebound_batch = store
+        .outbound_draft_batch(&batch_id)
+        .expect("batch lookup")
+        .expect("batch present");
+    assert_eq!(
+        reissued.payload_digest, rebound_batch.payload_digest,
+        "reissued token must bind the revised payload digest"
+    );
+    assert_ne!(
+        reissued.payload_digest, approval.payload_digest,
+        "revised binding must differ from the pre-edit binding"
+    );
+    assert!(
+        matches!(rebound_batch.approval_state, ApprovalState::Approved),
+        "batch must be approvable again after re-approval"
+    );
 }
 
 #[test]

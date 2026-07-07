@@ -36,6 +36,41 @@ const puppeteer = loadPuppeteer();
 const PR_URL = process.env.RR_PR_URL || 'https://github.com/cdilga/roger-reviewer/pull/2';
 const SKIP_IDLE = process.env.RR_SKIP_IDLE === '1';
 const IDLE_MS = 35000;
+// Forced-failure phase (native-messaging host manifest moved aside by the
+// caller): assert the panel FAST-FAILS with the honest "native host did not
+// respond / setup doctor --live" guidance instead of hanging for the full
+// completion budget. Gated so the happy-path run is unaffected.
+const FORCED_FAILURE = process.env.RR_FORCED_FAILURE === '1';
+// Package dir for the loadUnpacked fallback (below). Edge 150+/Chrome 137+
+// ignore the --load-extension launch switch, so the browser can come up with
+// the extension absent; we then load it deterministically over CDP.
+const EXT_PACKAGE_DIR =
+  process.env.RR_EXT_PACKAGE_DIR ||
+  path.join(__dirname, '..', '..', '..', 'target', 'bridge', 'extension', 'roger-extension-unpacked');
+
+// Ensure the Roger extension is actually loaded. Newer Edge/Chrome stable
+// silently ignore --load-extension, so the preloaded-launch path can produce a
+// browser with NO extension registered. The CDP Extensions.loadUnpacked command
+// loads an unpacked extension by path with no OS file picker; it is the reliable
+// automation-friendly install path on those builds. Returns true if the
+// extension is present (either already, or after a load + reload).
+async function ensureExtensionLoaded(browser) {
+  const hasRoger = () =>
+    browser.targets().some(
+      (t) => t.type() === 'service_worker' && /^chrome-extension:\/\//.test(t.url())
+    );
+  if (hasRoger()) return true;
+  try {
+    const session = await browser.target().createCDPSession();
+    const res = await session.send('Extensions.loadUnpacked', { path: EXT_PACKAGE_DIR });
+    await session.detach().catch(() => {});
+    console.log(`--- Extensions.loadUnpacked -> ${res && res.id} (browser ignored --load-extension) ---`);
+    return true;
+  } catch (e) {
+    console.log(`--- Extensions.loadUnpacked failed: ${e.message} ---`);
+    return false;
+  }
+}
 
 function resolvePort() {
   if (process.env.RR_CDP_PORT) return process.env.RR_CDP_PORT.trim();
@@ -121,11 +156,51 @@ async function driveLaunchWindow(page, ms) {
 (async () => {
   const port = resolvePort();
   const browser = await puppeteer.connect({ browserURL: `http://127.0.0.1:${port}`, defaultViewport: null });
+  // Newer Edge/Chrome stable ignore --load-extension; make sure the extension
+  // is actually registered before we assert anything against its panel.
+  const loaded = await ensureExtensionLoaded(browser);
   const pages = await browser.pages();
   let page = pages.find((p) => p.url().includes('/pull/'));
   if (!page) { page = pages.find((p) => p.url().includes('github.com')) || pages[0]; await page.goto(PR_URL, { waitUntil: 'networkidle2' }).catch(() => {}); }
   await page.bringToFront();
+  // If we had to load the extension after the page opened, reload so the content
+  // script injects the panel into an already-loaded PR page.
+  if (loaded && !(await page.evaluate(() => !!document.getElementById('roger-reviewer-panel')))) {
+    await page.reload({ waitUntil: 'networkidle2' }).catch(() => {});
+  }
   await sleep(2500);
+
+  // FORCED-FAILURE phase: the caller has moved the native-messaging host
+  // manifest aside. A launch click must FAST-FAIL with the honest
+  // native-unavailable / "setup doctor --live" guidance well under the full
+  // 120s completion budget — never sit silent. Runs standalone (skips the
+  // happy-path scenarios) so it can be driven after the manifest is removed.
+  if (FORCED_FAILURE) {
+    const panelPresent = await page.evaluate(() => !!document.getElementById('roger-reviewer-panel'));
+    record('forced-failure: panel present', panelPresent);
+    if (panelPresent) {
+      const clicked = await clickAction(page, 'start_review');
+      record('forced-failure: launch button clickable', clicked);
+      const started = Date.now();
+      let s = null;
+      // Poll up to 15s: assert we settle (fast-fail) rather than hang to 120s.
+      while (Date.now() - started < 15000) {
+        s = await snapLaunch(page);
+        if (launchSettled(s)) break;
+        await sleep(250);
+      }
+      const elapsed = ((Date.now() - started) / 1000).toFixed(1);
+      const text = `${s ? s.status : ''} ${s ? s.info : ''}`;
+      record('forced-failure: fast-fails under 15s (no 120s silent hang)',
+        !!s && launchSettled(s), `settled in ${elapsed}s: "${(s ? s.status : '').slice(0, 80)}"`);
+      record('forced-failure: renders honest native-unavailable / setup doctor --live guidance',
+        /native|unavailable|blocked|did not respond|setup doctor|not found/i.test(text),
+        text.trim().slice(0, 120));
+    }
+    await page.screenshot({ path: path.join(__dirname, 'panel_interaction_e2e_forced_failure.png') }).catch(() => {});
+    await finish(browser);
+    return;
+  }
 
   // 1) Panel present + brand mark actually loaded (not a broken image).
   const mark = await page.evaluate(() => {
