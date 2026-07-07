@@ -54,18 +54,25 @@ const EXT_PACKAGE_DIR =
 // loads an unpacked extension by path with no OS file picker; it is the reliable
 // automation-friendly install path on those builds. Returns true if the
 // extension is present (either already, or after a load + reload).
+// Returns 'already' (extension was already registered), 'freshly-loaded' (we ran
+// Extensions.loadUnpacked just now), or false (could not load). The distinction
+// matters: a fresh loadUnpacked INVALIDATES the content-script context of any
+// already-open PR tab (`chrome.runtime` throws "Extension context invalidated"),
+// so the caller MUST reload that tab before driving clicks — otherwise every
+// launch click fast-fails on the stale context and no host progress can ever be
+// observed (this is a harness artifact, not a product defect).
 async function ensureExtensionLoaded(browser) {
   const hasRoger = () =>
     browser.targets().some(
       (t) => t.type() === 'service_worker' && /^chrome-extension:\/\//.test(t.url())
     );
-  if (hasRoger()) return true;
+  if (hasRoger()) return 'already';
   try {
     const session = await browser.target().createCDPSession();
     const res = await session.send('Extensions.loadUnpacked', { path: EXT_PACKAGE_DIR });
     await session.detach().catch(() => {});
     console.log(`--- Extensions.loadUnpacked -> ${res && res.id} (browser ignored --load-extension) ---`);
-    return true;
+    return 'freshly-loaded';
   } catch (e) {
     console.log(`--- Extensions.loadUnpacked failed: ${e.message} ---`);
     return false;
@@ -143,11 +150,16 @@ async function driveLaunchWindow(page, ms) {
   let sawProgress = false;
   let last = null;
   const start = Date.now();
+  // Poll fast: the host progress lines ("running preflight" ~30ms ->
+  // "Launching review…" ~500ms) are transient and superseded by the settle
+  // line, so a coarse 250ms poll can stride right over a ~100ms progress window
+  // and mis-report a genuinely-shown progress step as absent.
   while (Date.now() - start < ms) {
     last = await snapLaunch(page);
     if (PROGRESS_RE.test(`${last.status} ${last.info}`)) sawProgress = true;
-    if (launchSettled(last)) break;
-    await sleep(250);
+    if (launchSettled(last) && sawProgress) break;
+    if (launchSettled(last) && Date.now() - start > 1500) break;
+    await sleep(40);
   }
   if (!last) last = await snapLaunch(page);
   return { snap: last, sawProgress };
@@ -163,9 +175,15 @@ async function driveLaunchWindow(page, ms) {
   let page = pages.find((p) => p.url().includes('/pull/'));
   if (!page) { page = pages.find((p) => p.url().includes('github.com')) || pages[0]; await page.goto(PR_URL, { waitUntil: 'networkidle2' }).catch(() => {}); }
   await page.bringToFront();
-  // If we had to load the extension after the page opened, reload so the content
-  // script injects the panel into an already-loaded PR page.
-  if (loaded && !(await page.evaluate(() => !!document.getElementById('roger-reviewer-panel')))) {
+  // A fresh loadUnpacked invalidates the open tab's content-script context, so
+  // ALWAYS reload after one (not only when the panel is absent) — otherwise a
+  // stale panel from the pre-load context stays mounted and every launch click
+  // fast-fails on "Extension context invalidated" instead of exercising the real
+  // host round-trip. Also reload when the panel simply never injected.
+  if (
+    loaded === 'freshly-loaded' ||
+    !(await page.evaluate(() => !!document.getElementById('roger-reviewer-panel')))
+  ) {
     await page.reload({ waitUntil: 'networkidle2' }).catch(() => {});
   }
   await sleep(2500);
@@ -270,18 +288,28 @@ async function driveLaunchWindow(page, ms) {
       record('listing: row controls injected on /pulls route', listing.count > 0, `${listing.count} controls`);
 
       if (listing.count > 0) {
-        const rect = await page.evaluate(() => {
-          const btn = document.querySelector('.rr-listing-control .rr-listing-button');
-          if (!btn) return null;
-          const r = btn.getBoundingClientRect();
-          return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-        });
-        if (rect) {
-          await page.mouse.click(rect.x, rect.y);
+        // A listing row lives in the page flow (often below the fold and under
+        // GitHub's sticky header), so a raw coordinate click against an
+        // un-scrolled rect lands on empty page / the sticky header and the
+        // launch never fires — a harness miss, not a product no-op. Puppeteer's
+        // ElementHandle.click() scrolls the element into view and issues a real
+        // CDP mouse click at its center, which is both reliable and still a
+        // genuine input event (not a synthetic DOM .click()).
+        const rowButton = await page.$('.rr-listing-control .rr-listing-button');
+        if (rowButton) {
+          await rowButton.click().catch(async () => {
+            // Fallback: if the real click is somehow obstructed, dispatch a DOM
+            // click so a genuine product no-op still fails loudly (not a miss).
+            await page.evaluate(() => {
+              document.querySelector('.rr-listing-control .rr-listing-button')?.click();
+            });
+          });
           let sawProgress = false;
           let rowSettled = false;
           let rowText = '';
-          for (let i = 0; i < 24; i++) {
+          // Poll fast (see driveLaunchWindow): the row's transient progress line
+          // is otherwise easy to stride over.
+          for (let i = 0; i < 150; i++) {
             const row = await page.evaluate(() => {
               const st = document.querySelector('.rr-listing-control .rr-listing-status');
               if (!st) return { text: '', visible: false };
@@ -294,11 +322,15 @@ async function driveLaunchWindow(page, ms) {
             });
             rowText = row.text;
             if (PROGRESS_RE.test(row.text)) sawProgress = true;
-            if (row.visible && /dispatch|completed|session|launched|blocked|unavailable|error|failed/i.test(row.text)) {
+            // "Dispatching…" is the in-flight state, NOT a settle — matching the
+            // panel's launchSettled() semantics. Breaking on it here exited the
+            // loop at ~1ms and strode over the transient progress lines that
+            // render a beat later, mis-reporting shown progress as absent.
+            if (row.visible && /completed|session|launched|blocked|unavailable|error|failed/i.test(row.text)) {
               rowSettled = true;
               break;
             }
-            await sleep(250);
+            await sleep(40);
           }
           record('listing: row launch settles with visible row-local feedback', rowSettled, rowText.slice(0, 80));
           record('listing: row launch shows loud host progress', sawProgress, 'host_started/preflight_ok');

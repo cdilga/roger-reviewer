@@ -6,6 +6,8 @@ const {
   BRAND_CHIP_CLASS,
   BRIDGE_DISCONNECT_GUIDANCE,
   STATUS_MIRROR_SETTLE_TIMEOUT_MS,
+  LAUNCH_CLIENT_SETTLE_TIMEOUT_MS,
+  LAUNCH_CLIENT_TIMEOUT_GUIDANCE,
   formatLaunchSuccessStatus,
   describeLaunchProgress,
   handleLaunchProgressMessage,
@@ -845,6 +847,75 @@ test('missing bridge response renders a persistent error status with setup guida
     assert.match(dom.statusNode.textContent, /rr extension doctor/);
     assert.equal(dom.statusNode.classList.contains('roger-panel-status--error'), true);
   });
+});
+
+test('launch fast-fails closed when sendMessage throws synchronously (extension context invalidated)', () => {
+  const dom = makePanelDom();
+  // sendMessage throwing synchronously means the response callback is never
+  // registered; without the try/catch the panel would hang forever on
+  // "Dispatching launch intent..." with the button disabled.
+  const chromeStub = {
+    runtime: {
+      lastError: null,
+      sendMessage() {
+        throw new Error('Extension context invalidated.');
+      },
+    },
+  };
+  const button = { disabled: true, textContent: 'Start Review in Roger' };
+
+  withPanelGlobals({ documentStub: dom.documentStub, chromeStub }, () => {
+    triggerLaunch('start_review', TEST_CONTEXT, button);
+
+    // Panel must fast-fail closed with honest guidance and re-enable the button.
+    assert.equal(dom.statusNode.hidden, false);
+    assert.match(dom.statusNode.textContent, /Bridge dispatch failed: Extension context invalidated\./);
+    assert.match(dom.statusNode.textContent, /rr extension setup/);
+    assert.equal(dom.statusNode.classList.contains('roger-panel-status--error'), true);
+    assert.equal(button.disabled, false);
+    assert.equal(button.textContent, 'Start Review in Roger');
+  });
+});
+
+test('launch fast-fails closed via the client watchdog when the response callback never fires', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const dom = makePanelDom();
+  // Model an Edge MV3 worker teardown that silently drops the launch reply: the
+  // callback is never invoked, so only the client-side watchdog can recover.
+  const chromeStub = {
+    runtime: {
+      lastError: null,
+      sendMessage() {
+        // Intentionally never calls the callback.
+      },
+    },
+  };
+  const button = { disabled: true, textContent: 'Start Review in Roger' };
+
+  withPanelGlobals({ documentStub: dom.documentStub, chromeStub }, () => {
+    triggerLaunch('start_review', TEST_CONTEXT, button);
+
+    // Before the watchdog fires the panel is still dispatching (button held).
+    assert.equal(button.disabled, true);
+    assert.match(dom.statusNode.textContent, /Dispatching launch intent/);
+
+    // Advance just past the client settle bound; the watchdog must fast-fail.
+    t.mock.timers.tick(LAUNCH_CLIENT_SETTLE_TIMEOUT_MS + 1);
+
+    assert.equal(dom.statusNode.hidden, false);
+    assert.match(dom.statusNode.textContent, /Native Messaging unavailable; launch blocked\./);
+    assert.match(dom.statusNode.textContent, /rr setup doctor --live/);
+    assert.equal(dom.statusNode.classList.contains('roger-panel-status--error'), true);
+    assert.equal(button.disabled, false);
+    assert.equal(button.textContent, 'Start Review in Roger');
+  });
+});
+
+test('client watchdog stays above the worker first-frame watchdog and points at setup doctor --live', () => {
+  // The client watchdog must never pre-empt a live worker's own honest degrade
+  // (LAUNCH_FIRST_FRAME_TIMEOUT_MS ~10000ms in background/main.js).
+  assert.ok(LAUNCH_CLIENT_SETTLE_TIMEOUT_MS > 10000);
+  assert.match(LAUNCH_CLIENT_TIMEOUT_GUIDANCE, /rr setup doctor --live/);
 });
 
 test('launch success persists a truthful status line that the status mirror does not clear', () => {

@@ -936,6 +936,26 @@ const BRIDGE_DISCONNECT_GUIDANCE =
 // worker leg is always given its full chance to resolve first.
 const STATUS_MIRROR_SETTLE_TIMEOUT_MS = 5000;
 
+// Content-side settle bound for a LAUNCH click. The launch leg
+// (content -> background sendMessage -> connectNative -> host) can leave the
+// panel wedged on "Dispatching launch intent..." two ways that the panel could
+// otherwise never recover from: (1) `chrome.runtime.sendMessage` throws
+// synchronously (e.g. "Extension context invalidated" after a browser/extension
+// reload) so the response callback is never registered, and (2) Edge's MV3
+// module service worker is torn down mid-launch and the response callback is
+// silently dropped (the callback never fires, not even with lastError). Both
+// left the Start button disabled forever with no guidance. This client watchdog
+// guarantees the panel always fast-fails with honest native-unavailable
+// guidance. It MUST exceed the worker-side first-frame watchdog
+// (LAUNCH_FIRST_FRAME_TIMEOUT_MS ~10000ms in background/main.js) so a live
+// worker's own honest degrade always wins first; this only backstops the cases
+// where the worker/callback never reports back at all.
+const LAUNCH_CLIENT_SETTLE_TIMEOUT_MS = 12000;
+// Guidance shown when the launch never reports back (mirrors the worker's
+// LAUNCH_FIRST_FRAME_GUIDANCE so both surfaces point at the same recovery step).
+const LAUNCH_CLIENT_TIMEOUT_GUIDANCE =
+  'Roger native host did not respond — run `rr setup doctor --live`, then reload this page.';
+
 function normalizeGuidanceText(guidance) {
   if (Array.isArray(guidance)) {
     return guidance
@@ -3079,101 +3099,160 @@ function triggerLaunch(action, context, button) {
   button.textContent = '…';
   setStatus('Dispatching launch intent...', false, { revealInline: true });
 
-  chrome.runtime.sendMessage(
-    {
-      type: 'roger_bridge_launch',
-      intent: {
-        action,
-        owner: context.owner,
-        repo: context.repo,
-        pr_number: context.pr_number,
-      },
-    },
-    (response) => {
-      button.disabled = false;
-      button.textContent = previousText;
+  // Settle-exactly-once guard shared by the response callback, the client-side
+  // watchdog, and the synchronous-throw handler, so whichever fires first wins
+  // and always re-enables the Start button. Without this the panel could hang
+  // forever on "Dispatching launch intent..." (see LAUNCH_CLIENT_SETTLE_TIMEOUT_MS).
+  let launchSettled = false;
+  let launchWatchdog = null;
+  const clearLaunchWatchdog = () => {
+    if (launchWatchdog !== null) {
+      clearTimeout(launchWatchdog);
+      launchWatchdog = null;
+    }
+  };
+  // Backstop for the two ways the response callback can never fire: a
+  // synchronous throw from sendMessage (context invalidated) or an Edge MV3
+  // worker teardown that silently drops the reply. Fast-fail closed with honest
+  // guidance instead of leaving the button disabled and the status wedged.
+  const failLaunchClosed = (statusText) => {
+    if (launchSettled) {
+      return;
+    }
+    launchSettled = true;
+    clearLaunchWatchdog();
+    button.disabled = false;
+    button.textContent = previousText;
+    lastAttentionState = null;
+    if (panel) {
+      applyActionModel(panel, lastAttentionState, lastSessionCount);
+    }
+    clearAttentionBadge();
+    setInfoMessage(statusText);
+    setStatus(statusText, true, { revealInline: true });
+  };
 
-      if (chrome.runtime.lastError) {
-        lastAttentionState = null;
-        if (panel) {
-          applyActionModel(panel, lastAttentionState, lastSessionCount);
-        }
-        clearAttentionBadge();
-        const disconnectStatus = appendGuidance(
-          `Bridge error: ${chrome.runtime.lastError.message}`,
-          BRIDGE_DISCONNECT_GUIDANCE
-        );
-        setInfoMessage(disconnectStatus);
-        setStatus(disconnectStatus, true, { revealInline: true });
-        return;
-      }
+  launchWatchdog = setTimeout(() => {
+    failLaunchClosed(
+      appendGuidance('Native Messaging unavailable; launch blocked.', LAUNCH_CLIENT_TIMEOUT_GUIDANCE)
+    );
+  }, LAUNCH_CLIENT_SETTLE_TIMEOUT_MS);
 
-      if (!response) {
-        lastAttentionState = null;
-        if (panel) {
-          applyActionModel(panel, lastAttentionState, lastSessionCount);
-        }
-        clearAttentionBadge();
-        const noResponseStatus = appendGuidance(
-          'No bridge response.',
-          BRIDGE_DISCONNECT_GUIDANCE
-        );
-        setInfoMessage(noResponseStatus);
-        setStatus(noResponseStatus, true, { revealInline: true });
-        return;
-      }
+  const onLaunchResponse = (response) => {
+    if (launchSettled) {
+      // The watchdog already fast-failed this launch; ignore a late reply.
+      return;
+    }
+    launchSettled = true;
+    clearLaunchWatchdog();
+    button.disabled = false;
+    button.textContent = previousText;
 
-      if (!response.ok) {
-        lastAttentionState = null;
-        if (panel) {
-          applyActionModel(panel, lastAttentionState, lastSessionCount);
-        }
-        clearAttentionBadge();
-        setInfoMessage(appendGuidance(response.message, response.guidance));
-        setStatus(appendGuidance(response.message, response.guidance), true, { revealInline: true });
-        return;
-      }
-
-      if (response.mode === 'custom_url_fallback') {
-        lastAttentionState = null;
-        if (panel) {
-          applyActionModel(panel, lastAttentionState, lastSessionCount);
-        }
-        clearAttentionBadge();
-        setInfoMessage('Launched via URL fallback. Open Roger locally for authoritative status.');
-        setStatus('Launched via URL fallback. Open Roger locally for authoritative status.', false, { revealInline: true });
-        return;
-      }
-
-      if (response.mode === 'native_messaging' && response.attention_state) {
-        lastAttentionState = response.attention_state;
-        if (typeof response.session_id === 'string' && response.session_id.trim().length > 0) {
-          // A canonical session id is durable proof at least one session exists.
-          lastSessionCount =
-            typeof lastSessionCount === 'number' && lastSessionCount >= 1 ? lastSessionCount : 1;
-        }
-        if (panel) {
-          applyActionModel(panel, lastAttentionState, lastSessionCount);
-        }
-        setAttentionBadge(response.attention_state, response.freshness_label || null);
-        const successStatus = formatLaunchSuccessStatus(response);
-        setInfoMessage(successStatus);
-        setStatus(successStatus, false, { revealInline: true });
-        return;
-      }
-
+    if (chrome.runtime.lastError) {
       lastAttentionState = null;
       if (panel) {
         applyActionModel(panel, lastAttentionState, lastSessionCount);
       }
+      clearAttentionBadge();
+      const disconnectStatus = appendGuidance(
+        `Bridge error: ${chrome.runtime.lastError.message}`,
+        BRIDGE_DISCONNECT_GUIDANCE
+      );
+      setInfoMessage(disconnectStatus);
+      setStatus(disconnectStatus, true, { revealInline: true });
+      return;
+    }
+
+    if (!response) {
+      lastAttentionState = null;
+      if (panel) {
+        applyActionModel(panel, lastAttentionState, lastSessionCount);
+      }
+      clearAttentionBadge();
+      const noResponseStatus = appendGuidance(
+        'No bridge response.',
+        BRIDGE_DISCONNECT_GUIDANCE
+      );
+      setInfoMessage(noResponseStatus);
+      setStatus(noResponseStatus, true, { revealInline: true });
+      return;
+    }
+
+    if (!response.ok) {
+      lastAttentionState = null;
+      if (panel) {
+        applyActionModel(panel, lastAttentionState, lastSessionCount);
+      }
+      clearAttentionBadge();
+      setInfoMessage(appendGuidance(response.message, response.guidance));
+      setStatus(appendGuidance(response.message, response.guidance), true, { revealInline: true });
+      return;
+    }
+
+    if (response.mode === 'custom_url_fallback') {
+      lastAttentionState = null;
+      if (panel) {
+        applyActionModel(panel, lastAttentionState, lastSessionCount);
+      }
+      clearAttentionBadge();
+      setInfoMessage('Launched via URL fallback. Open Roger locally for authoritative status.');
+      setStatus('Launched via URL fallback. Open Roger locally for authoritative status.', false, { revealInline: true });
+      return;
+    }
+
+    if (response.mode === 'native_messaging' && response.attention_state) {
+      lastAttentionState = response.attention_state;
+      if (typeof response.session_id === 'string' && response.session_id.trim().length > 0) {
+        // A canonical session id is durable proof at least one session exists.
+        lastSessionCount =
+          typeof lastSessionCount === 'number' && lastSessionCount >= 1 ? lastSessionCount : 1;
+      }
+      if (panel) {
+        applyActionModel(panel, lastAttentionState, lastSessionCount);
+      }
+      setAttentionBadge(response.attention_state, response.freshness_label || null);
       const successStatus = formatLaunchSuccessStatus(response);
       setInfoMessage(successStatus);
       setStatus(successStatus, false, { revealInline: true });
-      // Refresh the bounded badge/action model; this must not clear the
-      // launch result status line we just rendered.
-      requestStatusMirror(context);
+      return;
     }
-  );
+
+    lastAttentionState = null;
+    if (panel) {
+      applyActionModel(panel, lastAttentionState, lastSessionCount);
+    }
+    const successStatus = formatLaunchSuccessStatus(response);
+    setInfoMessage(successStatus);
+    setStatus(successStatus, false, { revealInline: true });
+    // Refresh the bounded badge/action model; this must not clear the
+    // launch result status line we just rendered.
+    requestStatusMirror(context);
+  };
+
+  try {
+    chrome.runtime.sendMessage(
+      {
+        type: 'roger_bridge_launch',
+        intent: {
+          action,
+          owner: context.owner,
+          repo: context.repo,
+          pr_number: context.pr_number,
+        },
+      },
+      onLaunchResponse
+    );
+  } catch (err) {
+    // sendMessage can throw synchronously (e.g. "Extension context invalidated"
+    // after a browser/extension reload). The response callback is then never
+    // registered, so fast-fail closed here rather than hang.
+    failLaunchClosed(
+      appendGuidance(
+        `Bridge dispatch failed: ${(err && err.message) || String(err)}`,
+        BRIDGE_DISCONNECT_GUIDANCE
+      )
+    );
+  }
 }
 
 if (typeof window !== 'undefined' && typeof document !== 'undefined') {
@@ -3186,6 +3265,8 @@ if (typeof module !== 'undefined' && module.exports) {
     BRAND_CHIP_CLASS,
     BRIDGE_DISCONNECT_GUIDANCE,
     STATUS_MIRROR_SETTLE_TIMEOUT_MS,
+    LAUNCH_CLIENT_SETTLE_TIMEOUT_MS,
+    LAUNCH_CLIENT_TIMEOUT_GUIDANCE,
     formatLaunchSuccessStatus,
     describeLaunchProgress,
     handleLaunchProgressMessage,
