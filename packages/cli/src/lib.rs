@@ -23,7 +23,8 @@ use roger_app_core::{
     safe_harness_command_bindings, validate_outbound_draft_batch_linkage,
 };
 use roger_bridge::{
-    NativeHostManifest, SupportedBrowser, SupportedOs, native_host_install_path_for,
+    BridgePreflight, NativeHostManifest, SupportedBrowser, SupportedOs,
+    native_host_install_path_for,
 };
 use roger_config::cli_defaults::{
     DEFAULT_OPENCODE_BIN, ENV_COPILOT_BIN, ENV_OPENCODE_BIN, ENV_STORE_ROOT,
@@ -59,7 +60,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::result::Result;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 use toon_format::encode_default as encode_toon_default;
@@ -300,6 +301,12 @@ struct ParsedArgs {
     resume_requested: bool,
     findings_sessions: bool,
     interactive: bool,
+    // Explicit launch surface for review/resume/return. `None` defaults to the
+    // CLI surface; the bridge passes `--surface bridge` when it spawns rr so the
+    // recorded launch attempt and binding carry the true origin surface.
+    surface: Option<LaunchSurface>,
+    // Opt-in live handshake for `rr extension doctor --live`.
+    live: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -719,6 +726,8 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
         resume_requested: false,
         findings_sessions: false,
         interactive: false,
+        surface: None,
+        live: false,
     };
 
     let mut i = 1;
@@ -1005,6 +1014,21 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
                 parsed.interactive = true;
                 i += 1;
             }
+            "--surface" => {
+                let value = argv.get(i + 1).ok_or_else(|| {
+                    "--surface requires cli, tui, extension, or bridge".to_owned()
+                })?;
+                parsed.surface = Some(LaunchSurface::parse(value).ok_or_else(|| {
+                    format!(
+                        "unsupported --surface: {value} (expected cli, tui, extension, or bridge)"
+                    )
+                })?);
+                i += 2;
+            }
+            "--live" => {
+                parsed.live = true;
+                i += 1;
+            }
             positional => {
                 if positional.starts_with('-') {
                     return Err(format!("unknown flag: {positional}"));
@@ -1229,6 +1253,27 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
 
     if parsed.command != CommandKind::Extension && parsed.extension_browser.is_some() {
         return Err("--browser is only supported by rr extension".to_owned());
+    }
+
+    // --surface names the true launch origin; only the launch-attempt commands
+    // (review/resume/return) record a surface-typed launch attempt and binding,
+    // so keep it out of the other commands' positive flag whitelists.
+    if !matches!(
+        parsed.command,
+        CommandKind::Review | CommandKind::Resume | CommandKind::Return
+    ) && parsed.surface.is_some()
+    {
+        return Err(
+            "--surface is only supported by rr review, rr resume, and rr return".to_owned(),
+        );
+    }
+
+    // --live only extends rr extension doctor with a real native-host handshake.
+    if parsed.live
+        && !(parsed.command == CommandKind::Extension
+            && parsed.extension_command == Some(ExtensionCommandKind::Doctor))
+    {
+        return Err("--live is only supported by rr extension doctor".to_owned());
     }
 
     if parsed.command != CommandKind::Agent
@@ -5819,6 +5864,7 @@ fn handle_extension_doctor(
         "name": "native_host_binary_present",
         "ok": host_binary_exists,
         "detail": host_binary_path
+            .clone()
             .unwrap_or_else(|| manifest_path.to_string_lossy().to_string()),
     }));
     checks.push(json!({
@@ -5912,30 +5958,280 @@ fn handle_extension_doctor(
         };
     }
 
+    let mut data = json!({
+        "subcommand": "doctor",
+        "browser": browser_label,
+        "package_dir": package_dir.to_string_lossy().to_string(),
+        "package_source": package_source,
+        "guided_profile_root": guided_profile_root.to_string_lossy().to_string(),
+        "guided_browser_script_path": guided_browser_script_path_value,
+        "guided_browser_command": guided_browser_command,
+        "install_root": install_root.to_string_lossy().to_string(),
+        "extension_id": extension_id,
+        "extension_id_source": extension_id_source,
+        "checks": checks,
+    });
+    let mut warnings: Vec<String> = custom_install_root_warning
+        .into_iter()
+        .chain((extension_id_source == Some("packaged_manifest_key")).then_some(
+            "doctor is relying on the packaged manifest key for extension identity; if the unpacked extension is not yet active in the target browser profile, load or reload it once before the first live launch."
+                .to_owned(),
+        ))
+        .collect();
+
+    // The live section is additive: it only appears when --live is passed, so the
+    // default doctor behavior and payload shape are unchanged.
+    let mut outcome = OutcomeKind::Complete;
+    let mut repair_actions: Vec<String> = Vec::new();
+    let mut message = "extension doctor checks passed".to_owned();
+    if parsed.live {
+        let live =
+            run_extension_doctor_live_handshake(host_binary_path.as_deref(), &runtime.store_root);
+        data["live"] = live.section;
+        if live.ok {
+            message = "extension doctor checks passed with live native-host handshake".to_owned();
+        } else {
+            outcome = OutcomeKind::Blocked;
+            repair_actions = live.repair_actions;
+            message = "extension doctor live handshake failed".to_owned();
+            if let Some(warning) = live.warning {
+                warnings.push(warning);
+            }
+        }
+    }
+
     CommandResponse {
-        outcome: OutcomeKind::Complete,
-        data: json!({
-            "subcommand": "doctor",
-            "browser": browser_label,
-            "package_dir": package_dir.to_string_lossy().to_string(),
-            "package_source": package_source,
-            "guided_profile_root": guided_profile_root.to_string_lossy().to_string(),
-            "guided_browser_script_path": guided_browser_script_path_value,
-            "guided_browser_command": guided_browser_command,
-            "install_root": install_root.to_string_lossy().to_string(),
-            "extension_id": extension_id,
-            "extension_id_source": extension_id_source,
-            "checks": checks,
+        outcome,
+        data,
+        warnings,
+        repair_actions,
+        message,
+    }
+}
+
+struct DoctorLiveHandshake {
+    ok: bool,
+    section: Value,
+    repair_actions: Vec<String>,
+    warning: Option<String>,
+}
+
+fn doctor_live_handshake_failed(
+    preflight_section: &Value,
+    launcher_path: Option<&str>,
+    reason: &str,
+    detail: String,
+    repair_actions: Vec<String>,
+) -> DoctorLiveHandshake {
+    DoctorLiveHandshake {
+        ok: false,
+        section: json!({
+            "preflight": preflight_section.clone(),
+            "live_handshake": "failed",
+            "reason": reason,
+            "detail": detail,
+            "launcher_path": launcher_path,
         }),
-        warnings: custom_install_root_warning
-            .into_iter()
-            .chain((extension_id_source == Some("packaged_manifest_key")).then_some(
-                "doctor is relying on the packaged manifest key for extension identity; if the unpacked extension is not yet active in the target browser profile, load or reload it once before the first live launch."
-                    .to_owned(),
-            ))
-            .collect(),
+        repair_actions,
+        warning: Some(format!("extension doctor live handshake failed ({reason})")),
+    }
+}
+
+/// Drive a real, bounded native-host handshake: report bridge preflight, then
+/// spawn the installed launcher, write a length-prefixed StatusProbe to its
+/// stdin, and read back one length-prefixed reply with a 10s ceiling. All
+/// failure modes are typed (launcher_missing, spawn_failed, timeout,
+/// malformed_reply, preflight_failed) with concrete repair actions. gh auth is
+/// a soft preflight signal and never fails the handshake on its own.
+fn run_extension_doctor_live_handshake(
+    launcher_path: Option<&str>,
+    store_root: &Path,
+) -> DoctorLiveHandshake {
+    let rr_binary = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rr"));
+    let preflight = BridgePreflight::check(&rr_binary, store_root);
+    let preflight_section = json!({
+        "roger_binary_found": preflight.roger_binary_found,
+        "roger_data_dir_exists": preflight.roger_data_dir_exists,
+        "gh_available": preflight.gh_available,
+        "ready": preflight.is_ready(),
+    });
+
+    // Hard prerequisites for any handshake: the rr binary and the local store
+    // must both exist. gh is intentionally excluded here.
+    if !preflight.roger_binary_found || !preflight.roger_data_dir_exists {
+        let detail = preflight
+            .guidance(&rr_binary)
+            .unwrap_or_else(|| "bridge preflight not ready".to_owned());
+        return doctor_live_handshake_failed(
+            &preflight_section,
+            launcher_path,
+            "preflight_failed",
+            detail,
+            vec![
+                "run rr init to bootstrap the local store".to_owned(),
+                "reinstall the native host with rr extension setup, then rerun rr extension doctor --live".to_owned(),
+            ],
+        );
+    }
+
+    let Some(launcher) = launcher_path else {
+        return doctor_live_handshake_failed(
+            &preflight_section,
+            launcher_path,
+            "launcher_missing",
+            "native host launcher path is unknown".to_owned(),
+            vec!["rerun rr extension setup to install the native host launcher".to_owned()],
+        );
+    };
+    if !Path::new(launcher).exists() {
+        return doctor_live_handshake_failed(
+            &preflight_section,
+            launcher_path,
+            "launcher_missing",
+            format!("native host launcher not found at {launcher}"),
+            vec!["rerun rr extension setup to reinstall the native host launcher".to_owned()],
+        );
+    }
+
+    let probe = json!({
+        "type": "roger_bridge_status",
+        "owner": "roger-reviewer",
+        "repo": "doctor-live-handshake",
+        "pr_number": 0,
+    });
+    let probe_bytes = match serde_json::to_vec(&probe) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return doctor_live_handshake_failed(
+                &preflight_section,
+                launcher_path,
+                "spawn_failed",
+                format!("failed to encode status probe: {err}"),
+                vec!["report this as an internal rr defect".to_owned()],
+            );
+        }
+    };
+    let mut wire = Vec::with_capacity(4 + probe_bytes.len());
+    wire.extend_from_slice(&(probe_bytes.len() as u32).to_le_bytes());
+    wire.extend_from_slice(&probe_bytes);
+
+    let mut child = match ProcessCommand::new(launcher)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("RR_STORE_ROOT", store_root)
+        .current_dir(store_root)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => {
+            return doctor_live_handshake_failed(
+                &preflight_section,
+                launcher_path,
+                "spawn_failed",
+                format!("failed to spawn native host launcher {launcher}: {err}"),
+                vec!["confirm the launcher is executable and rerun rr extension setup".to_owned()],
+            );
+        }
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        // Best-effort write; a broken pipe surfaces as a malformed/absent reply.
+        let _ = stdin.write_all(&wire);
+        // Drop stdin here to signal EOF so the host stops reading and replies.
+    }
+
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        return doctor_live_handshake_failed(
+            &preflight_section,
+            launcher_path,
+            "spawn_failed",
+            "native host launcher exposed no stdout handle".to_owned(),
+            vec!["rerun rr extension doctor --live after reinstalling the native host".to_owned()],
+        );
+    };
+
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+
+    let buf = match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(buf) => buf,
+        Err(_) => {
+            let _ = child.kill();
+            return doctor_live_handshake_failed(
+                &preflight_section,
+                launcher_path,
+                "timeout",
+                "native host did not reply within 10s".to_owned(),
+                vec![
+                    "run rr doctor to inspect local setup".to_owned(),
+                    "reinstall the native host with rr extension setup and rerun rr extension doctor --live".to_owned(),
+                ],
+            );
+        }
+    };
+    let _ = child.wait();
+
+    if buf.len() < 4 {
+        return doctor_live_handshake_failed(
+            &preflight_section,
+            launcher_path,
+            "malformed_reply",
+            format!(
+                "native host reply missing 4-byte length prefix ({} bytes)",
+                buf.len()
+            ),
+            vec!["run rr extension doctor to inspect the native host manifest".to_owned()],
+        );
+    }
+    let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    if buf.len() < 4 + len {
+        return doctor_live_handshake_failed(
+            &preflight_section,
+            launcher_path,
+            "malformed_reply",
+            "native host reply truncated relative to its length prefix".to_owned(),
+            vec!["run rr extension doctor to inspect the native host manifest".to_owned()],
+        );
+    }
+    let reply = match serde_json::from_slice::<Value>(&buf[4..4 + len]) {
+        Ok(value) if value.is_object() => value,
+        Ok(_) => {
+            return doctor_live_handshake_failed(
+                &preflight_section,
+                launcher_path,
+                "malformed_reply",
+                "native host reply was valid JSON but not an object".to_owned(),
+                vec!["run rr extension doctor to inspect the native host manifest".to_owned()],
+            );
+        }
+        Err(err) => {
+            return doctor_live_handshake_failed(
+                &preflight_section,
+                launcher_path,
+                "malformed_reply",
+                format!("native host reply was not valid JSON: {err}"),
+                vec!["run rr extension doctor to inspect the native host manifest".to_owned()],
+            );
+        }
+    };
+
+    DoctorLiveHandshake {
+        ok: true,
+        section: json!({
+            "preflight": preflight_section,
+            "live_handshake": "ok",
+            "reason": Value::Null,
+            "launcher_path": launcher,
+            "reply": reply,
+        }),
         repair_actions: Vec::new(),
-        message: "extension doctor checks passed".to_owned(),
+        warning: None,
     }
 }
 
@@ -7551,6 +7847,7 @@ fn launch_copilot_resume_or_return_session(
 }
 
 fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
+    let launch_surface = resolved_launch_surface(parsed);
     let supported_providers = runtime_supported_review_providers(runtime);
     let planned_not_live_providers = runtime_planned_not_live_review_providers(runtime);
     if !supported_providers.contains(&parsed.provider.as_str()) {
@@ -7661,7 +7958,7 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         id: &attempt_id,
         action: LaunchAttemptAction::StartReview,
         provider: &parsed.provider,
-        source_surface: LaunchSurface::Cli,
+        source_surface: launch_surface,
         review_target: &target,
         requested_session_id: None,
         state: LaunchAttemptState::Pending,
@@ -8082,12 +8379,12 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             session_id: &session_id,
             repo_locator: &target.repository,
             review_target: Some(&target),
-            surface: LaunchSurface::Cli,
+            surface: launch_surface,
             launch_profile_id: Some(cli_config::PROFILE_ID),
             ui_target: Some(cli_config::UI_TARGET),
             instance_preference: Some(cli_config::INSTANCE_PREFERENCE),
-            cwd: Some(binding_context.cwd.as_str()),
-            worktree_root: binding_context.worktree_root.as_deref(),
+            cwd: binding_local_root_for_surface(launch_surface, &binding_context).0,
+            worktree_root: binding_local_root_for_surface(launch_surface, &binding_context).1,
         },
     }) {
         let detail = format!("failed to finalize review launch: {err}");
@@ -8304,6 +8601,7 @@ fn infer_strongest_reentry_selection(
 }
 
 fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
+    let launch_surface = resolved_launch_surface(parsed);
     let store = match open_store_or_response(runtime, "rr resume") {
         Ok(store) => store,
         Err(response) => return response,
@@ -8316,7 +8614,7 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             explicit_session_id: parsed.session_id.clone(),
             repository,
             pull_request_number: parsed.pr,
-            source_surface: LaunchSurface::Cli,
+            source_surface: launch_surface,
             ui_target: Some(cli_config::UI_TARGET.to_owned()),
             instance_preference: Some(cli_config::INSTANCE_PREFERENCE.to_owned()),
         },
@@ -8338,7 +8636,7 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 &store,
                 &candidates,
                 parsed.pr,
-                LaunchSurface::Cli,
+                launch_surface,
                 binding_context.storage_local_root(),
                 Some(cli_config::UI_TARGET),
                 Some(cli_config::INSTANCE_PREFERENCE),
@@ -8522,7 +8820,7 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         id: &attempt_id,
         action: LaunchAttemptAction::ResumeReview,
         provider: &session.provider,
-        source_surface: LaunchSurface::Cli,
+        source_surface: launch_surface,
         review_target: &session.review_target,
         requested_session_id: Some(&session.id),
         state: LaunchAttemptState::Pending,
@@ -8970,12 +9268,12 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 session_id: &session.id,
                 repo_locator: &session.review_target.repository,
                 review_target: Some(&session.review_target),
-                surface: LaunchSurface::Cli,
+                surface: launch_surface,
                 launch_profile_id: Some(cli_config::PROFILE_ID),
                 ui_target: Some(cli_config::UI_TARGET),
                 instance_preference: Some(cli_config::INSTANCE_PREFERENCE),
-                cwd: Some(binding_context.cwd.as_str()),
-                worktree_root: binding_context.worktree_root.as_deref(),
+                cwd: binding_local_root_for_surface(launch_surface, &binding_context).0,
+                worktree_root: binding_local_root_for_surface(launch_surface, &binding_context).1,
             },
         })
     {
@@ -9035,6 +9333,7 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
 }
 
 fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
+    let launch_surface = resolved_launch_surface(parsed);
     let store = match open_store_or_response(runtime, "rr return") {
         Ok(store) => store,
         Err(response) => return response,
@@ -9047,7 +9346,7 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             explicit_session_id: parsed.session_id.clone(),
             repository,
             pull_request_number: parsed.pr,
-            source_surface: LaunchSurface::Cli,
+            source_surface: launch_surface,
             ui_target: Some(cli_config::UI_TARGET.to_owned()),
             instance_preference: Some(cli_config::INSTANCE_PREFERENCE.to_owned()),
         },
@@ -9104,7 +9403,7 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         id: &attempt_id,
         action: LaunchAttemptAction::ReturnToRoger,
         provider: &session.provider,
-        source_surface: LaunchSurface::Cli,
+        source_surface: launch_surface,
         review_target: &session.review_target,
         requested_session_id: Some(&session.id),
         state: LaunchAttemptState::Pending,
@@ -9182,7 +9481,7 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 &store,
                 ResolveSessionLaunchBinding {
                     explicit_session_id: Some(&session.id),
-                    surface: LaunchSurface::Cli,
+                    surface: launch_surface,
                     repo_locator: &session.review_target.repository,
                     review_target: Some(&session.review_target),
                     ui_target: Some(cli_config::UI_TARGET),
@@ -9374,12 +9673,12 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 session_id: &session.id,
                 repo_locator: &session.review_target.repository,
                 review_target: Some(&session.review_target),
-                surface: LaunchSurface::Cli,
+                surface: launch_surface,
                 launch_profile_id: Some(cli_config::PROFILE_ID),
                 ui_target: Some(cli_config::UI_TARGET),
                 instance_preference: Some(cli_config::INSTANCE_PREFERENCE),
-                cwd: Some(binding_context.cwd.as_str()),
-                worktree_root: binding_context.worktree_root.as_deref(),
+                cwd: binding_local_root_for_surface(launch_surface, &binding_context).0,
+                worktree_root: binding_local_root_for_surface(launch_surface, &binding_context).1,
             },
         })
     {
@@ -15601,6 +15900,35 @@ impl LaunchBindingContext {
     }
 }
 
+/// Resolve the effective launch surface for a launch-attempt command, defaulting
+/// to the CLI surface when `--surface` was not supplied.
+fn resolved_launch_surface(parsed: &ParsedArgs) -> LaunchSurface {
+    parsed.surface.unwrap_or(LaunchSurface::Cli)
+}
+
+/// Choose the durable local-root context stored on a launch binding.
+///
+/// Bridge-origin launches inherit the browser's cwd, which is frequently a
+/// poisoned path under NativeMessagingHosts. Binding a repo-local cwd/worktree
+/// there would later trip the stale-binding invariant and block `rr status
+/// --session` / `rr resume --session` readback. So for the bridge surface we
+/// deliberately bind no repo-local root (the validator recognizes the bridge
+/// surface and exempts it); every other surface keeps its real local-root
+/// context so the invariant continues to protect CLI/TUI launches.
+fn binding_local_root_for_surface(
+    surface: LaunchSurface,
+    binding_context: &LaunchBindingContext,
+) -> (Option<&str>, Option<&str>) {
+    if surface == LaunchSurface::Bridge {
+        (None, None)
+    } else {
+        (
+            Some(binding_context.cwd.as_str()),
+            binding_context.worktree_root.as_deref(),
+        )
+    }
+}
+
 fn git_lookup_cache() -> &'static Mutex<HashMap<PathBuf, GitLookupSnapshot>> {
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, GitLookupSnapshot>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -17065,10 +17393,10 @@ Primary flow:
 
 Choose and enter review work:
   rr queue [--repo owner/repo] [--limit <n>] [--robot]
-  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude|copilot] [--interactive] [--dry-run] [--robot]
-  rr review --resume [--pr <number> | --session <id>] [--repo owner/repo] [--interactive] [--dry-run] [--robot]
+  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude|copilot] [--interactive] [--surface cli|tui|extension|bridge] [--dry-run] [--robot]
+  rr review --resume [--pr <number> | --session <id>] [--repo owner/repo] [--interactive] [--surface cli|tui|extension|bridge] [--dry-run] [--robot]
   rr open [--repo owner/repo] [--pr <number>] [--session <id>]
-  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--interactive] [--robot]
+  rr return [--repo owner/repo] [--pr <number>] [--session <id>] [--interactive] [--surface cli|tui|extension|bridge] [--robot]
 
 Inspect and search review output:
   rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]
@@ -17085,7 +17413,7 @@ Send to GitHub, explicitly gated (rr send <sub>):
 
 Set up, update, and repair (rr setup <sub>):
   rr setup extension [--browser edge|chrome|brave] [--robot]
-  rr setup doctor [--browser edge|chrome|brave] [--robot]
+  rr setup doctor [--browser edge|chrome|brave] [--live] [--robot]
   rr setup fetch [--version <YYYY.MM.DD[-rc.N]>] [--robot]
   rr setup uninstall [--robot]
   rr setup update [--channel stable|rc] [--version <YYYY.MM.DD[-rc.N]>] [--yes|-y] [--dry-run] [--robot]
