@@ -30,7 +30,7 @@ pub use semantic_embedder::{
 };
 
 /// The schema this build produces; must track the highest migration.
-pub const CURRENT_SCHEMA_VERSION: i64 = 18;
+pub const CURRENT_SCHEMA_VERSION: i64 = 19;
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_session_ledger.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_launch_binding_context.sql");
@@ -51,7 +51,11 @@ const MIGRATION_0015: &str = include_str!("../migrations/0015_worker_audit_trail
 const MIGRATION_0016: &str = include_str!("../migrations/0016_posted_action_items.sql");
 const MIGRATION_0017: &str = include_str!("../migrations/0017_session_baseline_snapshots.sql");
 const MIGRATION_0018: &str = include_str!("../migrations/0018_outbound_draft_revisions.sql");
+const MIGRATION_0019: &str = include_str!("../migrations/0019_memory_review_requests.sql");
 const PRIOR_REVIEW_BULK_HYDRATION_CHUNK_SIZE: usize = 64;
+/// Lexical score assigned to an exact identifier/fingerprint/normalized-key
+/// match so the direct-lookup hit ranks ahead of ordinary token matches.
+const EXACT_IDENTIFIER_LEXICAL_SCORE: i64 = 200;
 
 /// Upper bound on the number of prior-review corpus documents (per kind) that
 /// [`RogerStore::generate_semantic_candidates`] embeds in a single lookup. The
@@ -1475,6 +1479,144 @@ pub struct MemoryItemRecord {
     pub updated_at: i64,
 }
 
+/// Where a durable [`MemoryReviewRequestRecord`] originated. Workers may
+/// propose memory review; only Roger-owned review logic (operator surface)
+/// mutates durable memory when the request is accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryReviewSource {
+    Worker,
+    Operator,
+}
+
+impl MemoryReviewSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+            Self::Operator => "operator",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "worker" => Some(Self::Worker),
+            "operator" => Some(Self::Operator),
+            _ => None,
+        }
+    }
+}
+
+/// The memory-lifecycle transition a review request proposes. `promote` is the
+/// first fully materializing path; the remaining kinds parse-validate now and
+/// map to the memory state they would establish on acceptance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryReviewRequestKind {
+    Promote,
+    Demote,
+    Deprecate,
+    Restore,
+    MarkAntiPattern,
+}
+
+impl MemoryReviewRequestKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Promote => "promote",
+            Self::Demote => "demote",
+            Self::Deprecate => "deprecate",
+            Self::Restore => "restore",
+            Self::MarkAntiPattern => "mark_anti_pattern",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "promote" => Some(Self::Promote),
+            "demote" => Some(Self::Demote),
+            "deprecate" => Some(Self::Deprecate),
+            "restore" => Some(Self::Restore),
+            "mark_anti_pattern" => Some(Self::MarkAntiPattern),
+            _ => None,
+        }
+    }
+
+    /// The `memory_items.state` an accepted request of this kind materializes.
+    pub fn target_memory_state(self) -> &'static str {
+        match self {
+            Self::Promote | Self::Restore => "established",
+            Self::Demote => "candidate",
+            Self::Deprecate => "deprecated",
+            Self::MarkAntiPattern => "anti_pattern",
+        }
+    }
+}
+
+/// Lifecycle status of a durable memory review request.
+pub const MEMORY_REVIEW_STATUS_PENDING: &str = "pending_review";
+pub const MEMORY_REVIEW_STATUS_ACCEPTED: &str = "accepted";
+pub const MEMORY_REVIEW_STATUS_REJECTED: &str = "rejected";
+
+/// A durable, auditable, non-mutating memory review request. Persisted from the
+/// worker `request_memory_review` transport and from ingested worker stage
+/// results; resolved (accepted/rejected) through the operator surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryReviewRequestRecord {
+    pub id: String,
+    pub review_session_id: String,
+    pub review_run_id: Option<String>,
+    pub source: String,
+    pub request_kind: String,
+    pub statement: String,
+    pub normalized_key: String,
+    pub scope_key: String,
+    pub memory_class: String,
+    pub rationale: Option<String>,
+    pub status: String,
+    pub created_at: i64,
+    pub resolved_at: Option<i64>,
+    pub resolution_actor: Option<String>,
+    pub resulting_memory_item_id: Option<String>,
+    pub row_version: i64,
+}
+
+/// Inputs for persisting a pending memory review request.
+#[derive(Debug, Clone)]
+pub struct CreateMemoryReviewRequest<'a> {
+    pub review_session_id: &'a str,
+    pub review_run_id: Option<&'a str>,
+    pub source: MemoryReviewSource,
+    pub request_kind: MemoryReviewRequestKind,
+    pub statement: &'a str,
+    pub normalized_key: &'a str,
+    pub scope_key: &'a str,
+    pub memory_class: &'a str,
+    pub rationale: Option<&'a str>,
+    /// Optional caller-supplied dedup discriminator (e.g. the worker request id)
+    /// folded into the deterministic request id so multiple proposals with the
+    /// same normalized key in one batch do not collide.
+    pub external_ref: Option<&'a str>,
+}
+
+/// Which way an operator resolved a pending memory review request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryReviewDecision {
+    Accept,
+    Reject,
+}
+
+/// Outcome of [`RogerStore::resolve_memory_review_request`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryReviewResolutionOutcome {
+    pub request: MemoryReviewRequestRecord,
+    /// Present only on an accepted `promote`/materializing request: the memory
+    /// item that was inserted or updated.
+    pub resulting_memory_item_id: Option<String>,
+    /// True when acceptance inserted a brand-new memory item, false when it
+    /// updated an existing same-scope/normalized-key row (dedup).
+    pub materialized_new_item: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SemanticLookupTargetKind {
@@ -1550,6 +1692,15 @@ pub struct PriorReviewEvidenceHit {
     pub confidence: String,
     pub triage_state: String,
     pub outbound_state: String,
+    /// Evidence-lane provenance label: `finding`, `posted_action_item`, or
+    /// `outbound_draft_revision`. Lets surfaces render where a hit came from
+    /// (tmmn.6: posted outcomes and edited draft bodies are now searchable).
+    #[serde(default = "default_evidence_source_kind")]
+    pub source_kind: String,
+    /// Why this hit surfaced: `lexical` (token match) or `exact_identifier`
+    /// (direct id/fingerprint match via the exact-lookup fast path).
+    #[serde(default = "default_retrieval_reason")]
+    pub retrieval_reason: String,
     pub lexical_score: i64,
     pub semantic_score_milli: i64,
     pub fused_score: i64,
@@ -1565,10 +1716,30 @@ pub struct PriorReviewMemoryHit {
     pub normalized_key: String,
     pub anchor_digest: Option<String>,
     pub source_kind: String,
+    /// Why this hit surfaced: `lexical` or `exact_identifier`.
+    #[serde(default = "default_retrieval_reason")]
+    pub retrieval_reason: String,
     pub lexical_score: i64,
     pub semantic_score_milli: i64,
     pub fused_score: i64,
 }
+
+fn default_evidence_source_kind() -> String {
+    "finding".to_owned()
+}
+
+fn default_retrieval_reason() -> String {
+    "lexical".to_owned()
+}
+
+/// Evidence-lane provenance labels for [`PriorReviewEvidenceHit::source_kind`].
+pub const EVIDENCE_SOURCE_FINDING: &str = "finding";
+pub const EVIDENCE_SOURCE_POSTED_ACTION_ITEM: &str = "posted_action_item";
+pub const EVIDENCE_SOURCE_OUTBOUND_DRAFT_REVISION: &str = "outbound_draft_revision";
+
+/// Retrieval-reason labels for the `retrieval_reason` fields.
+pub const RETRIEVAL_REASON_LEXICAL: &str = "lexical";
+pub const RETRIEVAL_REASON_EXACT_IDENTIFIER: &str = "exact_identifier";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PriorReviewLookupResult {
@@ -5023,6 +5194,278 @@ impl RogerStore {
             .map_err(StorageError::from)
     }
 
+    /// Persist a pending, non-mutating memory review request. Returns the durable
+    /// record. This is the durable form of the previously write-only worker
+    /// `request_memory_review` proposals.
+    pub fn create_memory_review_request(
+        &self,
+        input: CreateMemoryReviewRequest<'_>,
+    ) -> Result<MemoryReviewRequestRecord> {
+        let created_at = time::now_ts();
+        let id = short_content_id(
+            "mrr",
+            &[
+                input.review_session_id,
+                input.source.as_str(),
+                input.request_kind.as_str(),
+                input.normalized_key,
+                &created_at.to_string(),
+                input.external_ref.unwrap_or(""),
+            ],
+        );
+        self.conn.execute(
+            "INSERT INTO memory_review_requests (
+                id, review_session_id, review_run_id, source, request_kind,
+                statement, normalized_key, scope_key, memory_class, rationale,
+                status, created_at, resolved_at, resolution_actor,
+                resulting_memory_item_id, row_version
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5,
+                ?6, ?7, ?8, ?9, ?10,
+                ?11, ?12, NULL, NULL,
+                NULL, 0
+            )",
+            params![
+                id,
+                input.review_session_id,
+                input.review_run_id,
+                input.source.as_str(),
+                input.request_kind.as_str(),
+                input.statement,
+                input.normalized_key,
+                input.scope_key,
+                input.memory_class,
+                input.rationale,
+                MEMORY_REVIEW_STATUS_PENDING,
+                created_at,
+            ],
+        )?;
+        self.memory_review_request(&id)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "memory_review_request",
+                id,
+            })
+    }
+
+    pub fn memory_review_request(&self, id: &str) -> Result<Option<MemoryReviewRequestRecord>> {
+        self.conn
+            .query_row(
+                "SELECT id, review_session_id, review_run_id, source, request_kind,
+                    statement, normalized_key, scope_key, memory_class, rationale,
+                    status, created_at, resolved_at, resolution_actor,
+                    resulting_memory_item_id, row_version
+                FROM memory_review_requests
+                WHERE id = ?1",
+                params![id],
+                memory_review_request_from_row,
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    /// List pending memory review requests, newest first. When `scope_key` is
+    /// provided the list is filtered to that scope; otherwise all pending
+    /// requests are returned.
+    pub fn pending_memory_review_requests(
+        &self,
+        scope_key: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MemoryReviewRequestRecord>> {
+        let limit = limit.clamp(1, 500) as i64;
+        let mut records = Vec::new();
+        match scope_key {
+            Some(scope_key) => {
+                let mut stmt = self.conn.prepare_cached(
+                    "SELECT id, review_session_id, review_run_id, source, request_kind,
+                        statement, normalized_key, scope_key, memory_class, rationale,
+                        status, created_at, resolved_at, resolution_actor,
+                        resulting_memory_item_id, row_version
+                    FROM memory_review_requests
+                    WHERE status = ?1 AND scope_key = ?2
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?3",
+                )?;
+                let rows = stmt.query_map(
+                    params![MEMORY_REVIEW_STATUS_PENDING, scope_key, limit],
+                    memory_review_request_from_row,
+                )?;
+                for row in rows {
+                    records.push(row?);
+                }
+            }
+            None => {
+                let mut stmt = self.conn.prepare_cached(
+                    "SELECT id, review_session_id, review_run_id, source, request_kind,
+                        statement, normalized_key, scope_key, memory_class, rationale,
+                        status, created_at, resolved_at, resolution_actor,
+                        resulting_memory_item_id, row_version
+                    FROM memory_review_requests
+                    WHERE status = ?1
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?2",
+                )?;
+                let rows = stmt.query_map(
+                    params![MEMORY_REVIEW_STATUS_PENDING, limit],
+                    memory_review_request_from_row,
+                )?;
+                for row in rows {
+                    records.push(row?);
+                }
+            }
+        }
+        Ok(records)
+    }
+
+    /// Count pending memory review requests, optionally scoped.
+    pub fn count_pending_memory_review_requests(&self, scope_key: Option<&str>) -> Result<i64> {
+        let count = match scope_key {
+            Some(scope_key) => self.conn.query_row(
+                "SELECT COUNT(*) FROM memory_review_requests
+                 WHERE status = ?1 AND scope_key = ?2",
+                params![MEMORY_REVIEW_STATUS_PENDING, scope_key],
+                |row| row.get::<_, i64>(0),
+            )?,
+            None => self.conn.query_row(
+                "SELECT COUNT(*) FROM memory_review_requests WHERE status = ?1",
+                params![MEMORY_REVIEW_STATUS_PENDING],
+                |row| row.get::<_, i64>(0),
+            )?,
+        };
+        Ok(count)
+    }
+
+    /// Resolve a pending memory review request. Acceptance materializes/updates a
+    /// memory item (dedup by normalized_key within scope) into the state the
+    /// request kind targets — the first production writer of `memory_items`.
+    /// Rejection simply resolves the request. Resolving an already-resolved
+    /// request is a conflict.
+    pub fn resolve_memory_review_request(
+        &self,
+        id: &str,
+        decision: MemoryReviewDecision,
+        actor: &str,
+    ) -> Result<MemoryReviewResolutionOutcome> {
+        let request = self
+            .memory_review_request(id)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "memory_review_request",
+                id: id.to_owned(),
+            })?;
+        if request.status != MEMORY_REVIEW_STATUS_PENDING {
+            return Err(StorageError::Conflict {
+                entity: "memory_review_request",
+                id: format!("{id}:already_resolved_as_{}", request.status),
+            });
+        }
+
+        let now = time::now_ts();
+        let tx = self.conn.unchecked_transaction()?;
+
+        let (status, resulting_memory_item_id, materialized_new_item) = match decision {
+            MemoryReviewDecision::Reject => (MEMORY_REVIEW_STATUS_REJECTED, None, false),
+            MemoryReviewDecision::Accept => {
+                let kind =
+                    MemoryReviewRequestKind::parse(&request.request_kind).ok_or_else(|| {
+                        StorageError::Conflict {
+                            entity: "memory_review_request",
+                            id: format!("{id}:unknown_request_kind_{}", request.request_kind),
+                        }
+                    })?;
+                let target_state = kind.target_memory_state();
+                // Dedup by (scope_key, normalized_key): update an existing item
+                // in place rather than inserting a duplicate.
+                let existing: Option<String> = tx
+                    .query_row(
+                        "SELECT id FROM memory_items
+                         WHERE scope_key = ?1 AND normalized_key = ?2
+                         ORDER BY updated_at DESC, rowid DESC
+                         LIMIT 1",
+                        params![request.scope_key, request.normalized_key],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?;
+                let source_kind = format!("memory_review:{}", request.source);
+                match existing {
+                    Some(existing_id) => {
+                        tx.execute(
+                            "UPDATE memory_items
+                             SET state = ?1, statement = ?2, memory_class = ?3,
+                                 source_kind = ?4, row_version = row_version + 1,
+                                 updated_at = ?5
+                             WHERE id = ?6",
+                            params![
+                                target_state,
+                                request.statement,
+                                request.memory_class,
+                                source_kind,
+                                now,
+                                existing_id,
+                            ],
+                        )?;
+                        (MEMORY_REVIEW_STATUS_ACCEPTED, Some(existing_id), false)
+                    }
+                    None => {
+                        let memory_id =
+                            short_content_id("mem", &[&request.scope_key, &request.normalized_key]);
+                        tx.execute(
+                            "INSERT INTO memory_items (
+                                id, scope_key, memory_class, state, statement,
+                                normalized_key, anchor_digest, source_kind,
+                                row_version, created_at, updated_at
+                            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, 0, ?8, ?8)
+                            ON CONFLICT(id) DO UPDATE SET
+                                state = excluded.state,
+                                statement = excluded.statement,
+                                memory_class = excluded.memory_class,
+                                source_kind = excluded.source_kind,
+                                row_version = memory_items.row_version + 1,
+                                updated_at = excluded.updated_at",
+                            params![
+                                memory_id,
+                                request.scope_key,
+                                request.memory_class,
+                                target_state,
+                                request.statement,
+                                request.normalized_key,
+                                source_kind,
+                                now,
+                            ],
+                        )?;
+                        (MEMORY_REVIEW_STATUS_ACCEPTED, Some(memory_id), true)
+                    }
+                }
+            }
+        };
+
+        tx.execute(
+            "UPDATE memory_review_requests
+             SET status = ?1, resolved_at = ?2, resolution_actor = ?3,
+                 resulting_memory_item_id = ?4, row_version = row_version + 1
+             WHERE id = ?5 AND status = ?6",
+            params![
+                status,
+                now,
+                actor,
+                resulting_memory_item_id,
+                id,
+                MEMORY_REVIEW_STATUS_PENDING,
+            ],
+        )?;
+        tx.commit()?;
+
+        let request = self
+            .memory_review_request(id)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "memory_review_request",
+                id: id.to_owned(),
+            })?;
+        Ok(MemoryReviewResolutionOutcome {
+            request,
+            resulting_memory_item_id,
+            materialized_new_item,
+        })
+    }
+
     pub fn prior_review_lookup(
         &self,
         query: PriorReviewLookupQuery<'_>,
@@ -5065,14 +5508,18 @@ impl RogerStore {
             _ => {}
         }
 
+        // Multi-token AND matching: every whitespace token must match across the
+        // searched columns. A single-token query preserves the old behavior; a
+        // multi-token query narrows instead of silently dropping every token
+        // after the first.
         let normalized_query = query.query_text.trim().to_ascii_lowercase();
-        let lexical_query = normalized_query
+        let tokens: Vec<String> = normalized_query
             .split_whitespace()
-            .next()
-            .unwrap_or(normalized_query.as_str())
-            .to_owned();
-        let query_is_empty = lexical_query.is_empty();
+            .map(ToOwned::to_owned)
+            .collect();
+        let query_is_empty = tokens.is_empty();
         let limit = query.limit.clamp(1, 100);
+        let exact_identifier = query.query_text.trim();
 
         let lexical_ready = self
             .index_state(&format!("lexical:{}", query.scope_key))?
@@ -5116,28 +5563,96 @@ impl RogerStore {
             && semantic_index_ready
             && !query.semantic_candidates.is_empty();
 
-        let mut evidence_hits =
-            self.lookup_evidence_hits(query.repository, &lexical_query, query_is_empty, limit)?;
-        let mut promoted_memory = self.lookup_memory_hits(
+        // Exact-identifier fast path FIRST: a query that is exactly a known
+        // finding id/fingerprint or memory id/normalized_key resolves directly to
+        // those rows (retrieval_reason = exact_identifier) before the lexical
+        // token scan runs. It degrades truthfully to lexical when nothing matches
+        // exactly instead of widening silently.
+        let (exact_evidence_ids, exact_memory_ids) = if query_is_empty {
+            (HashSet::new(), HashSet::new())
+        } else {
+            let evidence =
+                self.exact_identifier_evidence_hits(query.repository, exact_identifier)?;
+            let memory = self.exact_identifier_memory_hits(
+                query.scope_key,
+                exact_identifier,
+                &["established", "proven", "candidate"],
+            )?;
+            (
+                evidence
+                    .iter()
+                    .map(|hit| hit.finding_id.clone())
+                    .collect::<HashSet<_>>(),
+                memory
+                    .iter()
+                    .map(|hit| hit.memory_id.clone())
+                    .collect::<HashSet<_>>(),
+            )
+        };
+
+        let mut evidence_hits = if query_is_empty {
+            Vec::new()
+        } else {
+            self.exact_identifier_evidence_hits(query.repository, exact_identifier)?
+        };
+        let mut lexical_evidence =
+            self.lookup_evidence_hits(query.repository, &tokens, query_is_empty, limit)?;
+        lexical_evidence.retain(|hit| !exact_evidence_ids.contains(&hit.finding_id));
+        evidence_hits.append(&mut lexical_evidence);
+
+        let mut promoted_memory = if query_is_empty {
+            Vec::new()
+        } else {
+            self.exact_identifier_memory_hits(
+                query.scope_key,
+                exact_identifier,
+                &["established", "proven"],
+            )?
+        };
+        let mut lexical_promoted = self.lookup_memory_hits(
             query.scope_key,
-            &lexical_query,
+            &tokens,
             query_is_empty,
             &["established", "proven"],
             limit,
         )?;
+        lexical_promoted.retain(|hit| !exact_memory_ids.contains(&hit.memory_id));
+        promoted_memory.append(&mut lexical_promoted);
+
         let mut tentative_candidates = if query.include_tentative_candidates {
-            self.lookup_memory_hits(
+            let mut exact = if query_is_empty {
+                Vec::new()
+            } else {
+                self.exact_identifier_memory_hits(
+                    query.scope_key,
+                    exact_identifier,
+                    &["candidate"],
+                )?
+            };
+            let mut lexical = self.lookup_memory_hits(
                 query.scope_key,
-                &lexical_query,
+                &tokens,
                 query_is_empty,
                 &["candidate"],
                 limit,
-            )?
+            )?;
+            lexical.retain(|hit| !exact_memory_ids.contains(&hit.memory_id));
+            exact.append(&mut lexical);
+            exact
         } else {
             Vec::new()
         };
 
         if !semantic_operational {
+            // Keep the merged (exact-first, then lexical) ordering explicit and
+            // bounded so the lexical/recovery path returns the same shape the
+            // hybrid path sorts to.
+            sort_evidence_hits(&mut evidence_hits);
+            sort_memory_hits(&mut promoted_memory);
+            sort_memory_hits(&mut tentative_candidates);
+            evidence_hits.truncate(limit);
+            promoted_memory.truncate(limit);
+            tentative_candidates.truncate(limit);
             return Ok(PriorReviewLookupResult {
                 scope_bucket,
                 mode: if lexical_recovery_scan {
@@ -5164,7 +5679,19 @@ impl RogerStore {
             .copied()
             .filter(|finding_id| !existing_evidence_ids.contains(finding_id))
             .collect::<Vec<_>>();
-        for mut hit in self.evidence_hits_by_ids(query.repository, &missing_evidence_ids)? {
+        // Findings hydrate through the canonical finding-by-id path; posted
+        // outcomes and draft revisions carry synthetic ids (source-kind prefixed)
+        // and hydrate through the posted-outcome path so semantic-only matches on
+        // posted bodies/revisions still surface (tmmn.6).
+        let (missing_finding_ids, missing_posted_ids): (Vec<&str>, Vec<&str>) =
+            missing_evidence_ids
+                .iter()
+                .partition(|id| !is_synthetic_evidence_id(id));
+        let mut hydrated_evidence =
+            self.evidence_hits_by_ids(query.repository, &missing_finding_ids)?;
+        hydrated_evidence
+            .append(&mut self.posted_outcome_hits_by_ids(query.repository, &missing_posted_ids)?);
+        for mut hit in hydrated_evidence {
             hit.semantic_score_milli = *evidence_semantic_scores
                 .get(hit.finding_id.as_str())
                 .unwrap_or(&0);
@@ -5214,27 +5741,12 @@ impl RogerStore {
             hit.fused_score = fused_score(hit.lexical_score, hit.semantic_score_milli);
         }
 
-        evidence_hits.sort_unstable_by(|left, right| {
-            right
-                .fused_score
-                .cmp(&left.fused_score)
-                .then_with(|| right.lexical_score.cmp(&left.lexical_score))
-                .then_with(|| left.finding_id.cmp(&right.finding_id))
-        });
-        promoted_memory.sort_unstable_by(|left, right| {
-            right
-                .fused_score
-                .cmp(&left.fused_score)
-                .then_with(|| right.lexical_score.cmp(&left.lexical_score))
-                .then_with(|| left.memory_id.cmp(&right.memory_id))
-        });
-        tentative_candidates.sort_unstable_by(|left, right| {
-            right
-                .fused_score
-                .cmp(&left.fused_score)
-                .then_with(|| right.lexical_score.cmp(&left.lexical_score))
-                .then_with(|| left.memory_id.cmp(&right.memory_id))
-        });
+        sort_evidence_hits(&mut evidence_hits);
+        sort_memory_hits(&mut promoted_memory);
+        sort_memory_hits(&mut tentative_candidates);
+        evidence_hits.truncate(limit);
+        promoted_memory.truncate(limit);
+        tentative_candidates.truncate(limit);
 
         degraded_reasons.retain(|reason| {
             !reason.contains("semantic assets")
@@ -5389,6 +5901,69 @@ impl RogerStore {
                 target_kind: SemanticLookupTargetKind::MemoryItem,
                 target_id: id,
                 text: format!("{statement}\n{normalized_key}"),
+            });
+        }
+
+        // Posted outcomes + latest draft-revision bodies join the curated
+        // semantic corpus as evidence-lane entries (tmmn.6). They carry the same
+        // synthetic ids the lexical posted-outcome hits use, so the hybrid path
+        // can hydrate a semantic-only match back to a renderable hit.
+        let mut posted_stmt = self.conn.prepare_cached(
+            "SELECT pai.id, pai.remote_identifier, pai.status, di.body
+             FROM posted_action_items pai
+             JOIN outbound_draft_items di ON di.id = pai.draft_id
+             JOIN review_sessions rs ON rs.id = di.review_session_id
+             WHERE json_extract(rs.review_target, '$.repository') = ?1
+             ORDER BY rs.updated_at DESC, pai.rowid DESC
+             LIMIT ?2",
+        )?;
+        let posted_rows = posted_stmt.query_map(
+            params![repository, SEMANTIC_CANDIDATE_CORPUS_CAP as i64],
+            |row| {
+                let id: String = row.get(0)?;
+                let remote_identifier: String = row.get(1)?;
+                let status: String = row.get(2)?;
+                let body: String = row.get(3)?;
+                Ok((id, remote_identifier, status, body))
+            },
+        )?;
+        for row in posted_rows {
+            let (id, remote_identifier, status, body) = row?;
+            entries.push(SemanticCorpusEntry {
+                target_kind: SemanticLookupTargetKind::EvidenceFinding,
+                target_id: synthetic_evidence_id(EVIDENCE_SOURCE_POSTED_ACTION_ITEM, &id),
+                text: format!("posted action {remote_identifier} [{status}]\n{body}"),
+            });
+        }
+
+        let mut revision_stmt = self.conn.prepare_cached(
+            "SELECT r.id, r.body
+             FROM outbound_draft_revisions r
+             JOIN outbound_draft_items di ON di.id = r.draft_id
+             JOIN review_sessions rs ON rs.id = di.review_session_id
+             WHERE json_extract(rs.review_target, '$.repository') = ?1
+               AND r.revision_index = (
+                 SELECT MAX(r2.revision_index)
+                 FROM outbound_draft_revisions r2
+                 WHERE r2.draft_id = r.draft_id
+               )
+             ORDER BY rs.updated_at DESC, r.rowid DESC
+             LIMIT ?2",
+        )?;
+        let revision_rows = revision_stmt.query_map(
+            params![repository, SEMANTIC_CANDIDATE_CORPUS_CAP as i64],
+            |row| {
+                let id: String = row.get(0)?;
+                let body: String = row.get(1)?;
+                Ok((id, body))
+            },
+        )?;
+        for row in revision_rows {
+            let (id, body) = row?;
+            entries.push(SemanticCorpusEntry {
+                target_kind: SemanticLookupTargetKind::EvidenceFinding,
+                target_id: synthetic_evidence_id(EVIDENCE_SOURCE_OUTBOUND_DRAFT_REVISION, &id),
+                text: body,
             });
         }
 
@@ -6430,14 +7005,53 @@ impl RogerStore {
             .map_err(StorageError::from)
     }
 
+    /// Evidence lane = findings PLUS posted outcomes and latest draft-revision
+    /// bodies (tmmn.6). Each source carries a distinct `source_kind` so surfaces
+    /// can render provenance. All sources are token-filtered the same way.
     fn lookup_evidence_hits(
         &self,
         repository: &str,
-        normalized_query: &str,
+        tokens: &[String],
         query_is_empty: bool,
         limit: usize,
     ) -> Result<Vec<PriorReviewEvidenceHit>> {
-        let mut stmt = self.conn.prepare_cached(
+        let mut hits = self.lookup_finding_hits(repository, tokens, query_is_empty, limit)?;
+        hits.append(&mut self.lookup_posted_outcome_hits(
+            repository,
+            tokens,
+            query_is_empty,
+            limit,
+        )?);
+        Ok(hits)
+    }
+
+    fn lookup_finding_hits(
+        &self,
+        repository: &str,
+        tokens: &[String],
+        query_is_empty: bool,
+        limit: usize,
+    ) -> Result<Vec<PriorReviewEvidenceHit>> {
+        let mut values = Vec::<Value>::new();
+        values.push(Value::Text(repository.to_owned())); // ?1
+        let (where_sql, score_sql) = if query_is_empty {
+            ("1 = 1".to_owned(), "0".to_owned())
+        } else {
+            lexical_token_clauses(
+                tokens,
+                &[("lower(f.fingerprint)", 120)],
+                &[
+                    ("lower(f.fingerprint)", 60),
+                    ("lower(f.title)", 45),
+                    ("lower(f.normalized_summary)", 35),
+                ],
+                &mut values,
+            )
+        };
+        values.push(Value::Integer(limit as i64));
+        let limit_index = values.len();
+
+        let sql = format!(
             "SELECT
                 f.id,
                 f.session_id,
@@ -6451,56 +7065,366 @@ impl RogerStore {
                 f.confidence,
                 f.triage_state,
                 f.outbound_state,
-                (
-                    CASE WHEN lower(f.fingerprint) = ?2 THEN 120 ELSE 0 END +
-                    CASE WHEN instr(lower(f.fingerprint), ?2) > 0 THEN 60 ELSE 0 END +
-                    CASE WHEN instr(lower(f.title), ?2) > 0 THEN 45 ELSE 0 END +
-                    CASE WHEN instr(lower(f.normalized_summary), ?2) > 0 THEN 35 ELSE 0 END
-                ) AS lexical_score
+                ({score_sql}) AS lexical_score
             FROM findings f
             JOIN review_sessions rs ON rs.id = f.session_id
             WHERE json_extract(rs.review_target, '$.repository') = ?1
-              AND (
-                ?3 = 1
-                OR lower(f.fingerprint) = ?2
-                OR instr(lower(f.fingerprint), ?2) > 0
-                OR instr(lower(f.title), ?2) > 0
-                OR instr(lower(f.normalized_summary), ?2) > 0
-              )
+              AND ({where_sql})
             ORDER BY lexical_score DESC, rs.updated_at DESC, f.rowid DESC
-            LIMIT ?4",
-        )?;
+            LIMIT ?{limit_index}"
+        );
 
-        let rows = stmt.query_map(
-            params![
-                repository,
-                normalized_query,
-                if query_is_empty { 1 } else { 0 },
-                limit as i64
-            ],
-            |row| {
-                let pull_request_number = row.get::<_, i64>(4).unwrap_or_default().max(0) as u64;
-                let lexical_score = row.get::<_, i64>(12).unwrap_or_default();
-                Ok(PriorReviewEvidenceHit {
-                    finding_id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    review_run_id: row.get(2)?,
-                    repository: row.get(3)?,
-                    pull_request_number,
-                    fingerprint: row.get(5)?,
-                    title: row.get(6)?,
-                    normalized_summary: row.get(7)?,
-                    severity: row.get(8)?,
-                    confidence: row.get(9)?,
-                    triage_state: row.get(10)?,
-                    outbound_state: row.get(11)?,
-                    lexical_score,
-                    semantic_score_milli: 0,
-                    fused_score: fused_score(lexical_score, 0),
-                })
-            },
-        )?;
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params_from_iter(values), |row| {
+            let pull_request_number = row.get::<_, i64>(4).unwrap_or_default().max(0) as u64;
+            let lexical_score = row.get::<_, i64>(12).unwrap_or_default();
+            Ok(PriorReviewEvidenceHit {
+                finding_id: row.get(0)?,
+                session_id: row.get(1)?,
+                review_run_id: row.get(2)?,
+                repository: row.get(3)?,
+                pull_request_number,
+                fingerprint: row.get(5)?,
+                title: row.get(6)?,
+                normalized_summary: row.get(7)?,
+                severity: row.get(8)?,
+                confidence: row.get(9)?,
+                triage_state: row.get(10)?,
+                outbound_state: row.get(11)?,
+                source_kind: default_evidence_source_kind(),
+                retrieval_reason: default_retrieval_reason(),
+                lexical_score,
+                semantic_score_milli: 0,
+                fused_score: fused_score(lexical_score, 0),
+            })
+        })?;
 
+        let mut hits = Vec::new();
+        for row in rows {
+            hits.push(row?);
+        }
+        Ok(hits)
+    }
+
+    /// Posted outcomes + latest draft revisions as evidence hits (tmmn.6).
+    fn lookup_posted_outcome_hits(
+        &self,
+        repository: &str,
+        tokens: &[String],
+        query_is_empty: bool,
+        limit: usize,
+    ) -> Result<Vec<PriorReviewEvidenceHit>> {
+        let mut hits =
+            self.lookup_posted_action_item_hits(repository, tokens, query_is_empty, limit)?;
+        hits.append(&mut self.lookup_draft_revision_hits(
+            repository,
+            tokens,
+            query_is_empty,
+            limit,
+        )?);
+        Ok(hits)
+    }
+
+    fn lookup_posted_action_item_hits(
+        &self,
+        repository: &str,
+        tokens: &[String],
+        query_is_empty: bool,
+        limit: usize,
+    ) -> Result<Vec<PriorReviewEvidenceHit>> {
+        let mut values = Vec::<Value>::new();
+        values.push(Value::Text(repository.to_owned())); // ?1
+        let (where_sql, score_sql) = if query_is_empty {
+            ("1 = 1".to_owned(), "0".to_owned())
+        } else {
+            lexical_token_clauses(
+                tokens,
+                &[("lower(pai.remote_identifier)", 120)],
+                &[
+                    ("lower(pai.remote_identifier)", 60),
+                    ("lower(di.body)", 40),
+                    ("lower(pai.status)", 20),
+                ],
+                &mut values,
+            )
+        };
+        values.push(Value::Integer(limit as i64));
+        let limit_index = values.len();
+
+        let sql = format!(
+            "SELECT
+                pai.id,
+                di.review_session_id,
+                di.review_run_id,
+                json_extract(rs.review_target, '$.repository') AS repository,
+                CAST(json_extract(rs.review_target, '$.pull_request_number') AS INTEGER) AS pull_request_number,
+                di.id,
+                pai.remote_identifier,
+                pai.status,
+                di.body,
+                ({score_sql}) AS lexical_score
+            FROM posted_action_items pai
+            JOIN outbound_draft_items di ON di.id = pai.draft_id
+            JOIN review_sessions rs ON rs.id = di.review_session_id
+            WHERE json_extract(rs.review_target, '$.repository') = ?1
+              AND ({where_sql})
+            ORDER BY lexical_score DESC, rs.updated_at DESC, pai.rowid DESC
+            LIMIT ?{limit_index}"
+        );
+
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params_from_iter(values), |row| {
+            let pull_request_number = row.get::<_, i64>(4).unwrap_or_default().max(0) as u64;
+            let posted_id: String = row.get(0)?;
+            let remote_identifier: String = row.get(6)?;
+            let status: String = row.get(7)?;
+            let lexical_score = row.get::<_, i64>(9).unwrap_or_default();
+            Ok(PriorReviewEvidenceHit {
+                finding_id: synthetic_evidence_id(EVIDENCE_SOURCE_POSTED_ACTION_ITEM, &posted_id),
+                session_id: row.get(1)?,
+                review_run_id: Some(row.get::<_, String>(2)?),
+                repository: row.get(3)?,
+                pull_request_number,
+                fingerprint: row.get(5)?,
+                title: format!("posted action {remote_identifier} [{status}]"),
+                normalized_summary: row.get(8)?,
+                severity: "info".to_owned(),
+                confidence: "posted".to_owned(),
+                triage_state: "posted".to_owned(),
+                outbound_state: status,
+                source_kind: EVIDENCE_SOURCE_POSTED_ACTION_ITEM.to_owned(),
+                retrieval_reason: default_retrieval_reason(),
+                lexical_score,
+                semantic_score_milli: 0,
+                fused_score: fused_score(lexical_score, 0),
+            })
+        })?;
+
+        let mut hits = Vec::new();
+        for row in rows {
+            hits.push(row?);
+        }
+        Ok(hits)
+    }
+
+    fn lookup_draft_revision_hits(
+        &self,
+        repository: &str,
+        tokens: &[String],
+        query_is_empty: bool,
+        limit: usize,
+    ) -> Result<Vec<PriorReviewEvidenceHit>> {
+        let mut values = Vec::<Value>::new();
+        values.push(Value::Text(repository.to_owned())); // ?1
+        let (where_sql, score_sql) = if query_is_empty {
+            ("1 = 1".to_owned(), "0".to_owned())
+        } else {
+            lexical_token_clauses(
+                tokens,
+                &[],
+                &[("lower(r.body)", 40), ("lower(di.target_locator)", 25)],
+                &mut values,
+            )
+        };
+        values.push(Value::Integer(limit as i64));
+        let limit_index = values.len();
+
+        // Only the latest revision per draft enters search; earlier revisions are
+        // superseded lineage.
+        let sql = format!(
+            "SELECT
+                r.id,
+                di.review_session_id,
+                di.review_run_id,
+                json_extract(rs.review_target, '$.repository') AS repository,
+                CAST(json_extract(rs.review_target, '$.pull_request_number') AS INTEGER) AS pull_request_number,
+                r.draft_id,
+                r.revision_index,
+                r.author_kind,
+                r.body,
+                ({score_sql}) AS lexical_score
+            FROM outbound_draft_revisions r
+            JOIN outbound_draft_items di ON di.id = r.draft_id
+            JOIN review_sessions rs ON rs.id = di.review_session_id
+            WHERE json_extract(rs.review_target, '$.repository') = ?1
+              AND r.revision_index = (
+                SELECT MAX(r2.revision_index)
+                FROM outbound_draft_revisions r2
+                WHERE r2.draft_id = r.draft_id
+              )
+              AND ({where_sql})
+            ORDER BY lexical_score DESC, rs.updated_at DESC, r.rowid DESC
+            LIMIT ?{limit_index}"
+        );
+
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params_from_iter(values), |row| {
+            let pull_request_number = row.get::<_, i64>(4).unwrap_or_default().max(0) as u64;
+            let revision_id: String = row.get(0)?;
+            let revision_index: i64 = row.get(6)?;
+            let author_kind: String = row.get(7)?;
+            let lexical_score = row.get::<_, i64>(9).unwrap_or_default();
+            Ok(PriorReviewEvidenceHit {
+                finding_id: synthetic_evidence_id(
+                    EVIDENCE_SOURCE_OUTBOUND_DRAFT_REVISION,
+                    &revision_id,
+                ),
+                session_id: row.get(1)?,
+                review_run_id: Some(row.get::<_, String>(2)?),
+                repository: row.get(3)?,
+                pull_request_number,
+                fingerprint: row.get(5)?,
+                title: format!("draft revision rev {revision_index} [{author_kind}]"),
+                normalized_summary: row.get(8)?,
+                severity: "info".to_owned(),
+                confidence: "revision".to_owned(),
+                triage_state: "draft".to_owned(),
+                outbound_state: "revised".to_owned(),
+                source_kind: EVIDENCE_SOURCE_OUTBOUND_DRAFT_REVISION.to_owned(),
+                retrieval_reason: default_retrieval_reason(),
+                lexical_score,
+                semantic_score_milli: 0,
+                fused_score: fused_score(lexical_score, 0),
+            })
+        })?;
+
+        let mut hits = Vec::new();
+        for row in rows {
+            hits.push(row?);
+        }
+        Ok(hits)
+    }
+
+    /// Hydrate posted-outcome/draft-revision evidence hits by their synthetic
+    /// ids so semantic-only matches (present in the semantic corpus but not the
+    /// lexical result) still surface in the hybrid path.
+    fn posted_outcome_hits_by_ids(
+        &self,
+        repository: &str,
+        synthetic_ids: &[&str],
+    ) -> Result<Vec<PriorReviewEvidenceHit>> {
+        if synthetic_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let wanted: HashSet<&str> = synthetic_ids.iter().copied().collect();
+        let all =
+            self.lookup_posted_outcome_hits(repository, &[], true, SEMANTIC_CANDIDATE_CORPUS_CAP)?;
+        Ok(all
+            .into_iter()
+            .filter(|hit| wanted.contains(hit.finding_id.as_str()))
+            .collect())
+    }
+
+    /// Exact-identifier fast path over findings: a query equal to a finding id or
+    /// fingerprint resolves directly with `retrieval_reason = exact_identifier`.
+    fn exact_identifier_evidence_hits(
+        &self,
+        repository: &str,
+        identifier: &str,
+    ) -> Result<Vec<PriorReviewEvidenceHit>> {
+        if identifier.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT
+                f.id,
+                f.session_id,
+                COALESCE(f.last_seen_run_id, f.first_run_id) AS review_run_id,
+                json_extract(rs.review_target, '$.repository') AS repository,
+                CAST(json_extract(rs.review_target, '$.pull_request_number') AS INTEGER) AS pull_request_number,
+                f.fingerprint,
+                f.title,
+                f.normalized_summary,
+                f.severity,
+                f.confidence,
+                f.triage_state,
+                f.outbound_state
+            FROM findings f
+            JOIN review_sessions rs ON rs.id = f.session_id
+            WHERE json_extract(rs.review_target, '$.repository') = ?1
+              AND (f.id = ?2 OR lower(f.fingerprint) = lower(?2))
+            ORDER BY rs.updated_at DESC, f.rowid DESC",
+        )?;
+        let rows = stmt.query_map(params![repository, identifier], |row| {
+            let pull_request_number = row.get::<_, i64>(4).unwrap_or_default().max(0) as u64;
+            Ok(PriorReviewEvidenceHit {
+                finding_id: row.get(0)?,
+                session_id: row.get(1)?,
+                review_run_id: row.get(2)?,
+                repository: row.get(3)?,
+                pull_request_number,
+                fingerprint: row.get(5)?,
+                title: row.get(6)?,
+                normalized_summary: row.get(7)?,
+                severity: row.get(8)?,
+                confidence: row.get(9)?,
+                triage_state: row.get(10)?,
+                outbound_state: row.get(11)?,
+                source_kind: default_evidence_source_kind(),
+                retrieval_reason: RETRIEVAL_REASON_EXACT_IDENTIFIER.to_owned(),
+                lexical_score: EXACT_IDENTIFIER_LEXICAL_SCORE,
+                semantic_score_milli: 0,
+                fused_score: fused_score(EXACT_IDENTIFIER_LEXICAL_SCORE, 0),
+            })
+        })?;
+        let mut hits = Vec::new();
+        for row in rows {
+            hits.push(row?);
+        }
+        Ok(hits)
+    }
+
+    /// Exact-identifier fast path over memory items: a query equal to a memory id
+    /// or normalized_key resolves directly with `retrieval_reason =
+    /// exact_identifier`.
+    fn exact_identifier_memory_hits(
+        &self,
+        scope_key: &str,
+        identifier: &str,
+        states: &[&str],
+    ) -> Result<Vec<PriorReviewMemoryHit>> {
+        if identifier.is_empty() || states.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut values = Vec::<Value>::new();
+        values.push(Value::Text(scope_key.to_owned()));
+        let mut state_placeholders = Vec::new();
+        for state in states {
+            values.push(Value::Text((*state).to_owned()));
+            state_placeholders.push(format!("?{}", values.len()));
+        }
+        values.push(Value::Text(identifier.to_owned()));
+        let id_index = values.len();
+
+        let sql = format!(
+            "SELECT
+                id, scope_key, memory_class, state, statement, normalized_key,
+                anchor_digest, source_kind
+            FROM memory_items
+            WHERE scope_key = ?1
+              AND state IN ({})
+              AND (id = ?{id_index} OR lower(normalized_key) = lower(?{id_index}))
+            ORDER BY updated_at DESC, rowid DESC",
+            state_placeholders.join(", ")
+        );
+
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params_from_iter(values), |row| {
+            Ok(PriorReviewMemoryHit {
+                memory_id: row.get(0)?,
+                scope_key: row.get(1)?,
+                memory_class: row.get(2)?,
+                state: row.get(3)?,
+                statement: row.get(4)?,
+                normalized_key: row.get(5)?,
+                anchor_digest: row.get(6)?,
+                source_kind: row.get(7)?,
+                retrieval_reason: RETRIEVAL_REASON_EXACT_IDENTIFIER.to_owned(),
+                lexical_score: EXACT_IDENTIFIER_LEXICAL_SCORE,
+                semantic_score_milli: 0,
+                fused_score: fused_score(EXACT_IDENTIFIER_LEXICAL_SCORE, 0),
+            })
+        })?;
         let mut hits = Vec::new();
         for row in rows {
             hits.push(row?);
@@ -6511,7 +7435,7 @@ impl RogerStore {
     fn lookup_memory_hits(
         &self,
         scope_key: &str,
-        normalized_query: &str,
+        tokens: &[String],
         query_is_empty: bool,
         states: &[&str],
         limit: usize,
@@ -6529,19 +7453,25 @@ impl RogerStore {
             state_placeholders.push(format!("?{}", values.len()));
         }
 
-        let query_index = if query_is_empty {
-            None
+        let (where_sql, token_score_sql) = if query_is_empty {
+            (None, "0".to_owned())
         } else {
-            values.push(Value::Text(normalized_query.to_owned()));
-            Some(values.len())
+            let (where_sql, score_sql) = lexical_token_clauses(
+                tokens,
+                &[("lower(normalized_key)", 120)],
+                &[
+                    ("lower(normalized_key)", 55),
+                    ("lower(statement)", 40),
+                    ("lower(COALESCE(anchor_digest, ''))", 15),
+                ],
+                &mut values,
+            );
+            (Some(where_sql), score_sql)
         };
 
-        let lexical_score_sql = if let Some(query_index) = query_index {
+        let lexical_score_sql = if where_sql.is_some() {
             format!(
-                "(CASE WHEN lower(normalized_key) = ?{query_index} THEN 120 ELSE 0 END +
-                  CASE WHEN instr(lower(normalized_key), ?{query_index}) > 0 THEN 55 ELSE 0 END +
-                  CASE WHEN instr(lower(statement), ?{query_index}) > 0 THEN 40 ELSE 0 END +
-                  CASE WHEN instr(lower(COALESCE(anchor_digest, '')), ?{query_index}) > 0 THEN 15 ELSE 0 END +
+                "(({token_score_sql}) +
                   CASE state
                     WHEN 'proven' THEN 20
                     WHEN 'established' THEN 10
@@ -6563,15 +7493,8 @@ impl RogerStore {
             state_placeholders.join(", ")
         );
 
-        if let Some(query_index) = query_index {
-            sql.push_str(&format!(
-                " AND (
-                    lower(normalized_key) = ?{query_index}
-                    OR instr(lower(normalized_key), ?{query_index}) > 0
-                    OR instr(lower(statement), ?{query_index}) > 0
-                    OR instr(lower(COALESCE(anchor_digest, '')), ?{query_index}) > 0
-                )"
-            ));
+        if let Some(where_sql) = &where_sql {
+            sql.push_str(&format!(" AND ({where_sql})"));
         }
 
         values.push(Value::Integer(limit as i64));
@@ -6593,6 +7516,7 @@ impl RogerStore {
                 normalized_key: row.get(5)?,
                 anchor_digest: row.get(6)?,
                 source_kind: row.get(7)?,
+                retrieval_reason: default_retrieval_reason(),
                 lexical_score,
                 semantic_score_milli: 0,
                 fused_score: fused_score(lexical_score, 0),
@@ -6662,6 +7586,8 @@ impl RogerStore {
                     confidence: row.get(9)?,
                     triage_state: row.get(10)?,
                     outbound_state: row.get(11)?,
+                    source_kind: default_evidence_source_kind(),
+                    retrieval_reason: default_retrieval_reason(),
                     lexical_score: 0,
                     semantic_score_milli: 0,
                     fused_score: 0,
@@ -6716,6 +7642,7 @@ impl RogerStore {
                     normalized_key: row.get(5)?,
                     anchor_digest: row.get(6)?,
                     source_kind: row.get(7)?,
+                    retrieval_reason: default_retrieval_reason(),
                     lexical_score: 0,
                     semantic_score_milli: 0,
                     fused_score: 0,
@@ -7322,6 +8249,16 @@ impl RogerStore {
                 self.conn.pragma_update(None, "user_version", 18)?;
             }
 
+            if version < 19 {
+                self.conn.execute_batch(MIGRATION_0019)?;
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at)
+                    VALUES (19, 'memory_review_requests', ?1)",
+                    params![time::now_ts()],
+                )?;
+                self.conn.pragma_update(None, "user_version", 19)?;
+            }
+
             if migration_class.requires_sidecar_invalidation() {
                 self.invalidate_sidecars_for_migration()?;
             }
@@ -7570,6 +8507,145 @@ fn fused_score(lexical_score: i64, semantic_score_milli: i64) -> i64 {
     lexical_score
         .saturating_mul(10)
         .saturating_add(semantic_score_milli)
+}
+
+/// Deterministic short content id: `<prefix>-<24 hex chars of sha256(parts)>`.
+/// Parts are unit-separated so distinct groupings never collide.
+fn short_content_id(prefix: &str, parts: &[&str]) -> String {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+        hasher.update(b"\x1f");
+    }
+    let digest = format!("{:x}", hasher.finalize());
+    format!("{prefix}-{}", &digest[..24])
+}
+
+fn memory_review_request_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<MemoryReviewRequestRecord> {
+    Ok(MemoryReviewRequestRecord {
+        id: row.get(0)?,
+        review_session_id: row.get(1)?,
+        review_run_id: row.get(2)?,
+        source: row.get(3)?,
+        request_kind: row.get(4)?,
+        statement: row.get(5)?,
+        normalized_key: row.get(6)?,
+        scope_key: row.get(7)?,
+        memory_class: row.get(8)?,
+        rationale: row.get(9)?,
+        status: row.get(10)?,
+        created_at: row.get(11)?,
+        resolved_at: row.get(12)?,
+        resolution_actor: row.get(13)?,
+        resulting_memory_item_id: row.get(14)?,
+        row_version: row.get(15)?,
+    })
+}
+
+/// Normalize free text into a stable memory `normalized_key`: collapse
+/// whitespace and lowercase. Shared so the worker write paths and any operator
+/// surface derive the same dedup key.
+pub fn normalize_memory_key(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+/// True when a `PriorReviewEvidenceHit::finding_id` is a synthetic id for a
+/// non-finding evidence source (posted outcome or draft revision), rather than a
+/// real `findings.id`. Synthetic ids are `"<source_kind>:<row_id>"`.
+fn is_synthetic_evidence_id(id: &str) -> bool {
+    id.starts_with(EVIDENCE_SOURCE_POSTED_ACTION_ITEM)
+        && id.as_bytes().get(EVIDENCE_SOURCE_POSTED_ACTION_ITEM.len()) == Some(&b':')
+        || id.starts_with(EVIDENCE_SOURCE_OUTBOUND_DRAFT_REVISION)
+            && id
+                .as_bytes()
+                .get(EVIDENCE_SOURCE_OUTBOUND_DRAFT_REVISION.len())
+                == Some(&b':')
+}
+
+fn synthetic_evidence_id(source_kind: &str, row_id: &str) -> String {
+    format!("{source_kind}:{row_id}")
+}
+
+/// Deterministic sort for evidence hits: highest fused score first, exact
+/// identifier reason ahead of lexical at equal score, then stable id order.
+fn sort_evidence_hits(hits: &mut [PriorReviewEvidenceHit]) {
+    hits.sort_by(|left, right| {
+        right
+            .fused_score
+            .cmp(&left.fused_score)
+            .then_with(|| {
+                retrieval_reason_rank(&left.retrieval_reason)
+                    .cmp(&retrieval_reason_rank(&right.retrieval_reason))
+            })
+            .then_with(|| right.lexical_score.cmp(&left.lexical_score))
+            .then_with(|| left.finding_id.cmp(&right.finding_id))
+    });
+}
+
+fn sort_memory_hits(hits: &mut [PriorReviewMemoryHit]) {
+    hits.sort_by(|left, right| {
+        right
+            .fused_score
+            .cmp(&left.fused_score)
+            .then_with(|| {
+                retrieval_reason_rank(&left.retrieval_reason)
+                    .cmp(&retrieval_reason_rank(&right.retrieval_reason))
+            })
+            .then_with(|| right.lexical_score.cmp(&left.lexical_score))
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
+}
+
+fn retrieval_reason_rank(reason: &str) -> u8 {
+    if reason == RETRIEVAL_REASON_EXACT_IDENTIFIER {
+        0
+    } else {
+        1
+    }
+}
+
+/// Build the multi-token AND WHERE clause and additive scoring expression for a
+/// lexical scan. Every token must match at least one searched column
+/// (AND across tokens, OR across columns); the score sums each column's weight
+/// per matching token. Column expressions must already lowercase the column and
+/// the caller pushes the lowercased tokens as bind values.
+fn lexical_token_clauses(
+    tokens: &[String],
+    exact_columns: &[(&str, i64)],
+    instr_columns: &[(&str, i64)],
+    values: &mut Vec<Value>,
+) -> (String, String) {
+    let mut where_terms = Vec::with_capacity(tokens.len());
+    let mut score_terms = Vec::new();
+    for token in tokens {
+        values.push(Value::Text(token.clone()));
+        let idx = values.len();
+        let mut or_terms = Vec::new();
+        for (col, weight) in exact_columns {
+            or_terms.push(format!("{col} = ?{idx}"));
+            score_terms.push(format!("CASE WHEN {col} = ?{idx} THEN {weight} ELSE 0 END"));
+        }
+        for (col, weight) in instr_columns {
+            or_terms.push(format!("instr({col}, ?{idx}) > 0"));
+            score_terms.push(format!(
+                "CASE WHEN instr({col}, ?{idx}) > 0 THEN {weight} ELSE 0 END"
+            ));
+        }
+        where_terms.push(format!("({})", or_terms.join(" OR ")));
+    }
+    let where_sql = where_terms.join(" AND ");
+    let score_sql = if score_terms.is_empty() {
+        "0".to_owned()
+    } else {
+        score_terms.join(" + ")
+    };
+    (where_sql, score_sql)
 }
 
 fn session_entry_from_record(record: &ReviewSessionRecord) -> SessionFinderEntry {

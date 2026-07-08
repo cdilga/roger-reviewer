@@ -391,12 +391,15 @@ fn prior_review_lookup_fuses_semantic_candidates_when_assets_and_sidecars_are_re
         .collect::<Vec<_>>();
     assert_eq!(evidence_ids, vec!["finding-owner", "finding-semantic-only"]);
 
+    // Multi-token AND matching: `mem-proven` only matches "refresh"/"signal"
+    // (not "stale"/"findings"), so it is correctly excluded from the lexical
+    // arm. `mem-proven-semantic` surfaces purely through the semantic candidate.
     let promoted_ids = result
         .promoted_memory
         .iter()
         .map(|hit| hit.memory_id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(promoted_ids, vec!["mem-proven", "mem-proven-semantic"]);
+    assert_eq!(promoted_ids, vec!["mem-proven-semantic"]);
 
     let candidate_ids = result
         .tentative_candidates
