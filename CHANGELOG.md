@@ -4,6 +4,64 @@ Roger Reviewer ships on a CalVer release lane (`vYYYY.MM.DD`). This file groups
 the dated releases into the product milestone they belong to. Entries describe
 what actually shipped; aspirational or feature-gated work is called out as such.
 
+## 0.3 (v2026.07.08) — In-place updates, real memory, worker transport, session sanity
+
+This release makes several surfaces that previously only *looked* real actually
+work, and closes the update trap the prior release left for existing users.
+
+### Updates that just work
+
+- `rr update` now applies additive (class-A) store-schema migrations in place
+  instead of failing closed on any schema change. The updater compares envelope
+  *format* (not exact struct equality), classifies the real migration delta
+  honestly, and — when it still must block — hands you the installer one-liner
+  directly. **This is the last release you'll need a one-time installer pass to
+  cross a schema bump**; the store advanced to schema 19 here, so users on
+  `v2026.07.07` update once with the install command, then in place forever after.
+
+### Memory that actually stores something
+
+- Memory was a well-typed façade: the memory table had no production writer, all
+  six search modes collapsed to a first-word-only substring scan, and posted
+  review outcomes never entered search. Now: worker memory-review requests
+  persist as durable rows; a TUI review surface (`m` toggle, `a`/`x`
+  accept/reject) promotes accepted candidates into real memory (the first
+  production writer); posted comments and edited draft bodies are indexed into
+  search with provenance; search does multi-token AND matching with a direct
+  identifier fast-path; and `rr status`/`rr doctor` now report semantic-asset
+  posture with an install repair action. The heavier remainder (vector sidecar,
+  memory graph, usage-event promotion ladder) is explicitly deferred and tracked.
+
+### A review worker that can see its own session
+
+- `rr review` now pre-stages a canonical worker-task binding (with nonce) and
+  commits the session before the provider spawns, so an in-session agent can call
+  the `rr agent` worker transport and resolve its own session. The feature-gated
+  Copilot read-only policy gained a strict, fail-closed carve-out for that
+  transport plus a scoped worker-inbox write exception and an inline
+  `--request-b64` submission path — so a policy-sandboxed reviewer can read
+  context, search memory, and submit findings without any repository-write
+  capability. Live-proven read path against real Copilot; a live agent submitting
+  a full findings pack remains an agent-steering follow-up.
+
+### Session sanity and browser candidates
+
+- `rr review` reuses an existing non-terminal session for the same PR instead of
+  minting a new one every invocation (`--fresh` to override); candidate lists cap
+  at the five most-recent per PR with ages. The browser panel finally renders the
+  session inventory it already received — a per-session list with Resume buttons,
+  an explicit picker when several sessions match (no more silent auto-pick),
+  unified findings rendering, copyable `rr open --session` handoffs, and a
+  visible-tab status re-poll. Edge 150+'s `--load-extension` removal is documented.
+
+### Skills that teach the real product
+
+- New `roger-worker-protocol` (the missing "how to be a Roger review worker"
+  doctrine), `roger-operator-quickstart`, and `roger-tui-cheatsheet` skills;
+  existing skills updated to the seven-verb CLI and `--interactive`; the stale
+  "Copilot is preferred" claims in the doc mirrors are gone; the skills bundle
+  now installs to the Codex skill root as well.
+
 ## 0.3 (v2026.07.07) — Seven-verb CLI, loud browser companion, editable outbound loop
 
 This release massively simplifies Roger's operator surface and closes the last
