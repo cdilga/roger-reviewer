@@ -1125,7 +1125,9 @@ fn repeated_review_reuses_resume_bundle_artifact_for_duplicate_digest() {
         .as_str()
         .expect("first bundle id");
 
-    let second = run_rr(&["review", "--pr", "42", "--robot"], &runtime);
+    // --fresh forces a second genuine launch (a plain `rr review` would reuse
+    // the first session); this exercises the duplicate resume-bundle digest path.
+    let second = run_rr(&["review", "--pr", "42", "--fresh", "--robot"], &runtime);
     assert_eq!(second.exit_code, 0, "{}", second.stderr);
     let second_payload = parse_robot_payload(&second.stdout);
     let second_bundle_id = second_payload["data"]["resume_bundle_artifact_id"]
@@ -1606,8 +1608,18 @@ fn review_succeeds_with_degraded_outcome_for_claude_and_gemini() {
     };
 
     for provider in ["claude", "gemini"] {
+        // --fresh so each provider gets a genuine launch instead of the second
+        // one reusing the first provider's session.
         let review = run_rr(
-            &["review", "--pr", "42", "--provider", provider, "--robot"],
+            &[
+                "review",
+                "--pr",
+                "42",
+                "--provider",
+                provider,
+                "--fresh",
+                "--robot",
+            ],
             &runtime,
         );
         // Exits 5 for Degraded because Tier A providers (Claude/Gemini) are always degraded

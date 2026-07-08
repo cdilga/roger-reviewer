@@ -113,5 +113,25 @@ if [ "$fail" -ne 0 ]; then
   echo "pre-tool-use matcher tests FAILED"
   exit 1
 fi
+
+# --- worker inbox scoped write exception ---
+inbox="${TMPDIR:-/tmp}/rr-hook-inbox-test.$$"
+mkdir -p "$inbox"
+export RR_WORKER_INBOX_DIR="$inbox"
+assert_decision "create inside inbox allowed" allow \
+  "{\"toolName\":\"create\",\"toolArgs\":\"{\\\"path\\\":\\\"$inbox/stage-result.json\\\"}\"}"
+assert_decision "write inside inbox allowed" allow \
+  "{\"toolName\":\"write\",\"toolArgs\":\"{\\\"filePath\\\":\\\"$inbox/notes.json\\\"}\"}"
+assert_decision "create outside inbox denied" deny \
+  "{\"toolName\":\"create\",\"toolArgs\":\"{\\\"path\\\":\\\"/tmp/evil.json\\\"}\"}"
+assert_decision "traversal out of inbox denied" deny \
+  "{\"toolName\":\"create\",\"toolArgs\":\"{\\\"path\\\":\\\"$inbox/../escape.json\\\"}\"}"
+assert_decision "edit stays denied even in inbox" deny \
+  "{\"toolName\":\"edit\",\"toolArgs\":\"{\\\"path\\\":\\\"$inbox/stage-result.json\\\"}\"}"
+unset RR_WORKER_INBOX_DIR
+assert_decision "create denied when no inbox env" deny \
+  "{\"toolName\":\"create\",\"toolArgs\":\"{\\\"path\\\":\\\"$inbox/stage-result.json\\\"}\"}"
+rm -f "$inbox"/*.json 2>/dev/null || true
+rmdir "$inbox" 2>/dev/null || true
 echo "pre-tool-use matcher tests passed"
 exit 0

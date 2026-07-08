@@ -2374,11 +2374,26 @@ impl RogerStore {
             ));
         }
 
+        // Idempotent over a provisional pre-spawn commit: launches whose
+        // provider runs an in-session worker DURING the launch subprocess
+        // (Copilot) provision the session/run rows before spawning so the
+        // worker's `rr agent` calls can see their own session; finalize then
+        // upgrades the provisional rows with the verified binding.
         tx.execute(
             "INSERT INTO review_sessions (
                 id, review_target, provider, session_locator, resume_bundle_artifact_id,
                 continuity_state, attention_state, launch_profile_id, row_version, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?9)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?9)
+            ON CONFLICT(id) DO UPDATE SET
+                review_target = excluded.review_target,
+                provider = excluded.provider,
+                session_locator = excluded.session_locator,
+                resume_bundle_artifact_id = excluded.resume_bundle_artifact_id,
+                continuity_state = excluded.continuity_state,
+                attention_state = excluded.attention_state,
+                launch_profile_id = excluded.launch_profile_id,
+                row_version = review_sessions.row_version + 1,
+                updated_at = excluded.updated_at",
             params![
                 input.review_session.id,
                 review_target_json,
@@ -2421,7 +2436,12 @@ impl RogerStore {
             "INSERT INTO review_runs (
                 id, session_id, run_kind, repo_snapshot,
                 continuity_quality, session_locator_artifact_id, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(id) DO UPDATE SET
+                run_kind = excluded.run_kind,
+                repo_snapshot = excluded.repo_snapshot,
+                continuity_quality = excluded.continuity_quality,
+                session_locator_artifact_id = excluded.session_locator_artifact_id",
             params![
                 input.review_run.id,
                 input.review_run.session_id,

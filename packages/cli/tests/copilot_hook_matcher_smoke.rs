@@ -20,9 +20,7 @@ fn workspace_root() -> PathBuf {
 }
 
 fn ensure_executable(path: &Path) {
-    let mut permissions = std::fs::metadata(path)
-        .expect("stat script")
-        .permissions();
+    let mut permissions = std::fs::metadata(path).expect("stat script").permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(path, permissions).expect("chmod script");
 }

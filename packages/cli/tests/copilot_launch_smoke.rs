@@ -1178,3 +1178,95 @@ fn workspace_copilot_assets_exist_and_session_start_hook_emits_roger_artifact() 
     assert_eq!(emitted["payload"]["attempt_nonce"], "attempt-123");
     assert_eq!(emitted["payload"]["policy_digest"], "sha256:policy");
 }
+
+#[test]
+fn copilot_launch_provisions_session_visible_to_midlaunch_worker() {
+    // The Copilot worker runs DURING the launch subprocess, so the session/run
+    // rows must be committed before the provider spawns. This double extracts
+    // the worker-task path from its own seed prompt and calls the real rr
+    // binary mid-launch — exactly what a live in-session agent does — and the
+    // transport must resolve the session instead of failing with
+    // "not present in the Roger store" (the p5 live-proof blocker).
+    let hook_event = fixture_case(
+        "tests/fixtures/fixture_copilot_hook_stream/copilot_hook_events.json",
+        "session_start_verified_id",
+        "events",
+    );
+    let expected_launch_profile = hook_event["payload"]["launch_profile_id"]
+        .as_str()
+        .expect("launch profile id");
+
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    init_repo(&repo);
+    let store_root = temp.path().join("roger-store");
+    let midlaunch_out = temp.path().join("midlaunch-context.json");
+    let fake_copilot = temp.path().join("fake-copilot");
+    let rr_bin = env!("CARGO_BIN_EXE_rr");
+    let fake_copilot_script = format!(
+        "#!/bin/sh\nset -eu\n\
+seed=\"$2\"\n\
+task_path=$(printf '%s' \"$seed\" | sed -n 's/.*get_review_context --task-file \\([^` ]*\\).*/\\1/p')\n\
+[ -n \"$task_path\" ] || {{ echo 'no task path in seed' >&2; exit 64; }}\n\
+mkdir -p \"$(dirname \"$RR_COPILOT_SESSION_START_ARTIFACT\")\"\n\
+cat > \"$RR_COPILOT_SESSION_START_ARTIFACT\" <<HOOK\n\
+{{\"hook\":\"session-start\",\"payload\":{{\"provider\":\"copilot\",\"session_id\":\"copilot-midlaunch-1\",\"worktree_root\":\"$PWD\",\"launch_profile_id\":\"{profile}\"}}}}\n\
+HOOK\n\
+RR_STORE_ROOT=\"{store}\" \"{rr}\" agent worker.get_review_context --task-file \"$task_path\" > \"{out}\" 2>&1 || true\n\
+printf 'Copilot CLI ready\\n'\n",
+        profile = expected_launch_profile,
+        store = store_root.display(),
+        rr = rr_bin,
+        out = midlaunch_out.display(),
+    );
+    write_executable(&fake_copilot, &fake_copilot_script);
+
+    let runtime = CliRuntime {
+        cwd: repo.clone(),
+        store_root: store_root.clone(),
+        opencode_bin: "opencode".to_owned(),
+    };
+
+    let gate = "1".to_owned();
+    let copilot_bin = fake_copilot.to_string_lossy().to_string();
+    let review = run_with_env_overrides(
+        &[
+            (ENV_COPILOT_ADMISSION_GATE, Some(gate.as_str())),
+            (ENV_COPILOT_BIN, Some(copilot_bin.as_str())),
+        ],
+        || {
+            run(
+                &[
+                    "review".to_owned(),
+                    "--pr".to_owned(),
+                    "7".to_owned(),
+                    "--provider".to_owned(),
+                    "copilot".to_owned(),
+                    "--robot".to_owned(),
+                ],
+                &runtime,
+            )
+        },
+    );
+
+    assert_eq!(review.exit_code, 5, "{}", review.stderr);
+    let payload = parse_robot(&review.stdout);
+    let launched_session_id = payload["data"]["session_id"]
+        .as_str()
+        .expect("session id in review payload");
+
+    let context_raw = std::fs::read_to_string(&midlaunch_out)
+        .expect("mid-launch worker call must have produced output");
+    assert!(
+        !context_raw.contains("is not present in the Roger store"),
+        "mid-launch worker must see its own session: {context_raw}"
+    );
+    assert!(
+        !context_raw.contains("validation_failed"),
+        "mid-launch get_review_context must validate: {context_raw}"
+    );
+    assert!(
+        context_raw.contains(launched_session_id),
+        "mid-launch context must be bound to the launched session {launched_session_id}: {context_raw}"
+    );
+}

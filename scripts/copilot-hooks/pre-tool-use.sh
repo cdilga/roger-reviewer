@@ -80,10 +80,29 @@ allow() {
   exit 0
 }
 
-# Repository writes are always denied.
+# Repository writes are denied — with ONE scoped exception: the Roger-owned
+# worker inbox (RR_WORKER_INBOX_DIR, exported by the Roger launch), where the
+# in-session worker stages its stage-result request JSON for
+# `rr agent worker.submit_stage_result --request-file`. The path must sit
+# strictly under the inbox root (no '..' traversal) and the tool must be
+# create/write (edit of repo files stays denied everywhere).
 case "$tool_name" in
   edit|create|write)
-    deny "Roger review_readonly policy denies repository writes during Copilot review sessions" "repo_write_denied"
+    inbox_root="${RR_WORKER_INBOX_DIR:-}"
+    if [ -n "$inbox_root" ] && [ "$tool_name" != "edit" ]; then
+      decoded_path_json="$(printf '%s' "$compact" | sed 's/\\"/"/g')"
+      target_path="$(printf '%s' "$decoded_path_json" \
+        | sed -n 's/.*"[a-zA-Z_]*[Pp]ath"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        | head -n 1)"
+      matched_command="$target_path"
+      case "$target_path" in
+        *..*) : ;;
+        "$inbox_root"/?*)
+          allow "worker_inbox_write"
+          ;;
+      esac
+    fi
+    deny "Roger review_readonly policy denies repository writes during Copilot review sessions (worker inbox excepted)" "repo_write_denied"
     ;;
 esac
 

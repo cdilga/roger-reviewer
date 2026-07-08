@@ -396,6 +396,9 @@ fn review_launch_succeeds_quietly_when_target_is_verified() {
         "verified launch must not emit an error line: {stderr}"
     );
 
+    // The first launch above minted a session; a plain second `rr review` now
+    // reuses it (see session-reuse hygiene). Pass --fresh to assert the
+    // target-verification contract on a genuine new launch.
     let robot = run_rr(
         &fixture,
         &[
@@ -406,6 +409,7 @@ fn review_launch_succeeds_quietly_when_target_is_verified() {
             "9999",
             "--provider",
             "opencode",
+            "--fresh",
             "--robot",
         ],
     );

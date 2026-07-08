@@ -392,7 +392,7 @@ fn rr_doctor_surfaces_planned_copilot_lane_and_missing_admission_assets() {
     );
     assert_eq!(
         payload["data"]["provider_capability"]["hook_profile"]["contract_version"],
-        "copilot_review_readonly_hooks.v2"
+        "copilot_review_readonly_hooks.v3"
     );
     assert_sha256_prefixed(
         &payload["data"]["provider_capability"]["hook_profile_digest_sha256"],

@@ -46,7 +46,18 @@ if ($inputJson -match '"toolName"\s*:\s*"bash"') { $toolName = "bash" }
 elseif ($inputJson -match '"toolName"\s*:\s*"(edit|create|write)"') { $toolName = $Matches[1] }
 
 if ($toolName -in @("edit", "create", "write")) {
-  Deny "Roger review_readonly policy denies repository writes during Copilot review sessions" "repo_write_denied" $toolName
+  # Scoped exception: create/write under the Roger-owned worker inbox
+  # (RR_WORKER_INBOX_DIR) is allowed so the worker can stage its stage-result
+  # request JSON. Edits and everything outside the inbox stay denied.
+  $inboxRoot = $env:RR_WORKER_INBOX_DIR
+  if ($inboxRoot -and $toolName -ne "edit") {
+    $targetPath = $null
+    if ($inputJson -match '"(?:path|filePath|file_path)"\s*:\s*"([^"]+)"') { $targetPath = $Matches[1] }
+    if ($targetPath -and ($targetPath -notmatch '\.\.') -and $targetPath.StartsWith("$inboxRoot/")) {
+      Allow "worker_inbox_write" $toolName
+    }
+  }
+  Deny "Roger review_readonly policy denies repository writes during Copilot review sessions (worker inbox excepted)" "repo_write_denied" $toolName
 }
 
 if ($toolName -eq "bash") {

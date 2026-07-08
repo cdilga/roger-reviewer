@@ -666,7 +666,7 @@ mod tests {
         );
         assert_eq!(
             copilot.hook_contract_version.value,
-            "copilot_review_readonly_hooks.v2"
+            "copilot_review_readonly_hooks.v3"
         );
         assert_eq!(
             copilot.instruction_contract_version.value,

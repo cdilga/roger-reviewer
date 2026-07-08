@@ -9,16 +9,17 @@ use roger_app_core::{
     AppError, ApprovalState, ContinuityQuality, ExplicitPostingInput, ExplicitPostingOutcome,
     FindingTriageState, HarnessAdapter, LaunchAction, LaunchIntent, OutboundApprovalToken,
     OutboundDraft, OutboundDraftBatch, RecallSourceRef, ResumeAttemptOutcome, ResumeBundle,
-    ResumeBundleProfile, ReviewTarget, ReviewTask, RogerCommand, RogerCommandId,
+    ResumeBundleProfile, ReviewTarget, ReviewTask, ReviewTaskKind, RogerCommand, RogerCommandId,
     RogerCommandInvocationSurface, RogerCommandResult, RogerCommandRouteStatus, SearchPlanError,
     SearchPlanInput, SearchQueryPlanError, SearchRetrievalClass, SessionBaselineSnapshot,
-    SessionLocator, Surface, WorkerArtifactExcerpt, WorkerArtifactExcerptRequest,
-    WorkerCapabilityProfile, WorkerContextPacket, WorkerEvidenceLocation, WorkerFindingDetail,
-    WorkerFindingDetailRequest, WorkerFindingListResponse, WorkerFindingSummary,
-    WorkerGatewaySnapshot, WorkerGitHubPosture, WorkerMemoryReviewRequest, WorkerMutationPosture,
-    WorkerOperation, WorkerOperationRequestEnvelope, WorkerRecallEnvelope,
-    WorkerSearchMemoryRequest, WorkerSearchMemoryResponse, WorkerStageOutcome, WorkerStageResult,
-    WorkerStatusSnapshot, WorkerTransportKind, execute_agent_transport_request,
+    SessionLocator, Surface, WORKER_OPERATION_REQUEST_SCHEMA_V1, WORKER_STAGE_RESULT_SCHEMA_V1,
+    WorkerArtifactExcerpt, WorkerArtifactExcerptRequest, WorkerCapabilityProfile,
+    WorkerContextPacket, WorkerEvidenceLocation, WorkerFindingDetail, WorkerFindingDetailRequest,
+    WorkerFindingListResponse, WorkerFindingSummary, WorkerGatewaySnapshot, WorkerGitHubPosture,
+    WorkerMemoryReviewRequest, WorkerMutationPosture, WorkerOperation,
+    WorkerOperationRequestEnvelope, WorkerRecallEnvelope, WorkerSearchMemoryRequest,
+    WorkerSearchMemoryResponse, WorkerStageOutcome, WorkerStageResult, WorkerStatusSnapshot,
+    WorkerTransportKind, WorkerTurnStrategy, execute_agent_transport_request,
     execute_explicit_posting_flow, materialize_search_plan, outbound_target_tuple_json,
     route_harness_command, safe_harness_command_bindings, validate_outbound_draft_batch_linkage,
 };
@@ -256,6 +257,10 @@ struct ParsedArgs {
     agent_operation: Option<String>,
     agent_task_file: Option<PathBuf>,
     agent_request_file: Option<PathBuf>,
+    // Inline base64 request payload for `rr agent` — a write-free submission
+    // path for in-session workers whose policy denies file creation and shell
+    // metacharacters (base64 text contains none of the denied characters).
+    agent_request_b64: Option<String>,
     agent_context_file: Option<PathBuf>,
     agent_capability_file: Option<PathBuf>,
     bridge_command: Option<BridgeCommandKind>,
@@ -309,6 +314,12 @@ struct ParsedArgs {
     surface: Option<LaunchSurface>,
     // Opt-in live handshake for `rr extension doctor --live`.
     live: bool,
+    // `rr review --fresh` forces a brand-new session even when a non-terminal
+    // session already exists for the repo/PR (default is reuse-or-new).
+    fresh: bool,
+    // `rr sessions --all` lists every matching session instead of the grouped,
+    // most-recent-per-PR default view.
+    show_all: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -688,6 +699,7 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
         agent_operation: None,
         agent_task_file: None,
         agent_request_file: None,
+        agent_request_b64: None,
         agent_context_file: None,
         agent_capability_file: None,
         bridge_command: None,
@@ -730,6 +742,8 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
         interactive: false,
         surface: None,
         live: false,
+        fresh: false,
+        show_all: false,
     };
 
     let mut i = 1;
@@ -754,6 +768,13 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
                     .get(i + 1)
                     .ok_or_else(|| "--request-file requires a value".to_owned())?;
                 parsed.agent_request_file = Some(PathBuf::from(value));
+                i += 2;
+            }
+            "--request-b64" => {
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--request-b64 requires a value".to_owned())?;
+                parsed.agent_request_b64 = Some(value.clone());
                 i += 2;
             }
             "--context-file" => {
@@ -1031,6 +1052,14 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
                 parsed.live = true;
                 i += 1;
             }
+            "--fresh" => {
+                parsed.fresh = true;
+                i += 1;
+            }
+            "--all" => {
+                parsed.show_all = true;
+                i += 1;
+            }
             positional => {
                 if positional.starts_with('-') {
                     return Err(format!("unknown flag: {positional}"));
@@ -1116,6 +1145,12 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
     }
     if parsed.findings_sessions && original_command != CommandKind::Findings {
         return Err("--sessions is only supported by rr findings".to_owned());
+    }
+    if parsed.fresh && parsed.command != CommandKind::Review {
+        return Err("--fresh is only supported by rr review".to_owned());
+    }
+    if parsed.show_all && parsed.command != CommandKind::Sessions {
+        return Err("--all is only supported by rr sessions".to_owned());
     }
 
     match parsed.robot_format {
@@ -1281,13 +1316,17 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
     if parsed.command != CommandKind::Agent
         && (parsed.agent_task_file.is_some()
             || parsed.agent_request_file.is_some()
+            || parsed.agent_request_b64.is_some()
             || parsed.agent_context_file.is_some()
             || parsed.agent_capability_file.is_some())
     {
         return Err(
-            "--task-file/--request-file/--context-file/--capability-file are only supported by rr agent"
+            "--task-file/--request-file/--request-b64/--context-file/--capability-file are only supported by rr agent"
                 .to_owned(),
         );
+    }
+    if parsed.agent_request_file.is_some() && parsed.agent_request_b64.is_some() {
+        return Err("--request-file and --request-b64 are mutually exclusive".to_owned());
     }
 
     let extension_fetch_scope = parsed.command == CommandKind::Extension
@@ -1569,7 +1608,7 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
             || parsed.update_yes
         {
             return Err(
-                "rr agent only supports <operation> plus --task-file, --request-file, --context-file, and --capability-file"
+                "rr agent only supports <operation> plus --task-file, --request-file, --request-b64, --context-file, and --capability-file"
                     .to_owned(),
             );
         }
@@ -1762,7 +1801,7 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
             || parsed.agent_capability_file.is_some()
         {
             return Err(
-                "rr review only supports --repo, --pr, --provider, --resume, --dry-run, and --robot"
+                "rr review only supports --repo, --pr, --provider, --resume, --fresh, --dry-run, and --robot"
                     .to_owned(),
             );
         }
@@ -1891,7 +1930,7 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
             || parsed.agent_capability_file.is_some()
         {
             return Err(
-                "rr sessions only supports --repo, --pr, --attention, --limit, and --robot"
+                "rr sessions only supports --repo, --pr, --attention, --limit, --all, and --robot"
                     .to_owned(),
             );
         }
@@ -2240,6 +2279,39 @@ fn read_json_bytes_from_stdin_or_file(
         return Err(format!("{stdin_label} from stdin was empty"));
     }
     Ok(bytes)
+}
+
+/// Read-only worker operations that need only the task binding — no request
+/// payload. For these, `rr agent <op> --task-file <path>` is sufficient on its
+/// own; Roger synthesizes a default bounded request from the ReviewTask. This is
+/// what makes the seeded call `rr agent worker.get_review_context --task-file
+/// <path>` succeed for an in-session worker under a write-denied policy (it
+/// cannot stage a separate --request-file).
+fn agent_operation_is_self_serviceable(operation: &str) -> bool {
+    matches!(
+        operation,
+        "worker.get_review_context" | "worker.get_status" | "worker.list_findings"
+    )
+}
+
+/// Build a default bounded request envelope from a ReviewTask for a
+/// self-serviceable read operation. Binding fields come straight from the task
+/// (so the nonce round-trips); requested scopes default to the task's allowed
+/// scopes; no payload.
+fn default_agent_request_from_task(
+    task: &ReviewTask,
+    operation: &str,
+) -> WorkerOperationRequestEnvelope {
+    WorkerOperationRequestEnvelope {
+        schema_id: WORKER_OPERATION_REQUEST_SCHEMA_V1.to_owned(),
+        review_session_id: task.review_session_id.clone(),
+        review_run_id: task.review_run_id.clone(),
+        review_task_id: task.id.clone(),
+        task_nonce: task.task_nonce.clone(),
+        operation: operation.to_owned(),
+        requested_scopes: task.allowed_scopes.clone(),
+        payload: None,
+    }
 }
 
 fn read_json_file<T: DeserializeOwned>(path: &Path, label: &str) -> Result<T, String> {
@@ -2900,31 +2972,68 @@ fn handle_agent(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         None => built_in_agent_capability_profile(),
     };
 
-    let request_bytes = match read_json_bytes_from_stdin_or_file(
-        parsed.agent_request_file.as_ref(),
-        "rr agent request envelope",
-    ) {
-        Ok(bytes) => bytes,
-        Err(message) => {
-            return agent_error_response(AgentTransportErrorCode::PayloadMissing, message);
-        }
-    };
-    let request: WorkerOperationRequestEnvelope = match serde_json::from_slice(&request_bytes) {
-        Ok(request) => request,
-        Err(err) => {
-            return agent_error_response(
-                AgentTransportErrorCode::PayloadInvalid,
-                format!("failed to parse rr agent request envelope as JSON: {err}"),
-            );
-        }
-    };
-
     let Some(expected_operation) = parsed.agent_operation.as_deref() else {
         return agent_error_response(
             AgentTransportErrorCode::ValidationFailed,
             "rr agent operation is missing",
         );
     };
+
+    // Inline base64 payload takes precedence: the write-free submission path
+    // for policy-sandboxed workers (base64 text carries none of the shell
+    // metacharacters the review_readonly allowlist rejects), so
+    // worker.submit_stage_result works without any file-creation capability.
+    let request: WorkerOperationRequestEnvelope = if let Some(encoded) =
+        parsed.agent_request_b64.as_deref()
+    {
+        let decoded = match BASE64_STANDARD.decode(encoded.trim()) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                return agent_error_response(
+                    AgentTransportErrorCode::PayloadInvalid,
+                    format!("failed to decode --request-b64 payload: {err}"),
+                );
+            }
+        };
+        match serde_json::from_slice(&decoded) {
+            Ok(request) => request,
+            Err(err) => {
+                return agent_error_response(
+                    AgentTransportErrorCode::PayloadInvalid,
+                    format!("failed to parse --request-b64 payload as JSON: {err}"),
+                );
+            }
+        }
+    } else {
+        match read_json_bytes_from_stdin_or_file(
+            parsed.agent_request_file.as_ref(),
+            "rr agent request envelope",
+        ) {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(request) => request,
+                Err(err) => {
+                    return agent_error_response(
+                        AgentTransportErrorCode::PayloadInvalid,
+                        format!("failed to parse rr agent request envelope as JSON: {err}"),
+                    );
+                }
+            },
+            Err(message) => {
+                // No explicit --request-file and empty/terminal stdin: for a
+                // self-serviceable read operation, bind directly from the task file
+                // (the seeded `rr agent <op> --task-file <path>` form). Operations
+                // that require a payload still demand an explicit request envelope.
+                if parsed.agent_request_file.is_none()
+                    && agent_operation_is_self_serviceable(expected_operation)
+                {
+                    default_agent_request_from_task(&task, expected_operation)
+                } else {
+                    return agent_error_response(AgentTransportErrorCode::PayloadMissing, message);
+                }
+            }
+        }
+    };
+
     if request.operation != expected_operation {
         return agent_error_response(
             AgentTransportErrorCode::ValidationFailed,
@@ -7189,6 +7298,9 @@ fn copilot_launch_capture_path(store_root: &Path, attempt_id: &str) -> PathBuf {
 /// where to append their audit jsonl. The CLI now always sets this for launches
 /// so hook denials/transcript references are captured as Roger evidence.
 const ENV_COPILOT_HOOK_AUDIT_DIR: &str = "RR_COPILOT_HOOK_AUDIT_DIR";
+/// Exported to the provider child so the review_readonly pre-tool-use hook can
+/// allow create/write ONLY under the Roger-owned worker inbox.
+const ENV_WORKER_INBOX_DIR: &str = "RR_WORKER_INBOX_DIR";
 
 /// Session/attempt-scoped directory the Roger-owned Copilot hooks write their
 /// audit jsonl into (denials, transcript references, lifecycle events). Roger
@@ -7442,6 +7554,7 @@ fn launch_copilot_session(
     continuity_quality: ContinuityQuality,
     expected_session_id: Option<&str>,
     interactive: bool,
+    worker_inbox_dir: Option<&Path>,
 ) -> std::result::Result<CopilotReviewLaunchOutcome, CopilotLaunchError> {
     let execution_mode = if interactive { "interactive" } else { "batch" };
     let launch_root = copilot_launch_root(binding_context, runtime);
@@ -7591,6 +7704,12 @@ fn launch_copilot_session(
         // Audit wiring: the Roger-owned hooks append denial/transcript/lifecycle
         // jsonl here for both batch and interactive launches.
         .env(ENV_COPILOT_HOOK_AUDIT_DIR, &hook_audit_dir);
+    if let Some(inbox) = worker_inbox_dir {
+        // Scoped write exception: pre-tool-use allows create/write ONLY under
+        // this Roger-owned inbox so the worker can stage its stage-result
+        // request file without any repo-write capability.
+        process_command.env(ENV_WORKER_INBOX_DIR, inbox);
+    }
 
     let spawn_error = |err: std::io::Error| CopilotLaunchError {
         state: LaunchAttemptState::FailedSpawn,
@@ -7928,13 +8047,13 @@ fn launch_copilot_review_session(
     target: &ReviewTarget,
     attempt_id: &str,
     binding_context: &LaunchBindingContext,
+    worker_task_path: &str,
     interactive: bool,
 ) -> std::result::Result<CopilotReviewLaunchOutcome, CopilotLaunchError> {
-    let seed_prompt = format!(
-        "Roger review start for {} PR #{} in review-only posture. Keep all findings local to Roger; do not post to GitHub and do not modify repository files. \
-Begin by confirming Roger session state with `rr status --robot`, then drive the review through the Roger worker transport: run `rr agent worker.get_status --task-file <path>` and the other `rr agent worker.*` operations to read context and submit stage results. The review_readonly policy allows only `rr agent <op>` and read-only `rr status|findings|sessions|search --robot`; every other shell command is denied, so issue one clean allowlisted command at a time.",
-        target.repository, target.pull_request_number
-    );
+    let seed_prompt = copilot_worker_seed_prompt(target, worker_task_path);
+    let worker_inbox = Path::new(worker_task_path)
+        .parent()
+        .map(|p| p.join("inbox"));
     launch_copilot_session(
         runtime,
         target,
@@ -7946,6 +8065,7 @@ Begin by confirming Roger session state with `rr status --robot`, then drive the
         ContinuityQuality::Degraded,
         None,
         interactive,
+        worker_inbox.as_deref(),
     )
 }
 
@@ -7983,8 +8103,12 @@ fn launch_copilot_resume_or_return_session(
     binding_context: &LaunchBindingContext,
     session_locator: Option<&SessionLocator>,
     resume_bundle: Option<&ResumeBundle>,
+    worker_task_path: &str,
     interactive: bool,
 ) -> std::result::Result<CopilotContinuityLaunchOutcome, CopilotLaunchError> {
+    let worker_inbox = Path::new(worker_task_path)
+        .parent()
+        .map(|p| p.join("inbox"));
     if let Some(locator) = session_locator {
         match launch_copilot_session(
             runtime,
@@ -7997,6 +8121,7 @@ fn launch_copilot_resume_or_return_session(
             ContinuityQuality::Usable,
             Some(&locator.session_id),
             interactive,
+            worker_inbox.as_deref(),
         ) {
             Ok(linkage) => {
                 return Ok(CopilotContinuityLaunchOutcome {
@@ -8023,8 +8148,11 @@ fn launch_copilot_resume_or_return_session(
     };
 
     let reseed_prompt = format!(
-        "Roger resume reseed for {} PR #{} in review-only posture. Use the stored ResumeBundle summary '{}' only as Roger continuity guidance. Keep all findings local to Roger; do not post to GitHub and do not modify repository files.",
-        target.repository, target.pull_request_number, resume_bundle.stage_summary,
+        "Roger resume reseed for {} PR #{} in review-only posture. Use the stored ResumeBundle summary '{}' only as Roger continuity guidance. Keep all findings local to Roger; do not post to GitHub and do not modify repository files. {}",
+        target.repository,
+        target.pull_request_number,
+        resume_bundle.stage_summary,
+        worker_protocol_seed_summary(worker_task_path),
     );
     let linkage = launch_copilot_session(
         runtime,
@@ -8037,6 +8165,7 @@ fn launch_copilot_resume_or_return_session(
         ContinuityQuality::Degraded,
         None,
         interactive,
+        worker_inbox.as_deref(),
     )?;
 
     Ok(CopilotContinuityLaunchOutcome {
@@ -8048,6 +8177,255 @@ fn launch_copilot_resume_or_return_session(
             "copilot_reseeded_from_bundle".to_owned()
         },
     })
+}
+
+/// The ten worker-transport operations a launch-bound `ReviewTask` grants. This
+/// mirrors the `rr agent worker.*` surface documented in the review-worker
+/// contract and the roger-worker-protocol skill.
+const WORKER_TASK_ALLOWED_OPERATIONS: &[&str] = &[
+    "worker.get_review_context",
+    "worker.search_memory",
+    "worker.list_findings",
+    "worker.get_finding_detail",
+    "worker.get_artifact_excerpt",
+    "worker.get_status",
+    "worker.submit_stage_result",
+    "worker.request_clarification",
+    "worker.request_memory_review",
+    "worker.propose_follow_up",
+];
+
+/// Canonical on-disk location of the worker-task binding file for a session:
+/// `<store_root>/sessions/<session-id>/worker-task.json`. This is the file the
+/// in-session worker passes to every `rr agent worker.* --task-file <path>`
+/// call; the seed prompt embeds this absolute path.
+fn worker_task_file_path(store_root: &Path, session_id: &str) -> PathBuf {
+    store_root
+        .join("sessions")
+        .join(session_id)
+        .join("worker-task.json")
+}
+
+/// Build the canonical launch `ReviewTask` bound to a freshly minted (or reused)
+/// session/run. The task carries a fresh nonce that must round-trip through
+/// every worker result so Roger can reject stale or cross-session submissions.
+fn build_launch_review_task(session_id: &str, run_id: &str, stage: &str) -> ReviewTask {
+    ReviewTask {
+        id: next_id("task"),
+        review_session_id: session_id.to_owned(),
+        review_run_id: run_id.to_owned(),
+        stage: stage.to_owned(),
+        task_kind: ReviewTaskKind::DeepReviewPass,
+        task_nonce: next_id("nonce"),
+        objective:
+            "Perform a bounded review pass and return findings through the Roger worker transport."
+                .to_owned(),
+        turn_strategy: WorkerTurnStrategy::SingleTurnReport,
+        allowed_scopes: vec!["repo".to_owned()],
+        allowed_operations: WORKER_TASK_ALLOWED_OPERATIONS
+            .iter()
+            .map(|op| (*op).to_owned())
+            .collect(),
+        expected_result_schema: WORKER_STAGE_RESULT_SCHEMA_V1.to_owned(),
+        prompt_preset_id: None,
+        created_at: time::now_ts(),
+    }
+}
+
+/// Atomically persist a worker-task binding file at its canonical path. Creates
+/// the session artifact directory and overwrites any prior binding (a re-launch
+/// rebinds the CURRENT run/task ids) via a temp-write-then-rename.
+fn write_worker_task_file(store_root: &Path, task: &ReviewTask) -> Result<PathBuf, String> {
+    let path = worker_task_file_path(store_root, &task.review_session_id);
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("invalid worker-task path {}", path.display()))?;
+    fs::create_dir_all(parent).map_err(|err| {
+        format!(
+            "failed to create worker-task directory {}: {err}",
+            parent.display()
+        )
+    })?;
+    let payload = serde_json::to_vec_pretty(task)
+        .map_err(|err| format!("failed to serialize worker-task binding: {err}"))?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, &payload).map_err(|err| {
+        format!(
+            "failed to write worker-task binding {}: {err}",
+            tmp.display()
+        )
+    })?;
+    fs::rename(&tmp, &path).map_err(|err| {
+        format!(
+            "failed to finalize worker-task binding {}: {err}",
+            path.display()
+        )
+    })?;
+    // The worker inbox: the one directory the review_readonly policy lets the
+    // in-session worker write into (staging its stage-result request JSON).
+    let inbox = parent.join("inbox");
+    fs::create_dir_all(&inbox)
+        .map_err(|err| format!("failed to create worker inbox {}: {err}", inbox.display()))?;
+    Ok(path)
+}
+
+/// The compact worker-protocol summary embedded in provider seed prompts. The
+/// roger-worker-protocol skill carries the depth; this keeps the seed short but
+/// unambiguous about the bind -> read -> submit loop and the boundary.
+fn worker_protocol_seed_summary(worker_task_path: &str) -> String {
+    format!(
+        "Your Roger worker-task file is {worker_task_path}. Drive the review through the Roger worker transport: \
+first `rr agent worker.get_review_context --task-file {worker_task_path}` to read bounded context, \
+then do the review, then submit findings: write your stage-result request JSON with the create tool to a file under $RR_WORKER_INBOX_DIR (the one directory the policy lets you write) and run `rr agent worker.submit_stage_result --task-file {worker_task_path} --request-file <that file>`; if file writes are unavailable, base64-encode the request JSON yourself and pass it inline via `rr agent worker.submit_stage_result --task-file {worker_task_path} --request-b64 <base64>`. \
+Use `rr agent worker.search_memory` before writing new analysis and `rr agent worker.request_clarification` when you need operator input; the task_nonce in the file must round-trip through every submission. \
+The review_readonly policy allows only `rr agent <op>` and read-only `rr status|findings|sessions|search --robot`; every other shell command is denied, so issue one clean allowlisted command at a time."
+    )
+}
+
+/// Build the Copilot start-review seed prompt with the worker-task path and the
+/// bounded worker protocol embedded.
+fn copilot_worker_seed_prompt(target: &ReviewTarget, worker_task_path: &str) -> String {
+    format!(
+        "Roger review start for {} PR #{} in review-only posture. Keep all findings local to Roger; do not post to GitHub and do not modify repository files. {}",
+        target.repository,
+        target.pull_request_number,
+        worker_protocol_seed_summary(worker_task_path),
+    )
+}
+
+/// Build the human next-steps block for a launched/reused review session: the
+/// concrete follow-on commands an operator runs next.
+fn review_next_commands(
+    session_id: &str,
+    provider: &str,
+    repository: &str,
+    pr: u64,
+    interactive: bool,
+) -> Vec<String> {
+    let mut commands = vec![
+        format!("rr open --session {session_id}"),
+        format!("rr findings --session {session_id}"),
+    ];
+    if provider == session_copilot::PROVIDER_ID && !interactive {
+        commands.push(format!(
+            "rr review --pr {pr} --repo {repository} --provider copilot --interactive  # hand the terminal to Copilot"
+        ));
+    }
+    commands
+}
+
+/// Attention states that mean a review session is done and must NOT be silently
+/// reused by a later `rr review`. Everything else in the canonical vocabulary
+/// (review_launched, review_resumed, awaiting_*, findings_ready,
+/// outbound_approval_required, refresh_recommended, returned_to_roger) is a live
+/// session an operator would want to re-enter rather than duplicate.
+const TERMINAL_REVIEW_ATTENTION_STATES: &[&str] = &["review_failed"];
+
+fn attention_state_is_reusable(state: &str) -> bool {
+    !TERMINAL_REVIEW_ATTENTION_STATES.contains(&state)
+}
+
+/// Pick the newest non-terminal session to reuse from repo/PR candidates.
+fn select_reusable_session(candidates: &[SessionFinderEntry]) -> Option<&SessionFinderEntry> {
+    candidates
+        .iter()
+        .filter(|entry| attention_state_is_reusable(&entry.attention_state))
+        .max_by_key(|entry| entry.updated_at)
+}
+
+/// Compact relative-age label ("2h ago") for human candidate lists and reuse
+/// messages. `now`/`then` are unix-second timestamps.
+fn format_relative_age(now: i64, then: i64) -> String {
+    let secs = (now - then).max(0);
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3_600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3_600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
+}
+
+/// Defensively pull a session-row projection out of either a picker `candidate`
+/// object or a `rr sessions` `items` object (their key shapes differ slightly).
+/// Returns (session_id, repository, pull_request, provider, attention, updated_at).
+fn extract_session_row(entry: &Value) -> (String, String, u64, String, String, i64) {
+    let session_id = entry["session_id"].as_str().unwrap_or("?").to_owned();
+    let repository = entry
+        .get("repository")
+        .and_then(Value::as_str)
+        .or_else(|| entry.get("repo").and_then(Value::as_str))
+        .or_else(|| {
+            entry
+                .get("target")
+                .and_then(|target| target.get("repository"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("?")
+        .to_owned();
+    let pull_request = entry
+        .get("pull_request")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            entry
+                .get("target")
+                .and_then(|target| target.get("pull_request"))
+                .and_then(Value::as_u64)
+        })
+        .unwrap_or(0);
+    let provider = entry["provider"].as_str().unwrap_or("?").to_owned();
+    let attention = entry["attention_state"].as_str().unwrap_or("?").to_owned();
+    let updated_at = entry.get("updated_at").and_then(Value::as_i64).unwrap_or(0);
+    (
+        session_id,
+        repository,
+        pull_request,
+        provider,
+        attention,
+        updated_at,
+    )
+}
+
+/// Render a human session list grouped by repo/PR: at most five most-recent per
+/// group with relative ages, then an "and N older sessions" line pointing at
+/// `rr sessions --all`. With `show_all`, every session in each group is listed.
+fn render_grouped_session_lines(entries: &[Value], show_all: bool, now: i64) -> String {
+    let mut groups: std::collections::BTreeMap<
+        (String, u64),
+        Vec<(String, String, u64, String, String, i64)>,
+    > = std::collections::BTreeMap::new();
+    for entry in entries {
+        let row = extract_session_row(entry);
+        groups.entry((row.1.clone(), row.2)).or_default().push(row);
+    }
+    let mut out = String::new();
+    for ((repository, pull_request), mut group) in groups {
+        group.sort_by(|a, b| b.5.cmp(&a.5));
+        out.push_str(&format!("{repository}#{pull_request}:\n"));
+        let shown = if show_all {
+            group.len()
+        } else {
+            group.len().min(5)
+        };
+        for row in &group[..shown] {
+            out.push_str(&format!(
+                "  {}  {}  {}  {}\n",
+                row.0,
+                row.3,
+                row.4,
+                format_relative_age(now, row.5)
+            ));
+        }
+        if !show_all && group.len() > shown {
+            out.push_str(&format!(
+                "  ... and {} older sessions (rr sessions --all to list)\n",
+                group.len() - shown
+            ));
+        }
+    }
+    out
 }
 
 fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
@@ -8157,6 +8535,50 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         Err(response) => return response,
     };
 
+    // Session reuse-or-new. Unless --fresh is passed, a non-terminal session
+    // already covering this repo/PR is reused with resume semantics instead of
+    // minting yet another zombie session. This is where the 25-zombies-per-2-PRs
+    // pollution is stopped.
+    if !parsed.fresh {
+        match store.session_finder(SessionFinderQuery {
+            repository: Some(target.repository.clone()),
+            pull_request_number: Some(pr),
+            attention_states: Vec::new(),
+            limit: 250,
+        }) {
+            Ok(candidates) => {
+                if let Some(reused) = select_reusable_session(&candidates) {
+                    let reused_id = reused.session_id.clone();
+                    let age = format_relative_age(time::now_ts(), reused.updated_at);
+                    let mut reuse_parsed = parsed.clone();
+                    reuse_parsed.session_id = Some(reused_id.clone());
+                    let mut response = handle_resume(&reuse_parsed, runtime);
+                    let failed = matches!(
+                        response.outcome,
+                        OutcomeKind::Blocked | OutcomeKind::Error | OutcomeKind::RepairNeeded
+                    );
+                    if let Value::Object(map) = &mut response.data {
+                        map.insert("reused".to_owned(), Value::Bool(true));
+                        map.insert(
+                            "reused_session_id".to_owned(),
+                            Value::String(reused_id.clone()),
+                        );
+                        map.insert("reused_session_age".to_owned(), Value::String(age.clone()));
+                    }
+                    if !failed {
+                        response.message = format!(
+                            "reusing existing session {reused_id} (started {age}); pass --fresh for a new session"
+                        );
+                    }
+                    return response;
+                }
+            }
+            Err(err) => {
+                return error_response(format!("failed to check for reusable sessions: {err}"));
+            }
+        }
+    }
+
     let attempt_id = next_id("attempt");
     if let Err(err) = store.create_launch_attempt(CreateLaunchAttempt {
         id: &attempt_id,
@@ -8185,6 +8607,26 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
 
     let binding_context = LaunchBindingContext::for_cwd(&runtime.cwd);
     let intent = launch_intent(LaunchAction::StartReview, runtime);
+
+    // Pre-mint the session and run ids so the worker-task binding path is known
+    // BEFORE the provider launches: the Copilot seed prompt embeds the absolute
+    // worker-task path, and the same ids are finalized into the store below.
+    let session_id = next_id("session");
+    let run_id = next_id("run");
+    let worker_task = build_launch_review_task(&session_id, &run_id, "deep_review");
+    let worker_task_path = worker_task_file_path(&runtime.store_root, &session_id);
+    let worker_task_path_string = normalized_path_string(&worker_task_path);
+
+    // Pre-stage the worker-task binding file NOW, before the provider process
+    // runs, so an in-session agent that calls `rr agent worker.* --task-file
+    // <path>` during the launch finds a valid ReviewTask at the seeded path
+    // (the store session/run are committed by finalize below). If the launch
+    // later fails, the file is an orphan under an uncommitted session id.
+    let mut worker_task_binding_warning: Option<String> = None;
+    if let Err(err) = write_worker_task_file(&runtime.store_root, &worker_task) {
+        worker_task_binding_warning = Some(format!("failed to persist worker-task binding: {err}"));
+    }
+
     let record_failure = |state: LaunchAttemptState, reason: &str| {
         persist_launch_attempt_state(
             &store,
@@ -8199,6 +8641,7 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     };
     let mut copilot_interactive = false;
     let mut copilot_hook_audit_event_count = 0usize;
+    let mut provisional_session_committed = false;
     let (session_locator, session_path, continuity_quality, mut warnings, bundle_artifact_refs) =
         match parsed.provider.as_str() {
             "opencode" => {
@@ -8324,15 +8767,50 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 )
             }
             "copilot" => {
+                // Copilot runs its in-session worker DURING the launch
+                // subprocess, so the session/run rows must already be visible
+                // for the worker's `rr agent` calls (get_review_context etc.).
+                // Provision them now; finalize upgrades the same rows (upsert)
+                // with the verified binding, and the failure arms below demote
+                // the provisional session to review_failed.
+                if let Err(err) = store.create_review_session(CreateReviewSession {
+                    id: &session_id,
+                    review_target: &target,
+                    provider: &parsed.provider,
+                    session_locator: None,
+                    resume_bundle_artifact_id: None,
+                    continuity_state: continuity_state_label(&ContinuityQuality::Degraded),
+                    attention_state: "review_launched",
+                    launch_profile_id: Some(cli_config::PROFILE_ID),
+                }) {
+                    return error_response(format!(
+                        "failed to provision review session before Copilot launch: {err}"
+                    ));
+                }
+                if let Err(err) = store.create_review_run(CreateReviewRun {
+                    id: &run_id,
+                    session_id: &session_id,
+                    run_kind: "review",
+                    repo_snapshot: &format!("{}#{}", target.repository, target.pull_request_number),
+                    continuity_quality: continuity_state_label(&ContinuityQuality::Degraded),
+                    session_locator_artifact_id: None,
+                }) {
+                    return error_response(format!(
+                        "failed to provision review run before Copilot launch: {err}"
+                    ));
+                }
+                provisional_session_committed = true;
                 let linkage = match launch_copilot_review_session(
                     runtime,
                     &target,
                     &attempt_id,
                     &binding_context,
+                    &worker_task_path_string,
                     parsed.interactive,
                 ) {
                     Ok(linkage) => linkage,
                     Err(err) => {
+                        demote_provisional_session(&store, &session_id);
                         if let Err(update_err) = persist_launch_attempt_state(
                             &store,
                             &attempt_id,
@@ -8412,6 +8890,9 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     {
         Ok(session_id) => session_id.to_owned(),
         Err(detail) => {
+            if provisional_session_committed {
+                demote_provisional_session(&store, &session_id);
+            }
             if let Err(update_err) = persist_launch_attempt_state(
                 &store,
                 &attempt_id,
@@ -8436,8 +8917,6 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         }
     };
 
-    let session_id = next_id("session");
-    let run_id = next_id("run");
     let bundle_id = next_id("bundle");
     let binding_id = next_id("binding");
 
@@ -8455,6 +8934,9 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         Ok(payload) => payload,
         Err(err) => {
             let detail = format!("failed to serialize ResumeBundle: {err}");
+            if provisional_session_committed {
+                demote_provisional_session(&store, &session_id);
+            }
             if let Err(update_err) = persist_launch_attempt_state(
                 &store,
                 &attempt_id,
@@ -8485,6 +8967,9 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                     Ok(None) => {
                         let detail =
                             "failed to persist ResumeBundle: duplicate digest detected but no stored artifact could be resolved".to_owned();
+                        if provisional_session_committed {
+                            demote_provisional_session(&store, &session_id);
+                        }
                         if let Err(update_err) = persist_launch_attempt_state(
                             &store,
                             &attempt_id,
@@ -8503,6 +8988,9 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                         let detail = format!(
                             "failed to persist ResumeBundle: duplicate digest lookup failed: {lookup_err}"
                         );
+                        if provisional_session_committed {
+                            demote_provisional_session(&store, &session_id);
+                        }
                         if let Err(update_err) = persist_launch_attempt_state(
                             &store,
                             &attempt_id,
@@ -8521,6 +9009,9 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             }
             Err(err) => {
                 let detail = format!("failed to persist ResumeBundle: {err}");
+                if provisional_session_committed {
+                    demote_provisional_session(&store, &session_id);
+                }
                 if let Err(update_err) = persist_launch_attempt_state(
                     &store,
                     &attempt_id,
@@ -8539,6 +9030,9 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         Err(err) => {
             let detail =
                 format!("failed to resolve existing ResumeBundle artifact by digest: {err}");
+            if provisional_session_committed {
+                demote_provisional_session(&store, &session_id);
+            }
             if let Err(update_err) = persist_launch_attempt_state(
                 &store,
                 &attempt_id,
@@ -8592,6 +9086,9 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         },
     }) {
         let detail = format!("failed to finalize review launch: {err}");
+        if provisional_session_committed {
+            demote_provisional_session(&store, &session_id);
+        }
         let failure_state = match err {
             ReviewLaunchFinalizationError::SessionBinding(_) => {
                 LaunchAttemptState::FailedSessionBinding
@@ -8627,6 +9124,28 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     if let Some(warning) = target_verification_warning {
         warnings.push(warning);
     }
+    // The worker-task binding was pre-staged before launch; surface any write
+    // failure now that we are assembling the response.
+    if let Some(warning) = worker_task_binding_warning {
+        warnings.push(warning);
+    }
+
+    let next_commands = review_next_commands(
+        &session_id,
+        &parsed.provider,
+        &target.repository,
+        target.pull_request_number,
+        copilot_interactive,
+    );
+    let human_details = format!(
+        "\n  session: {session_id}\n  provider: {}\n  worker-task: {worker_task_path_string}\nNext:\n{}",
+        parsed.provider,
+        next_commands
+            .iter()
+            .map(|command| format!("  {command}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
 
     CommandResponse {
         outcome,
@@ -8634,6 +9153,9 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             "launch_attempt_id": attempt_id,
             "session_id": session_id,
             "review_run_id": run_id,
+            "review_task_id": worker_task.id,
+            "task_nonce": worker_task.task_nonce,
+            "worker_task_path": worker_task_path_string,
             "resume_bundle_artifact_id": bundle_artifact_id,
             "repository": target.repository,
             "pull_request": target.pull_request_number,
@@ -8644,6 +9166,7 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             "launch_execution_mode": if copilot_interactive { "interactive" } else { "batch" },
             "interactive": copilot_interactive,
             "hook_audit_event_count": copilot_hook_audit_event_count,
+            "next_commands": next_commands,
             "provider_capability": runtime_provider_capability(runtime, &parsed.provider),
             "routine_surface": runtime_routine_surface_projection(
                 runtime,
@@ -8653,7 +9176,7 @@ fn handle_review(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         }),
         warnings,
         repair_actions: Vec::new(),
-        message: "review session launched".to_owned(),
+        message: format!("review session launched{human_details}"),
     }
 }
 
@@ -8972,6 +9495,10 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 "resume_path": inferred_resume_path,
                 "continuity_quality": continuity_quality,
                 "continuity_state_snapshot": session.continuity_state,
+                "worker_task_path": normalized_path_string(&worker_task_file_path(
+                    &runtime.store_root,
+                    &session.id,
+                )),
                 "provider_capability": provider_capability.clone(),
                 "routine_surface": routine_surface.clone(),
             }),
@@ -9312,6 +9839,8 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             )
         }
         "copilot" => {
+            let worker_task_path =
+                normalized_path_string(&worker_task_file_path(&runtime.store_root, &session.id));
             let continuity = match launch_copilot_resume_or_return_session(
                 runtime,
                 &session.review_target,
@@ -9319,6 +9848,7 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 &binding_context,
                 session.session_locator.as_ref(),
                 resume_bundle.as_ref(),
+                &worker_task_path,
                 parsed.interactive,
             ) {
                 Ok(linkage) => linkage,
@@ -9508,6 +10038,22 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let degraded = !matches!(continuity_quality, ContinuityQuality::Usable)
         || resume_path == "reseeded_from_bundle";
 
+    // Rebind the worker-task file to the CURRENT resume run so the in-session
+    // worker's `rr agent worker.* --task-file <path>` calls target live ids.
+    let worker_task = build_launch_review_task(&session.id, &run_id, "deep_review");
+    let worker_task_path_string =
+        normalized_path_string(&worker_task_file_path(&runtime.store_root, &session.id));
+    if let Err(err) = write_worker_task_file(&runtime.store_root, &worker_task) {
+        warnings.push(format!("failed to persist worker-task binding: {err}"));
+    }
+    let next_commands = review_next_commands(
+        &session.id,
+        &session.provider,
+        &session.review_target.repository,
+        session.review_target.pull_request_number,
+        copilot_interactive,
+    );
+
     CommandResponse {
         outcome: if degraded {
             OutcomeKind::Degraded
@@ -9518,6 +10064,9 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             "launch_attempt_id": attempt_id,
             "session_id": session.id,
             "review_run_id": run_id,
+            "review_task_id": worker_task.id,
+            "task_nonce": worker_task.task_nonce,
+            "worker_task_path": worker_task_path_string,
             "repository": session.review_target.repository,
             "pull_request": session.review_target.pull_request_number,
             "provider": session.provider,
@@ -9527,6 +10076,7 @@ fn handle_resume(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             "launch_execution_mode": if copilot_interactive { "interactive" } else { "batch" },
             "interactive": copilot_interactive,
             "hook_audit_event_count": copilot_hook_audit_event_count,
+            "next_commands": next_commands,
             "provider_capability": provider_capability.clone(),
             "routine_surface": routine_surface.clone(),
         }),
@@ -9738,6 +10288,8 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             )
         }
         "copilot" => {
+            let worker_task_path =
+                normalized_path_string(&worker_task_file_path(&runtime.store_root, &session.id));
             let continuity = match launch_copilot_resume_or_return_session(
                 runtime,
                 &session.review_target,
@@ -9745,6 +10297,7 @@ fn handle_return(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 &binding_context,
                 session.session_locator.as_ref(),
                 resume_bundle.as_ref(),
+                &worker_task_path,
                 parsed.interactive,
             ) {
                 Ok(linkage) => linkage,
@@ -10009,7 +10562,10 @@ fn handle_sessions(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
         );
     }
 
-    let limit = parsed.limit.unwrap_or(25).min(250);
+    // --all widens the underlying fetch so the grouped human view can list every
+    // session per PR; the default view keeps the bounded window.
+    let default_limit = if parsed.show_all { 250 } else { 25 };
+    let limit = parsed.limit.unwrap_or(default_limit).min(250);
     let fetch_limit = limit.saturating_add(1).min(250);
     let sessions = match store.session_finder(SessionFinderQuery {
         repository: parsed.repo.clone(),
@@ -10075,6 +10631,7 @@ fn handle_sessions(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
             "items": items,
             "count": count,
             "truncated": truncated,
+            "show_all": parsed.show_all,
             "filters_applied": {
                 "repository": parsed.repo,
                 "pull_request": parsed.pr,
@@ -16190,21 +16747,23 @@ fn render_output(parsed: &ParsedArgs, mut response: CommandResponse) -> CliRunRe
             | CommandKind::RobotDocs
     ) || response.outcome == OutcomeKind::Blocked
     {
-        // Session candidates render as a readable table for humans; raw JSON
-        // stays the transport for --robot consumers.
+        // Session candidates and `rr sessions` listings render as a grouped,
+        // age-annotated, capped table for humans; raw JSON stays the transport
+        // for --robot consumers.
+        let now = time::now_ts();
         let candidates = response.data.get("candidates").and_then(Value::as_array);
+        let session_items = if parsed.command == CommandKind::Sessions {
+            response.data.get("items").and_then(Value::as_array)
+        } else {
+            None
+        };
         if let Some(candidates) = candidates.filter(|list| !list.is_empty()) {
             stdout.push_str("Sessions:\n");
-            for entry in candidates {
-                stdout.push_str(&format!(
-                    "  {}  {}#{}  {}  {}\n",
-                    entry["session_id"].as_str().unwrap_or("?"),
-                    entry["repository"].as_str().unwrap_or("?"),
-                    entry["pull_request"].as_u64().unwrap_or(0),
-                    entry["provider"].as_str().unwrap_or("?"),
-                    entry["attention_state"].as_str().unwrap_or("?"),
-                ));
-            }
+            stdout.push_str(&render_grouped_session_lines(
+                candidates,
+                parsed.show_all,
+                now,
+            ));
             // "Pick one" only makes sense for a genuine multi-candidate
             // picker. A single blocked candidate cannot be resolved by
             // selection, so the primary message (which surfaces the concrete
@@ -16212,8 +16771,11 @@ fn render_output(parsed: &ParsedArgs, mut response: CommandResponse) -> CliRunRe
             if candidates.len() >= 2 {
                 stdout.push_str("Re-run with --session <id> to pick one.\n");
             }
-        } else if candidates.is_some() {
-            // Zero candidates: the message and repair actions already say
+        } else if let Some(items) = session_items.filter(|list| !list.is_empty()) {
+            stdout.push_str("Sessions:\n");
+            stdout.push_str(&render_grouped_session_lines(items, parsed.show_all, now));
+        } else if candidates.is_some() || session_items.is_some() {
+            // Zero candidates/items: the message and repair actions already say
             // everything a human needs; no JSON blob.
         } else if let Ok(pretty) = serde_json::to_string_pretty(&response.data) {
             stdout.push_str(&pretty);
@@ -16519,6 +17081,28 @@ fn classify_reopen_error(err: &AppError) -> ResumeAttemptOutcome {
         ResumeAttemptOutcome::MissingHarnessState
     } else {
         ResumeAttemptOutcome::ReopenUnavailable
+    }
+}
+
+/// Demote a provisionally committed launch session to `review_failed` after a
+/// post-provision launch failure. Best-effort: the launch-attempt record
+/// carries the authoritative failure detail, so a demotion error is logged to
+/// stderr rather than masking the original failure.
+fn demote_provisional_session(store: &RogerStore, session_id: &str) {
+    let record = match store.review_session(session_id) {
+        Ok(Some(record)) => record,
+        Ok(None) => return,
+        Err(err) => {
+            eprintln!(
+                "warning: failed to load provisional session {session_id} for demotion: {err}"
+            );
+            return;
+        }
+    };
+    if let Err(err) =
+        store.update_review_session_attention(session_id, record.row_version, "review_failed")
+    {
+        eprintln!("warning: failed to demote provisional session {session_id}: {err}");
     }
 }
 
@@ -17698,7 +18282,7 @@ fn command_usage(topic: &str) -> String {
             "rr queue — list open pull requests as a review queue (alias: rr prs).\n\nUsage:\n  rr queue [--repo owner/repo] [--limit <n>] [--robot]"
         }
         "review" => {
-            "rr review — start or re-enter a review.\n\nUsage:\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude|copilot] [--dry-run] [--robot]\n  rr review --resume [--pr <number> | --session <id>] [--repo owner/repo] [--dry-run] [--robot]\n\nNote: --resume routes to the resume handler (rr resume)."
+            "rr review — start or re-enter a review.\n\nUsage:\n  rr review --pr <number> [--repo owner/repo] [--provider opencode|codex|gemini|claude|copilot] [--fresh] [--dry-run] [--robot]\n  rr review --resume [--pr <number> | --session <id>] [--repo owner/repo] [--dry-run] [--robot]\n\nBy default rr review reuses a non-terminal session for the same repo/PR; pass --fresh to force a new session.\nNote: --resume routes to the resume handler (rr resume)."
         }
         "resume" => {
             "rr resume — re-enter an existing review (preferred form: rr review --resume).\n\nUsage:\n  rr resume [--repo owner/repo] [--pr <number>] [--session <id>] [--dry-run] [--robot]"
@@ -17716,7 +18300,7 @@ fn command_usage(topic: &str) -> String {
             "rr search — prior-review corpus search (preferred form: rr findings --query).\n\nUsage:\n  rr search --query <text> [--query-mode auto|exact_lookup|recall|related_context|candidate_audit] [--repo owner/repo] [--limit <n>] [--robot]"
         }
         "sessions" => {
-            "rr sessions — list local review sessions (preferred form: rr findings --sessions).\n\nUsage:\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]"
+            "rr sessions — list local review sessions (preferred form: rr findings --sessions).\n\nUsage:\n  rr sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--all] [--robot]\n\nThe default human view groups by repo/PR and shows the five most-recent per PR; pass --all to list every session."
         }
         "status" => {
             "rr status — session attention snapshot.\n\nUsage:\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]"
@@ -21112,6 +21696,155 @@ mod tests {
 
     fn debug_of(args: &[&str]) -> String {
         format!("{:?}", pa(args).expect("parse ok"))
+    }
+
+    #[test]
+    fn fresh_flag_is_only_accepted_by_review() {
+        assert!(pa(&["review", "--pr", "5", "--fresh"]).is_ok());
+        assert_eq!(
+            pa(&["status", "--fresh"]).unwrap_err(),
+            "--fresh is only supported by rr review"
+        );
+        assert_eq!(
+            pa(&["sessions", "--fresh"]).unwrap_err(),
+            "--fresh is only supported by rr review"
+        );
+    }
+
+    #[test]
+    fn all_flag_is_only_accepted_by_sessions() {
+        assert!(pa(&["sessions", "--all"]).is_ok());
+        assert!(pa(&["findings", "--sessions", "--all"]).is_ok());
+        assert_eq!(
+            pa(&["review", "--pr", "5", "--all"]).unwrap_err(),
+            "--all is only supported by rr sessions"
+        );
+    }
+
+    #[test]
+    fn reuse_decision_treats_only_failed_as_terminal() {
+        assert!(attention_state_is_reusable("review_launched"));
+        assert!(attention_state_is_reusable("awaiting_user_input"));
+        assert!(attention_state_is_reusable("findings_ready"));
+        assert!(attention_state_is_reusable("returned_to_roger"));
+        assert!(!attention_state_is_reusable("review_failed"));
+    }
+
+    fn reuse_finder_entry(id: &str, attention: &str, updated_at: i64) -> SessionFinderEntry {
+        SessionFinderEntry {
+            session_id: id.to_owned(),
+            repository: "owner/repo".to_owned(),
+            pull_request_number: 42,
+            attention_state: attention.to_owned(),
+            provider: "opencode".to_owned(),
+            updated_at,
+        }
+    }
+
+    #[test]
+    fn select_reusable_session_picks_newest_non_terminal() {
+        let candidates = vec![
+            reuse_finder_entry("old", "review_launched", 100),
+            reuse_finder_entry("failed-newest", "review_failed", 900),
+            reuse_finder_entry("newest-live", "awaiting_user_input", 500),
+        ];
+        let picked = select_reusable_session(&candidates).expect("a reusable session");
+        assert_eq!(picked.session_id, "newest-live");
+    }
+
+    #[test]
+    fn select_reusable_session_returns_none_when_all_terminal() {
+        let candidates = vec![reuse_finder_entry("a", "review_failed", 100)];
+        assert!(select_reusable_session(&candidates).is_none());
+    }
+
+    #[test]
+    fn relative_age_labels_are_compact() {
+        assert_eq!(format_relative_age(1_000, 990), "10s ago");
+        assert_eq!(format_relative_age(1_000, 400), "10m ago");
+        assert_eq!(format_relative_age(10_000, 2_800), "2h ago");
+        assert_eq!(format_relative_age(200_000, 5_600), "2d ago");
+        // Clock skew never produces a negative age.
+        assert_eq!(format_relative_age(100, 500), "0s ago");
+    }
+
+    #[test]
+    fn grouped_session_render_caps_at_five_with_older_note() {
+        let now = 1_000_000;
+        let entries: Vec<Value> = (0..7)
+            .map(|i| {
+                json!({
+                    "session_id": format!("s{i}"),
+                    "repository": "owner/repo",
+                    "pull_request": 42,
+                    "provider": "opencode",
+                    "attention_state": "review_launched",
+                    "updated_at": now - (i as i64) * 60,
+                })
+            })
+            .collect();
+        let default_view = render_grouped_session_lines(&entries, false, now);
+        assert!(default_view.contains("owner/repo#42:"));
+        // Newest first, capped at five.
+        assert!(default_view.contains("s0  opencode  review_launched  0s ago"));
+        assert!(default_view.contains("s4  opencode  review_launched"));
+        assert!(!default_view.contains("s5  "));
+        assert!(default_view.contains("and 2 older sessions (rr sessions --all to list)"));
+
+        let all_view = render_grouped_session_lines(&entries, true, now);
+        assert!(all_view.contains("s6  opencode  review_launched"));
+        assert!(!all_view.contains("older sessions"));
+    }
+
+    #[test]
+    fn review_next_commands_add_copilot_interactive_hint_only_when_batch() {
+        let batch = review_next_commands(
+            "sess-1",
+            session_copilot::PROVIDER_ID,
+            "owner/repo",
+            42,
+            false,
+        );
+        assert!(batch.iter().any(|c| c == "rr open --session sess-1"));
+        assert!(batch.iter().any(|c| c.contains("--interactive")));
+        let interactive = review_next_commands(
+            "sess-1",
+            session_copilot::PROVIDER_ID,
+            "owner/repo",
+            42,
+            true,
+        );
+        assert!(!interactive.iter().any(|c| c.contains("--interactive")));
+        let opencode = review_next_commands("sess-1", "opencode", "owner/repo", 42, false);
+        assert!(!opencode.iter().any(|c| c.contains("--interactive")));
+    }
+
+    #[test]
+    fn copilot_seed_embeds_worker_task_path_and_protocol() {
+        let target = ReviewTarget {
+            repository: "owner/repo".to_owned(),
+            pull_request_number: 42,
+            base_ref: "main".to_owned(),
+            head_ref: "feature".to_owned(),
+            base_commit: "aaa".to_owned(),
+            head_commit: "bbb".to_owned(),
+        };
+        let seed = copilot_worker_seed_prompt(&target, "/store/sessions/sess-1/worker-task.json");
+        assert!(seed.contains("/store/sessions/sess-1/worker-task.json"));
+        assert!(seed.contains("worker.get_review_context"));
+        assert!(seed.contains("worker.submit_stage_result"));
+        assert!(seed.contains("worker.search_memory"));
+        assert!(seed.contains("task_nonce"));
+        assert!(seed.contains("do not post to GitHub"));
+    }
+
+    #[test]
+    fn worker_task_file_path_is_canonical() {
+        let path = worker_task_file_path(Path::new("/store"), "sess-1");
+        assert_eq!(
+            path,
+            Path::new("/store/sessions/sess-1/worker-task.json").to_path_buf()
+        );
     }
 
     #[test]
