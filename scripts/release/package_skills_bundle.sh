@@ -76,7 +76,10 @@ ROGER_SKILLS=(
   roger-copilot-harness
   roger-extreme-software-optimization
   roger-inside-roger-agent
+  roger-operator-quickstart
   roger-review-driver
+  roger-tui-cheatsheet
+  roger-worker-protocol
 )
 
 unpacked_dir="${output_dir}/unpacked"

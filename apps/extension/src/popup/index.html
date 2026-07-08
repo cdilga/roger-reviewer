@@ -166,6 +166,73 @@
         color: var(--rr-popup-muted);
       }
 
+      .popup-results:empty {
+        display: none;
+      }
+
+      .popup-results {
+        margin: 10px 0 0;
+        padding-top: 8px;
+        border-top: 1px solid var(--rr-popup-border);
+        font-size: 11px;
+        line-height: 1.4;
+        color: var(--rr-popup-muted);
+      }
+
+      .popup-results h2 {
+        margin: 0 0 4px;
+        font-size: 11px;
+        font-weight: 700;
+        color: var(--rr-popup-ink);
+      }
+
+      .popup-results .popup-findings,
+      .popup-results .popup-sessions {
+        margin: 0 0 8px;
+      }
+
+      .popup-results ul {
+        margin: 4px 0 0;
+        padding: 0;
+        list-style: none;
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+
+      .popup-results li {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .popup-results .popup-session-id {
+        font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+        color: var(--rr-popup-ink);
+      }
+
+      .popup-copy-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 4px;
+      }
+
+      .popup-copy-row code {
+        flex: 1 1 auto;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+        color: var(--rr-popup-ink);
+      }
+
+      .popup-copy-row button {
+        flex: 0 0 auto;
+        padding: 3px 8px;
+        font-size: 11px;
+      }
+
       .popup-info {
         margin: 10px 0 0;
         padding-top: 8px;
@@ -213,6 +280,7 @@
             </button>
           </div>
         </div>
+        <div id="popup-results" class="popup-results"></div>
         <details class="popup-info" id="popup-info">
           <summary id="popup-info-toggle">Build and fallback details</summary>
           <p id="popup-build-info">Extension build unavailable.</p>

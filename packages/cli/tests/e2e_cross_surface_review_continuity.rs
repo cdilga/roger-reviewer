@@ -217,6 +217,7 @@ fn e2e_cross_surface_review_continuity_proves_bridge_resume_tui_and_recall_truth
             pr_number: 42,
             head_ref: None,
             instance: None,
+            session_id: None,
             extension_id: Some(PACKAGED_MANIFEST_KEY_EXTENSION_ID.to_owned()),
             browser: Some("chrome".to_owned()),
         },

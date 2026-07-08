@@ -62,6 +62,11 @@ pub struct BridgeLaunchIntent {
     pub head_ref: Option<String>,
     /// Optional explicit instance name.
     pub instance: Option<String>,
+    /// Optional explicit session id. When present on a `resume_review` intent
+    /// the bridge dispatches `rr resume --session <id>` so a specific candidate
+    /// is reopened instead of relying on the CLI's auto-selection heuristic.
+    #[serde(default)]
+    pub session_id: Option<String>,
     /// Optional browser extension runtime ID for identity-registration events.
     #[serde(default)]
     pub extension_id: Option<String>,
@@ -88,6 +93,11 @@ pub enum BridgeFailureKind {
     RobotSchemaMismatch,
     MissingSessionId,
     CliOutcomeNotSafe,
+    /// The resume command could not pick a single session and returned a
+    /// disambiguation picker. This is NOT an unsafe outcome: it carries a
+    /// bounded `candidates` list the extension renders so the user can pick a
+    /// session and resume it explicitly.
+    PickerRequired,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +130,23 @@ pub struct BridgeResponse {
     /// to be a source of truth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub findings: Option<serde_json::Value>,
+    /// Canonical Roger warnings forwarded verbatim from the launch command's
+    /// robot envelope (resume auto-selection notice, provider-support caveats,
+    /// etc). Previously the bridge discarded these; the extension now renders
+    /// them so silent auto-picks become visible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    /// Bounded disambiguation candidates relayed for a `resume_review` picker
+    /// (the `blocked_picker_response` envelope's `data.candidates`). Present only
+    /// with `failure_kind = picker_required`; the extension renders a per-session
+    /// resume affordance instead of a generic error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidates: Option<serde_json::Value>,
+    /// True when the resume command auto-selected a session from multiple
+    /// candidates (detected from the leading "auto-selected session" warning).
+    /// Lets the extension surface a visible "choose another" notice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_selected_session: Option<bool>,
 }
 
 impl BridgeResponse {
@@ -136,6 +163,9 @@ impl BridgeResponse {
             launch_outcome: None,
             failure_kind: None,
             findings: None,
+            warnings: Vec::new(),
+            candidates: None,
+            auto_selected_session: None,
         }
     }
 
@@ -159,6 +189,37 @@ impl BridgeResponse {
             launch_outcome: launch_outcome.map(str::to_owned),
             failure_kind: None,
             findings: None,
+            warnings: Vec::new(),
+            candidates: None,
+            auto_selected_session: None,
+        }
+    }
+
+    /// Build a `resume_review` picker response: `ok = false` but NOT an unsafe
+    /// outcome — it carries the bounded `candidates` list so the extension can
+    /// render a per-session resume affordance instead of a generic error.
+    pub fn picker_required(
+        action: &str,
+        message: &str,
+        guidance: &str,
+        candidates: serde_json::Value,
+        warnings: Vec<String>,
+    ) -> Self {
+        Self {
+            ok: false,
+            action: action.to_owned(),
+            message: message.to_owned(),
+            session_id: None,
+            guidance: Some(guidance.to_owned()),
+            attention_state: None,
+            generated_at: None,
+            status: None,
+            launch_outcome: Some("blocked".to_owned()),
+            failure_kind: Some(BridgeFailureKind::PickerRequired),
+            findings: None,
+            warnings,
+            candidates: Some(candidates),
+            auto_selected_session: None,
         }
     }
 
@@ -185,6 +246,9 @@ impl BridgeResponse {
             launch_outcome: launch_outcome.map(str::to_owned),
             failure_kind: failure_kind.into(),
             findings: None,
+            warnings: Vec::new(),
+            candidates: None,
+            auto_selected_session: None,
         }
     }
 }
@@ -548,6 +612,11 @@ struct BridgeDispatchSpec {
     command_name: &'static str,
     argv: Vec<String>,
     allowed_outcomes: &'static [&'static str],
+    /// When true, a `blocked` outcome carrying a non-empty `data.candidates`
+    /// array is captured as a disambiguation picker (relayed to the extension)
+    /// instead of failing the allow-list as an unsafe outcome. Only `rr resume`
+    /// opts in; every other command keeps `blocked` fatal.
+    capture_picker_block: bool,
 }
 
 fn bridge_dispatch_spec(intent: &BridgeLaunchIntent) -> Option<BridgeDispatchSpec> {
@@ -557,32 +626,48 @@ fn bridge_dispatch_spec(intent: &BridgeLaunchIntent) -> Option<BridgeDispatchSpe
     // `accepts_surface` marks the launch-attempt commands (review/resume) that
     // record a surface-typed launch attempt/binding; `rr findings` does not, so
     // it must not receive the bridge-only `--surface` flag.
-    let (command_name, mut argv, allowed_outcomes, accepts_surface) = match intent.action.as_str() {
-        "start_review" => (
-            "rr review",
-            vec!["review".to_owned()],
-            &["complete", "degraded"][..],
-            true,
-        ),
-        "resume_review" => (
-            "rr resume",
-            vec!["resume".to_owned()],
-            &["complete", "degraded"][..],
-            true,
-        ),
-        "show_findings" => (
-            "rr findings",
-            vec!["findings".to_owned()],
-            &["complete", "empty"][..],
-            false,
-        ),
-        _ => return None,
-    };
+    let (command_name, mut argv, allowed_outcomes, accepts_surface, capture_picker_block) =
+        match intent.action.as_str() {
+            "start_review" => (
+                "rr review",
+                vec!["review".to_owned()],
+                &["complete", "degraded"][..],
+                true,
+                false,
+            ),
+            "resume_review" => (
+                "rr resume",
+                vec!["resume".to_owned()],
+                &["complete", "degraded"][..],
+                true,
+                true,
+            ),
+            "show_findings" => (
+                "rr findings",
+                vec!["findings".to_owned()],
+                &["complete", "empty"][..],
+                false,
+                false,
+            ),
+            _ => return None,
+        };
 
     argv.push("--repo".to_owned());
     argv.push(repo_locator);
     argv.push("--pr".to_owned());
     argv.push(pr_number);
+    // An explicit session id makes resume deterministic: dispatch it so the CLI
+    // reopens exactly that candidate instead of auto-selecting.
+    if intent.action == "resume_review"
+        && let Some(session_id) = intent
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    {
+        argv.push("--session".to_owned());
+        argv.push(session_id.to_owned());
+    }
     if accepts_surface {
         // Record the true launch origin so the persisted launch attempt/binding
         // carry surface=bridge instead of masquerading as a CLI launch.
@@ -597,6 +682,7 @@ fn bridge_dispatch_spec(intent: &BridgeLaunchIntent) -> Option<BridgeDispatchSpe
         command_name,
         argv,
         allowed_outcomes,
+        capture_picker_block,
     })
 }
 
@@ -666,12 +752,21 @@ fn neutral_bridge_launch_dir() -> PathBuf {
     std::env::temp_dir()
 }
 
+fn envelope_has_candidates(envelope: &RobotEnvelope) -> bool {
+    envelope
+        .data
+        .get("candidates")
+        .and_then(Value::as_array)
+        .is_some_and(|candidates| !candidates.is_empty())
+}
+
 fn execute_rr_robot_command(
     action: &str,
     roger_binary_path: &Path,
     command_name: &str,
     argv: &[String],
     allowed_outcomes: &[&str],
+    capture_picker_block: bool,
 ) -> std::result::Result<RobotEnvelope, BridgeResponse> {
     let rerun_command = format_rr_command(argv);
     let output = match Command::new(roger_binary_path)
@@ -735,6 +830,16 @@ fn execute_rr_robot_command(
     }
 
     if !allowed_outcomes.contains(&envelope.outcome.as_str()) {
+        // Resume's disambiguation picker surfaces as a `blocked` outcome that
+        // carries a bounded candidates list. That is a legitimate, actionable
+        // response — not an unsafe outcome — so hand the envelope back for the
+        // caller to relay instead of failing the allow-list.
+        if capture_picker_block
+            && envelope.outcome == "blocked"
+            && envelope_has_candidates(&envelope)
+        {
+            return Ok(envelope);
+        }
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(BridgeResponse::failure_with_kind(
             action,
@@ -844,12 +949,38 @@ pub fn handle_bridge_intent(
         dispatch.command_name,
         &dispatch.argv,
         dispatch.allowed_outcomes,
+        dispatch.capture_picker_block,
     ) {
         Ok(envelope) => envelope,
         Err(response) => return response,
     };
 
     let launch_command = format_rr_command(&dispatch.argv);
+
+    // Resume disambiguation picker: relay the candidates as a typed
+    // picker-required response so the extension can render per-session resume
+    // buttons rather than a generic "unsafe outcome" error.
+    if dispatch.capture_picker_block && launch_envelope.outcome == "blocked" {
+        let candidates = launch_envelope
+            .data
+            .get("candidates")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new()));
+        let guidance = bridge_guidance_from_robot_envelope(
+            dispatch.command_name,
+            &launch_command,
+            &launch_envelope,
+            "",
+        );
+        return BridgeResponse::picker_required(
+            &intent.action,
+            "Multiple Roger review sessions match this pull request — choose one to resume.",
+            &guidance,
+            candidates,
+            launch_envelope.warnings.clone(),
+        );
+    }
+
     let Some(session_id) = envelope_session_id(&launch_envelope).map(str::to_owned) else {
         return BridgeResponse::failure_with_kind(
             &intent.action,
@@ -880,6 +1011,7 @@ pub fn handle_bridge_intent(
         "rr status",
         &status_argv,
         &["complete"],
+        false,
     ) {
         Ok(envelope) => envelope,
         Err(response) => return response,
@@ -936,6 +1068,18 @@ pub fn handle_bridge_intent(
             "count": launch_envelope.data.get("count").cloned().unwrap_or(Value::from(0)),
             "warnings": launch_envelope.warnings,
         }));
+    } else if intent.action == "resume_review" {
+        // Forward the resume envelope's warnings so a silent auto-pick becomes
+        // visible, and echo the auto-selection signal detected from the CLI's
+        // "auto-selected session ..." warning prefix.
+        if launch_envelope
+            .warnings
+            .iter()
+            .any(|warning| warning.trim_start().starts_with("auto-selected session"))
+        {
+            response.auto_selected_session = Some(true);
+        }
+        response.warnings = launch_envelope.warnings;
     }
     response
 }
@@ -1033,6 +1177,7 @@ mod tests {
             pr_number: 42,
             head_ref: Some("feat/frob".to_owned()),
             instance: None,
+            session_id: None,
             extension_id: None,
             browser: None,
         }
@@ -1430,6 +1575,207 @@ esac
     }
 
     #[test]
+    fn resume_dispatch_passes_explicit_session_id_in_argv() {
+        let mut intent = sample_intent();
+        intent.action = "resume_review".to_owned();
+        intent.session_id = Some("session-explicit-9".to_owned());
+        let dispatch = bridge_dispatch_spec(&intent).expect("resume dispatch spec");
+        assert_eq!(dispatch.command_name, "rr resume");
+        assert!(dispatch.capture_picker_block);
+        let session_flag = dispatch
+            .argv
+            .windows(2)
+            .find(|pair| pair[0] == "--session");
+        assert_eq!(
+            session_flag.map(|pair| pair[1].as_str()),
+            Some("session-explicit-9"),
+            "resume argv must carry the explicit session id: {:?}",
+            dispatch.argv
+        );
+    }
+
+    #[test]
+    fn resume_dispatch_omits_session_flag_without_explicit_id() {
+        let mut intent = sample_intent();
+        intent.action = "resume_review".to_owned();
+        intent.session_id = None;
+        let dispatch = bridge_dispatch_spec(&intent).expect("resume dispatch spec");
+        assert!(
+            !dispatch.argv.iter().any(|arg| arg == "--session"),
+            "resume argv must not carry --session when no id is provided: {:?}",
+            dispatch.argv
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_bridge_intent_resume_forwards_auto_select_warning() {
+        let (_stub_dir, stub_rr) = write_stub_roger_binary(
+            "resume",
+            &serde_json::to_string_pretty(&serde_json::json!({
+                "schema_id": "rr.robot.resume.v1",
+                "command": "rr resume",
+                "robot_format": "json",
+                "outcome": "complete",
+                "generated_at": "2026-04-15T00:00:00Z",
+                "exit_code": 0,
+                "warnings": [
+                    "auto-selected session session-bridge-1 from 3 candidates (pr_rank=1, binding_rank=2, continuity_rank=2, updated_at=1000)"
+                ],
+                "repair_actions": [],
+                "data": {
+                    "session_id": "session-bridge-1",
+                    "resume_path": "reopened_by_locator"
+                }
+            }))
+            .expect("serialize resume envelope"),
+            0,
+            &serde_json::to_string_pretty(&serde_json::json!({
+                "schema_id": "rr.robot.status.v1",
+                "command": "rr status",
+                "robot_format": "json",
+                "outcome": "complete",
+                "generated_at": "2026-04-15T00:00:01Z",
+                "exit_code": 0,
+                "warnings": [],
+                "repair_actions": [],
+                "data": {
+                    "session": {"id": "session-bridge-1"},
+                    "attention": {"state": "awaiting_user_input"}
+                }
+            }))
+            .expect("serialize status envelope"),
+            0,
+        );
+        let preflight = BridgePreflight {
+            roger_binary_found: true,
+            roger_data_dir_exists: true,
+            gh_available: true,
+        };
+        let mut intent = sample_intent();
+        intent.action = "resume_review".to_owned();
+        let resp = handle_bridge_intent(&intent, &preflight, &stub_rr);
+        assert!(resp.ok, "guidance: {:?}", resp.guidance);
+        assert_eq!(resp.auto_selected_session, Some(true));
+        assert!(
+            resp.warnings
+                .iter()
+                .any(|warning| warning.starts_with("auto-selected session")),
+            "resume must forward the CLI auto-select warning: {:?}",
+            resp.warnings
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_bridge_intent_resume_relays_picker_candidates() {
+        let (_stub_dir, stub_rr) = write_stub_roger_binary(
+            "resume",
+            &serde_json::to_string_pretty(&serde_json::json!({
+                "schema_id": "rr.robot.resume.v1",
+                "command": "rr resume",
+                "robot_format": "json",
+                "outcome": "blocked",
+                "generated_at": "2026-04-15T00:00:00Z",
+                "exit_code": 3,
+                "warnings": ["session inference is ambiguous; explicit selection is required"],
+                "repair_actions": ["re-run with --session <id> or pass --pr <number> for a unique match"],
+                "data": {
+                    "reason": "ambiguous repo-local session match",
+                    "candidates": [
+                        {
+                            "session_id": "session-a",
+                            "repository": "acme/widgets",
+                            "pull_request": 42,
+                            "attention_state": "awaiting_user_input",
+                            "provider": "opencode",
+                            "updated_at": 1000
+                        },
+                        {
+                            "session_id": "session-b",
+                            "repository": "acme/widgets",
+                            "pull_request": 42,
+                            "attention_state": "refresh_recommended",
+                            "provider": "codex",
+                            "updated_at": 2000
+                        }
+                    ]
+                }
+            }))
+            .expect("serialize blocked resume envelope"),
+            3,
+            &serde_json::to_string_pretty(&serde_json::json!({
+                "schema_id": "rr.robot.status.v1",
+                "command": "rr status",
+                "robot_format": "json",
+                "outcome": "complete",
+                "generated_at": "2026-04-15T00:00:01Z",
+                "exit_code": 0,
+                "warnings": [],
+                "repair_actions": [],
+                "data": {"session": {"id": "unused"}, "attention": {"state": "awaiting_user_input"}}
+            }))
+            .expect("serialize status envelope"),
+            0,
+        );
+        let preflight = BridgePreflight {
+            roger_binary_found: true,
+            roger_data_dir_exists: true,
+            gh_available: true,
+        };
+        let mut intent = sample_intent();
+        intent.action = "resume_review".to_owned();
+        let resp = handle_bridge_intent(&intent, &preflight, &stub_rr);
+        assert!(!resp.ok);
+        assert_eq!(resp.failure_kind, Some(BridgeFailureKind::PickerRequired));
+        let candidates = resp
+            .candidates
+            .expect("picker response must relay candidates");
+        let array = candidates.as_array().expect("candidates array");
+        assert_eq!(array.len(), 2);
+        assert_eq!(array[0]["session_id"], "session-a");
+        assert_eq!(array[1]["provider"], "codex");
+        assert!(
+            resp.session_id.is_none(),
+            "a picker response has no single resolved session"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_bridge_intent_resume_blocked_without_candidates_stays_unsafe() {
+        let (_stub_dir, stub_rr) = write_stub_roger_binary(
+            "resume",
+            &serde_json::to_string_pretty(&serde_json::json!({
+                "schema_id": "rr.robot.resume.v1",
+                "command": "rr resume",
+                "robot_format": "json",
+                "outcome": "blocked",
+                "generated_at": "2026-04-15T00:00:00Z",
+                "exit_code": 3,
+                "warnings": ["no matching session found for the requested target"],
+                "repair_actions": ["run rr review --pr <number> to create a new session"],
+                "data": {"reason": "no review session exists", "candidates": []}
+            }))
+            .expect("serialize blocked resume envelope"),
+            3,
+            "{}",
+            0,
+        );
+        let preflight = BridgePreflight {
+            roger_binary_found: true,
+            roger_data_dir_exists: true,
+            gh_available: true,
+        };
+        let mut intent = sample_intent();
+        intent.action = "resume_review".to_owned();
+        let resp = handle_bridge_intent(&intent, &preflight, &stub_rr);
+        assert!(!resp.ok);
+        assert_eq!(resp.failure_kind, Some(BridgeFailureKind::CliOutcomeNotSafe));
+        assert!(resp.candidates.is_none());
+    }
+
+    #[test]
     fn handle_bridge_intent_unknown_action() {
         let preflight = BridgePreflight {
             roger_binary_found: true,
@@ -1484,6 +1830,7 @@ esac
             pr_number: 0,
             head_ref: None,
             instance: None,
+            session_id: None,
             extension_id: Some("abcdefghijklmnopabcdefghijklmnop".to_owned()),
             browser: Some("chrome".to_owned()),
         };
@@ -1509,6 +1856,7 @@ esac
             pr_number: 0,
             head_ref: None,
             instance: None,
+            session_id: None,
             extension_id: Some("INVALID-ID".to_owned()),
             browser: Some("chrome".to_owned()),
         };

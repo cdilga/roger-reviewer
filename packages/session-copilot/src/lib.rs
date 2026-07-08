@@ -23,7 +23,7 @@ pub const COPILOT_ADMISSION_FEATURE_GATE: &str = "copilot_provider_admission";
 pub const REVIEW_READONLY_POLICY_PROFILE_ID: &str = "review_readonly";
 pub const REVIEW_READONLY_POLICY_SUMMARY: &str = "review-safe Copilot posture: read-oriented prompts only, Roger-owned audit artifacts for denials/transcript references, and provider state treated as continuity evidence only";
 pub const REVIEW_READONLY_CONTINUITY_MODE: &str = "provider_state_evidence_only";
-pub const REVIEW_READONLY_HOOK_CONTRACT_VERSION: &str = "copilot_review_readonly_hooks.v1";
+pub const REVIEW_READONLY_HOOK_CONTRACT_VERSION: &str = "copilot_review_readonly_hooks.v2";
 pub const REVIEW_READONLY_INSTRUCTION_CONTRACT_VERSION: &str =
     "copilot_review_readonly_instructions.v1";
 pub const REVIEW_READONLY_REQUIRED_ISOLATION_MODE: &str = "worktree";
@@ -820,7 +820,7 @@ mod tests {
         );
         assert_eq!(
             REVIEW_READONLY_HOOK_CONTRACT_VERSION,
-            "copilot_review_readonly_hooks.v1"
+            "copilot_review_readonly_hooks.v2"
         );
         assert_eq!(
             REVIEW_READONLY_INSTRUCTION_CONTRACT_VERSION,

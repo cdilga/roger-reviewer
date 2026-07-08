@@ -94,6 +94,25 @@ const FINDINGS_TRIAGE_ORDER = [
   'dismissed',
 ];
 
+// ---------------------------------------------------------------------------
+// Session-candidates surface (bead rr-ext-session-candidates-surface-pnv0).
+//
+// Renders Roger's LOCAL session inventory (from the status probe's `.sessions`)
+// AND resume disambiguation candidates (from a `picker_required` launch
+// response) as a compact, read-only list with a per-session Resume button and a
+// copyable `rr open --session <id>` handoff. Non-mutating: Resume/launch are the
+// only sanctioned actions; everything else is a truthful mirror.
+// ---------------------------------------------------------------------------
+const SESSIONS_SECTION_ID = 'roger-reviewer-sessions';
+const SESSIONS_NOTICE_ID = 'roger-reviewer-sessions-notice';
+const SESSIONS_LIST_ID = 'roger-reviewer-sessions-list';
+const SESSIONS_CAPTION =
+  'Local Roger review sessions (read-only) — Resume reopens one in your provider.';
+// Visible-tab status re-poll cadence. The panel refreshes the bounded status
+// mirror every 45s while mounted and visible; polling stops when the tab is
+// hidden or the panel unmounts so a background tab never spins the native host.
+const STATUS_MIRROR_POLL_INTERVAL_MS = 45000;
+
 const ATTENTION_STYLES = {
   awaiting_user_input: {
     label: 'Awaiting user input',
@@ -1180,6 +1199,7 @@ function requestStatusMirror(context) {
         if (response.mode === 'no_local_session') {
           applyMirroredModel(null, 0);
           clearAttentionBadge();
+          renderSessionInventoryIntoPanel([], context);
           setInfoMessage('No Roger review exists for this PR yet — start one.');
           return;
         }
@@ -1192,6 +1212,7 @@ function requestStatusMirror(context) {
         ) {
           applyMirroredModel(null, response.session_count);
           clearAttentionBadge();
+          renderSessionInventoryIntoPanel(response.sessions, context);
           const count = normalizeSessionCount(response.session_count);
           setInfoMessage(
             `${count} local Roger review session${count === 1 ? '' : 's'} for this PR. ` +
@@ -1214,6 +1235,7 @@ function requestStatusMirror(context) {
 
         applyMirroredModel(response.attention_state, response.session_count);
         setAttentionBadge(response.attention_state, response.freshness_label || null);
+        renderSessionInventoryIntoPanel(response.sessions, context);
         setInfoMessage(
           appendGuidance(response.message || 'Mirroring bounded Roger status.', response.guidance)
         );
@@ -2041,6 +2063,129 @@ ${buildDarkThemeBlocks(`#${PANEL_ID}`)}
   color: var(--rr-panel-muted);
   word-break: break-all;
 }
+
+#${SESSIONS_SECTION_ID} {
+  margin: 12px 0 0 0;
+  padding: 10px 0 0 0;
+  border-top: 1px solid var(--rr-panel-border);
+}
+
+#${PANEL_ID}.roger-panel--inline #${SESSIONS_SECTION_ID} {
+  display: none;
+}
+
+#${SESSIONS_SECTION_ID} .rr-sessions-caption {
+  margin: 0 0 6px 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--rr-panel-muted);
+}
+
+#${SESSIONS_SECTION_ID} .rr-sessions-notice {
+  margin: 0 0 8px 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--bgColor-accent-muted, #ddf4ff);
+  color: var(--fgColor-accent, #0969da);
+  font-size: 12px;
+  line-height: 1.35;
+  font-weight: 600;
+}
+
+#${SESSIONS_SECTION_ID} .rr-session-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#${SESSIONS_SECTION_ID} .rr-session-item {
+  padding: 8px;
+  border: 1px solid var(--rr-panel-border);
+  border-radius: 8px;
+  background: var(--rr-panel-surface-muted);
+}
+
+#${SESSIONS_SECTION_ID} .rr-session-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+#${SESSIONS_SECTION_ID} .rr-session-id {
+  font-family: var(
+    --fontStack-monospace,
+    ui-monospace,
+    SFMono-Regular,
+    SF Mono,
+    Menlo,
+    Consolas,
+    monospace
+  );
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--rr-panel-text);
+  word-break: break-all;
+}
+
+#${SESSIONS_SECTION_ID} .rr-session-resume {
+  flex: 0 0 auto;
+}
+
+#${SESSIONS_SECTION_ID} .rr-session-meta {
+  margin: 4px 0 0 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--rr-panel-muted);
+}
+
+#${SESSIONS_SECTION_ID} .rr-copy-block,
+#${FINDINGS_SECTION_ID} .rr-copy-block {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 0 0;
+}
+
+.rr-copy-command {
+  flex: 1 1 auto;
+  padding: 3px 6px;
+  border-radius: 5px;
+  background: var(--rr-panel-surface-raised, var(--bgColor-muted, #f6f8fa));
+  border: 1px solid var(--rr-panel-border);
+  font-family: var(
+    --fontStack-monospace,
+    ui-monospace,
+    SFMono-Regular,
+    SF Mono,
+    Menlo,
+    Consolas,
+    monospace
+  );
+  font-size: 11px;
+  color: var(--rr-panel-text);
+  word-break: break-all;
+}
+
+.rr-copy-button {
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--rr-panel-border-strong);
+  border-radius: 5px;
+  background: var(--button-default-bgColor-rest, var(--bgColor-default, #ffffff));
+  color: var(--rr-panel-text);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.rr-copy-button:hover {
+  background: var(--button-default-bgColor-hover, var(--bgColor-muted, #f3f4f6));
+}
   `.trim();
 
   const styleHost = rootDocument.head || rootDocument.documentElement || rootDocument.body;
@@ -2267,6 +2412,207 @@ function humanizeToken(token) {
   return String(token)
     .replace(/_/g, ' ')
     .replace(/\b\w/g, (ch) => ch.toUpperCase());
+}
+
+// Shorten a session id for compact display while keeping the full id available
+// as the resume/copy payload. Long canonical ids (`session-<ts>-<pid>-<seq>`)
+// collapse to a head…tail form; short ids render verbatim.
+function shortenSessionId(sessionId) {
+  const id = typeof sessionId === 'string' ? sessionId.trim() : '';
+  if (id.length === 0) {
+    return '';
+  }
+  if (id.length <= 20) {
+    return id;
+  }
+  return `${id.slice(0, 10)}…${id.slice(-6)}`;
+}
+
+// Format a session's last-updated timestamp as a coarse relative age. Accepts a
+// numeric unix timestamp (seconds) from the session finder or an ISO string.
+// Returns null when the input is unusable so the caller can omit the age token
+// rather than render a bogus one.
+function formatRelativeAge(updatedAt, nowMs = Date.now()) {
+  let thenMs = null;
+  if (typeof updatedAt === 'number' && Number.isFinite(updatedAt)) {
+    // Heuristic: 10-digit values are unix seconds, 13-digit are milliseconds.
+    thenMs = updatedAt > 1e12 ? updatedAt : updatedAt * 1000;
+  } else if (typeof updatedAt === 'string' && updatedAt.trim().length > 0) {
+    const parsed = Date.parse(updatedAt.trim());
+    if (Number.isFinite(parsed)) {
+      thenMs = parsed;
+    }
+  }
+  if (thenMs === null) {
+    return null;
+  }
+  const deltaSeconds = Math.max(0, Math.round((nowMs - thenMs) / 1000));
+  if (deltaSeconds < 45) {
+    return 'just now';
+  }
+  const minutes = Math.round(deltaSeconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ago`;
+  }
+  const days = Math.round(hours / 24);
+  return `${days}d ago`;
+}
+
+// The canonical operator handoff for a session id: the exact command a user can
+// paste into a terminal to open that session locally.
+function resumeCommandForSession(sessionId) {
+  return `rr open --session ${sessionId}`;
+}
+
+// Copy text to the clipboard, preferring the async Clipboard API and falling
+// back to a hidden-textarea execCommand for contexts where it is unavailable or
+// blocked. Returns a promise that resolves true on success, false otherwise.
+function copyTextToClipboard(text, options = {}) {
+  const nav =
+    options.navigator || (typeof navigator !== 'undefined' ? navigator : null);
+  const doc = options.document || (typeof document !== 'undefined' ? document : null);
+
+  if (nav && nav.clipboard && typeof nav.clipboard.writeText === 'function') {
+    return Promise.resolve()
+      .then(() => nav.clipboard.writeText(text))
+      .then(() => true)
+      .catch(() => execCommandCopyFallback(text, doc));
+  }
+  return Promise.resolve(execCommandCopyFallback(text, doc));
+}
+
+function execCommandCopyFallback(text, doc) {
+  if (!doc || typeof doc.createElement !== 'function' || typeof doc.execCommand !== 'function') {
+    return false;
+  }
+  try {
+    const textarea = doc.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', 'true');
+    textarea.style.position = 'absolute';
+    textarea.style.left = '-9999px';
+    const host = doc.body || doc.documentElement;
+    if (!host || typeof host.appendChild !== 'function') {
+      return false;
+    }
+    host.appendChild(textarea);
+    if (typeof textarea.select === 'function') {
+      textarea.select();
+    }
+    const ok = doc.execCommand('copy');
+    if (typeof textarea.remove === 'function') {
+      textarea.remove();
+    }
+    return Boolean(ok);
+  } catch {
+    return false;
+  }
+}
+
+// Build the copyable `rr open --session <id>` handoff: a <code> block plus a
+// Copy button that writes the command to the clipboard and shows brief 'Copied'
+// feedback. The chrome surfaces (navigator/document) are injectable for tests.
+function createCopyCommandBlock(rootDocument, sessionId, options = {}) {
+  const command = resumeCommandForSession(sessionId);
+  const block = makeEl(rootDocument, 'div', 'rr-copy-block');
+
+  const code = makeEl(rootDocument, 'code', 'rr-copy-command', command);
+  block.appendChild(code);
+
+  const button = makeEl(rootDocument, 'button', 'rr-copy-button', 'Copy');
+  button.type = 'button';
+  button.setAttribute('aria-label', `Copy ${command}`);
+  button.dataset.command = command;
+
+  const showFeedback = (label) => {
+    button.textContent = label;
+    const resetDelay = typeof options.feedbackMs === 'number' ? options.feedbackMs : 1500;
+    if (typeof setTimeout === 'function') {
+      setTimeout(() => {
+        button.textContent = 'Copy';
+      }, resetDelay);
+    }
+  };
+
+  if (typeof button.addEventListener === 'function') {
+    button.addEventListener('click', () => {
+      Promise.resolve(copyTextToClipboard(command, options)).then((copied) => {
+        showFeedback(copied ? 'Copied' : 'Copy failed');
+      });
+    });
+  }
+
+  block.appendChild(button);
+  return block;
+}
+
+// Normalize a session-inventory entry OR a picker candidate into one shape.
+// Inventory entries carry `session_id`; picker candidates carry `session_id`
+// plus `pull_request`. Both share provider / attention_state / updated_at.
+function normalizeSessionEntry(raw) {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+  const sessionId =
+    typeof raw.session_id === 'string' && raw.session_id.trim().length > 0
+      ? raw.session_id.trim()
+      : typeof raw.id === 'string' && raw.id.trim().length > 0
+        ? raw.id.trim()
+        : null;
+  if (!sessionId) {
+    return null;
+  }
+  return {
+    session_id: sessionId,
+    provider:
+      typeof raw.provider === 'string' && raw.provider.trim().length > 0
+        ? raw.provider.trim()
+        : null,
+    attention_state:
+      typeof raw.attention_state === 'string' && raw.attention_state.trim().length > 0
+        ? raw.attention_state.trim()
+        : null,
+    updated_at:
+      typeof raw.updated_at === 'number' || typeof raw.updated_at === 'string'
+        ? raw.updated_at
+        : null,
+    pull_request:
+      typeof raw.pull_request === 'number' && Number.isFinite(raw.pull_request)
+        ? raw.pull_request
+        : null,
+  };
+}
+
+// Coerce a launch response's `candidates` payload (or a status probe's
+// `sessions` array) into a bounded list of normalized session entries.
+function normalizeSessionEntries(raw) {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw.map(normalizeSessionEntry).filter(Boolean).slice(0, 8);
+}
+
+// Parse the "auto-selected session <id> from <N> candidates ..." warning the
+// resume CLI emits so the panel can render a precise, honest notice. Returns
+// { sessionId, total } or null.
+function parseAutoSelectWarning(warnings) {
+  if (!Array.isArray(warnings)) {
+    return null;
+  }
+  for (const warning of warnings) {
+    if (typeof warning !== 'string') {
+      continue;
+    }
+    const match = warning.match(/^auto-selected session (\S+) from (\d+) candidates/);
+    if (match) {
+      return { sessionId: match[1], total: Number(match[2]) };
+    }
+  }
+  return null;
 }
 
 function normalizeFindingsWarnings(obj) {
@@ -2672,6 +3018,156 @@ function handleShowFindings(context, button, options = {}) {
   );
 }
 
+// Dispatch a resume for a specific session. Reuses the hardened triggerLaunch
+// path (settle-once guard, watchdog, honest degrade) but carries the explicit
+// session id so the bridge dispatches `rr resume --session <id>` instead of
+// auto-selecting. Injectable via options.onResume for tests.
+function handleSessionResume(session, context, button, options = {}) {
+  if (typeof options.onResume === 'function') {
+    options.onResume(session, button, context);
+    return;
+  }
+  triggerLaunch('resume_review', context, button, { sessionId: session.session_id });
+}
+
+// Build one compact, read-only session row: short id (full id on hover), a
+// provider · attention · age meta line, a per-session Resume button, and the
+// copyable `rr open --session <id>` handoff.
+function renderSessionRow(session, context, rootDocument, options = {}) {
+  const li = makeEl(rootDocument, 'li', 'rr-session-item');
+  li.dataset.sessionId = session.session_id;
+
+  const head = makeEl(rootDocument, 'div', 'rr-session-head');
+  const idNode = makeEl(rootDocument, 'span', 'rr-session-id', shortenSessionId(session.session_id));
+  if (typeof idNode.setAttribute === 'function') {
+    idNode.setAttribute('title', session.session_id);
+  }
+  head.appendChild(idNode);
+
+  const resumeButton = makeEl(
+    rootDocument,
+    'button',
+    'rr-session-resume roger-panel-button roger-panel-button--secondary',
+    'Resume'
+  );
+  resumeButton.type = 'button';
+  resumeButton.dataset.action = 'resume_review';
+  resumeButton.dataset.sessionId = session.session_id;
+  resumeButton.setAttribute('aria-label', `Resume session ${session.session_id}`);
+  if (typeof resumeButton.addEventListener === 'function') {
+    resumeButton.addEventListener('click', () =>
+      handleSessionResume(session, context, resumeButton, options)
+    );
+  }
+  head.appendChild(resumeButton);
+  li.appendChild(head);
+
+  const metaParts = [];
+  if (session.provider) {
+    metaParts.push(humanizeToken(session.provider));
+  }
+  if (session.attention_state) {
+    metaParts.push(humanizeToken(session.attention_state));
+  }
+  const age = formatRelativeAge(session.updated_at);
+  if (age) {
+    metaParts.push(age);
+  }
+  if (metaParts.length > 0) {
+    li.appendChild(makeEl(rootDocument, 'div', 'rr-session-meta', metaParts.join(' · ')));
+  }
+
+  li.appendChild(createCopyCommandBlock(rootDocument, session.session_id, options));
+  return li;
+}
+
+// Populate a list node with session rows. Returns the number rendered.
+function renderSessionListInto(listNode, sessions, context, rootDocument, options = {}) {
+  if (!listNode || !rootDocument || typeof rootDocument.createElement !== 'function') {
+    return 0;
+  }
+  clearChildren(listNode);
+  const normalized = normalizeSessionEntries(sessions);
+  for (const session of normalized) {
+    listNode.appendChild(renderSessionRow(session, context, rootDocument, options));
+  }
+  return normalized.length;
+}
+
+function createSessionsSection(rootDocument) {
+  const section = rootDocument.createElement('section');
+  section.id = SESSIONS_SECTION_ID;
+  section.className = 'rr-sessions';
+  section.hidden = true;
+
+  section.appendChild(makeEl(rootDocument, 'p', 'rr-sessions-caption', SESSIONS_CAPTION));
+
+  const notice = makeEl(rootDocument, 'p', 'rr-sessions-notice');
+  notice.id = SESSIONS_NOTICE_ID;
+  notice.hidden = true;
+  section.appendChild(notice);
+
+  const list = rootDocument.createElement('ul');
+  list.id = SESSIONS_LIST_ID;
+  list.className = 'rr-session-list';
+  section.appendChild(list);
+
+  return section;
+}
+
+// Show/hide the sessions section based on whether it currently carries either a
+// visible notice or at least one rendered row.
+function updateSessionsSectionVisibility(rootDocument) {
+  const doc = rootDocument || (typeof document !== 'undefined' ? document : null);
+  if (!doc || typeof doc.getElementById !== 'function') {
+    return;
+  }
+  const section = doc.getElementById(SESSIONS_SECTION_ID);
+  const list = doc.getElementById(SESSIONS_LIST_ID);
+  const notice = doc.getElementById(SESSIONS_NOTICE_ID);
+  if (!section) {
+    return;
+  }
+  const hasRows = Boolean(list && list.children && list.children.length > 0);
+  const hasNotice = Boolean(notice && !notice.hidden);
+  section.hidden = !(hasRows || hasNotice);
+}
+
+function setSessionsNotice(message, rootDocument) {
+  const doc = rootDocument || (typeof document !== 'undefined' ? document : null);
+  if (!doc || typeof doc.getElementById !== 'function') {
+    return;
+  }
+  const notice = doc.getElementById(SESSIONS_NOTICE_ID);
+  if (!notice) {
+    return;
+  }
+  if (!message) {
+    notice.hidden = true;
+    notice.textContent = '';
+  } else {
+    notice.hidden = false;
+    notice.textContent = message;
+  }
+  updateSessionsSectionVisibility(doc);
+}
+
+// Render a session list (inventory or candidates) into the panel's sessions
+// section. Empty input clears the list; visibility follows list+notice state.
+function renderSessionInventoryIntoPanel(sessions, context, options = {}) {
+  const doc = options.document || (typeof document !== 'undefined' ? document : null);
+  if (!doc || typeof doc.getElementById !== 'function') {
+    return 0;
+  }
+  const list = doc.getElementById(SESSIONS_LIST_ID);
+  if (!list) {
+    return 0;
+  }
+  const count = renderSessionListInto(list, sessions, context, doc, options);
+  updateSessionsSectionVisibility(doc);
+  return count;
+}
+
 function createFindingsSection(context, rootDocument) {
   const section = rootDocument.createElement('section');
   section.id = FINDINGS_SECTION_ID;
@@ -2777,7 +3273,14 @@ function createPanel(context, rootDocument) {
     button.type = 'button';
     button.textContent = action.label;
     button.dataset.action = action.id;
-    button.addEventListener('click', () => triggerLaunch(action.id, context, button));
+    // Findings unification: the primary 'View Findings' action renders the
+    // read-only staging list via the same path as the 'Show local findings'
+    // button, instead of the generic launch path that discarded findings.
+    if (action.id === 'show_findings') {
+      button.addEventListener('click', () => handleShowFindings(context, button));
+    } else {
+      button.addEventListener('click', () => triggerLaunch(action.id, context, button));
+    }
     buttonRow.appendChild(button);
   }
 
@@ -2790,6 +3293,7 @@ function createPanel(context, rootDocument) {
   status.hidden = true;
   panel.appendChild(status);
 
+  panel.appendChild(createSessionsSection(rootDocument));
   panel.appendChild(createFindingsSection(context, rootDocument));
 
   return panel;
@@ -2871,6 +3375,78 @@ let lastAttentionState = null;
 let lastSessionCount = null;
 let refreshScheduled = false;
 
+// Visible-tab status re-poll state. The panel refreshes the bounded status
+// mirror on an interval while mounted AND the tab is visible; the interval is
+// cleared when the tab hides or the panel unmounts.
+let statusPollTimer = null;
+let statusPollContext = null;
+let statusPollClear = null;
+
+function isStatusPolling() {
+  return statusPollTimer !== null;
+}
+
+function stopStatusPolling() {
+  if (statusPollTimer !== null) {
+    const clearFn =
+      statusPollClear || (typeof clearInterval === 'function' ? clearInterval : null);
+    if (clearFn) {
+      clearFn(statusPollTimer);
+    }
+  }
+  statusPollTimer = null;
+}
+
+// Start (or restart) the 45s status re-poll for a context. No-op when the tab
+// is hidden — polling only runs while visible; visibilitychange restarts it.
+function startStatusPolling(context, options = {}) {
+  const doc = options.document || (typeof document !== 'undefined' ? document : null);
+  const setIntervalFn =
+    options.setInterval || (typeof setInterval === 'function' ? setInterval : null);
+  statusPollClear =
+    options.clearInterval || (typeof clearInterval === 'function' ? clearInterval : null);
+
+  stopStatusPolling();
+  statusPollContext = context || null;
+  if (!setIntervalFn || !statusPollContext) {
+    return null;
+  }
+  // Never poll while the tab is hidden.
+  if (doc && typeof doc.visibilityState === 'string' && doc.visibilityState !== 'visible') {
+    return null;
+  }
+
+  const onTick =
+    options.onTick ||
+    (() => {
+      if (doc && typeof doc.visibilityState === 'string' && doc.visibilityState !== 'visible') {
+        return;
+      }
+      if (statusPollContext) {
+        requestStatusMirror(statusPollContext);
+      }
+    });
+
+  statusPollTimer = setIntervalFn(onTick, STATUS_MIRROR_POLL_INTERVAL_MS);
+  return statusPollTimer;
+}
+
+// Bridge visibilitychange into the poll lifecycle: stop while hidden, restart
+// (for the last known context) when the tab becomes visible again.
+function handleStatusPollVisibilityChange(options = {}) {
+  const doc = options.document || (typeof document !== 'undefined' ? document : null);
+  if (!doc) {
+    return;
+  }
+  if (doc.visibilityState === 'visible') {
+    if (statusPollContext) {
+      startStatusPolling(statusPollContext, { ...options, document: doc });
+    }
+  } else {
+    stopStatusPolling();
+  }
+}
+
 function contextKey(context) {
   if (!context) {
     return null;
@@ -2887,6 +3463,10 @@ function refreshPanelForCurrentPage(rootDocument) {
     lastPanelMode = null;
     lastAttentionState = null;
     lastSessionCount = null;
+    // The panel is gone: stop the visible-tab re-poll so a background/non-PR
+    // route never spins the native host.
+    stopStatusPolling();
+    statusPollContext = null;
     // On non-detail routes (including PR-list pages) the listing controls own
     // their own lifecycle, separate from the detail panel.
     refreshPrListingControls(rootDocument);
@@ -2905,8 +3485,12 @@ function refreshPanelForCurrentPage(rootDocument) {
       applyActionModel(panel, lastAttentionState, lastSessionCount);
     }
     clearStatus();
+    // A new PR context: drop any stale auto-select / picker notice.
+    setSessionsNotice(null, rootDocument);
     setInfoMessage(DEFAULT_INFO_MESSAGE);
     requestStatusMirror(context);
+    // (Re)start the visible-tab re-poll bound to this context.
+    startStatusPolling(context, { document: rootDocument });
   }
 
   // A PR-detail page is never a PR-list route, so this clears any stale listing
@@ -2942,6 +3526,13 @@ function registerNavigationHooks(rootDocument) {
   window.addEventListener('turbo:load', onPotentialNavigation);
   window.addEventListener('pjax:end', onPotentialNavigation);
   window.addEventListener('popstate', onPotentialNavigation);
+
+  // Pause the status re-poll when the tab is hidden; resume when visible again.
+  if (typeof rootDocument.addEventListener === 'function') {
+    rootDocument.addEventListener('visibilitychange', () =>
+      handleStatusPollVisibilityChange({ document: rootDocument })
+    );
+  }
 
   if (typeof MutationObserver !== 'undefined' && rootDocument.body) {
     const observer = new MutationObserver(() => onPotentialNavigation());
@@ -3080,7 +3671,51 @@ function formatLaunchSuccessStatus(response) {
   return base;
 }
 
-function triggerLaunch(action, context, button) {
+// A resume response is a disambiguation picker (not a hard failure) when it
+// carries the typed picker signal or a candidates array.
+function isPickerRequiredResponse(response) {
+  if (!response || typeof response !== 'object') {
+    return false;
+  }
+  return (
+    response.failure_kind === 'picker_required' ||
+    response.mode === 'bridge_picker_required' ||
+    Array.isArray(response.candidates)
+  );
+}
+
+// Render the resume picker candidates into the sessions section with per-session
+// Resume buttons, and surface an actionable (non-error) status line — never a
+// generic error.
+function renderPickerCandidates(response, context, options = {}) {
+  const candidates = normalizeSessionEntries(response.candidates);
+  const count = renderSessionInventoryIntoPanel(candidates, context, options);
+  const message =
+    response.message || 'Multiple Roger sessions match — choose one to resume below.';
+  setSessionsNotice(message);
+  setInfoMessage(appendGuidance(message, response.guidance));
+  setStatus(message, false, { revealInline: true });
+  return count;
+}
+
+// When a resume auto-selected a session, render a visible one-line notice so the
+// silent pick becomes explicit and the user can choose another from the list.
+function maybeRenderAutoSelectNotice(response, context, options = {}) {
+  if (!response || response.auto_selected_session !== true) {
+    return false;
+  }
+  const parsed = parseAutoSelectWarning(response.warnings);
+  const notice = parsed
+    ? `Roger auto-selected session ${shortenSessionId(parsed.sessionId)} of ${parsed.total} — choose another below`
+    : 'Roger auto-selected a session — choose another below';
+  setSessionsNotice(notice);
+  // Populate the candidate list so the user can act on the notice. The success
+  // response omits candidates, so refresh the inventory mirror.
+  requestStatusMirror(context);
+  return true;
+}
+
+function triggerLaunch(action, context, button, options = {}) {
   const panel = typeof document !== 'undefined' ? document.getElementById(PANEL_ID) : null;
 
   if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
@@ -3179,6 +3814,22 @@ function triggerLaunch(action, context, button) {
     }
 
     if (!response.ok) {
+      // A resume disambiguation picker is actionable, not an error: render the
+      // candidates as per-session Resume buttons instead of a generic failure.
+      if (isPickerRequiredResponse(response)) {
+        const candidateCount = normalizeSessionEntries(response.candidates).length;
+        lastAttentionState = null;
+        if (candidateCount >= 1) {
+          lastSessionCount = candidateCount;
+        }
+        if (panel) {
+          applyActionModel(panel, lastAttentionState, lastSessionCount);
+        }
+        clearAttentionBadge();
+        renderPickerCandidates(response, context);
+        return;
+      }
+
       lastAttentionState = null;
       if (panel) {
         applyActionModel(panel, lastAttentionState, lastSessionCount);
@@ -3214,6 +3865,7 @@ function triggerLaunch(action, context, button) {
       const successStatus = formatLaunchSuccessStatus(response);
       setInfoMessage(successStatus);
       setStatus(successStatus, false, { revealInline: true });
+      maybeRenderAutoSelectNotice(response, context);
       return;
     }
 
@@ -3224,12 +3876,18 @@ function triggerLaunch(action, context, button) {
     const successStatus = formatLaunchSuccessStatus(response);
     setInfoMessage(successStatus);
     setStatus(successStatus, false, { revealInline: true });
-    // Refresh the bounded badge/action model; this must not clear the
-    // launch result status line we just rendered.
-    requestStatusMirror(context);
+    if (!maybeRenderAutoSelectNotice(response, context)) {
+      // Refresh the bounded badge/action model; this must not clear the
+      // launch result status line we just rendered.
+      requestStatusMirror(context);
+    }
   };
 
   try {
+    const sessionId =
+      typeof options.sessionId === 'string' && options.sessionId.trim().length > 0
+        ? options.sessionId.trim()
+        : null;
     chrome.runtime.sendMessage(
       {
         type: 'roger_bridge_launch',
@@ -3238,6 +3896,9 @@ function triggerLaunch(action, context, button) {
           owner: context.owner,
           repo: context.repo,
           pr_number: context.pr_number,
+          // An explicit session id makes resume deterministic; the bridge maps
+          // it to `rr resume --session <id>`.
+          ...(sessionId ? { session_id: sessionId } : {}),
         },
       },
       onLaunchResponse
@@ -3278,6 +3939,34 @@ if (typeof module !== 'undefined' && module.exports) {
     renderFindingsStaging,
     groupFindingsByTriage,
     createFindingsSection,
+    // Session-candidates surface.
+    SESSIONS_SECTION_ID,
+    SESSIONS_NOTICE_ID,
+    SESSIONS_LIST_ID,
+    shortenSessionId,
+    formatRelativeAge,
+    resumeCommandForSession,
+    copyTextToClipboard,
+    createCopyCommandBlock,
+    normalizeSessionEntry,
+    normalizeSessionEntries,
+    parseAutoSelectWarning,
+    handleSessionResume,
+    renderSessionRow,
+    renderSessionListInto,
+    createSessionsSection,
+    renderSessionInventoryIntoPanel,
+    setSessionsNotice,
+    updateSessionsSectionVisibility,
+    isPickerRequiredResponse,
+    renderPickerCandidates,
+    maybeRenderAutoSelectNotice,
+    // Visible-tab status re-poll.
+    STATUS_MIRROR_POLL_INTERVAL_MS,
+    startStatusPolling,
+    stopStatusPolling,
+    isStatusPolling,
+    handleStatusPollVisibilityChange,
     FINDINGS_SECTION_ID,
     FINDINGS_BODY_ID,
     FINDINGS_BUTTON_ID,

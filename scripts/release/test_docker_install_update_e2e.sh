@@ -88,16 +88,20 @@ echo "update outcome: ${update_outcome}"
 after="$(current)"
 echo "--- version after in-place update: ${after} ---"
 if [ "${after}" = "${TO_VERSION}" ]; then
+  # Expected path for future release pairs: same-schema or additive (Class A)
+  # schema bumps update in place. The FROM binary reads the target's published
+  # envelope; when that envelope is auto_safe and the delta is within the class_a
+  # window, migration preflight allows apply and the new binary auto-migrates the
+  # store on first open.
   echo "in-place self-update succeeded"
 elif [ "${update_outcome}" = "blocked" ]; then
-  # A cross-store-schema release pair: the FROM binary's migration preflight
-  # fails closed (embedded/published envelope mismatch) by design. The blessed
-  # user path is the recommended install command from the update envelope —
-  # assert the envelope actually carries it, then execute the published
-  # installer and prove the upgrade + store auto-migration end to end.
-  # Historical binaries (<= 2026.06.20) block with migration-posture guidance
-  # only; pointing the blocked envelope at the installer one-liner is a
-  # fix-forward requirement on newer binaries. Print whatever guidance shipped.
+  # Historical path: a FROM binary at or before v2026.07.07 predates the
+  # semantic-envelope + auto_safe preflight, or the target release publishes a
+  # binary_only envelope — either way a cross-store-schema bump fails closed by
+  # design. The blessed user path is the release-hosted installer one-liner that
+  # the blocked envelope now carries as a repair action; assert whatever guidance
+  # shipped, then execute the published installer and prove the upgrade + store
+  # auto-migration end to end.
   printf '%s' "$update_json" | python3 -c 'import json,sys
 d=json.load(sys.stdin)
 print("blocked repair guidance:", "; ".join(d.get("repair_actions") or []) or "<none>")'

@@ -17,6 +17,17 @@
 //   RR_CDP_PORT       explicit CDP port (overrides the port file)
 //   RR_PR_URL         PR page url to drive (default cdilga/roger-reviewer#2)
 //   RR_SKIP_IDLE      "1" to skip the ~35s worker-idle regression (faster, weaker)
+//
+// FUTURE SCENARIO (bead rr-ext-session-candidates-surface-pnv0, not yet driven
+// live here — jsdom-covered in src/content/main.test.js): with >=2 local Roger
+// sessions for the PR, the rail/modal panel renders a #roger-reviewer-sessions
+// list (one row per session: short id, provider, attention, relative age), each
+// with a Resume button that dispatches resume_review carrying that session_id,
+// and a copyable `rr open --session <id>` handoff. A resume whose CLI
+// auto-selects should surface a visible #roger-reviewer-sessions-notice, and a
+// picker_required response should render the candidates (never a generic error).
+// Driving this live needs a seeded multi-session store, so it stays jsdom-level
+// until a deterministic fixture exists.
 const fs = require('fs');
 const path = require('path');
 

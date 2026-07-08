@@ -26,9 +26,19 @@ DEFAULT_STORE_COMPATIBILITY = {
     # silently breaks `rr update` apply with a false downgrade classification.
     "store_schema_version": None,
     "min_supported_store_schema": 0,
-    "auto_migrate_from": 0,
-    "migration_policy": "binary_only",
-    "migration_class_max_auto": "none",
+    # auto_migrate_from is derived as store_schema_version - 1 (see
+    # _normalize_store_compatibility). The store-open runner classifies a jump by
+    # delta magnitude: only a single-version additive bump is class_a, so with the
+    # class_a ceiling below the oldest schema with a class_a-only auto path to the
+    # build's schema is exactly one version back. This mirrors the binary's
+    # embedded envelope (embedded_store_compatibility_envelope in packages/cli).
+    "auto_migrate_from": None,
+    # auto_safe (not the old binary_only, which hard-blocked every schema bump):
+    # an installed binary reading this published envelope may update in place
+    # across an additive (class_a) schema bump because the new binary
+    # auto-migrates class_a deltas on first store open.
+    "migration_policy": "auto_safe",
+    "migration_class_max_auto": "class_a",
     "sidecar_generation": "v1",
     "backup_required": True,
 }
@@ -154,6 +164,11 @@ def _normalize_store_compatibility(
             return None, errors
         defaults = dict(DEFAULT_STORE_COMPATIBILITY)
         defaults["store_schema_version"] = derived
+        # Honest class_a floor: the oldest schema with a single-version (class_a)
+        # auto path to this build's schema. Never drop below min_supported.
+        defaults["auto_migrate_from"] = max(
+            defaults["min_supported_store_schema"], derived - 1
+        )
         return defaults, []
     if not isinstance(raw, dict):
         return None, ["core manifest store_compatibility must be an object"]

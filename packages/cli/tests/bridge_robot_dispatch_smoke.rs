@@ -193,6 +193,7 @@ fn native_host_bridge_dispatches_real_robot_review_and_status() {
         pr_number: 42,
         head_ref: None,
         instance: None,
+        session_id: None,
         extension_id: None,
         browser: None,
     };
@@ -250,6 +251,7 @@ fn native_host_bridge_dispatches_when_browser_passes_extension_origin_arg() {
         pr_number: 42,
         head_ref: None,
         instance: None,
+        session_id: None,
         extension_id: None,
         browser: Some("edge".to_owned()),
     };

@@ -29,11 +29,18 @@ upgrade-path truth, read
 alongside this document. This contract owns the migration-specific portion of
 that lane, not every release-surface detail.
 
-Current product truth remains unchanged until follow-on beads land:
+Current product truth:
 
-- `0.1.x` still reports migration posture as deferred/fail-closed
-- `rr update` is still scoped to binary replacement only; current shipped-release
-  viability for that path is further narrowed by the update contract above
+- the store-open runner auto-migrates additive (Class A) and additive-plus-rebuild
+  (Class B) schema deltas on first open, and fails closed for wider (Class D) jumps
+  (proven live v17->v18)
+- `rr update` no longer hard-blocks every store-schema bump. The embedded and
+  published compatibility envelope compare **semantically** (envelope format only),
+  and the embedded/published `migration_policy` defaults to `auto_safe` with a
+  `class_a` auto ceiling, so an installed binary can update in place across an
+  additive schema bump. The governing policy for any single update still comes from
+  the **target release's** published envelope, not the embedded one — a target that
+  publishes `binary_only` still blocks schema deltas.
 
 ## Compatibility Envelope
 
@@ -54,10 +61,22 @@ Required fields:
 - `backup_required`: whether pre-mutation checkpoint is mandatory
 - `envelope_version`: Roger-owned version for envelope format evolution
 
-Envelope mismatch rule:
+Envelope comparison rule (semantic, not struct equality):
 
-- if embedded envelope and published metadata envelope disagree for a target
-  release, update and first-run migration behavior must fail closed
+- the embedded envelope and the published metadata envelope are compared on
+  **format fields only**: `envelope_version` and `sidecar_generation`
+- a difference in `store_schema_version`, `migration_policy`,
+  `migration_class_max_auto`, `auto_migrate_from`, or `min_supported_store_schema`
+  between an installed binary and a newer target release is **not** an envelope
+  mismatch — assessing that schema delta is the job of the migration preflight,
+  not the comparison gate
+- only a genuine envelope-format incompatibility (different `envelope_version` or
+  different `sidecar_generation`) fails closed with a typed
+  `embedded_and_published_envelope_mismatch` block, because then the two sides do
+  not agree on how to read the envelope or its sidecars at all
+- the policy that governs a given update is always taken from the **target
+  release's** published envelope, never inferred from the installed binary's
+  embedded envelope
 
 ## Migration Classes
 
@@ -91,7 +110,9 @@ Roger must fail closed before mutation when any of the following is true:
 
 - release metadata is missing, ambiguous, or checksum-invalid
 - compatibility envelope is missing or malformed
-- embedded and published envelopes disagree
+- embedded and published envelope **formats** disagree (different
+  `envelope_version` or `sidecar_generation`) — a schema/policy field difference
+  alone is not a disagreement and does not fail closed here
 - local store schema is below minimum supported schema
 - migration class/policy requires explicit gate but user is on default path
 - migration posture is unsupported for current release line
@@ -128,7 +149,31 @@ Rules:
 
 - updater apply is blocked when `migration.apply_allowed=false`
 - `--yes` bypasses confirmation only; it does not bypass migration blocks
-- in `0.1.x`, posture remains binary-only/deferred until `rr-1xhg.2+` land
+- `migration.classification` reports the **honest class of the actual
+  current->target delta**, computed with the same delta-based classifier the
+  store-open runner enforces (`roger_storage::store_migration_class_label`). The
+  updater never echoes the published `migration_class_max_auto` ceiling as the
+  classification — a two-version jump is reported `class_b` even under a `class_a`
+  ceiling, and is fenced off from the auto path
+- when `apply_allowed=false` for a migration reason, the blocked envelope must
+  carry the release-hosted installer one-liner
+  (`curl -fsSL https://github.com/cdilga/roger-reviewer/releases/latest/download/rr-install.sh | bash`)
+  as a repair action and `data.recommended_install_command` as the tag-pinned
+  reinstall command
+
+Auto-safe status/blocked-reason matrix for `migration_policy=auto_safe`:
+
+- `no_migration_needed` when `current == target`
+- `auto_safe_migration_after_update` (`apply_allowed=true`) when the delta is
+  in the auto window (`current >= auto_migrate_from`) and the actual delta class
+  is within the published auto ceiling
+- `migration_requires_explicit_operator_gate` with
+  `local_store_schema_outside_auto_migrate_window` when `current < auto_migrate_from`
+- `migration_requires_explicit_operator_gate` with
+  `auto_migration_class_exceeds_published_ceiling` when the actual delta class is
+  auto-capable but wider than the published ceiling (e.g. `class_b` under `class_a`)
+- `migration_unsupported` with `auto_migration_class_unsupported_for_delta` when
+  the actual delta classifies `class_d`
 
 ## First-Run Store-Open Contract
 

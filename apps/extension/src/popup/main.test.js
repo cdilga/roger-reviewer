@@ -17,6 +17,16 @@ const {
   resolveSessionCount,
   SUPPORTED_ACTIONS,
   routePopupAction,
+  shortenSessionId,
+  formatRelativeAge,
+  resumeCommandForSession,
+  copyTextToClipboard,
+  summarizeFindings,
+  extractSessions,
+  newestSession,
+  renderFindingsSummary,
+  renderSessionsSummary,
+  clearPopupResults,
 } = require('./main.js');
 
 test('parsePullRequestContextFromUrl extracts owner/repo/pr from GitHub PR URL', () => {
@@ -240,4 +250,158 @@ test('buildLaunchMessage rejects unsupported actions', () => {
       }),
     /Unsupported action/
   );
+});
+
+// ---------------------------------------------------------------------------
+// Findings + session summaries (bead rr-ext-session-candidates-surface-pnv0).
+// ---------------------------------------------------------------------------
+
+test('summarizeFindings reads count + up to three titles from a findings mirror', () => {
+  const summary = summarizeFindings({
+    ok: true,
+    findings: {
+      count: 5,
+      items: [
+        { title: 'Unbounded retry loop' },
+        { title: 'Missing auth check' },
+        { title: 'Race in cache write' },
+        { title: 'Typo in log' },
+      ],
+    },
+  });
+  assert.equal(summary.count, 5);
+  assert.deepEqual(summary.titles, ['Unbounded retry loop', 'Missing auth check', 'Race in cache write']);
+  assert.equal(summarizeFindings({ ok: true }), null);
+});
+
+test('extractSessions normalizes the session inventory array', () => {
+  const sessions = extractSessions({
+    sessions: [
+      { session_id: 'a', provider: 'opencode', updated_at: 1000 },
+      { junk: true },
+      { session_id: 'b', updated_at: '2026-01-01T00:00:00Z' },
+    ],
+  });
+  assert.equal(sessions.length, 2);
+  assert.equal(sessions[0].session_id, 'a');
+  assert.equal(sessions[1].session_id, 'b');
+  assert.deepEqual(extractSessions({}), []);
+});
+
+test('newestSession picks the most recently updated session', () => {
+  const newest = newestSession([
+    { session_id: 'old', updated_at: 1000 },
+    { session_id: 'new', updated_at: 3000 },
+    { session_id: 'mid', updated_at: 2000 },
+  ]);
+  assert.equal(newest.session_id, 'new');
+  assert.equal(newestSession([]), null);
+});
+
+test('shortenSessionId and resumeCommandForSession build the compact handoff', () => {
+  assert.equal(shortenSessionId('session-1700000000-1234-7'), 'session-17…1234-7');
+  assert.equal(resumeCommandForSession('sess-x'), 'rr open --session sess-x');
+});
+
+test('formatRelativeAge renders coarse ages', () => {
+  const now = 2_000_000_000_000;
+  assert.equal(formatRelativeAge(now / 1000 - 300, now), '5m ago');
+  assert.equal(formatRelativeAge(null, now), null);
+});
+
+test('copyTextToClipboard uses navigator.clipboard when present', async () => {
+  let written = null;
+  const ok = await copyTextToClipboard('rr open --session s1', {
+    navigator: { clipboard: { writeText: (t) => { written = t; return Promise.resolve(); } } },
+  });
+  assert.equal(ok, true);
+  assert.equal(written, 'rr open --session s1');
+});
+
+// Minimal DOM stubs for the render helpers, which target #popup-results.
+function makePopupEl(tag) {
+  return {
+    tagName: String(tag).toUpperCase(),
+    textContent: '',
+    children: [],
+    attributes: {},
+    _listeners: {},
+    appendChild(node) {
+      this.children.push(node);
+      return node;
+    },
+    setAttribute(name, value) {
+      this.attributes[name] = value;
+    },
+    addEventListener(type, fn) {
+      (this._listeners[type] = this._listeners[type] || []).push(fn);
+    },
+    click() {
+      for (const fn of this._listeners.click || []) fn({});
+    },
+  };
+}
+
+function withPopupDocument(fn) {
+  const results = makePopupEl('div');
+  const previous = global.document;
+  global.document = {
+    createElement: (tag) => makePopupEl(tag),
+    getElementById: (id) => (id === 'popup-results' ? results : null),
+  };
+  try {
+    return fn(results);
+  } finally {
+    global.document = previous;
+  }
+}
+
+function collectText(node, acc = []) {
+  if (node.textContent) {
+    acc.push(node.textContent);
+  }
+  for (const child of node.children || []) {
+    collectText(child, acc);
+  }
+  return acc;
+}
+
+test('renderFindingsSummary renders a count heading and titles into the results area', () => {
+  withPopupDocument((results) => {
+    clearPopupResults();
+    renderFindingsSummary({ count: 2, titles: ['Unbounded retry loop', 'Missing auth check'] });
+    const text = collectText(results).join(' | ');
+    assert.match(text, /Findings \(2\)/);
+    assert.match(text, /Unbounded retry loop/);
+    assert.match(text, /Missing auth check/);
+  });
+});
+
+test('renderSessionsSummary lists sessions and a copy button for the newest session', async () => {
+  await withPopupDocument(async (results) => {
+    let written = null;
+    clearPopupResults();
+    renderSessionsSummary(
+      [
+        { session_id: 'sess-old', updated_at: 1000 },
+        { session_id: 'sess-new', updated_at: 3000 },
+      ],
+      { navigator: { clipboard: { writeText: (t) => { written = t; return Promise.resolve(); } } } }
+    );
+    const text = collectText(results).join(' | ');
+    assert.match(text, /Local sessions \(2\)/);
+    assert.match(text, /rr open --session sess-new/);
+
+    // The copy button copies the newest session's handoff command.
+    const buttons = [];
+    const walk = (n) => {
+      if (n.tagName === 'BUTTON') buttons.push(n);
+      for (const c of n.children || []) walk(c);
+    };
+    walk(results);
+    assert.equal(buttons.length, 1);
+    buttons[0].click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(written, 'rr open --session sess-new');
+  });
 });

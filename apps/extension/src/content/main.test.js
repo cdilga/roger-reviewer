@@ -2703,3 +2703,555 @@ test('handleShowFindings renders the honest not-relayed note for a stripped-down
     new RegExp(FINDINGS_NOT_RELAYED_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
   );
 });
+
+// ---------------------------------------------------------------------------
+// Session-candidates surface (bead rr-ext-session-candidates-surface-pnv0).
+// ---------------------------------------------------------------------------
+
+const {
+  SESSIONS_SECTION_ID,
+  SESSIONS_NOTICE_ID,
+  SESSIONS_LIST_ID,
+  shortenSessionId,
+  formatRelativeAge,
+  resumeCommandForSession,
+  copyTextToClipboard,
+  createCopyCommandBlock,
+  normalizeSessionEntry,
+  normalizeSessionEntries,
+  parseAutoSelectWarning,
+  handleSessionResume,
+  renderSessionRow,
+  renderSessionListInto,
+  renderSessionInventoryIntoPanel,
+  setSessionsNotice,
+  updateSessionsSectionVisibility,
+  isPickerRequiredResponse,
+  STATUS_MIRROR_POLL_INTERVAL_MS,
+  startStatusPolling,
+  stopStatusPolling,
+  isStatusPolling,
+  handleStatusPollVisibilityChange,
+} = require('./main.js');
+
+function makeToggleClassList() {
+  const classes = new Set();
+  return {
+    classes,
+    add(...names) {
+      for (const name of names) classes.add(name);
+    },
+    remove(...names) {
+      for (const name of names) classes.delete(name);
+    },
+    toggle(name, enabled) {
+      if (enabled) {
+        classes.add(name);
+      } else {
+        classes.delete(name);
+      }
+    },
+    contains(name) {
+      return classes.has(name);
+    },
+  };
+}
+
+// A recording element factory: unlike createTestElement it stores event
+// listeners so click() can fire them, which lets the session/copy/findings
+// interaction paths be exercised end to end.
+function makeRecordingEl(tagName, registry) {
+  const attributes = new Map();
+  const listeners = {};
+  const el = {
+    tagName: String(tagName).toUpperCase(),
+    id: '',
+    className: '',
+    textContent: '',
+    hidden: false,
+    disabled: false,
+    children: [],
+    parentElement: null,
+    dataset: {},
+    style: {},
+    classList: makeToggleClassList(),
+    appendChild(node) {
+      if (!node) {
+        return null;
+      }
+      this.children.push(node);
+      node.parentElement = this;
+      return node;
+    },
+    prepend(node) {
+      if (!node) {
+        return null;
+      }
+      this.children.unshift(node);
+      node.parentElement = this;
+      return node;
+    },
+    remove() {
+      if (this.parentElement) {
+        const idx = this.parentElement.children.indexOf(this);
+        if (idx >= 0) {
+          this.parentElement.children.splice(idx, 1);
+        }
+        this.parentElement = null;
+      }
+    },
+    replaceChildren() {
+      for (const child of this.children) {
+        child.parentElement = null;
+      }
+      this.children = [];
+    },
+    select() {},
+    addEventListener(type, fn) {
+      (listeners[type] = listeners[type] || []).push(fn);
+    },
+    click() {
+      for (const fn of listeners.click || []) {
+        fn({});
+      }
+    },
+    setAttribute(name, value) {
+      attributes.set(name, String(value));
+    },
+    getAttribute(name) {
+      return attributes.has(name) ? attributes.get(name) : null;
+    },
+    querySelectorAll(selector) {
+      if (selector === 'button[data-action]') {
+        return findNodes(this, (node) => node.dataset && typeof node.dataset.action === 'string', []);
+      }
+      return [];
+    },
+  };
+  if (registry) {
+    registry.push(el);
+  }
+  return el;
+}
+
+// Minimal live document backed by a registry so getElementById resolves any
+// element by its assigned id, and createElement yields recording elements.
+function makeLiveDocument() {
+  const registry = [];
+  const head = makeRecordingEl('head', registry);
+  return {
+    registry,
+    head,
+    createElement(tag) {
+      return makeRecordingEl(tag, registry);
+    },
+    getElementById(id) {
+      for (let i = registry.length - 1; i >= 0; i -= 1) {
+        if (registry[i].id === id) {
+          return registry[i];
+        }
+      }
+      return null;
+    },
+  };
+}
+
+function findByClass(root, className) {
+  return findNodes(
+    root,
+    (node) =>
+      typeof node.className === 'string' && node.className.split(/\s+/).includes(className)
+  );
+}
+
+test('shortenSessionId collapses long ids and passes short ids through', () => {
+  assert.equal(shortenSessionId('session-1700000000-1234-7'), 'session-17…1234-7');
+  assert.equal(shortenSessionId('sess-9'), 'sess-9');
+  assert.equal(shortenSessionId(''), '');
+});
+
+test('formatRelativeAge renders coarse ages from unix seconds and ISO strings', () => {
+  const now = 2_000_000_000_000; // fixed ms
+  assert.equal(formatRelativeAge(now / 1000, now), 'just now');
+  assert.equal(formatRelativeAge(now / 1000 - 300, now), '5m ago');
+  assert.equal(formatRelativeAge(now / 1000 - 7200, now), '2h ago');
+  assert.equal(formatRelativeAge(now / 1000 - 172800, now), '2d ago');
+  assert.equal(formatRelativeAge(new Date(now - 3600 * 1000).toISOString(), now), '1h ago');
+  assert.equal(formatRelativeAge(null, now), null);
+});
+
+test('resumeCommandForSession renders the canonical rr open handoff', () => {
+  assert.equal(resumeCommandForSession('sess-x'), 'rr open --session sess-x');
+});
+
+test('normalizeSessionEntry accepts inventory and candidate shapes', () => {
+  assert.equal(normalizeSessionEntry({ nope: true }), null);
+  const inv = normalizeSessionEntry({
+    session_id: 'a',
+    provider: 'opencode',
+    attention_state: 'awaiting_user_input',
+    updated_at: 1000,
+  });
+  assert.equal(inv.session_id, 'a');
+  assert.equal(inv.provider, 'opencode');
+  const cand = normalizeSessionEntry({ session_id: 'b', pull_request: 42, updated_at: '2026-01-01T00:00:00Z' });
+  assert.equal(cand.session_id, 'b');
+  assert.equal(cand.pull_request, 42);
+  assert.equal(normalizeSessionEntries([{ session_id: 'a' }, { junk: 1 }, { session_id: 'c' }]).length, 2);
+});
+
+test('parseAutoSelectWarning extracts the auto-selected session and candidate count', () => {
+  const parsed = parseAutoSelectWarning([
+    'provider is tier b',
+    'auto-selected session sess-7 from 3 candidates (pr_rank=1, binding_rank=2)',
+  ]);
+  assert.deepEqual(parsed, { sessionId: 'sess-7', total: 3 });
+  assert.equal(parseAutoSelectWarning(['nothing here']), null);
+});
+
+test('renderSessionRow builds id, meta, resume button, and a copy handoff', () => {
+  const doc = makeLiveDocument();
+  const row = renderSessionRow(
+    { session_id: 'sess-abc', provider: 'opencode', attention_state: 'awaiting_user_input', updated_at: 1000 },
+    TEST_CONTEXT,
+    doc
+  );
+  const idNode = findByClass(row, 'rr-session-id')[0];
+  assert.ok(idNode);
+  assert.equal(idNode.getAttribute('title'), 'sess-abc');
+  const resume = findByClass(row, 'rr-session-resume')[0];
+  assert.ok(resume);
+  assert.equal(resume.dataset.action, 'resume_review');
+  assert.equal(resume.dataset.sessionId, 'sess-abc');
+  const meta = findByClass(row, 'rr-session-meta')[0];
+  assert.match(meta.textContent, /Opencode/);
+  assert.match(meta.textContent, /Awaiting User Input/);
+  const code = findByClass(row, 'rr-copy-command')[0];
+  assert.equal(code.textContent, 'rr open --session sess-abc');
+});
+
+test('handleSessionResume dispatches resume carrying the session id', () => {
+  let received = null;
+  handleSessionResume(
+    { session_id: 'sess-target' },
+    TEST_CONTEXT,
+    { textContent: 'Resume' },
+    { onResume: (session) => { received = session; } }
+  );
+  assert.equal(received.session_id, 'sess-target');
+});
+
+test('renderSessionInventoryIntoPanel renders inventory rows and reveals the section', () => {
+  const doc = makeLiveDocument();
+  const section = doc.createElement('section');
+  section.id = SESSIONS_SECTION_ID;
+  section.hidden = true;
+  const notice = doc.createElement('p');
+  notice.id = SESSIONS_NOTICE_ID;
+  notice.hidden = true;
+  const list = doc.createElement('ul');
+  list.id = SESSIONS_LIST_ID;
+
+  const count = renderSessionInventoryIntoPanel(
+    [
+      { session_id: 'a', provider: 'opencode', updated_at: 1000 },
+      { session_id: 'b', provider: 'codex', updated_at: 2000 },
+    ],
+    TEST_CONTEXT,
+    { document: doc }
+  );
+  assert.equal(count, 2);
+  assert.equal(list.children.length, 2);
+  assert.equal(section.hidden, false);
+
+  // Empty inventory clears rows; section hides again when no notice is set.
+  renderSessionInventoryIntoPanel([], TEST_CONTEXT, { document: doc });
+  assert.equal(list.children.length, 0);
+  assert.equal(section.hidden, true);
+});
+
+test('setSessionsNotice keeps the section visible on notice alone', () => {
+  const doc = makeLiveDocument();
+  const section = doc.createElement('section');
+  section.id = SESSIONS_SECTION_ID;
+  section.hidden = true;
+  const notice = doc.createElement('p');
+  notice.id = SESSIONS_NOTICE_ID;
+  notice.hidden = true;
+  const list = doc.createElement('ul');
+  list.id = SESSIONS_LIST_ID;
+
+  setSessionsNotice('Roger auto-selected session s1 of 3 — choose another below', doc);
+  assert.equal(notice.hidden, false);
+  assert.match(notice.textContent, /of 3/);
+  assert.equal(section.hidden, false);
+
+  setSessionsNotice(null, doc);
+  assert.equal(notice.hidden, true);
+  assert.equal(section.hidden, true);
+});
+
+test('copyTextToClipboard prefers navigator.clipboard and reports success', async () => {
+  let written = null;
+  const ok = await copyTextToClipboard('rr open --session s1', {
+    navigator: { clipboard: { writeText: (text) => { written = text; return Promise.resolve(); } } },
+  });
+  assert.equal(ok, true);
+  assert.equal(written, 'rr open --session s1');
+});
+
+test('copyTextToClipboard falls back to execCommand when clipboard is unavailable', async () => {
+  const doc = makeLiveDocument();
+  const body = doc.createElement('body');
+  doc.body = body;
+  let copied = false;
+  doc.execCommand = (cmd) => {
+    copied = cmd === 'copy';
+    return true;
+  };
+  const ok = await copyTextToClipboard('rr open --session s1', { navigator: {}, document: doc });
+  assert.equal(ok, true);
+  assert.equal(copied, true);
+});
+
+test('createCopyCommandBlock renders a code block and a Copy button that copies', async () => {
+  const doc = makeLiveDocument();
+  let written = null;
+  const block = createCopyCommandBlock(doc, 'sess-copy', {
+    navigator: { clipboard: { writeText: (text) => { written = text; return Promise.resolve(); } } },
+    feedbackMs: 0,
+  });
+  const code = findByClass(block, 'rr-copy-command')[0];
+  assert.equal(code.textContent, 'rr open --session sess-copy');
+  const button = findByClass(block, 'rr-copy-button')[0];
+  assert.ok(button);
+  button.click();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(written, 'rr open --session sess-copy');
+});
+
+test('isPickerRequiredResponse recognizes the typed picker signal and candidates', () => {
+  assert.equal(isPickerRequiredResponse({ failure_kind: 'picker_required' }), true);
+  assert.equal(isPickerRequiredResponse({ mode: 'bridge_picker_required' }), true);
+  assert.equal(isPickerRequiredResponse({ candidates: [] }), true);
+  assert.equal(isPickerRequiredResponse({ ok: false, mode: 'native_unavailable' }), false);
+});
+
+// Build a panel DOM including the sessions section nodes so triggerLaunch /
+// requestStatusMirror render paths can be exercised end to end.
+function makeSessionsPanelDom() {
+  const doc = makeLiveDocument();
+  const panel = doc.createElement('section');
+  panel.id = 'roger-reviewer-panel';
+  const buttonRow = doc.createElement('div');
+  for (const action of ['start_review', 'resume_review', 'show_findings']) {
+    const b = doc.createElement('button');
+    b.dataset.action = action;
+    buttonRow.appendChild(b);
+  }
+  panel.appendChild(buttonRow);
+  const status = doc.createElement('p');
+  status.id = 'roger-reviewer-status';
+  status.hidden = true;
+  status.classList = createStatusClassList();
+  status.parentElement = panel;
+  const badge = doc.createElement('p');
+  badge.id = 'roger-reviewer-attention-badge';
+  badge.style = {};
+  const info = doc.createElement('p');
+  info.id = 'roger-reviewer-info-text';
+  const section = doc.createElement('section');
+  section.id = SESSIONS_SECTION_ID;
+  section.hidden = true;
+  const notice = doc.createElement('p');
+  notice.id = SESSIONS_NOTICE_ID;
+  notice.hidden = true;
+  const list = doc.createElement('ul');
+  list.id = SESSIONS_LIST_ID;
+  return { doc, panel, status, badge, info, section, notice, list };
+}
+
+test('per-session resume dispatch carries session_id in the launch intent', () => {
+  const dom = makeSessionsPanelDom();
+  const sent = [];
+  const chromeStub = {
+    runtime: {
+      lastError: null,
+      sendMessage(payload, callback) {
+        sent.push(payload);
+        if (payload?.type === 'roger_bridge_launch') {
+          callback({ ok: true, mode: 'native_messaging', attention_state: 'awaiting_user_input', session_id: 'sess-r', freshness_label: '1s old' });
+        }
+      },
+    },
+  };
+  const button = { disabled: false, textContent: 'Resume' };
+  withPanelGlobals({ documentStub: dom.doc, chromeStub }, () => {
+    triggerLaunch('resume_review', TEST_CONTEXT, button, { sessionId: 'sess-explicit' });
+  });
+  const launch = sent.find((p) => p.type === 'roger_bridge_launch');
+  assert.equal(launch.intent.session_id, 'sess-explicit');
+  assert.equal(launch.intent.action, 'resume_review');
+});
+
+test('picker_required launch response renders candidates as resume rows, not an error', () => {
+  const dom = makeSessionsPanelDom();
+  const chromeStub = {
+    runtime: {
+      lastError: null,
+      sendMessage(payload, callback) {
+        if (payload?.type === 'roger_bridge_launch') {
+          callback({
+            ok: false,
+            mode: 'bridge_picker_required',
+            failure_kind: 'picker_required',
+            action: 'resume_review',
+            message: 'Multiple Roger review sessions match — choose one to resume.',
+            candidates: [
+              { session_id: 'cand-a', provider: 'opencode', attention_state: 'awaiting_user_input', updated_at: 1000 },
+              { session_id: 'cand-b', provider: 'codex', attention_state: 'refresh_recommended', updated_at: 2000 },
+            ],
+          });
+        }
+      },
+    },
+  };
+  const button = { disabled: false, textContent: 'Resume Existing Review' };
+  withPanelGlobals({ documentStub: dom.doc, chromeStub }, () => {
+    triggerLaunch('resume_review', TEST_CONTEXT, button);
+  });
+  assert.equal(dom.list.children.length, 2);
+  assert.equal(dom.section.hidden, false);
+  // Not rendered as an error.
+  assert.equal(dom.status.classList.contains('roger-panel-status--error'), false);
+  assert.match(dom.notice.textContent, /choose one to resume/i);
+});
+
+test('auto-selected resume renders a visible choose-another notice', () => {
+  const dom = makeSessionsPanelDom();
+  const chromeStub = {
+    runtime: {
+      lastError: null,
+      sendMessage(payload, callback) {
+        if (payload?.type === 'roger_bridge_launch') {
+          callback({
+            ok: true,
+            mode: 'native_messaging',
+            action: 'resume_review',
+            attention_state: 'awaiting_user_input',
+            freshness_label: '1s old',
+            session_id: 'sess-1',
+            auto_selected_session: true,
+            warnings: ['auto-selected session sess-1 from 3 candidates (pr_rank=1)'],
+          });
+        }
+        if (payload?.type === 'roger_bridge_status') {
+          callback({
+            ok: true,
+            mode: 'session_inventory',
+            session_count: 3,
+            sessions: [
+              { session_id: 'sess-1', provider: 'opencode', updated_at: 3000 },
+              { session_id: 'sess-2', provider: 'codex', updated_at: 2000 },
+              { session_id: 'sess-3', provider: 'gemini', updated_at: 1000 },
+            ],
+          });
+        }
+      },
+    },
+  };
+  const button = { disabled: false, textContent: 'Resume Existing Review' };
+  withPanelGlobals({ documentStub: dom.doc, chromeStub }, () => {
+    triggerLaunch('resume_review', TEST_CONTEXT, button);
+  });
+  assert.equal(dom.notice.hidden, false);
+  assert.match(dom.notice.textContent, /auto-selected session sess-1 of 3/);
+  // The inventory refresh populated the candidate list to choose from.
+  assert.equal(dom.list.children.length, 3);
+});
+
+test('bounded status mirror renders the session inventory list', () => {
+  const dom = makeSessionsPanelDom();
+  const chromeStub = {
+    runtime: {
+      lastError: null,
+      sendMessage(payload, callback) {
+        if (payload?.type === 'roger_bridge_status') {
+          callback({
+            ok: true,
+            mode: 'session_inventory',
+            session_count: 2,
+            sessions: [
+              { session_id: 'inv-a', provider: 'opencode', updated_at: 1000 },
+              { session_id: 'inv-b', provider: 'codex', updated_at: 2000 },
+            ],
+          });
+        }
+      },
+    },
+  };
+  withPanelGlobals({ documentStub: dom.doc, chromeStub }, () => {
+    requestStatusMirror(TEST_CONTEXT);
+  });
+  assert.equal(dom.list.children.length, 2);
+  assert.equal(dom.section.hidden, false);
+});
+
+test('createPanel wires the primary View Findings action to the findings staging path', () => {
+  const doc = makeLiveDocument();
+  createPanel(TEST_CONTEXT, doc);
+  const findingsButton = doc.registry.find(
+    (el) => el.dataset && el.dataset.action === 'show_findings'
+  );
+  assert.ok(findingsButton);
+  const chromeStub = makeFindingsChromeStub({ response: RELAYED_FINDINGS_RESPONSE });
+  withPanelGlobals({ documentStub: doc, chromeStub: chromeStub.stub }, () => {
+    findingsButton.click();
+  });
+  const body = doc.getElementById(FINDINGS_BODY_ID);
+  const captions = findByClass(body, 'rr-findings-caption');
+  assert.equal(captions.length, 1);
+  assert.equal(captions[0].textContent, FINDINGS_READONLY_CAPTION);
+  const summaries = findByClass(body, 'rr-findings-summary');
+  assert.match(summaries[0].textContent, /3 findings/);
+});
+
+test('status re-poll starts while visible and stops when hidden', () => {
+  const created = [];
+  const cleared = [];
+  const fakeSet = (fn) => {
+    created.push(fn);
+    return created.length;
+  };
+  const fakeClear = (id) => {
+    cleared.push(id);
+  };
+  const visibleDoc = { visibilityState: 'visible' };
+  const opts = { document: visibleDoc, setInterval: fakeSet, clearInterval: fakeClear, onTick: () => {} };
+
+  startStatusPolling(TEST_CONTEXT, opts);
+  assert.equal(isStatusPolling(), true);
+  assert.equal(STATUS_MIRROR_POLL_INTERVAL_MS, 45000);
+
+  handleStatusPollVisibilityChange({ document: { visibilityState: 'hidden' }, clearInterval: fakeClear });
+  assert.equal(isStatusPolling(), false);
+  assert.ok(cleared.length >= 1);
+
+  // Restart on becoming visible again.
+  handleStatusPollVisibilityChange(opts);
+  assert.equal(isStatusPolling(), true);
+
+  stopStatusPolling();
+  assert.equal(isStatusPolling(), false);
+});
+
+test('status re-poll does not start while the tab is hidden', () => {
+  const fakeSet = () => 1;
+  const started = startStatusPolling(TEST_CONTEXT, {
+    document: { visibilityState: 'hidden' },
+    setInterval: fakeSet,
+    clearInterval: () => {},
+  });
+  assert.equal(started, null);
+  assert.equal(isStatusPolling(), false);
+});

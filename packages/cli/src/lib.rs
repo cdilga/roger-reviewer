@@ -7733,7 +7733,8 @@ fn launch_copilot_review_session(
     interactive: bool,
 ) -> std::result::Result<CopilotReviewLaunchOutcome, CopilotLaunchError> {
     let seed_prompt = format!(
-        "Roger review start for {} PR #{} in review-only posture. Keep all findings local to Roger; do not post to GitHub and do not modify repository files.",
+        "Roger review start for {} PR #{} in review-only posture. Keep all findings local to Roger; do not post to GitHub and do not modify repository files. \
+Begin by confirming Roger session state with `rr status --robot`, then drive the review through the Roger worker transport: run `rr agent worker.get_status --task-file <path>` and the other `rr agent worker.*` operations to read context and submit stage results. The review_readonly policy allows only `rr agent <op>` and read-only `rr status|findings|sessions|search --robot`; every other shell command is denied, so issue one clean allowlisted command at a time.",
         target.repository, target.pull_request_number
     );
     launch_copilot_session(
@@ -11045,6 +11046,15 @@ fn release_hosted_reinstall_command(
     format!("curl -fsSL {base} | bash -s -- {}", args.join(" "))
 }
 
+/// The canonical release-hosted installer one-liner. Blocked update envelopes
+/// must carry this as a repair action so a user whose in-place update is fenced
+/// off by migration posture always has a copy-pasteable recovery path that works
+/// from an installed-binary context (no repo checkout required). Repo-aware, but
+/// resolves to the documented `cdilga/roger-reviewer` command for the default.
+fn release_latest_installer_one_liner(repo: &str) -> String {
+    format!("curl -fsSL https://github.com/{repo}/releases/latest/download/rr-install.sh | bash")
+}
+
 fn resolve_latest_release_tag(api_root: &str, channel: &str) -> Result<String, String> {
     if channel == "stable" {
         let payload = fetch_url_with_curl(&format!("{api_root}/releases/latest"))?;
@@ -11556,9 +11566,23 @@ fn embedded_store_compatibility_envelope() -> StoreCompatibilityEnvelope {
         // hardcoded value here silently bricks rr update apply).
         store_schema_version: roger_storage::CURRENT_SCHEMA_VERSION,
         min_supported_store_schema: 0,
-        auto_migrate_from: 0,
-        migration_policy: "binary_only".to_owned(),
-        migration_class_max_auto: "none".to_owned(),
+        // Auto-migrate floor. The store-open runner classifies a jump by delta
+        // magnitude (see roger_storage::store_migration_class_label): only a
+        // single-version additive bump is class_a. With migration_class_max_auto
+        // pinned to class_a below, the only delta we truthfully auto-apply is
+        // exactly one schema version, so the oldest schema with a class_a-only
+        // path to the current schema is CURRENT_SCHEMA_VERSION - 1. This is the
+        // conservative, honest floor: anything older is a >=2-version jump that
+        // classifies class_b+ and is deliberately not claimed as auto here.
+        auto_migrate_from: roger_storage::CURRENT_SCHEMA_VERSION.saturating_sub(1),
+        // The new binary auto-migrates additive (class_a) schema deltas on first
+        // store open (proven live v17->v18). Publishing auto_safe here — instead
+        // of the old binary_only, which hard-blocked every schema bump — lets an
+        // installed binary read a newer release's envelope and update in place
+        // across an additive bump. Policy that governs a given update still comes
+        // from the *target* release's published envelope, not this embedded one.
+        migration_policy: "auto_safe".to_owned(),
+        migration_class_max_auto: "class_a".to_owned(),
         sidecar_generation: "v1".to_owned(),
         backup_required: true,
     }
@@ -11668,12 +11692,43 @@ fn read_local_store_schema_for_update(
         })
 }
 
+/// Rank of a migration class so preflight can compare an *actual* delta class
+/// against the *ceiling* the target release publishes. Higher is more invasive;
+/// `none` is a no-op and `class_d`/unknown sits above every auto-safe ceiling.
+fn migration_class_rank(class: &str) -> u8 {
+    match class {
+        "none" => 0,
+        "class_a" => 1,
+        "class_b" => 2,
+        "class_c" => 3,
+        _ => 4,
+    }
+}
+
+/// Semantic envelope-format compatibility. The embedded and published envelopes
+/// are compared on *format* fields only — the envelope format version and the
+/// sidecar generation marker. A mere store_schema_version difference (or a
+/// migration_policy/class/window difference) between an installed binary and a
+/// newer target release is NOT an incompatibility: assessing that schema delta
+/// is the job of assess_migration_preflight, not this equality gate. Only a
+/// genuinely different envelope format (envelope_version) or a different
+/// derived-asset generation (sidecar_generation) is a structural mismatch that
+/// must fail closed, because then the two sides do not agree on how to read the
+/// envelope or the sidecars at all.
+fn envelope_formats_compatible(
+    embedded: &StoreCompatibilityEnvelope,
+    published: &StoreCompatibilityEnvelope,
+) -> bool {
+    embedded.envelope_version == published.envelope_version
+        && embedded.sidecar_generation == published.sidecar_generation
+}
+
 fn assess_migration_preflight(
     current_store_schema: i64,
     published: &StoreCompatibilityEnvelope,
-    embedded_matches_published: bool,
+    envelope_formats_compatible: bool,
 ) -> MigrationPreflight {
-    if !embedded_matches_published {
+    if !envelope_formats_compatible {
         return MigrationPreflight {
             status: "migration_unsupported",
             classification: "class_d",
@@ -11711,36 +11766,69 @@ fn assess_migration_preflight(
 
     match published.migration_policy.as_str() {
         "auto_safe" => {
-            if current_store_schema >= published.auto_migrate_from {
-                let classification = match published.migration_class_max_auto.as_str() {
-                    "class_a" => "class_a",
-                    "class_b" => "class_b",
-                    _ => {
-                        return MigrationPreflight {
-                            status: "migration_requires_explicit_operator_gate",
-                            classification: "class_c",
-                            apply_allowed: false,
-                            blocked_reason: Some(
-                                "auto_safe_policy_missing_auto_migration_class".to_owned(),
-                            ),
-                        };
-                    }
-                };
-                MigrationPreflight {
-                    status: "auto_safe_migration_after_update",
-                    classification,
-                    apply_allowed: true,
-                    blocked_reason: None,
-                }
-            } else {
-                MigrationPreflight {
+            if current_store_schema < published.auto_migrate_from {
+                return MigrationPreflight {
                     status: "migration_requires_explicit_operator_gate",
                     classification: "class_c",
                     apply_allowed: false,
                     blocked_reason: Some(
                         "local_store_schema_outside_auto_migrate_window".to_owned(),
                     ),
-                }
+                };
+            }
+
+            // The target release publishes an auto ceiling (class_a | class_b).
+            // A "none" ceiling under an auto_safe policy is a malformed envelope.
+            let ceiling = published.migration_class_max_auto.as_str();
+            if !matches!(ceiling, "class_a" | "class_b") {
+                return MigrationPreflight {
+                    status: "migration_requires_explicit_operator_gate",
+                    classification: "class_c",
+                    apply_allowed: false,
+                    blocked_reason: Some(
+                        "auto_safe_policy_missing_auto_migration_class".to_owned(),
+                    ),
+                };
+            }
+
+            // Honest classification: use the storage runner's own delta-based
+            // classifier for the ACTUAL current->target jump instead of blindly
+            // echoing the published ceiling. A single-version bump is class_a; a
+            // two-version bump is class_b; anything wider is class_d. This is the
+            // same class first-open would apply, so we can never claim class_a on
+            // a jump the runner would actually treat as class_b or refuse.
+            let actual_class = roger_storage::store_migration_class_label(
+                current_store_schema,
+                published.store_schema_version,
+            );
+
+            if actual_class == "class_d" {
+                return MigrationPreflight {
+                    status: "migration_unsupported",
+                    classification: "class_d",
+                    apply_allowed: false,
+                    blocked_reason: Some("auto_migration_class_unsupported_for_delta".to_owned()),
+                };
+            }
+
+            if migration_class_rank(actual_class) > migration_class_rank(ceiling) {
+                // e.g. a class_b jump under a class_a ceiling: the store could be
+                // migrated, but not automatically under this release's policy.
+                return MigrationPreflight {
+                    status: "migration_requires_explicit_operator_gate",
+                    classification: actual_class,
+                    apply_allowed: false,
+                    blocked_reason: Some(
+                        "auto_migration_class_exceeds_published_ceiling".to_owned(),
+                    ),
+                };
+            }
+
+            MigrationPreflight {
+                status: "auto_safe_migration_after_update",
+                classification: actual_class,
+                apply_allowed: true,
+                blocked_reason: None,
             }
         }
         "explicit_operator_gate" => MigrationPreflight {
@@ -11777,9 +11865,8 @@ fn migration_preflight_payload(
 ) -> Result<Value, String> {
     let current_store_schema =
         read_local_store_schema_for_update(runtime, published.store_schema_version)?;
-    let embedded_matches_published = embedded == published;
-    let preflight =
-        assess_migration_preflight(current_store_schema, published, embedded_matches_published);
+    let formats_compatible = envelope_formats_compatible(embedded, published);
+    let preflight = assess_migration_preflight(current_store_schema, published, formats_compatible);
 
     let mut payload = json!({
         "status": preflight.status,
@@ -11794,7 +11881,7 @@ fn migration_preflight_payload(
         "migration_class_max_auto": published.migration_class_max_auto,
         "sidecar_generation": published.sidecar_generation,
         "envelope_version": published.envelope_version,
-        "embedded_envelope_matches_metadata": embedded_matches_published,
+        "embedded_envelope_format_compatible": formats_compatible,
     });
     if let Some(reason) = preflight.blocked_reason {
         payload["blocked_reason"] = Value::String(reason);
@@ -12472,9 +12559,11 @@ fn handle_update(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             .get("blocked_reason")
             .and_then(Value::as_str)
             .unwrap_or("migration_preflight_blocked");
+        let installer_one_liner = release_latest_installer_one_liner(&repo);
         return blocked_response(
             format!("rr update apply blocked by migration posture: {blocked_reason}"),
             vec![
+                installer_one_liner,
                 "run rr update --dry-run --robot to inspect migration posture details".to_owned(),
                 "apply is allowed only when migration.apply_allowed=true".to_owned(),
             ],
@@ -12484,6 +12573,7 @@ fn handle_update(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 "target_tag": target_tag,
                 "target": target,
                 "migration": migration_policy.clone(),
+                "recommended_install_command": recommended_command,
             }),
         );
     }
@@ -17081,6 +17171,7 @@ export interface BridgeLaunchIntent {
   pr_number: number;
   head_ref?: string;
   instance?: string;
+  session_id?: string;
 }
 
 export interface BridgeResponse {
@@ -17089,6 +17180,9 @@ export interface BridgeResponse {
   message: string;
   session_id?: string;
   guidance?: string;
+  warnings?: string[];
+  candidates?: unknown;
+  auto_selected_session?: boolean;
 }
 "#
 }
@@ -18394,6 +18488,7 @@ mod tests {
             pr_number: 0,
             head_ref: None,
             instance: None,
+            session_id: None,
             extension_id: Some(extension_id.to_owned()),
             browser: Some(browser.to_owned()),
         };
@@ -19778,12 +19873,143 @@ mod tests {
 
     #[test]
     fn migration_preflight_reports_auto_safe_posture_when_policy_allows_window() {
+        // store_schema=10, current=9: a single-version (class_a) jump. Even
+        // though the envelope's ceiling is class_b, the honest classification of
+        // the ACTUAL delta is class_a — preflight must report class_a, not echo
+        // the ceiling.
         let envelope = sample_store_compatibility("auto_safe");
         let preflight = assess_migration_preflight(9, &envelope, true);
         assert_eq!(preflight.status, "auto_safe_migration_after_update");
-        assert_eq!(preflight.classification, "class_b");
+        assert_eq!(preflight.classification, "class_a");
         assert!(preflight.apply_allowed);
         assert!(preflight.blocked_reason.is_none());
+    }
+
+    #[test]
+    fn migration_preflight_reports_class_a_for_single_version_bump_within_window() {
+        // class_a ceiling, single-version bump (9 -> 10) at the auto floor.
+        let mut envelope = sample_store_compatibility("auto_safe");
+        envelope.migration_class_max_auto = "class_a".to_owned();
+        envelope.auto_migrate_from = 9;
+        let preflight = assess_migration_preflight(9, &envelope, true);
+        assert_eq!(preflight.status, "auto_safe_migration_after_update");
+        assert_eq!(preflight.classification, "class_a");
+        assert!(preflight.apply_allowed);
+        assert!(preflight.blocked_reason.is_none());
+    }
+
+    #[test]
+    fn migration_preflight_blocks_class_b_delta_under_class_a_ceiling() {
+        // store_schema=10, current=8: a two-version (class_b) jump that exceeds
+        // the release's class_a ceiling. Honest classification must NOT claim
+        // class_a; it fences the auto path off to an explicit operator gate.
+        let mut envelope = sample_store_compatibility("auto_safe");
+        envelope.migration_class_max_auto = "class_a".to_owned();
+        envelope.auto_migrate_from = 8;
+        let preflight = assess_migration_preflight(8, &envelope, true);
+        assert_eq!(
+            preflight.status,
+            "migration_requires_explicit_operator_gate"
+        );
+        assert_eq!(preflight.classification, "class_b");
+        assert!(!preflight.apply_allowed);
+        assert_eq!(
+            preflight.blocked_reason.as_deref(),
+            Some("auto_migration_class_exceeds_published_ceiling")
+        );
+    }
+
+    #[test]
+    fn migration_preflight_blocks_bump_below_auto_migrate_window_floor() {
+        // current=7 is below auto_migrate_from=8: outside the auto window.
+        let envelope = sample_store_compatibility("auto_safe");
+        let preflight = assess_migration_preflight(7, &envelope, true);
+        assert_eq!(
+            preflight.status,
+            "migration_requires_explicit_operator_gate"
+        );
+        assert!(!preflight.apply_allowed);
+        assert_eq!(
+            preflight.blocked_reason.as_deref(),
+            Some("local_store_schema_outside_auto_migrate_window")
+        );
+    }
+
+    #[test]
+    fn migration_preflight_blocks_class_d_delta_even_within_window() {
+        // A wide jump (schema 5 -> 10, delta 5) classifies class_d: no proven
+        // auto path, so it fails closed as unsupported even inside the window.
+        let mut envelope = sample_store_compatibility("auto_safe");
+        envelope.migration_class_max_auto = "class_b".to_owned();
+        envelope.auto_migrate_from = 0;
+        let preflight = assess_migration_preflight(5, &envelope, true);
+        assert_eq!(preflight.status, "migration_unsupported");
+        assert_eq!(preflight.classification, "class_d");
+        assert!(!preflight.apply_allowed);
+        assert_eq!(
+            preflight.blocked_reason.as_deref(),
+            Some("auto_migration_class_unsupported_for_delta")
+        );
+    }
+
+    #[test]
+    fn migration_preflight_blocks_store_newer_than_target_release() {
+        let envelope = sample_store_compatibility("auto_safe");
+        let preflight = assess_migration_preflight(11, &envelope, true);
+        assert_eq!(preflight.status, "migration_unsupported");
+        assert_eq!(preflight.classification, "class_d");
+        assert!(!preflight.apply_allowed);
+        assert_eq!(
+            preflight.blocked_reason.as_deref(),
+            Some("local_store_schema_newer_than_target_release")
+        );
+    }
+
+    #[test]
+    fn migration_preflight_blocks_store_below_min_supported() {
+        let mut envelope = sample_store_compatibility("auto_safe");
+        envelope.min_supported_store_schema = 5;
+        let preflight = assess_migration_preflight(4, &envelope, true);
+        assert_eq!(preflight.status, "migration_unsupported");
+        assert_eq!(preflight.classification, "class_d");
+        assert!(!preflight.apply_allowed);
+        assert_eq!(
+            preflight.blocked_reason.as_deref(),
+            Some("local_store_schema_below_min_supported")
+        );
+    }
+
+    #[test]
+    fn envelope_format_compat_ignores_schema_and_policy_differences() {
+        // The core of the semantic comparison: an installed binary (auto_safe,
+        // newer schema, class_a ceiling) vs an older target release envelope
+        // (binary_only, older schema) share the same envelope_version and
+        // sidecar_generation, so they are format-COMPATIBLE. The schema/policy
+        // delta is assessed by preflight, not treated as an envelope mismatch.
+        let embedded = StoreCompatibilityEnvelope {
+            envelope_version: 1,
+            store_schema_version: 18,
+            min_supported_store_schema: 0,
+            auto_migrate_from: 17,
+            migration_policy: "auto_safe".to_owned(),
+            migration_class_max_auto: "class_a".to_owned(),
+            sidecar_generation: "v1".to_owned(),
+            backup_required: true,
+        };
+        let published = sample_store_compatibility("binary_only");
+        assert!(envelope_formats_compatible(&embedded, &published));
+    }
+
+    #[test]
+    fn envelope_format_compat_fails_on_version_or_sidecar_mismatch() {
+        let embedded = sample_store_compatibility("auto_safe");
+        let mut newer_format = embedded.clone();
+        newer_format.envelope_version = 2;
+        assert!(!envelope_formats_compatible(&embedded, &newer_format));
+
+        let mut newer_sidecar = embedded.clone();
+        newer_sidecar.sidecar_generation = "v2".to_owned();
+        assert!(!envelope_formats_compatible(&embedded, &newer_sidecar));
     }
 
     #[test]

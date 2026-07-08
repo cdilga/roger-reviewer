@@ -605,6 +605,7 @@ fn register_extension_identity_via_bridge(runtime: &CliRuntime, browser: &str, e
             pr_number: 0,
             head_ref: None,
             instance: None,
+            session_id: None,
             extension_id: Some(extension_id.to_owned()),
             browser: Some(browser.to_owned()),
         },
@@ -768,6 +769,7 @@ fn rr_binary_accepts_native_host_registration_intents_via_stdio_envelope() {
         pr_number: 0,
         head_ref: None,
         instance: None,
+        session_id: None,
         extension_id: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()),
         browser: Some("chrome".to_owned()),
     };
@@ -799,6 +801,7 @@ fn rr_binary_native_host_path_returns_bridge_response_for_launch_intents() {
         pr_number: 42,
         head_ref: None,
         instance: None,
+        session_id: None,
         extension_id: None,
         browser: None,
     };
@@ -919,6 +922,7 @@ fn rr_binary_native_host_path_handles_all_primary_launch_actions_without_hanging
             pr_number: 42,
             head_ref: None,
             instance: None,
+            session_id: None,
             extension_id: None,
             browser: None,
         };

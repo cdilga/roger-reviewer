@@ -7468,6 +7468,19 @@ fn classify_store_migration_class(schema_from: i64, schema_to: i64) -> StoreMigr
     }
 }
 
+/// Stable public label for the automatic migration class of a schema jump,
+/// mirroring the exact classification the store-open migration runner enforces
+/// (`apply_migrations`). Update preflight consumes this so the class it reports
+/// for a `current -> target` delta is the same class first-open would actually
+/// apply — the updater can never dishonestly label a wider jump as `class_a`.
+///
+/// Classes are delta-based by design: a single-version additive bump is
+/// `class_a`, a two-version bump is `class_b` (auto-safe but rebuilds sidecars),
+/// and any wider jump is `class_d` (no proven automatic path).
+pub fn store_migration_class_label(schema_from: i64, schema_to: i64) -> &'static str {
+    classify_store_migration_class(schema_from, schema_to).as_str()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ScopeClass {
     Repo,

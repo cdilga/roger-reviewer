@@ -13,6 +13,7 @@ export interface BridgeLaunchIntent {
   pr_number: number;
   head_ref?: string;
   instance?: string;
+  session_id?: string;
 }
 
 export interface BridgeResponse {
@@ -21,4 +22,7 @@ export interface BridgeResponse {
   message: string;
   session_id?: string;
   guidance?: string;
+  warnings?: string[];
+  candidates?: unknown;
+  auto_selected_session?: boolean;
 }

@@ -30,6 +30,8 @@ Environment overrides:
   RR_INSTALL_DIR
   RR_STORE_ROOT          Roger store root for the extension package (default: $HOME/.roger)
   RR_SKILLS_DIR          Claude skills dir for the roger-* skills (default: $HOME/.claude/skills)
+  RR_CODEX_SKILLS_DIR    Optional Codex skills dir for the same roger-* skills (default: mirror
+                         only if $HOME/.codex/skills already exists; never created speculatively)
 EOF
 }
 
@@ -604,6 +606,37 @@ PY
       echo "Installed Roger skills into ${skills_dir}:${installed_skills}"
     else
       echo "Warning: skills bundle ${skills_archive_name} contained no roger-* skills; nothing installed." >&2
+    fi
+
+    # Optional Codex-root mirror: install the same roger-* skills into a Codex
+    # skills directory too, but only when the operator opted in via
+    # RR_CODEX_SKILLS_DIR or an existing $HOME/.codex/skills root is already
+    # present. Never created speculatively -- an absent Codex root just means
+    # this mirror is skipped, same non-fatal shape as the Claude skills lane.
+    codex_default_skills_dir="${HOME}/.codex/skills"
+    if [[ -n "${RR_CODEX_SKILLS_DIR:-}" ]]; then
+      codex_skills_dir="${RR_CODEX_SKILLS_DIR}"
+    elif [[ -d "$codex_default_skills_dir" ]]; then
+      codex_skills_dir="$codex_default_skills_dir"
+    else
+      codex_skills_dir=""
+    fi
+    if [[ -n "$codex_skills_dir" ]]; then
+      mkdir -p "$codex_skills_dir"
+      installed_codex_skills=""
+      for skill_path in "${skills_stage_dir}"/roger-*; do
+        [[ -d "$skill_path" ]] || continue
+        skill_name="$(basename "$skill_path")"
+        target="${codex_skills_dir}/${skill_name}"
+        rm -rf "$target"
+        cp -R "$skill_path" "$target"
+        installed_codex_skills="${installed_codex_skills} ${skill_name}"
+      done
+      if [[ -n "$installed_codex_skills" ]]; then
+        echo "Installed Roger skills into ${codex_skills_dir}:${installed_codex_skills}"
+      else
+        echo "Warning: skills bundle ${skills_archive_name} contained no roger-* skills; nothing installed into ${codex_skills_dir}." >&2
+      fi
     fi
   fi
 else

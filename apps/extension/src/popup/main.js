@@ -140,6 +140,138 @@ function appendGuidance(message, guidance) {
   return `${normalizedBase} ${extra}`.trim();
 }
 
+// ---------------------------------------------------------------------------
+// Findings + session summaries (bead rr-ext-session-candidates-surface-pnv0).
+// ---------------------------------------------------------------------------
+
+function shortenSessionId(sessionId) {
+  const id = typeof sessionId === 'string' ? sessionId.trim() : '';
+  if (id.length === 0) {
+    return '';
+  }
+  if (id.length <= 20) {
+    return id;
+  }
+  return `${id.slice(0, 10)}…${id.slice(-6)}`;
+}
+
+function formatRelativeAge(updatedAt, nowMs = Date.now()) {
+  let thenMs = null;
+  if (typeof updatedAt === 'number' && Number.isFinite(updatedAt)) {
+    thenMs = updatedAt > 1e12 ? updatedAt : updatedAt * 1000;
+  } else if (typeof updatedAt === 'string' && updatedAt.trim().length > 0) {
+    const parsed = Date.parse(updatedAt.trim());
+    if (Number.isFinite(parsed)) {
+      thenMs = parsed;
+    }
+  }
+  if (thenMs === null) {
+    return null;
+  }
+  const deltaSeconds = Math.max(0, Math.round((nowMs - thenMs) / 1000));
+  if (deltaSeconds < 45) {
+    return 'just now';
+  }
+  const minutes = Math.round(deltaSeconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ago`;
+  }
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+function resumeCommandForSession(sessionId) {
+  return `rr open --session ${sessionId}`;
+}
+
+function copyTextToClipboard(text, options = {}) {
+  const nav = options.navigator || (typeof navigator !== 'undefined' ? navigator : null);
+  if (nav && nav.clipboard && typeof nav.clipboard.writeText === 'function') {
+    return Promise.resolve()
+      .then(() => nav.clipboard.writeText(text))
+      .then(() => true)
+      .catch(() => false);
+  }
+  return Promise.resolve(false);
+}
+
+// Summarize a show_findings response into a count + up to three finding titles.
+// Returns null when the response carries no findings mirror.
+function summarizeFindings(response, limit = 3) {
+  if (!response || typeof response !== 'object') {
+    return null;
+  }
+  const source =
+    response.findings && typeof response.findings === 'object' && !Array.isArray(response.findings)
+      ? response.findings
+      : Array.isArray(response.findings)
+        ? { items: response.findings }
+        : null;
+  if (!source) {
+    return null;
+  }
+  const items = Array.isArray(source.items) ? source.items : [];
+  const titles = items
+    .map((item) =>
+      item && typeof item.title === 'string' && item.title.trim().length > 0
+        ? item.title.trim()
+        : null
+    )
+    .filter(Boolean)
+    .slice(0, limit);
+  const count = Number.isFinite(source.count) ? Math.floor(source.count) : items.length;
+  return { count, titles };
+}
+
+// Extract a bounded, normalized session list from a status response.
+function extractSessions(response) {
+  if (!response || typeof response !== 'object' || !Array.isArray(response.sessions)) {
+    return [];
+  }
+  return response.sessions
+    .filter(
+      (entry) => entry && typeof entry === 'object' && typeof entry.session_id === 'string'
+    )
+    .slice(0, 5)
+    .map((entry) => ({
+      session_id: entry.session_id,
+      provider: typeof entry.provider === 'string' ? entry.provider : null,
+      attention_state:
+        typeof entry.attention_state === 'string' ? entry.attention_state : null,
+      updated_at:
+        typeof entry.updated_at === 'number' || typeof entry.updated_at === 'string'
+          ? entry.updated_at
+          : null,
+    }));
+}
+
+// The newest session by updated_at (numeric or ISO). Falls back to the first.
+function newestSession(sessions) {
+  if (!Array.isArray(sessions) || sessions.length === 0) {
+    return null;
+  }
+  let best = sessions[0];
+  let bestMs = -Infinity;
+  for (const session of sessions) {
+    const value = session.updated_at;
+    let ms = null;
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      ms = value > 1e12 ? value : value * 1000;
+    } else if (typeof value === 'string') {
+      const parsed = Date.parse(value);
+      ms = Number.isFinite(parsed) ? parsed : null;
+    }
+    if (ms !== null && ms > bestMs) {
+      bestMs = ms;
+      best = session;
+    }
+  }
+  return best;
+}
+
 // Map a host launch-progress stage to the one-liner the popup shows in its
 // subtitle while a launch is in flight (mirrors the in-page panel wording).
 function describeLaunchProgress(stage) {
@@ -351,6 +483,111 @@ function setSubtitle(text, isError = false) {
   subtitle.classList.toggle('status-error', isError);
 }
 
+function clearPopupResults() {
+  const node = document.getElementById('popup-results');
+  if (node) {
+    node.textContent = '';
+  }
+}
+
+// Render a findings count + up to three titles into the popup results area.
+function renderFindingsSummary(summary) {
+  const node = document.getElementById('popup-results');
+  if (!node || !summary) {
+    return;
+  }
+
+  const block = document.createElement('div');
+  block.className = 'popup-findings';
+
+  const heading = document.createElement('h2');
+  heading.textContent = `Findings (${summary.count})`;
+  block.appendChild(heading);
+
+  if (summary.titles.length > 0) {
+    const list = document.createElement('ul');
+    for (const title of summary.titles) {
+      const li = document.createElement('li');
+      li.textContent = title;
+      li.setAttribute('title', title);
+      list.appendChild(li);
+    }
+    block.appendChild(list);
+  } else {
+    const empty = document.createElement('p');
+    empty.textContent =
+      summary.count > 0
+        ? 'Open Roger locally (`rr findings`) for detail.'
+        : 'No findings staged yet.';
+    block.appendChild(empty);
+  }
+
+  node.appendChild(block);
+}
+
+// Render a compact session list (short id + age) plus a copy button for the
+// newest session's `rr open --session <id>` handoff command.
+function renderSessionsSummary(sessions, options = {}) {
+  const node = document.getElementById('popup-results');
+  if (!node || !Array.isArray(sessions) || sessions.length === 0) {
+    return;
+  }
+
+  const block = document.createElement('div');
+  block.className = 'popup-sessions';
+
+  const heading = document.createElement('h2');
+  heading.textContent = `Local sessions (${sessions.length})`;
+  block.appendChild(heading);
+
+  const list = document.createElement('ul');
+  for (const session of sessions) {
+    const li = document.createElement('li');
+    const idSpan = document.createElement('span');
+    idSpan.className = 'popup-session-id';
+    idSpan.textContent = shortenSessionId(session.session_id);
+    idSpan.setAttribute('title', session.session_id);
+    li.appendChild(idSpan);
+    const age = formatRelativeAge(session.updated_at);
+    if (age) {
+      const ageSpan = document.createElement('span');
+      ageSpan.textContent = ` — ${age}`;
+      li.appendChild(ageSpan);
+    }
+    list.appendChild(li);
+  }
+  block.appendChild(list);
+
+  const newest = newestSession(sessions);
+  if (newest) {
+    const command = resumeCommandForSession(newest.session_id);
+    const row = document.createElement('div');
+    row.className = 'popup-copy-row';
+    const code = document.createElement('code');
+    code.textContent = command;
+    code.setAttribute('title', command);
+    row.appendChild(code);
+    const copyButton = document.createElement('button');
+    copyButton.type = 'button';
+    copyButton.textContent = 'Copy';
+    copyButton.setAttribute('aria-label', `Copy ${command}`);
+    copyButton.addEventListener('click', () => {
+      Promise.resolve(copyTextToClipboard(command, options)).then((copied) => {
+        copyButton.textContent = copied ? 'Copied' : 'Copy failed';
+        if (typeof setTimeout === 'function') {
+          setTimeout(() => {
+            copyButton.textContent = 'Copy';
+          }, 1500);
+        }
+      });
+    });
+    row.appendChild(copyButton);
+    block.appendChild(row);
+  }
+
+  node.appendChild(block);
+}
+
 function setButtonsDisabled(disabled) {
   const buttons = document.querySelectorAll('button[data-action]');
   for (const button of buttons) {
@@ -406,6 +643,15 @@ async function handleActionClick(action, context, button) {
     const feedback = describeLaunchResponse(response);
     setSubtitle(feedback.message, feedback.isError);
     applyActionModel(feedback.attentionState, resolveSessionCount(response));
+    // View Findings: render the relayed count + top titles instead of
+    // discarding them behind a one-line subtitle.
+    if (action === 'show_findings') {
+      const summary = summarizeFindings(response);
+      if (summary) {
+        clearPopupResults();
+        renderFindingsSummary(summary);
+      }
+    }
   } catch (error) {
     setSubtitle(
       appendGuidance(`Bridge error: ${String(error?.message || error)}`, BRIDGE_DISCONNECT_GUIDANCE),
@@ -453,6 +699,11 @@ async function syncPopupActionModel(context) {
     const response = await sendRuntimeMessage(buildStatusMessage(context));
     const attentionState = resolveAttentionState(response);
     applyActionModel(attentionState, resolveSessionCount(response));
+    const sessions = extractSessions(response);
+    if (sessions.length > 0) {
+      clearPopupResults();
+      renderSessionsSummary(sessions);
+    }
     return attentionState;
   } catch {
     applyActionModel(null, null);
@@ -535,5 +786,15 @@ if (typeof module !== 'undefined' && module.exports) {
     resolveFindingsKnownEmpty,
     routePopupAction,
     syncPopupActionModel,
+    shortenSessionId,
+    formatRelativeAge,
+    resumeCommandForSession,
+    copyTextToClipboard,
+    summarizeFindings,
+    extractSessions,
+    newestSession,
+    renderFindingsSummary,
+    renderSessionsSummary,
+    clearPopupResults,
   };
 }

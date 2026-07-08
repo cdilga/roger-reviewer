@@ -48,6 +48,9 @@ const BRIDGE_FAILURE_MODE_BY_KIND = Object.freeze({
   robot_schema_mismatch: 'bridge_robot_schema_mismatch',
   missing_session_id: 'bridge_missing_session_id',
   cli_outcome_not_safe: 'bridge_cli_outcome_not_safe',
+  // A resume disambiguation picker is NOT a hard failure: it carries a bounded
+  // candidates list the panel renders as per-session resume buttons.
+  picker_required: 'bridge_picker_required',
 });
 
 function classifyBridgeFailureMode(response) {
@@ -175,6 +178,18 @@ function dispatchNative(intent, onProgress) {
           session_id: frame.session_id,
           failure_kind: frame.failure_kind,
           launch_outcome: frame.launch_outcome,
+          // Resume auto-selection notice + disambiguation picker relay. These
+          // are additive: the bridge only populates them for resume_review, and
+          // the panel renders a visible notice / candidate list from them.
+          ...(Array.isArray(frame.warnings) && frame.warnings.length > 0
+            ? { warnings: frame.warnings }
+            : {}),
+          ...(frame.candidates !== undefined && frame.candidates !== null
+            ? { candidates: frame.candidates }
+            : {}),
+          ...(typeof frame.auto_selected_session === 'boolean'
+            ? { auto_selected_session: frame.auto_selected_session }
+            : {}),
           ...(mirrored
             ? {
                 attention_state: mirrored.attention_state,
@@ -336,7 +351,13 @@ function parseSessionInventory(response) {
           ...(typeof entry.attention_state === 'string'
             ? { attention_state: entry.attention_state }
             : {}),
-          ...(typeof entry.updated_at === 'string' ? { updated_at: entry.updated_at } : {}),
+          // updated_at crosses the wire as a numeric unix timestamp from the
+          // session finder (and occasionally as an ISO string); keep either so
+          // the panel can render a relative age.
+          ...(typeof entry.updated_at === 'string' ||
+          (typeof entry.updated_at === 'number' && Number.isFinite(entry.updated_at))
+            ? { updated_at: entry.updated_at }
+            : {}),
         }))
     : [];
 

@@ -172,6 +172,7 @@ fn extension_setup_writes_native_host_launcher_that_normalizes_browser_argv() {
         pr_number: 42,
         head_ref: None,
         instance: None,
+        session_id: None,
         extension_id: None,
         browser: Some("edge".to_owned()),
     };

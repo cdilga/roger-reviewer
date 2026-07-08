@@ -188,6 +188,7 @@ fn launch_streams_ack_then_preflight_ok_then_final_when_ready() {
         pr_number: 7,
         head_ref: None,
         instance: None,
+        session_id: None,
         extension_id: None,
         browser: None,
     };
@@ -246,6 +247,7 @@ fn launch_still_acks_before_failure_when_preflight_not_ready() {
         pr_number: 7,
         head_ref: None,
         instance: None,
+        session_id: None,
         extension_id: None,
         browser: None,
     };

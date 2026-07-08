@@ -42,6 +42,13 @@ trap 'rm -rf "${TMP_DIR}"' EXIT
 export RR_SKILLS_DIR="${TMP_DIR}/skills-global-default"
 mkdir -p "${RR_SKILLS_DIR}"
 
+# Same isolation for the optional Codex-root skills mirror: rr-install.sh
+# defaults to mirroring into $HOME/.codex/skills when RR_CODEX_SKILLS_DIR is
+# unset AND that directory already exists on the machine running the test.
+# Pin it into the tmp sandbox unconditionally so this test can never write
+# into (or clobber) the developer's real ~/.codex/skills.
+export RR_CODEX_SKILLS_DIR="${TMP_DIR}/codex-skills-global-default"
+
 DOWNLOAD_ROOT="file://${TMP_DIR}/releases/download"
 DOWNLOAD_FS_ROOT="${TMP_DIR}/releases/download"
 TARGET="x86_64-unknown-linux-gnu"

@@ -56,7 +56,13 @@ As of `2026-04-14`, the repo has these real facts:
   the same artifact contract, with retained run artifacts.
 - release automation already verifies core assets, installer-script presence,
   optional-lane claim drift, and publish-gate inputs before publication.
-- schema/data migration-capable updates remain deferred/fail-closed in `0.1.x`.
+- schema/data migration-capable updates are supported for additive (Class A)
+  schema deltas: the compatibility envelope compares semantically (format fields
+  only), the embedded/published `migration_policy` is `auto_safe` with a `class_a`
+  auto ceiling and an `auto_migrate_from` floor of `store_schema_version - 1`, and
+  the store-open runner auto-migrates the additive delta on first open. Wider
+  jumps, and any target release that publishes `binary_only`, still fail closed
+  with installer repair guidance.
 
 Those facts are necessary, but they are not yet a complete tested-upgrade
 contract.
@@ -285,6 +291,31 @@ For `0.1.x`, this is the only Roger-owned path that may claim:
 - install-layout inspection
 - rename-with-backup replacement
 - immediate rollback restore on replacement failure
+
+#### Cross-store-schema in-place update
+
+`rr update` no longer hard-blocks across a store-schema bump. Migration preflight
+now decides per delta:
+
+- the embedded and published envelopes compare semantically (envelope format
+  only); a schema/policy field difference is not treated as a mismatch
+- the governing `migration_policy` is taken from the **target release's** published
+  envelope. When the target publishes `auto_safe` (the current default) and the
+  local store is within the auto window with a delta whose honest class is inside
+  the published ceiling, preflight reports `auto_safe_migration_after_update` with
+  `apply_allowed=true`, and the freshly installed binary auto-migrates the store on
+  first open
+- when the target publishes `binary_only` (older releases up to and including
+  `v2026.07.07`), any schema delta still blocks — same-schema updates still pass as
+  `no_migration_needed`
+- the classification reported is the honest class of the actual delta, not the
+  published ceiling; a two-version jump reports `class_b` even under a `class_a`
+  ceiling and does not auto-apply
+
+Because this preflight logic lives in the installed binary, a binary must already
+carry it before the next schema bump for that bump to update in place. Binaries at
+or before `v2026.07.07` predate this logic and block across a schema bump; those
+users take the installer repair path (below).
 
 #### Post-binary extension refresh phase
 
@@ -587,6 +618,12 @@ Required rule:
 
 - recommended reinstall guidance must use release-backed commands or URLs
   that work without local repo scripts
+- when `rr update` blocks on migration posture (`apply_allowed=false`), the
+  blocked envelope must carry the release-hosted installer one-liner
+  `curl -fsSL https://github.com/cdilga/roger-reviewer/releases/latest/download/rr-install.sh | bash`
+  as a repair action and the tag-pinned reinstall command under
+  `data.recommended_install_command`, so a user whose in-place path is fenced off
+  by a schema bump always has a copy-pasteable recovery path
 
 Non-truthful guidance examples:
 

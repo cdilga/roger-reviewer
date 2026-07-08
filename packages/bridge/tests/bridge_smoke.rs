@@ -22,6 +22,7 @@ fn native_messaging_end_to_end() {
         pr_number: 99,
         head_ref: None,
         instance: Some("my-inst".to_owned()),
+        session_id: None,
         extension_id: None,
         browser: None,
     };
@@ -105,6 +106,7 @@ fn fail_closed_when_roger_not_installed() {
         pr_number: 1,
         head_ref: None,
         instance: None,
+        session_id: None,
         extension_id: None,
         browser: None,
     };
@@ -190,6 +192,7 @@ fn unknown_action_rejected() {
         pr_number: 1,
         head_ref: None,
         instance: None,
+        session_id: None,
         extension_id: None,
         browser: None,
     };
@@ -212,6 +215,7 @@ fn refresh_review_action_is_rejected() {
         pr_number: 7,
         head_ref: None,
         instance: None,
+        session_id: None,
         extension_id: None,
         browser: None,
     };
@@ -236,6 +240,7 @@ fn bridge_launch_response_returns_verified_session_and_status_snapshot() {
         pr_number: 12,
         head_ref: None,
         instance: None,
+        session_id: None,
         extension_id: None,
         browser: None,
     };
@@ -304,6 +309,7 @@ fn bridge_launch_success_carries_repair_guidance_for_refresh_recommended_status(
         pr_number: 12,
         head_ref: None,
         instance: None,
+        session_id: None,
         extension_id: None,
         browser: None,
     };
@@ -369,6 +375,7 @@ fn bridge_launch_failure_reports_cli_spawn_failure() {
         pr_number: 12,
         head_ref: None,
         instance: None,
+        session_id: None,
         extension_id: None,
         browser: None,
     };
@@ -398,6 +405,7 @@ fn bridge_launch_failure_reports_robot_schema_mismatch_for_invalid_payload() {
         pr_number: 12,
         head_ref: None,
         instance: None,
+        session_id: None,
         extension_id: None,
         browser: None,
     };
@@ -447,6 +455,7 @@ fn bridge_launch_failure_reports_missing_session_id_distinctly() {
         pr_number: 12,
         head_ref: None,
         instance: None,
+        session_id: None,
         extension_id: None,
         browser: None,
     };
@@ -508,6 +517,7 @@ fn bridge_launch_failure_reports_blocked_cli_outcome_with_real_repair_guidance()
         pr_number: 12,
         head_ref: None,
         instance: None,
+        session_id: None,
         extension_id: None,
         browser: None,
     };
@@ -573,6 +583,7 @@ fn bridge_launch_success_keeps_degraded_outcome_explicit() {
         pr_number: 12,
         head_ref: None,
         instance: None,
+        session_id: None,
         extension_id: None,
         browser: None,
     };
@@ -637,6 +648,7 @@ fn bridge_launch_failure_reports_noncanonical_status_readback() {
         pr_number: 12,
         head_ref: None,
         instance: None,
+        session_id: None,
         extension_id: None,
         browser: None,
     };
@@ -697,6 +709,7 @@ fn bridge_not_ready_guidance_is_setup_only_not_approval_or_posting_status() {
         pr_number: 13,
         head_ref: None,
         instance: None,
+        session_id: None,
         extension_id: None,
         browser: None,
     };
