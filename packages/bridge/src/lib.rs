@@ -1582,10 +1582,7 @@ esac
         let dispatch = bridge_dispatch_spec(&intent).expect("resume dispatch spec");
         assert_eq!(dispatch.command_name, "rr resume");
         assert!(dispatch.capture_picker_block);
-        let session_flag = dispatch
-            .argv
-            .windows(2)
-            .find(|pair| pair[0] == "--session");
+        let session_flag = dispatch.argv.windows(2).find(|pair| pair[0] == "--session");
         assert_eq!(
             session_flag.map(|pair| pair[1].as_str()),
             Some("session-explicit-9"),
@@ -1771,7 +1768,10 @@ esac
         intent.action = "resume_review".to_owned();
         let resp = handle_bridge_intent(&intent, &preflight, &stub_rr);
         assert!(!resp.ok);
-        assert_eq!(resp.failure_kind, Some(BridgeFailureKind::CliOutcomeNotSafe));
+        assert_eq!(
+            resp.failure_kind,
+            Some(BridgeFailureKind::CliOutcomeNotSafe)
+        );
         assert!(resp.candidates.is_none());
     }
 

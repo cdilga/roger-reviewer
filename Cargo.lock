@@ -1845,6 +1845,7 @@ dependencies = [
  "roger-bridge",
  "roger-config",
  "roger-github-adapter",
+ "roger-review-ops",
  "roger-session-claude",
  "roger-session-codex",
  "roger-session-copilot",
@@ -1892,6 +1893,19 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "roger-review-ops"
+version = "0.1.0"
+dependencies = [
+ "roger-app-core",
+ "roger-session-copilot",
+ "roger-storage",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]

@@ -6,9 +6,8 @@ use roger_app_core::time;
 use roger_app_core::{
     AGENT_TRANSPORT_REQUEST_SCHEMA_V1, AGENT_TRANSPORT_RESPONSE_SCHEMA_V1, AgentTransportErrorCode,
     AgentTransportRequestEnvelope, AgentTransportResponseEnvelope, AgentTransportResponseStatus,
-    AppError, ApprovalState, ContinuityQuality, ExplicitPostingInput, ExplicitPostingOutcome,
-    FindingTriageState, HarnessAdapter, LaunchAction, LaunchIntent, OutboundApprovalToken,
-    OutboundDraft, OutboundDraftBatch, RecallSourceRef, ResumeAttemptOutcome, ResumeBundle,
+    AppError, ContinuityQuality, ExplicitPostingOutcome, FindingTriageState, HarnessAdapter,
+    LaunchAction, LaunchIntent, RecallSourceRef, ResumeAttemptOutcome, ResumeBundle,
     ResumeBundleProfile, ReviewTarget, ReviewTask, ReviewTaskKind, RogerCommand, RogerCommandId,
     RogerCommandInvocationSurface, RogerCommandResult, RogerCommandRouteStatus, SearchPlanError,
     SearchPlanInput, SearchQueryPlanError, SearchRetrievalClass, SessionBaselineSnapshot,
@@ -20,8 +19,8 @@ use roger_app_core::{
     WorkerOperationRequestEnvelope, WorkerRecallEnvelope, WorkerSearchMemoryRequest,
     WorkerSearchMemoryResponse, WorkerStageOutcome, WorkerStageResult, WorkerStatusSnapshot,
     WorkerTransportKind, WorkerTurnStrategy, execute_agent_transport_request,
-    execute_explicit_posting_flow, materialize_search_plan, outbound_target_tuple_json,
-    route_harness_command, safe_harness_command_bindings, validate_outbound_draft_batch_linkage,
+    materialize_search_plan, outbound_target_tuple_json, route_harness_command,
+    safe_harness_command_bindings,
 };
 use roger_bridge::{
     BridgePreflight, NativeHostManifest, SupportedBrowser, SupportedOs,
@@ -13891,7 +13890,9 @@ fn handle_robot_docs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRespon
     }
 }
 
-const TRIAGE_OPERATOR_STATES: &[&str] = &["accepted", "ignored", "needs_follow_up", "resolved"];
+// Single source of truth lives in the shared review-ops layer so every surface
+// validates operator-settable triage states identically.
+const TRIAGE_OPERATOR_STATES: &[&str] = roger_review_ops::TRIAGE_OPERATOR_STATES;
 
 fn handle_triage(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let store = match open_store_or_response(runtime, "rr triage") {
@@ -13976,49 +13977,54 @@ fn handle_triage(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         }
     };
 
-    let mut finding_ids = parsed.draft_finding_ids.clone();
-    finding_ids.sort();
-    finding_ids.dedup();
-
-    let mut selected_findings = Vec::with_capacity(finding_ids.len());
-    let mut unknown_finding_ids = Vec::new();
-    for finding_id in &finding_ids {
-        match store.materialized_finding(finding_id) {
-            Ok(Some(record)) if record.session_id == session.id => selected_findings.push(record),
-            Ok(_) => unknown_finding_ids.push(finding_id.clone()),
-            Err(err) => {
-                return error_response(format!("failed to load finding {finding_id}: {err}"));
-            }
+    // Domain triage application (finding existence + session binding + update
+    // + decision event) lives in the shared review-ops layer so the TUI and
+    // bridge enforce the same fail-closed rules.
+    let updated_findings = match roger_review_ops::set_finding_triage(
+        &store,
+        &session,
+        &parsed.draft_finding_ids,
+        triage_state,
+    ) {
+        Ok(outcome) => outcome.updated_findings,
+        Err(roger_review_ops::SetTriageRejection::UnknownFindingIds {
+            unknown_finding_ids,
+        }) => {
+            return blocked_response(
+                "rr triage could not bind every requested finding to the resolved session"
+                    .to_owned(),
+                vec![format!(
+                    "inspect rr findings --session {} --robot for the current finding ids",
+                    session.id
+                )],
+                json!({
+                    "reason_code": "unknown_finding_ids",
+                    "session_id": session.id,
+                    "unknown_finding_ids": unknown_finding_ids,
+                }),
+            );
         }
-    }
-
-    if !unknown_finding_ids.is_empty() {
-        return blocked_response(
-            "rr triage could not bind every requested finding to the resolved session".to_owned(),
-            vec![format!(
-                "inspect rr findings --session {} --robot for the current finding ids",
-                session.id
-            )],
-            json!({
-                "reason_code": "unknown_finding_ids",
-                "session_id": session.id,
-                "unknown_finding_ids": unknown_finding_ids,
-            }),
-        );
-    }
-
-    let mut updated_findings = Vec::with_capacity(selected_findings.len());
-    for finding in &selected_findings {
-        match store.update_finding_triage_state(&finding.id, triage_state) {
-            Ok(updated) => updated_findings.push(updated),
-            Err(err) => {
-                return error_response(format!(
-                    "failed to update triage state for finding {}: {err}",
-                    finding.id
-                ));
-            }
+        Err(roger_review_ops::SetTriageRejection::UnsupportedState { requested_state }) => {
+            // Pre-validated at the top of this handler; kept fail-closed for parity.
+            return blocked_response(
+                format!(
+                    "unsupported --state: {requested_state} (expected accepted, ignored, needs_follow_up, or resolved; new and stale are Roger-derived triage states and cannot be set by the operator)"
+                ),
+                vec![format!(
+                    "pass --state with one of: {}",
+                    TRIAGE_OPERATOR_STATES.join(", ")
+                )],
+                json!({
+                    "reason_code": "unsupported_triage_state",
+                    "requested_state": requested_state,
+                    "supported_states": TRIAGE_OPERATOR_STATES,
+                }),
+            );
         }
-    }
+        Err(roger_review_ops::SetTriageRejection::Failed(message)) => {
+            return error_response(message);
+        }
+    };
 
     let warnings = provider_support_warning(&session.provider, "rr triage")
         .into_iter()
@@ -14072,20 +14078,117 @@ fn handle_triage(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     }
 }
 
-fn handle_draft(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
-    #[derive(Clone, Serialize)]
-    struct DraftPreviewDescriptor {
-        finding_id: String,
-        fingerprint: String,
-        title: String,
-        normalized_summary: String,
-        severity: String,
-        confidence: String,
-        anchor_digest: String,
-        target_locator: String,
-        body: String,
+/// Render a shared session-precondition block (attention/target/no-run) into
+/// the exact command-specific blocked envelope. The domain decision (which
+/// precondition failed) lives in the shared review-ops layer; only the surface
+/// wording differs across `rr draft`/`rr approve`/`rr post`.
+fn session_precondition_response(
+    command: &str,
+    stale_reason_tail: &str,
+    target_reason_tail: &str,
+    session: &ReviewSessionRecord,
+    block: roger_review_ops::SessionPreconditionBlock,
+) -> CommandResponse {
+    use roger_review_ops::SessionPreconditionBlock;
+    match block {
+        SessionPreconditionBlock::StaleLocalState => {
+            let reconciliation = json!({
+                "mode": "persisted_readback",
+                "manual_refresh_supported": false,
+                "stale_target_detected": true,
+                "repair_required": true,
+                "freshness_basis": "persisted_attention_state",
+                "attention_updated_at": session.updated_at,
+                "recommended_reentry_command": format!("rr resume --session {}", session.id),
+                "recommended_fresh_pass_command": format!(
+                    "rr review --repo {} --pr {}",
+                    session.review_target.repository, session.review_target.pull_request_number
+                ),
+            });
+            blocked_response(
+                format!(
+                    "rr {command} is blocked because the persisted review state requires explicit reconciliation before {stale_reason_tail}"
+                ),
+                vec![
+                    format!(
+                        "run rr resume --session {} to reopen the Roger session locally",
+                        session.id
+                    ),
+                    format!(
+                        "run rr review --repo {} --pr {} to start a fresh pass if target drift invalidated the older review",
+                        session.review_target.repository, session.review_target.pull_request_number
+                    ),
+                ],
+                json!({
+                    "reason_code": "stale_local_state",
+                    "session_id": session.id,
+                    "attention_state": session.attention_state,
+                    "reconciliation": reconciliation,
+                }),
+            )
+        }
+        SessionPreconditionBlock::MissingReviewTarget => blocked_response(
+            format!(
+                "rr {command} requires a concrete review target before Roger can {target_reason_tail}"
+            ),
+            vec![
+                "re-run rr review --repo <owner/repo> --pr <number> to capture a real target"
+                    .to_owned(),
+                format!("or inspect rr status --session {} --robot", session.id),
+            ],
+            json!({
+                "reason_code": "missing_review_target",
+                "session_id": session.id,
+                "review_target": session.review_target,
+            }),
+        ),
+        SessionPreconditionBlock::MissingLocalStateNoRun => blocked_response(
+            format!("rr {command} requires persisted local review state for the selected target"),
+            vec![format!(
+                "run rr review --repo {} --pr {} to materialize a local review first",
+                session.review_target.repository, session.review_target.pull_request_number
+            )],
+            json!({
+                "reason_code": "missing_local_state",
+                "session_id": session.id,
+            }),
+        ),
     }
+}
 
+/// Serialize a shared draft-selection issue into the exact `rr draft` blocked
+/// envelope shape.
+fn draft_selection_issue_json(issue: &roger_review_ops::DraftSelectionIssue) -> Value {
+    use roger_review_ops::DraftSelectionIssue;
+    match issue {
+        DraftSelectionIssue::TriageStateNotAccepted {
+            finding_id,
+            triage_state,
+        } => json!({
+            "finding_id": finding_id.clone(),
+            "reason_code": "triage_state_not_accepted",
+            "triage_state": triage_state.clone(),
+        }),
+        DraftSelectionIssue::ExistingOutboundState {
+            finding_id,
+            current_outbound_state,
+            draft_id,
+            draft_batch_id,
+            approval_id,
+            posted_action_id,
+        } => json!({
+            "finding_id": finding_id.clone(),
+            "reason_code": "existing_outbound_state",
+            "current_outbound_state": current_outbound_state.clone(),
+            "draft_id": draft_id.clone(),
+            "draft_batch_id": draft_batch_id.clone(),
+            "approval_id": approval_id.clone(),
+            "posted_action_id": posted_action_id.clone(),
+        }),
+    }
+}
+
+fn handle_draft(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let store = match open_store_or_response(runtime, "rr draft") {
         Ok(store) => store,
         Err(response) => return response,
@@ -14115,140 +14218,64 @@ fn handle_draft(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         }
     };
 
-    if session.attention_state == "refresh_recommended" {
-        let reconciliation = json!({
-            "mode": "persisted_readback",
-            "manual_refresh_supported": false,
-            "stale_target_detected": true,
-            "repair_required": true,
-            "freshness_basis": "persisted_attention_state",
-            "attention_updated_at": session.updated_at,
-            "recommended_reentry_command": format!("rr resume --session {}", session.id),
-            "recommended_fresh_pass_command": format!(
-                "rr review --repo {} --pr {}",
-                session.review_target.repository, session.review_target.pull_request_number
-            ),
-        });
-        return blocked_response(
-            "rr draft is blocked because the persisted review state requires explicit reconciliation before outbound material can be derived".to_owned(),
-            vec![
-                format!(
-                    "run rr resume --session {} to reopen the Roger session locally",
-                    session.id
-                ),
-                format!(
-                    "run rr review --repo {} --pr {} to start a fresh pass if target drift invalidated the older review",
+    // All draft-materialization domain rules (session preconditions, accepted-only
+    // enforcement, not-drafted gating, target binding, batch/item digests, and the
+    // stored batch + item rows) live in the shared review-ops layer so the TUI and
+    // bridge materialize drafts through the same fail-closed path.
+    let selection = if parsed.draft_all_findings {
+        roger_review_ops::DraftSelection::AllFindings
+    } else {
+        roger_review_ops::DraftSelection::Explicit(parsed.draft_finding_ids.clone())
+    };
+    let draft_outcome = match roger_review_ops::materialize_draft_batch(
+        &store, &session, &selection,
+    ) {
+        Ok(outcome) => outcome,
+        Err(roger_review_ops::MaterializeDraftRejection::Precondition(block)) => {
+            return session_precondition_response(
+                "draft",
+                "outbound material can be derived",
+                "bind local outbound state",
+                &session,
+                block,
+            );
+        }
+        Err(roger_review_ops::MaterializeDraftRejection::MissingFindings { review_run_id }) => {
+            return blocked_response(
+                "rr draft requires persisted findings from the latest local review run".to_owned(),
+                vec![format!(
+                    "run rr review --repo {} --pr {} to materialize findings before drafting",
                     session.review_target.repository, session.review_target.pull_request_number
-                ),
-            ],
-            json!({
-                "reason_code": "stale_local_state",
-                "session_id": session.id,
-                "attention_state": session.attention_state,
-                "reconciliation": reconciliation,
-            }),
-        );
-    }
-
-    if session.review_target.repository.trim().is_empty()
-        || session.review_target.pull_request_number == 0
-    {
-        return blocked_response(
-            "rr draft requires a concrete review target before Roger can bind local outbound state"
-                .to_owned(),
-            vec![
-                "re-run rr review --repo <owner/repo> --pr <number> to capture a real target"
-                    .to_owned(),
-                format!("or inspect rr status --session {} --robot", session.id),
-            ],
-            json!({
-                "reason_code": "missing_review_target",
-                "session_id": session.id,
-                "review_target": session.review_target,
-            }),
-        );
-    }
-
-    let Some(run) = (match store.latest_review_run(&session.id) {
-        Ok(run) => run,
-        Err(err) => return error_response(format!("failed to load latest run: {err}")),
-    }) else {
-        return blocked_response(
-            "rr draft requires persisted local review state for the selected target".to_owned(),
-            vec![format!(
-                "run rr review --repo {} --pr {} to materialize a local review first",
-                session.review_target.repository, session.review_target.pull_request_number
-            )],
-            json!({
-                "reason_code": "missing_local_state",
-                "session_id": session.id,
-            }),
-        );
-    };
-
-    let findings = match store.materialized_findings_for_run(&session.id, &run.id) {
-        Ok(findings) => findings,
-        Err(err) => {
-            return error_response(format!("failed to load findings for latest run: {err}"));
+                )],
+                json!({
+                    "reason_code": "missing_local_state",
+                    "session_id": session.id,
+                    "review_run_id": review_run_id,
+                }),
+            );
         }
-    };
-
-    if findings.is_empty() {
-        return blocked_response(
-            "rr draft requires persisted findings from the latest local review run".to_owned(),
-            vec![format!(
-                "run rr review --repo {} --pr {} to materialize findings before drafting",
-                session.review_target.repository, session.review_target.pull_request_number
-            )],
-            json!({
-                "reason_code": "missing_local_state",
-                "session_id": session.id,
-                "review_run_id": run.id,
-            }),
-        );
-    }
-
-    if !parsed.draft_all_findings && parsed.draft_finding_ids.is_empty() {
-        return blocked_response(
-            "rr draft requires explicit finding selection in this slice".to_owned(),
-            vec![
-                "pass --finding <id> one or more times".to_owned(),
-                "or pass --all-findings to group every finding in the latest run".to_owned(),
-            ],
-            json!({
-                "reason_code": "finding_selection_required",
-                "session_id": session.id,
-                "review_run_id": run.id,
-                "available_finding_ids": findings
-                    .iter()
-                    .map(|finding| finding.id.clone())
-                    .collect::<Vec<_>>(),
-            }),
-        );
-    }
-
-    let findings_by_id = findings
-        .iter()
-        .map(|finding| (finding.id.as_str(), finding))
-        .collect::<HashMap<_, _>>();
-    let selection_mode = if parsed.draft_all_findings {
-        "all_findings"
-    } else {
-        "explicit_findings"
-    };
-
-    let mut selected_findings = if parsed.draft_all_findings {
-        findings.clone()
-    } else {
-        let mut selected = Vec::new();
-        let mut missing = Vec::new();
-        for finding_id in &parsed.draft_finding_ids {
-            match findings_by_id.get(finding_id.as_str()) {
-                Some(finding) => selected.push((*finding).clone()),
-                None => missing.push(finding_id.clone()),
-            }
+        Err(roger_review_ops::MaterializeDraftRejection::FindingSelectionRequired {
+            review_run_id,
+            available_finding_ids,
+        }) => {
+            return blocked_response(
+                "rr draft requires explicit finding selection in this slice".to_owned(),
+                vec![
+                    "pass --finding <id> one or more times".to_owned(),
+                    "or pass --all-findings to group every finding in the latest run".to_owned(),
+                ],
+                json!({
+                    "reason_code": "finding_selection_required",
+                    "session_id": session.id,
+                    "review_run_id": review_run_id,
+                    "available_finding_ids": available_finding_ids,
+                }),
+            );
         }
-        if !missing.is_empty() {
+        Err(roger_review_ops::MaterializeDraftRejection::MissingFindingSelection {
+            review_run_id,
+            missing_finding_ids,
+        }) => {
             return blocked_response(
                 "rr draft could not find every requested finding in the latest local run"
                     .to_owned(),
@@ -14259,151 +14286,50 @@ fn handle_draft(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 json!({
                     "reason_code": "missing_local_state",
                     "session_id": session.id,
-                    "review_run_id": run.id,
-                    "missing_finding_ids": missing,
+                    "review_run_id": review_run_id,
+                    "missing_finding_ids": missing_finding_ids,
                 }),
             );
         }
-        selected
-    };
-    selected_findings.sort_by(|left, right| left.id.cmp(&right.id));
-    selected_findings.dedup_by(|left, right| left.id == right.id);
-
-    let mut selection_issues = Vec::new();
-    for finding in &selected_findings {
-        let projection = match store
-            .outbound_surface_projection_for_finding(&finding.id, &finding.outbound_state)
-        {
-            Ok(projection) => projection,
-            Err(err) => {
-                return error_response(format!(
-                    "failed to inspect outbound state for finding {}: {err}",
-                    finding.id
-                ));
-            }
-        };
-
-        if !finding.triage_state.eq_ignore_ascii_case("accepted") {
-            selection_issues.push(json!({
-                "finding_id": finding.id.clone(),
-                "reason_code": "triage_state_not_accepted",
-                "triage_state": finding.triage_state.clone(),
-            }));
+        Err(roger_review_ops::MaterializeDraftRejection::SelectionNotDraftable {
+            review_run_id,
+            issues,
+        }) => {
+            let selection_issues = issues
+                .iter()
+                .map(draft_selection_issue_json)
+                .collect::<Vec<_>>();
+            return blocked_response(
+                "selected findings cannot be drafted from the current local state".to_owned(),
+                vec![
+                    format!(
+                        "inspect rr findings --session {} --robot to review triage and outbound state",
+                        session.id
+                    ),
+                    "choose only Accepted findings whose outbound state is still not_drafted"
+                        .to_owned(),
+                ],
+                json!({
+                    "reason_code": "stale_local_state",
+                    "session_id": session.id,
+                    "review_run_id": review_run_id,
+                    "selection_issues": selection_issues,
+                }),
+            );
         }
-        if projection.state != "not_drafted" {
-            selection_issues.push(json!({
-                "finding_id": finding.id.clone(),
-                "reason_code": "existing_outbound_state",
-                "current_outbound_state": projection.state,
-                "draft_id": projection.draft_id,
-                "draft_batch_id": projection.draft_batch_id,
-                "approval_id": projection.approval_id,
-                "posted_action_id": projection.posted_action_id,
-            }));
+        Err(roger_review_ops::MaterializeDraftRejection::Failed(message)) => {
+            return error_response(message);
         }
-    }
-
-    if !selection_issues.is_empty() {
-        return blocked_response(
-            "selected findings cannot be drafted from the current local state".to_owned(),
-            vec![
-                format!(
-                    "inspect rr findings --session {} --robot to review triage and outbound state",
-                    session.id
-                ),
-                "choose only Accepted findings whose outbound state is still not_drafted"
-                    .to_owned(),
-            ],
-            json!({
-                "reason_code": "stale_local_state",
-                "session_id": session.id,
-                "review_run_id": run.id,
-                "selection_issues": selection_issues,
-            }),
-        );
-    }
-
-    let repo_id = session.review_target.repository.clone();
-    let remote_review_target_id = format!("pr-{}", session.review_target.pull_request_number);
-    let mut draft_previews = Vec::with_capacity(selected_findings.len());
-    for finding in &selected_findings {
-        let body = render_local_outbound_draft_body(finding);
-        let anchor_digest = match outbound_draft_anchor_digest(finding) {
-            Ok(digest) => digest,
-            Err(err) => {
-                return error_response(format!(
-                    "failed to build draft anchor digest for finding {}: {err}",
-                    finding.id
-                ));
-            }
-        };
-        draft_previews.push(DraftPreviewDescriptor {
-            finding_id: finding.id.clone(),
-            fingerprint: finding.fingerprint.clone(),
-            title: finding.title.clone(),
-            normalized_summary: finding.normalized_summary.clone(),
-            severity: finding.severity.clone(),
-            confidence: finding.confidence.clone(),
-            anchor_digest,
-            target_locator: outbound_draft_target_locator(&session.review_target, &finding.id),
-            body,
-        });
-    }
-
-    let payload_digest = match sha256_prefixed_json(&json!({
-        "repo_id": repo_id.clone(),
-        "remote_review_target_id": remote_review_target_id.clone(),
-        "drafts": draft_previews.clone(),
-    })) {
-        Ok(digest) => digest,
-        Err(err) => return error_response(format!("failed to build batch payload digest: {err}")),
     };
 
-    let batch = OutboundDraftBatch {
-        id: next_id("draft-batch"),
-        review_session_id: session.id.clone(),
-        review_run_id: run.id.clone(),
-        repo_id: repo_id.clone(),
-        remote_review_target_id: remote_review_target_id.clone(),
-        payload_digest: payload_digest.clone(),
-        approval_state: ApprovalState::Drafted,
-        approved_at: None,
-        invalidated_at: None,
-        invalidation_reason_code: None,
-        row_version: 0,
-    };
+    let review_run_id = draft_outcome.review_run_id.clone();
+    let selection_mode = draft_outcome.selection_mode;
+    let selected_finding_ids = draft_outcome.selected_finding_ids.clone();
+    let batch = draft_outcome.batch;
+    let stored_drafts = draft_outcome.drafts;
+    let draft_previews = draft_outcome.previews;
 
-    if let Err(err) = store.store_outbound_draft_batch(&batch) {
-        return error_response(format!("failed to store outbound draft batch: {err}"));
-    }
-
-    let mut stored_drafts = Vec::with_capacity(draft_previews.len());
-    for preview in &draft_previews {
-        let draft = OutboundDraft {
-            id: next_id("draft"),
-            review_session_id: session.id.clone(),
-            review_run_id: run.id.clone(),
-            finding_id: Some(preview.finding_id.clone()),
-            draft_batch_id: batch.id.clone(),
-            repo_id: repo_id.clone(),
-            remote_review_target_id: remote_review_target_id.clone(),
-            payload_digest: payload_digest.clone(),
-            approval_state: ApprovalState::Drafted,
-            anchor_digest: preview.anchor_digest.clone(),
-            target_locator: preview.target_locator.clone(),
-            body: preview.body.clone(),
-            row_version: 0,
-        };
-        if let Err(err) = store.store_outbound_draft_item(&draft) {
-            return error_response(format!(
-                "failed to store outbound draft item for finding {}: {err}",
-                preview.finding_id
-            ));
-        }
-        stored_drafts.push(draft);
-    }
-
-    let state_counts = match store.outbound_state_counts_for_run(&session.id, &run.id) {
+    let state_counts = match store.outbound_state_counts_for_run(&session.id, &review_run_id) {
         Ok(counts) => counts,
         Err(err) => {
             return error_response(format!(
@@ -14436,14 +14362,11 @@ fn handle_draft(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         outcome: OutcomeKind::Complete,
         data: json!({
             "session_id": session.id.clone(),
-            "review_run_id": run.id.clone(),
+            "review_run_id": review_run_id.clone(),
             "selection": {
                 "mode": selection_mode,
                 "grouped": stored_drafts.len() > 1,
-                "finding_ids": selected_findings
-                    .iter()
-                    .map(|finding| finding.id.clone())
-                    .collect::<Vec<_>>(),
+                "finding_ids": selected_finding_ids.clone(),
                 "count": stored_drafts.len(),
             },
             "target": {
@@ -14507,86 +14430,6 @@ fn handle_draft(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             if stored_drafts.len() == 1 { "" } else { "s" }
         ),
     }
-}
-
-fn approval_invalidation_reason_for_linkage_issues(
-    validation: &roger_app_core::OutboundDraftBatchValidation,
-) -> &'static str {
-    if validation.issues.iter().any(|issue| {
-        matches!(
-            issue.reason_code.as_str(),
-            "target_mismatch" | "payload_digest_mismatch"
-        )
-    }) {
-        "target_or_payload_drift"
-    } else if validation.issues.iter().any(|issue| {
-        matches!(
-            issue.reason_code.as_str(),
-            "empty_batch" | "missing_finding_link"
-        )
-    }) {
-        "missing_local_state"
-    } else {
-        "local_state_drift"
-    }
-}
-
-fn awaiting_approval_batch_ids_for_run(
-    store: &RogerStore,
-    review_session_id: &str,
-    review_run_id: &str,
-) -> Result<Vec<String>, String> {
-    let findings = store
-        .materialized_findings_for_run(review_session_id, review_run_id)
-        .map_err(|err| format!("failed to load findings for latest run: {err}"))?;
-    let mut batch_ids = Vec::new();
-    for finding in findings {
-        let projection = store
-            .outbound_surface_projection_for_finding(&finding.id, &finding.outbound_state)
-            .map_err(|err| {
-                format!(
-                    "failed to inspect outbound approval state for finding {}: {err}",
-                    finding.id
-                )
-            })?;
-        if projection.state == "awaiting_approval" {
-            if let Some(batch_id) = projection.draft_batch_id {
-                batch_ids.push(batch_id);
-            }
-        }
-    }
-    batch_ids.sort();
-    batch_ids.dedup();
-    Ok(batch_ids)
-}
-
-fn approved_batch_ids_for_run(
-    store: &RogerStore,
-    review_session_id: &str,
-    review_run_id: &str,
-) -> Result<Vec<String>, String> {
-    let findings = store
-        .materialized_findings_for_run(review_session_id, review_run_id)
-        .map_err(|err| format!("failed to load findings for latest run: {err}"))?;
-    let mut batch_ids = Vec::new();
-    for finding in findings {
-        let projection = store
-            .outbound_surface_projection_for_finding(&finding.id, &finding.outbound_state)
-            .map_err(|err| {
-                format!(
-                    "failed to inspect outbound approval state for finding {}: {err}",
-                    finding.id
-                )
-            })?;
-        if projection.state == "approved"
-            && let Some(batch_id) = projection.draft_batch_id
-        {
-            batch_ids.push(batch_id);
-        }
-    }
-    batch_ids.sort();
-    batch_ids.dedup();
-    Ok(batch_ids)
 }
 
 /// Open `$VISUAL`/`$EDITOR`/`vi` on a temp file seeded with the current draft
@@ -14816,6 +14659,333 @@ fn handle_edit(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     }
 }
 
+fn linkage_issues_json(issues: &[(Option<String>, String)]) -> Vec<Value> {
+    issues
+        .iter()
+        .map(|(draft_id, reason_code)| {
+            json!({
+                "draft_id": draft_id.clone(),
+                "reason_code": reason_code.clone(),
+            })
+        })
+        .collect()
+}
+
+fn draft_state_issues_json(issues: &[roger_review_ops::DraftStateIssue]) -> Vec<Value> {
+    issues
+        .iter()
+        .map(|issue| {
+            json!({
+                "draft_id": issue.draft_id.clone(),
+                "finding_id": issue.finding_id.clone(),
+                "reason_code": issue.reason_code.clone(),
+            })
+        })
+        .collect()
+}
+
+/// Render an `approve_batch` rejection into the exact `rr approve` blocked/error
+/// envelope. The fail-closed decision lives in the shared review-ops layer; this
+/// only renders it for the CLI surface.
+fn approve_rejection_response(
+    session: &ReviewSessionRecord,
+    rejection: roger_review_ops::ApproveRejection,
+) -> CommandResponse {
+    use roger_review_ops::ApproveRejection;
+    match rejection {
+        ApproveRejection::Precondition(block) => session_precondition_response(
+            "approve",
+            "approval can be granted",
+            "bind local approval state",
+            session,
+            block,
+        ),
+        ApproveRejection::BatchSelectionRequired {
+            review_run_id,
+            available_batch_ids,
+        } => blocked_response(
+            "rr approve requires an explicit draft batch id in this slice".to_owned(),
+            vec![
+                format!(
+                    "inspect rr findings --session {} --robot to find awaiting_approval draft batches",
+                    session.id
+                ),
+                "re-run rr approve --batch <draft-batch-id> once you select the exact stored batch"
+                    .to_owned(),
+            ],
+            json!({
+                "reason_code": "draft_batch_selection_required",
+                "session_id": session.id,
+                "review_run_id": review_run_id,
+                "available_batch_ids": available_batch_ids,
+            }),
+        ),
+        ApproveRejection::BatchNotFound {
+            review_run_id,
+            draft_batch_id,
+            available_batch_ids,
+        } => blocked_response(
+            "rr approve could not find the requested local draft batch".to_owned(),
+            vec![
+                format!(
+                    "inspect rr findings --session {} --robot to find the current awaiting_approval batch ids",
+                    session.id
+                ),
+                format!(
+                    "re-run rr draft --session {} --finding <finding-id> if the older batch was superseded",
+                    session.id
+                ),
+            ],
+            json!({
+                "reason_code": "missing_local_state",
+                "session_id": session.id,
+                "review_run_id": review_run_id,
+                "draft_batch_id": draft_batch_id,
+                "available_batch_ids": available_batch_ids,
+            }),
+        ),
+        ApproveRejection::SessionMismatch {
+            review_run_id,
+            draft_batch_id,
+            batch_review_session_id,
+        } => blocked_response(
+            "rr approve refused to bind approval because the requested batch belongs to a different Roger session".to_owned(),
+            vec![
+                format!("inspect rr status --session {} --robot", session.id),
+                "use the batch id returned by rr draft for this exact session".to_owned(),
+            ],
+            json!({
+                "reason_code": "approval_invalidated:local_state_drift",
+                "session_id": session.id,
+                "review_run_id": review_run_id,
+                "draft_batch_id": draft_batch_id,
+                "batch_review_session_id": batch_review_session_id,
+            }),
+        ),
+        ApproveRejection::RunMismatch {
+            latest_review_run_id,
+            draft_batch_id,
+            batch_review_run_id,
+        } => blocked_response(
+            "rr approve is blocked because the requested batch does not belong to the latest persisted review run".to_owned(),
+            vec![
+                format!("inspect rr findings --session {} --robot for the current run state", session.id),
+                format!(
+                    "re-run rr draft --session {} --finding <finding-id> after reconciling the newer local run",
+                    session.id
+                ),
+            ],
+            json!({
+                "reason_code": "approval_invalidated:local_state_drift",
+                "session_id": session.id,
+                "latest_review_run_id": latest_review_run_id,
+                "draft_batch_id": draft_batch_id,
+                "batch_review_run_id": batch_review_run_id,
+            }),
+        ),
+        ApproveRejection::TargetDrift {
+            draft_batch_id,
+            expected_repo_id,
+            expected_remote_review_target_id,
+            stored_repo_id,
+            stored_remote_review_target_id,
+        } => blocked_response(
+            "rr approve is blocked because the stored batch target no longer matches the active Roger review target".to_owned(),
+            vec![
+                format!("inspect rr status --session {} --robot", session.id),
+                format!(
+                    "re-run rr draft --session {} --finding <finding-id> after reconciling target drift",
+                    session.id
+                ),
+            ],
+            json!({
+                "reason_code": "approval_invalidated:target_drift",
+                "session_id": session.id,
+                "draft_batch_id": draft_batch_id,
+                "expected_repo_id": expected_repo_id,
+                "expected_remote_review_target_id": expected_remote_review_target_id,
+                "stored_repo_id": stored_repo_id,
+                "stored_remote_review_target_id": stored_remote_review_target_id,
+            }),
+        ),
+        ApproveRejection::ExistingPostedAction {
+            draft_batch_id,
+            posted_action_id,
+            posted_action_status,
+            failure_code,
+        } => blocked_response(
+            "rr approve is no longer available because Roger already recorded a post attempt for this batch".to_owned(),
+            vec![format!(
+                "inspect rr status --session {} --robot for the current outbound posting state",
+                session.id
+            )],
+            json!({
+                "reason_code": "existing_posted_action",
+                "session_id": session.id,
+                "draft_batch_id": draft_batch_id,
+                "posted_action_id": posted_action_id,
+                "posted_action_status": posted_action_status,
+                "failure_code": failure_code,
+            }),
+        ),
+        ApproveRejection::MissingDraftItems { draft_batch_id } => blocked_response(
+            "rr approve requires persisted local draft items for the selected batch".to_owned(),
+            vec![format!(
+                "re-run rr draft --session {} --finding <finding-id> to materialize the batch again",
+                session.id
+            )],
+            json!({
+                "reason_code": "missing_local_state",
+                "session_id": session.id,
+                "draft_batch_id": draft_batch_id,
+            }),
+        ),
+        ApproveRejection::LinkageInvalid {
+            draft_batch_id,
+            reason_suffix,
+            issues,
+        } => blocked_response(
+            "rr approve refused to bind approval because the stored draft batch no longer matches its payload or target evidence".to_owned(),
+            vec![
+                format!(
+                    "inspect rr findings --session {} --robot to review the current outbound state",
+                    session.id
+                ),
+                format!(
+                    "re-run rr draft --session {} --finding <finding-id> to materialize a fresh batch after drift",
+                    session.id
+                ),
+            ],
+            json!({
+                "reason_code": format!("approval_invalidated:{reason_suffix}"),
+                "session_id": session.id,
+                "draft_batch_id": draft_batch_id,
+                "validation_issues": linkage_issues_json(&issues),
+            }),
+        ),
+        ApproveRejection::BatchInvalidated {
+            draft_batch_id,
+            invalidation_reason_code,
+            invalidated_at,
+        } => blocked_response(
+            "rr approve is blocked because the stored batch was already invalidated by target or local-state drift".to_owned(),
+            vec![
+                format!(
+                    "inspect rr findings --session {} --robot to review the invalidation state",
+                    session.id
+                ),
+                format!(
+                    "re-run rr draft --session {} --finding <finding-id> after reconciling the newer local state",
+                    session.id
+                ),
+            ],
+            json!({
+                "reason_code": format!(
+                    "approval_invalidated:{}",
+                    invalidation_reason_code.clone().unwrap_or_else(|| "unspecified".to_owned())
+                ),
+                "session_id": session.id,
+                "draft_batch_id": draft_batch_id,
+                "approval_state": "invalidated",
+                "invalidation_reason_code": invalidation_reason_code,
+                "invalidated_at": invalidated_at,
+            }),
+        ),
+        ApproveRejection::DraftStateNotApprovable {
+            draft_batch_id,
+            issues,
+        } => blocked_response(
+            "rr approve is blocked because the stored draft items are no longer all in an approvable state".to_owned(),
+            vec![format!(
+                "inspect rr findings --session {} --robot to review the current outbound state",
+                session.id
+            )],
+            json!({
+                "reason_code": "stale_local_state",
+                "session_id": session.id,
+                "draft_batch_id": draft_batch_id,
+                "draft_state_issues": draft_state_issues_json(&issues),
+            }),
+        ),
+        ApproveRejection::ApprovalRevoked {
+            draft_batch_id,
+            approval_id,
+            revoked_at,
+        } => blocked_response(
+            "rr approve is blocked because the stored approval token was already revoked".to_owned(),
+            vec![format!(
+                "re-run rr draft --session {} --finding <finding-id> after reviewing the revoked batch state",
+                session.id
+            )],
+            json!({
+                "reason_code": "approval_revoked",
+                "session_id": session.id,
+                "draft_batch_id": draft_batch_id,
+                "approval_id": approval_id,
+                "revoked_at": revoked_at,
+            }),
+        ),
+        ApproveRejection::ApprovalPayloadDigestMismatch {
+            draft_batch_id,
+            approval_id,
+            expected_payload_digest,
+            stored_payload_digest,
+        } => blocked_response(
+            "rr approve refused to reuse the stored approval token because its payload digest no longer matches the batch".to_owned(),
+            vec![format!(
+                "re-run rr draft --session {} --finding <finding-id> to materialize a fresh batch",
+                session.id
+            )],
+            json!({
+                "reason_code": "approval_payload_digest_mismatch",
+                "session_id": session.id,
+                "draft_batch_id": draft_batch_id,
+                "approval_id": approval_id,
+                "expected_payload_digest": expected_payload_digest,
+                "stored_payload_digest": stored_payload_digest,
+            }),
+        ),
+        ApproveRejection::ApprovalTargetTupleMismatch {
+            draft_batch_id,
+            approval_id,
+            expected_target_tuple_json,
+            stored_target_tuple_json,
+        } => blocked_response(
+            "rr approve refused to reuse the stored approval token because its target tuple no longer matches the batch".to_owned(),
+            vec![format!(
+                "re-run rr draft --session {} --finding <finding-id> after reconciling target drift",
+                session.id
+            )],
+            json!({
+                "reason_code": "approval_target_tuple_mismatch",
+                "session_id": session.id,
+                "draft_batch_id": draft_batch_id,
+                "approval_id": approval_id,
+                "expected_target_tuple_json": expected_target_tuple_json,
+                "stored_target_tuple_json": stored_target_tuple_json,
+            }),
+        ),
+        ApproveRejection::BatchNotApprovable {
+            draft_batch_id,
+            approval_state,
+        } => blocked_response(
+            "rr approve is blocked because the stored batch is no longer in an approvable state"
+                .to_owned(),
+            vec![format!(
+                "inspect rr status --session {} --robot for the current outbound state",
+                session.id
+            )],
+            json!({
+                "reason_code": "stale_local_state",
+                "session_id": session.id,
+                "draft_batch_id": draft_batch_id,
+                "approval_state": approval_state,
+            }),
+        ),
+        ApproveRejection::Failed(message) => error_response(message),
+    }
+}
+
 fn handle_approve(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let store = match open_store_or_response(runtime, "rr approve") {
         Ok(store) => store,
@@ -14846,503 +15016,25 @@ fn handle_approve(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse 
         }
     };
 
-    if session.attention_state == "refresh_recommended" {
-        let reconciliation = json!({
-            "mode": "persisted_readback",
-            "manual_refresh_supported": false,
-            "stale_target_detected": true,
-            "repair_required": true,
-            "freshness_basis": "persisted_attention_state",
-            "attention_updated_at": session.updated_at,
-            "recommended_reentry_command": format!("rr resume --session {}", session.id),
-            "recommended_fresh_pass_command": format!(
-                "rr review --repo {} --pr {}",
-                session.review_target.repository, session.review_target.pull_request_number
-            ),
-        });
-        return blocked_response(
-            "rr approve is blocked because the persisted review state requires explicit reconciliation before approval can be granted"
-                .to_owned(),
-            vec![
-                format!(
-                    "run rr resume --session {} to reopen the Roger session locally",
-                    session.id
-                ),
-                format!(
-                    "run rr review --repo {} --pr {} to start a fresh pass if target drift invalidated the older review",
-                    session.review_target.repository, session.review_target.pull_request_number
-                ),
-            ],
-            json!({
-                "reason_code": "stale_local_state",
-                "session_id": session.id,
-                "attention_state": session.attention_state,
-                "reconciliation": reconciliation,
-            }),
-        );
-    }
-
-    if session.review_target.repository.trim().is_empty()
-        || session.review_target.pull_request_number == 0
-    {
-        return blocked_response(
-            "rr approve requires a concrete review target before Roger can bind local approval state"
-                .to_owned(),
-            vec![
-                "re-run rr review --repo <owner/repo> --pr <number> to capture a real target"
-                    .to_owned(),
-                format!("or inspect rr status --session {} --robot", session.id),
-            ],
-            json!({
-                "reason_code": "missing_review_target",
-                "session_id": session.id,
-                "review_target": session.review_target,
-            }),
-        );
-    }
-
-    let Some(run) = (match store.latest_review_run(&session.id) {
-        Ok(run) => run,
-        Err(err) => return error_response(format!("failed to load latest run: {err}")),
-    }) else {
-        return blocked_response(
-            "rr approve requires persisted local review state for the selected target".to_owned(),
-            vec![format!(
-                "run rr review --repo {} --pr {} to materialize a local review first",
-                session.review_target.repository, session.review_target.pull_request_number
-            )],
-            json!({
-                "reason_code": "missing_local_state",
-                "session_id": session.id,
-            }),
-        );
-    };
-
-    let candidate_batch_ids =
-        match awaiting_approval_batch_ids_for_run(&store, &session.id, &run.id) {
-            Ok(ids) => ids,
-            Err(err) => return error_response(err),
+    // The full fail-closed approval domain rule (session preconditions, batch
+    // selection/binding, target binding, prior-post guard, linkage validation,
+    // invalidation guard, draft-state guard, revoked/digest/target token checks,
+    // and the approval-token + batch writes) lives in the shared review-ops
+    // layer so every surface approves through the same path.
+    let approve_outcome =
+        match roger_review_ops::approve_batch(&store, &session, parsed.batch_id.as_deref()) {
+            Ok(outcome) => outcome,
+            Err(rejection) => return approve_rejection_response(&session, rejection),
         };
+    let review_run_id = approve_outcome.review_run_id.clone();
+    let batch = approve_outcome.batch;
+    let drafts = approve_outcome.drafts;
+    let approval = approve_outcome.approval;
+    let expected_target_tuple_json = approve_outcome.expected_target_tuple_json;
+    let batch_already_approved = approve_outcome.batch_already_approved;
+    let approval_created = approve_outcome.approval_created;
 
-    let Some(batch_id) = parsed.batch_id.as_deref() else {
-        return blocked_response(
-            "rr approve requires an explicit draft batch id in this slice".to_owned(),
-            vec![
-                format!(
-                    "inspect rr findings --session {} --robot to find awaiting_approval draft batches",
-                    session.id
-                ),
-                "re-run rr approve --batch <draft-batch-id> once you select the exact stored batch"
-                    .to_owned(),
-            ],
-            json!({
-                "reason_code": "draft_batch_selection_required",
-                "session_id": session.id,
-                "review_run_id": run.id,
-                "available_batch_ids": candidate_batch_ids,
-            }),
-        );
-    };
-
-    let Some(batch) = (match store.outbound_draft_batch(batch_id) {
-        Ok(batch) => batch,
-        Err(err) => return error_response(format!("failed to load outbound draft batch: {err}")),
-    }) else {
-        return blocked_response(
-            "rr approve could not find the requested local draft batch".to_owned(),
-            vec![
-                format!(
-                    "inspect rr findings --session {} --robot to find the current awaiting_approval batch ids",
-                    session.id
-                ),
-                format!(
-                    "re-run rr draft --session {} --finding <finding-id> if the older batch was superseded",
-                    session.id
-                ),
-            ],
-            json!({
-                "reason_code": "missing_local_state",
-                "session_id": session.id,
-                "review_run_id": run.id,
-                "draft_batch_id": batch_id,
-                "available_batch_ids": candidate_batch_ids,
-            }),
-        );
-    };
-
-    if batch.review_session_id != session.id {
-        return blocked_response(
-            "rr approve refused to bind approval because the requested batch belongs to a different Roger session".to_owned(),
-            vec![
-                format!("inspect rr status --session {} --robot", session.id),
-                "use the batch id returned by rr draft for this exact session".to_owned(),
-            ],
-            json!({
-                "reason_code": "approval_invalidated:local_state_drift",
-                "session_id": session.id,
-                "review_run_id": run.id,
-                "draft_batch_id": batch.id,
-                "batch_review_session_id": batch.review_session_id,
-            }),
-        );
-    }
-
-    if batch.review_run_id != run.id {
-        return blocked_response(
-            "rr approve is blocked because the requested batch does not belong to the latest persisted review run".to_owned(),
-            vec![
-                format!("inspect rr findings --session {} --robot for the current run state", session.id),
-                format!(
-                    "re-run rr draft --session {} --finding <finding-id> after reconciling the newer local run",
-                    session.id
-                ),
-            ],
-            json!({
-                "reason_code": "approval_invalidated:local_state_drift",
-                "session_id": session.id,
-                "latest_review_run_id": run.id,
-                "draft_batch_id": batch.id,
-                "batch_review_run_id": batch.review_run_id,
-            }),
-        );
-    }
-
-    let expected_remote_review_target_id =
-        format!("pr-{}", session.review_target.pull_request_number);
-    if batch.repo_id != session.review_target.repository
-        || batch.remote_review_target_id != expected_remote_review_target_id
-    {
-        return blocked_response(
-            "rr approve is blocked because the stored batch target no longer matches the active Roger review target".to_owned(),
-            vec![
-                format!("inspect rr status --session {} --robot", session.id),
-                format!(
-                    "re-run rr draft --session {} --finding <finding-id> after reconciling target drift",
-                    session.id
-                ),
-            ],
-            json!({
-                "reason_code": "approval_invalidated:target_drift",
-                "session_id": session.id,
-                "draft_batch_id": batch.id,
-                "expected_repo_id": session.review_target.repository,
-                "expected_remote_review_target_id": expected_remote_review_target_id,
-                "stored_repo_id": batch.repo_id,
-                "stored_remote_review_target_id": batch.remote_review_target_id,
-            }),
-        );
-    }
-
-    let posted_actions = match store.posted_actions_for_batch(&batch.id) {
-        Ok(actions) => actions,
-        Err(err) => {
-            return error_response(format!("failed to inspect prior posted actions: {err}"));
-        }
-    };
-    if let Some(latest_posted_action) = posted_actions.last() {
-        return blocked_response(
-            "rr approve is no longer available because Roger already recorded a post attempt for this batch".to_owned(),
-            vec![format!(
-                "inspect rr status --session {} --robot for the current outbound posting state",
-                session.id
-            )],
-            json!({
-                "reason_code": "existing_posted_action",
-                "session_id": session.id,
-                "draft_batch_id": batch.id,
-                "posted_action_id": latest_posted_action.id,
-                "posted_action_status": format!("{:?}", latest_posted_action.status),
-                "failure_code": latest_posted_action.failure_code.clone(),
-            }),
-        );
-    }
-
-    let drafts = match store.outbound_draft_items_for_batch(&batch.id) {
-        Ok(drafts) => drafts,
-        Err(err) => return error_response(format!("failed to load outbound draft items: {err}")),
-    };
-    if drafts.is_empty() {
-        return blocked_response(
-            "rr approve requires persisted local draft items for the selected batch".to_owned(),
-            vec![format!(
-                "re-run rr draft --session {} --finding <finding-id> to materialize the batch again",
-                session.id
-            )],
-            json!({
-                "reason_code": "missing_local_state",
-                "session_id": session.id,
-                "draft_batch_id": batch.id,
-            }),
-        );
-    }
-
-    let validation = validate_outbound_draft_batch_linkage(&batch, &drafts);
-    if !validation.valid {
-        return blocked_response(
-            "rr approve refused to bind approval because the stored draft batch no longer matches its payload or target evidence".to_owned(),
-            vec![
-                format!(
-                    "inspect rr findings --session {} --robot to review the current outbound state",
-                    session.id
-                ),
-                format!(
-                    "re-run rr draft --session {} --finding <finding-id> to materialize a fresh batch after drift",
-                    session.id
-                ),
-            ],
-            json!({
-                "reason_code": format!(
-                    "approval_invalidated:{}",
-                    approval_invalidation_reason_for_linkage_issues(&validation)
-                ),
-                "session_id": session.id,
-                "draft_batch_id": batch.id,
-                "validation_issues": validation
-                    .issues
-                    .iter()
-                    .map(|issue| json!({
-                        "draft_id": issue.draft_id.clone(),
-                        "reason_code": issue.reason_code.clone(),
-                    }))
-                    .collect::<Vec<_>>(),
-            }),
-        );
-    }
-
-    if batch.invalidated_at.is_some() || matches!(&batch.approval_state, ApprovalState::Invalidated)
-    {
-        return blocked_response(
-            "rr approve is blocked because the stored batch was already invalidated by target or local-state drift".to_owned(),
-            vec![
-                format!(
-                    "inspect rr findings --session {} --robot to review the invalidation state",
-                    session.id
-                ),
-                format!(
-                    "re-run rr draft --session {} --finding <finding-id> after reconciling the newer local state",
-                    session.id
-                ),
-            ],
-            json!({
-                "reason_code": format!(
-                    "approval_invalidated:{}",
-                    batch
-                        .invalidation_reason_code
-                        .clone()
-                        .unwrap_or_else(|| "unspecified".to_owned())
-                ),
-                "session_id": session.id,
-                "draft_batch_id": batch.id,
-                "approval_state": "invalidated",
-                "invalidation_reason_code": batch.invalidation_reason_code,
-                "invalidated_at": batch.invalidated_at,
-            }),
-        );
-    }
-
-    let current_draft_state_issues = drafts
-        .iter()
-        .filter_map(|draft| match &draft.approval_state {
-            ApprovalState::Drafted | ApprovalState::Approved => None,
-            ApprovalState::Invalidated => Some(json!({
-                "draft_id": draft.id,
-                "finding_id": draft.finding_id,
-                "reason_code": "draft_invalidated",
-            })),
-            ApprovalState::Posted => Some(json!({
-                "draft_id": draft.id,
-                "finding_id": draft.finding_id,
-                "reason_code": "draft_already_posted",
-            })),
-            ApprovalState::Failed => Some(json!({
-                "draft_id": draft.id,
-                "finding_id": draft.finding_id,
-                "reason_code": "draft_already_failed",
-            })),
-            ApprovalState::NotDrafted => Some(json!({
-                "draft_id": draft.id,
-                "finding_id": draft.finding_id,
-                "reason_code": "draft_state_not_materialized",
-            })),
-        })
-        .collect::<Vec<_>>();
-    if !current_draft_state_issues.is_empty() {
-        return blocked_response(
-            "rr approve is blocked because the stored draft items are no longer all in an approvable state".to_owned(),
-            vec![format!(
-                "inspect rr findings --session {} --robot to review the current outbound state",
-                session.id
-            )],
-            json!({
-                "reason_code": "stale_local_state",
-                "session_id": session.id,
-                "draft_batch_id": batch.id,
-                "draft_state_issues": current_draft_state_issues,
-            }),
-        );
-    }
-
-    let expected_target_tuple_json = outbound_target_tuple_json(&batch);
-    let existing_approval = match store.approval_token_for_batch(&batch.id) {
-        Ok(approval) => approval,
-        Err(err) => {
-            return error_response(format!("failed to inspect existing approval token: {err}"));
-        }
-    };
-    // A token revoked because the operator revised a draft body is explicitly
-    // re-approvable: re-running rr approve IS the explicit human approval of
-    // the revised payload (the batch and item digests were re-derived by the
-    // revision, so the reissued token binds the new exact payload). Any other
-    // revocation reason stays terminal and fail-closed.
-    let reapproval_after_revision = existing_approval
-        .as_ref()
-        .is_some_and(|approval| approval.revoked_at.is_some())
-        && matches!(
-            store.outbound_approval_revocation_reason(&batch.id),
-            Ok(Some(ref reason))
-                if reason == roger_storage::OUTBOUND_APPROVAL_REVOKED_REASON_DRAFT_REVISED
-        );
-    if let Some(approval) = &existing_approval {
-        if approval.revoked_at.is_some() && !reapproval_after_revision {
-            return blocked_response(
-                "rr approve is blocked because the stored approval token was already revoked"
-                    .to_owned(),
-                vec![format!(
-                    "re-run rr draft --session {} --finding <finding-id> after reviewing the revoked batch state",
-                    session.id
-                )],
-                json!({
-                    "reason_code": "approval_revoked",
-                    "session_id": session.id,
-                    "draft_batch_id": batch.id,
-                    "approval_id": approval.id,
-                    "revoked_at": approval.revoked_at,
-                }),
-            );
-        }
-        if reapproval_after_revision {
-            // Skip the stale digest/target comparisons below: the reissued
-            // token is built from the batch's current (revised) binding.
-        } else {
-            if approval.payload_digest != batch.payload_digest {
-                return blocked_response(
-                "rr approve refused to reuse the stored approval token because its payload digest no longer matches the batch".to_owned(),
-                vec![format!(
-                    "re-run rr draft --session {} --finding <finding-id> to materialize a fresh batch",
-                    session.id
-                )],
-                json!({
-                    "reason_code": "approval_payload_digest_mismatch",
-                    "session_id": session.id,
-                    "draft_batch_id": batch.id,
-                    "approval_id": approval.id,
-                    "expected_payload_digest": batch.payload_digest,
-                    "stored_payload_digest": approval.payload_digest,
-                }),
-            );
-            }
-            if approval.target_tuple_json != expected_target_tuple_json {
-                return blocked_response(
-                "rr approve refused to reuse the stored approval token because its target tuple no longer matches the batch".to_owned(),
-                vec![format!(
-                    "re-run rr draft --session {} --finding <finding-id> after reconciling target drift",
-                    session.id
-                )],
-                json!({
-                    "reason_code": "approval_target_tuple_mismatch",
-                    "session_id": session.id,
-                    "draft_batch_id": batch.id,
-                    "approval_id": approval.id,
-                    "expected_target_tuple_json": expected_target_tuple_json,
-                    "stored_target_tuple_json": approval.target_tuple_json,
-                }),
-            );
-            }
-        }
-    }
-
-    let batch_already_approved = matches!(&batch.approval_state, ApprovalState::Approved);
-    if !matches!(
-        &batch.approval_state,
-        ApprovalState::Drafted | ApprovalState::Approved
-    ) {
-        return blocked_response(
-            "rr approve is blocked because the stored batch is no longer in an approvable state"
-                .to_owned(),
-            vec![format!(
-                "inspect rr status --session {} --robot for the current outbound state",
-                session.id
-            )],
-            json!({
-                "reason_code": "stale_local_state",
-                "session_id": session.id,
-                "draft_batch_id": batch.id,
-                "approval_state": format!("{:?}", batch.approval_state),
-            }),
-        );
-    }
-
-    let approval_needs_insert = existing_approval.is_none() || reapproval_after_revision;
-    let approval = match existing_approval {
-        // Reissue the batch's token row (one row per batch by schema) bound to
-        // the revised payload; the upsert clears the revocation.
-        Some(existing) if reapproval_after_revision => OutboundApprovalToken {
-            id: existing.id,
-            draft_batch_id: batch.id.clone(),
-            payload_digest: batch.payload_digest.clone(),
-            target_tuple_json: expected_target_tuple_json.clone(),
-            approved_at: time::now_ts(),
-            revoked_at: None,
-        },
-        Some(existing) => existing,
-        None => OutboundApprovalToken {
-            id: next_id("approval"),
-            draft_batch_id: batch.id.clone(),
-            payload_digest: batch.payload_digest.clone(),
-            target_tuple_json: expected_target_tuple_json.clone(),
-            approved_at: time::now_ts(),
-            revoked_at: None,
-        },
-    };
-    let approval_created = !batch_already_approved;
-
-    for draft in &drafts {
-        if matches!(&draft.approval_state, ApprovalState::Approved) {
-            continue;
-        }
-
-        let mut approved_draft = draft.clone();
-        approved_draft.approval_state = ApprovalState::Approved;
-        approved_draft.row_version += 1;
-        if let Err(err) = store.store_outbound_draft_item(&approved_draft) {
-            return error_response(format!(
-                "failed to store approved outbound draft item for finding {}: {err}",
-                draft.finding_id.as_deref().unwrap_or("<unknown>")
-            ));
-        }
-    }
-
-    if approval_needs_insert {
-        if let Err(err) = store.store_outbound_approval_token(&approval) {
-            return error_response(format!("failed to store outbound approval token: {err}"));
-        }
-    }
-
-    if !batch_already_approved || batch.approved_at != Some(approval.approved_at) {
-        let mut approved_batch = batch.clone();
-        approved_batch.approval_state = ApprovalState::Approved;
-        approved_batch.approved_at = Some(approval.approved_at);
-        approved_batch.invalidated_at = None;
-        approved_batch.invalidation_reason_code = None;
-        approved_batch.row_version += 1;
-        if let Err(err) = store.store_outbound_draft_batch(&approved_batch) {
-            return error_response(format!(
-                "failed to store approved outbound draft batch: {err}"
-            ));
-        }
-    }
-
-    let state_counts = match store.outbound_state_counts_for_run(&session.id, &run.id) {
+    let state_counts = match store.outbound_state_counts_for_run(&session.id, &review_run_id) {
         Ok(counts) => counts,
         Err(err) => {
             return error_response(format!(
@@ -15367,7 +15059,7 @@ fn handle_approve(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse 
         outcome: OutcomeKind::Complete,
         data: json!({
             "session_id": session.id.clone(),
-            "review_run_id": run.id.clone(),
+            "review_run_id": review_run_id.clone(),
             "target": {
                 "provider": "github",
                 "repository": session.review_target.repository.clone(),
@@ -15433,6 +15125,323 @@ fn handle_approve(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse 
     }
 }
 
+/// Render a `post_batch` rejection into the exact `rr post` blocked/error
+/// envelope. The fail-closed decision lives in the shared review-ops layer.
+fn post_rejection_response(
+    session: &ReviewSessionRecord,
+    rejection: roger_review_ops::PostRejection,
+) -> CommandResponse {
+    use roger_review_ops::PostRejection;
+    match rejection {
+        PostRejection::Precondition(block) => session_precondition_response(
+            "post",
+            "GitHub mutation can run",
+            "execute outbound mutation",
+            session,
+            block,
+        ),
+        PostRejection::BatchSelectionRequired {
+            review_run_id,
+            available_batch_ids,
+        } => blocked_response(
+            "rr post requires an explicit approved draft batch id in this slice".to_owned(),
+            vec![
+                format!(
+                    "inspect rr findings --session {} --robot to find approved draft batches",
+                    session.id
+                ),
+                "re-run rr post --batch <draft-batch-id> once you select the exact approved batch"
+                    .to_owned(),
+            ],
+            json!({
+                "reason_code": "approved_batch_selection_required",
+                "session_id": session.id,
+                "review_run_id": review_run_id,
+                "available_batch_ids": available_batch_ids,
+            }),
+        ),
+        PostRejection::BatchNotFound {
+            review_run_id,
+            draft_batch_id,
+            available_batch_ids,
+        } => blocked_response(
+            "rr post could not find the requested approved draft batch".to_owned(),
+            vec![
+                format!(
+                    "inspect rr findings --session {} --robot to find the current approved batch ids",
+                    session.id
+                ),
+                format!(
+                    "re-run rr draft --session {} --finding <finding-id> and rr approve if the older batch was superseded",
+                    session.id
+                ),
+            ],
+            json!({
+                "reason_code": "missing_local_state",
+                "session_id": session.id,
+                "review_run_id": review_run_id,
+                "draft_batch_id": draft_batch_id,
+                "available_batch_ids": available_batch_ids,
+            }),
+        ),
+        PostRejection::SessionMismatch {
+            review_run_id,
+            draft_batch_id,
+            batch_review_session_id,
+        } => blocked_response(
+            "rr post refused to execute because the requested batch belongs to a different Roger session".to_owned(),
+            vec![
+                format!("inspect rr status --session {} --robot", session.id),
+                "use the batch id returned by rr approve for this exact session".to_owned(),
+            ],
+            json!({
+                "reason_code": "approval_invalidated:local_state_drift",
+                "session_id": session.id,
+                "review_run_id": review_run_id,
+                "draft_batch_id": draft_batch_id,
+                "batch_review_session_id": batch_review_session_id,
+            }),
+        ),
+        PostRejection::RunMismatch {
+            latest_review_run_id,
+            draft_batch_id,
+            batch_review_run_id,
+        } => blocked_response(
+            "rr post is blocked because the requested batch does not belong to the latest persisted review run".to_owned(),
+            vec![
+                format!(
+                    "inspect rr findings --session {} --robot for the current run state",
+                    session.id
+                ),
+                format!(
+                    "re-run rr draft --session {} --finding <finding-id> and rr approve after reconciling the newer local run",
+                    session.id
+                ),
+            ],
+            json!({
+                "reason_code": "approval_invalidated:local_state_drift",
+                "session_id": session.id,
+                "latest_review_run_id": latest_review_run_id,
+                "draft_batch_id": draft_batch_id,
+                "batch_review_run_id": batch_review_run_id,
+            }),
+        ),
+        PostRejection::TargetDrift {
+            draft_batch_id,
+            expected_repo_id,
+            expected_remote_review_target_id,
+            stored_repo_id,
+            stored_remote_review_target_id,
+        } => blocked_response(
+            "rr post is blocked because the stored batch target no longer matches the active Roger review target".to_owned(),
+            vec![
+                format!("inspect rr status --session {} --robot", session.id),
+                format!(
+                    "re-run rr draft --session {} --finding <finding-id> and rr approve after reconciling target drift",
+                    session.id
+                ),
+            ],
+            json!({
+                "reason_code": "approval_invalidated:target_drift",
+                "session_id": session.id,
+                "draft_batch_id": draft_batch_id,
+                "expected_repo_id": expected_repo_id,
+                "expected_remote_review_target_id": expected_remote_review_target_id,
+                "stored_repo_id": stored_repo_id,
+                "stored_remote_review_target_id": stored_remote_review_target_id,
+            }),
+        ),
+        PostRejection::ExistingPostedAction {
+            draft_batch_id,
+            posted_action_id,
+            posted_action_status,
+            failure_code,
+        } => blocked_response(
+            "rr post is blocked because Roger already recorded a post attempt for this batch"
+                .to_owned(),
+            vec![
+                format!(
+                    "inspect rr status --session {} --robot for the current outbound posting state",
+                    session.id
+                ),
+                format!(
+                    "inspect rr findings --session {} --robot to review the recorded posted action lineage",
+                    session.id
+                ),
+            ],
+            json!({
+                "reason_code": "existing_posted_action",
+                "session_id": session.id,
+                "draft_batch_id": draft_batch_id,
+                "posted_action_id": posted_action_id,
+                "posted_action_status": posted_action_status,
+                "failure_code": failure_code,
+            }),
+        ),
+        PostRejection::MissingDraftItems { draft_batch_id } => blocked_response(
+            "rr post requires persisted approved draft items for the selected batch".to_owned(),
+            vec![format!(
+                "re-run rr draft --session {} --finding <finding-id> and rr approve to materialize the batch again",
+                session.id
+            )],
+            json!({
+                "reason_code": "missing_local_state",
+                "session_id": session.id,
+                "draft_batch_id": draft_batch_id,
+            }),
+        ),
+        PostRejection::LinkageInvalid {
+            draft_batch_id,
+            reason_suffix,
+            issues,
+        } => blocked_response(
+            "rr post refused to execute because the stored draft batch no longer matches its payload or target evidence".to_owned(),
+            vec![
+                format!(
+                    "inspect rr findings --session {} --robot to review the current outbound state",
+                    session.id
+                ),
+                format!(
+                    "re-run rr draft --session {} --finding <finding-id> and rr approve to materialize a fresh batch after drift",
+                    session.id
+                ),
+            ],
+            json!({
+                "reason_code": format!("approval_invalidated:{reason_suffix}"),
+                "session_id": session.id,
+                "draft_batch_id": draft_batch_id,
+                "validation_issues": linkage_issues_json(&issues),
+            }),
+        ),
+        PostRejection::BatchInvalidated {
+            draft_batch_id,
+            invalidation_reason_code,
+            invalidated_at,
+        } => blocked_response(
+            "rr post is blocked because the stored batch was already invalidated by target or local-state drift".to_owned(),
+            vec![
+                format!(
+                    "inspect rr findings --session {} --robot to review the invalidation state",
+                    session.id
+                ),
+                format!(
+                    "re-run rr draft --session {} --finding <finding-id> and rr approve after reconciling the newer local state",
+                    session.id
+                ),
+            ],
+            json!({
+                "reason_code": format!(
+                    "approval_invalidated:{}",
+                    invalidation_reason_code.clone().unwrap_or_else(|| "unspecified".to_owned())
+                ),
+                "session_id": session.id,
+                "draft_batch_id": draft_batch_id,
+                "approval_state": "invalidated",
+                "invalidation_reason_code": invalidation_reason_code,
+                "invalidated_at": invalidated_at,
+            }),
+        ),
+        PostRejection::DraftStateNotPostable {
+            draft_batch_id,
+            issues,
+        } => blocked_response(
+            "rr post is blocked because the stored draft items are no longer all in an approved postable state".to_owned(),
+            vec![format!(
+                "inspect rr findings --session {} --robot to review the current outbound state",
+                session.id
+            )],
+            json!({
+                "reason_code": "stale_local_state",
+                "session_id": session.id,
+                "draft_batch_id": draft_batch_id,
+                "draft_state_issues": draft_state_issues_json(&issues),
+            }),
+        ),
+        PostRejection::ApprovalRequiredBatchState {
+            draft_batch_id,
+            approval_state,
+        } => blocked_response(
+            "rr post requires an approved batch before GitHub mutation can run".to_owned(),
+            vec![
+                format!(
+                    "run rr approve --session {} --batch {} before posting",
+                    session.id, draft_batch_id
+                ),
+                format!("inspect rr findings --session {} --robot", session.id),
+            ],
+            json!({
+                "reason_code": "approval_required",
+                "session_id": session.id,
+                "draft_batch_id": draft_batch_id,
+                "approval_state": approval_state,
+            }),
+        ),
+        PostRejection::ApprovalRequiredNoToken { draft_batch_id } => blocked_response(
+            "rr post requires an explicit local approval token for the selected batch".to_owned(),
+            vec![
+                format!(
+                    "run rr approve --session {} --batch {} before posting",
+                    session.id, draft_batch_id
+                ),
+                format!("inspect rr findings --session {} --robot", session.id),
+            ],
+            json!({
+                "reason_code": "approval_required",
+                "session_id": session.id,
+                "draft_batch_id": draft_batch_id,
+            }),
+        ),
+        PostRejection::ApprovalRevoked {
+            draft_batch_id,
+            approval_id,
+            revoked_at,
+        } => blocked_response(
+            "rr post is blocked because the stored approval token was already revoked".to_owned(),
+            vec![format!(
+                "re-run rr draft --session {} --finding <finding-id> and rr approve after reviewing the revoked batch state",
+                session.id
+            )],
+            json!({
+                "reason_code": "approval_revoked",
+                "session_id": session.id,
+                "draft_batch_id": draft_batch_id,
+                "approval_id": approval_id,
+                "revoked_at": revoked_at,
+            }),
+        ),
+        PostRejection::PostingBlocked {
+            review_run_id,
+            draft_batch_id,
+            approval_id,
+            reason_code,
+            item_results,
+            retry_draft_ids,
+        } => blocked_response(
+            "rr post refused to execute because the stored approval token or batch binding no longer passes exact-payload verification".to_owned(),
+            vec![
+                format!(
+                    "inspect rr findings --session {} --robot to review the current outbound state",
+                    session.id
+                ),
+                format!(
+                    "re-run rr draft --session {} --finding <finding-id> and rr approve to materialize a fresh approved batch",
+                    session.id
+                ),
+            ],
+            json!({
+                "reason_code": reason_code,
+                "session_id": session.id,
+                "review_run_id": review_run_id,
+                "draft_batch_id": draft_batch_id,
+                "approval_id": approval_id,
+                "item_results": item_results,
+                "retry_draft_ids": retry_draft_ids,
+            }),
+        ),
+        PostRejection::Failed(message) => error_response(message),
+    }
+}
+
 fn handle_post(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let store = match open_store_or_response(runtime, "rr post") {
         Ok(store) => store,
@@ -15463,465 +15472,29 @@ fn handle_post(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         }
     };
 
-    if session.attention_state == "refresh_recommended" {
-        let reconciliation = json!({
-            "mode": "persisted_readback",
-            "manual_refresh_supported": false,
-            "stale_target_detected": true,
-            "repair_required": true,
-            "freshness_basis": "persisted_attention_state",
-            "attention_updated_at": session.updated_at,
-            "recommended_reentry_command": format!("rr resume --session {}", session.id),
-            "recommended_fresh_pass_command": format!(
-                "rr review --repo {} --pr {}",
-                session.review_target.repository, session.review_target.pull_request_number
-            ),
-        });
-        return blocked_response(
-            "rr post is blocked because the persisted review state requires explicit reconciliation before GitHub mutation can run"
-                .to_owned(),
-            vec![
-                format!(
-                    "run rr resume --session {} to reopen the Roger session locally",
-                    session.id
-                ),
-                format!(
-                    "run rr review --repo {} --pr {} to start a fresh pass if target drift invalidated the older review",
-                    session.review_target.repository, session.review_target.pull_request_number
-                ),
-            ],
-            json!({
-                "reason_code": "stale_local_state",
-                "session_id": session.id,
-                "attention_state": session.attention_state,
-                "reconciliation": reconciliation,
-            }),
-        );
-    }
-
-    if session.review_target.repository.trim().is_empty()
-        || session.review_target.pull_request_number == 0
-    {
-        return blocked_response(
-            "rr post requires a concrete review target before Roger can execute outbound mutation"
-                .to_owned(),
-            vec![
-                "re-run rr review --repo <owner/repo> --pr <number> to capture a real target"
-                    .to_owned(),
-                format!("or inspect rr status --session {} --robot", session.id),
-            ],
-            json!({
-                "reason_code": "missing_review_target",
-                "session_id": session.id,
-                "review_target": session.review_target,
-            }),
-        );
-    }
-
-    let Some(run) = (match store.latest_review_run(&session.id) {
-        Ok(run) => run,
-        Err(err) => return error_response(format!("failed to load latest run: {err}")),
-    }) else {
-        return blocked_response(
-            "rr post requires persisted local review state for the selected target".to_owned(),
-            vec![format!(
-                "run rr review --repo {} --pr {} to materialize a local review first",
-                session.review_target.repository, session.review_target.pull_request_number
-            )],
-            json!({
-                "reason_code": "missing_local_state",
-                "session_id": session.id,
-            }),
-        );
-    };
-
-    let candidate_batch_ids = match approved_batch_ids_for_run(&store, &session.id, &run.id) {
-        Ok(ids) => ids,
-        Err(err) => return error_response(err),
-    };
-
-    let Some(batch_id) = parsed.batch_id.as_deref() else {
-        return blocked_response(
-            "rr post requires an explicit approved draft batch id in this slice".to_owned(),
-            vec![
-                format!(
-                    "inspect rr findings --session {} --robot to find approved draft batches",
-                    session.id
-                ),
-                "re-run rr post --batch <draft-batch-id> once you select the exact approved batch"
-                    .to_owned(),
-            ],
-            json!({
-                "reason_code": "approved_batch_selection_required",
-                "session_id": session.id,
-                "review_run_id": run.id,
-                "available_batch_ids": candidate_batch_ids,
-            }),
-        );
-    };
-
-    let Some(batch) = (match store.outbound_draft_batch(batch_id) {
-        Ok(batch) => batch,
-        Err(err) => return error_response(format!("failed to load outbound draft batch: {err}")),
-    }) else {
-        return blocked_response(
-            "rr post could not find the requested approved draft batch".to_owned(),
-            vec![
-                format!(
-                    "inspect rr findings --session {} --robot to find the current approved batch ids",
-                    session.id
-                ),
-                format!(
-                    "re-run rr draft --session {} --finding <finding-id> and rr approve if the older batch was superseded",
-                    session.id
-                ),
-            ],
-            json!({
-                "reason_code": "missing_local_state",
-                "session_id": session.id,
-                "review_run_id": run.id,
-                "draft_batch_id": batch_id,
-                "available_batch_ids": candidate_batch_ids,
-            }),
-        );
-    };
-
-    if batch.review_session_id != session.id {
-        return blocked_response(
-            "rr post refused to execute because the requested batch belongs to a different Roger session".to_owned(),
-            vec![
-                format!("inspect rr status --session {} --robot", session.id),
-                "use the batch id returned by rr approve for this exact session".to_owned(),
-            ],
-            json!({
-                "reason_code": "approval_invalidated:local_state_drift",
-                "session_id": session.id,
-                "review_run_id": run.id,
-                "draft_batch_id": batch.id,
-                "batch_review_session_id": batch.review_session_id,
-            }),
-        );
-    }
-
-    if batch.review_run_id != run.id {
-        return blocked_response(
-            "rr post is blocked because the requested batch does not belong to the latest persisted review run".to_owned(),
-            vec![
-                format!(
-                    "inspect rr findings --session {} --robot for the current run state",
-                    session.id
-                ),
-                format!(
-                    "re-run rr draft --session {} --finding <finding-id> and rr approve after reconciling the newer local run",
-                    session.id
-                ),
-            ],
-            json!({
-                "reason_code": "approval_invalidated:local_state_drift",
-                "session_id": session.id,
-                "latest_review_run_id": run.id,
-                "draft_batch_id": batch.id,
-                "batch_review_run_id": batch.review_run_id,
-            }),
-        );
-    }
-
-    let expected_remote_review_target_id =
-        format!("pr-{}", session.review_target.pull_request_number);
-    if batch.repo_id != session.review_target.repository
-        || batch.remote_review_target_id != expected_remote_review_target_id
-    {
-        return blocked_response(
-            "rr post is blocked because the stored batch target no longer matches the active Roger review target".to_owned(),
-            vec![
-                format!("inspect rr status --session {} --robot", session.id),
-                format!(
-                    "re-run rr draft --session {} --finding <finding-id> and rr approve after reconciling target drift",
-                    session.id
-                ),
-            ],
-            json!({
-                "reason_code": "approval_invalidated:target_drift",
-                "session_id": session.id,
-                "draft_batch_id": batch.id,
-                "expected_repo_id": session.review_target.repository,
-                "expected_remote_review_target_id": expected_remote_review_target_id,
-                "stored_repo_id": batch.repo_id,
-                "stored_remote_review_target_id": batch.remote_review_target_id,
-            }),
-        );
-    }
-
-    let posted_actions = match store.posted_actions_for_batch(&batch.id) {
-        Ok(actions) => actions,
-        Err(err) => {
-            return error_response(format!("failed to inspect prior posted actions: {err}"));
-        }
-    };
-    if let Some(latest_posted_action) = posted_actions.last() {
-        return blocked_response(
-            "rr post is blocked because Roger already recorded a post attempt for this batch"
-                .to_owned(),
-            vec![
-                format!(
-                    "inspect rr status --session {} --robot for the current outbound posting state",
-                    session.id
-                ),
-                format!(
-                    "inspect rr findings --session {} --robot to review the recorded posted action lineage",
-                    session.id
-                ),
-            ],
-            json!({
-                "reason_code": "existing_posted_action",
-                "session_id": session.id,
-                "draft_batch_id": batch.id,
-                "posted_action_id": latest_posted_action.id,
-                "posted_action_status": format!("{:?}", latest_posted_action.status),
-                "failure_code": latest_posted_action.failure_code.clone(),
-            }),
-        );
-    }
-
-    let drafts = match store.outbound_draft_items_for_batch(&batch.id) {
-        Ok(drafts) => drafts,
-        Err(err) => return error_response(format!("failed to load outbound draft items: {err}")),
-    };
-    if drafts.is_empty() {
-        return blocked_response(
-            "rr post requires persisted approved draft items for the selected batch".to_owned(),
-            vec![format!(
-                "re-run rr draft --session {} --finding <finding-id> and rr approve to materialize the batch again",
-                session.id
-            )],
-            json!({
-                "reason_code": "missing_local_state",
-                "session_id": session.id,
-                "draft_batch_id": batch.id,
-            }),
-        );
-    }
-
-    let validation = validate_outbound_draft_batch_linkage(&batch, &drafts);
-    if !validation.valid {
-        return blocked_response(
-            "rr post refused to execute because the stored draft batch no longer matches its payload or target evidence".to_owned(),
-            vec![
-                format!(
-                    "inspect rr findings --session {} --robot to review the current outbound state",
-                    session.id
-                ),
-                format!(
-                    "re-run rr draft --session {} --finding <finding-id> and rr approve to materialize a fresh batch after drift",
-                    session.id
-                ),
-            ],
-            json!({
-                "reason_code": format!(
-                    "approval_invalidated:{}",
-                    approval_invalidation_reason_for_linkage_issues(&validation)
-                ),
-                "session_id": session.id,
-                "draft_batch_id": batch.id,
-                "validation_issues": validation
-                    .issues
-                    .iter()
-                    .map(|issue| json!({
-                        "draft_id": issue.draft_id.clone(),
-                        "reason_code": issue.reason_code.clone(),
-                    }))
-                    .collect::<Vec<_>>(),
-            }),
-        );
-    }
-
-    if batch.invalidated_at.is_some() || matches!(&batch.approval_state, ApprovalState::Invalidated)
-    {
-        return blocked_response(
-            "rr post is blocked because the stored batch was already invalidated by target or local-state drift".to_owned(),
-            vec![
-                format!(
-                    "inspect rr findings --session {} --robot to review the invalidation state",
-                    session.id
-                ),
-                format!(
-                    "re-run rr draft --session {} --finding <finding-id> and rr approve after reconciling the newer local state",
-                    session.id
-                ),
-            ],
-            json!({
-                "reason_code": format!(
-                    "approval_invalidated:{}",
-                    batch
-                        .invalidation_reason_code
-                        .clone()
-                        .unwrap_or_else(|| "unspecified".to_owned())
-                ),
-                "session_id": session.id,
-                "draft_batch_id": batch.id,
-                "approval_state": "invalidated",
-                "invalidation_reason_code": batch.invalidation_reason_code,
-                "invalidated_at": batch.invalidated_at,
-            }),
-        );
-    }
-
-    let current_draft_state_issues = drafts
-        .iter()
-        .filter_map(|draft| match &draft.approval_state {
-            ApprovalState::Approved => None,
-            ApprovalState::Drafted => Some(json!({
-                "draft_id": draft.id,
-                "finding_id": draft.finding_id,
-                "reason_code": "draft_not_yet_approved",
-            })),
-            ApprovalState::Invalidated => Some(json!({
-                "draft_id": draft.id,
-                "finding_id": draft.finding_id,
-                "reason_code": "draft_invalidated",
-            })),
-            ApprovalState::Posted => Some(json!({
-                "draft_id": draft.id,
-                "finding_id": draft.finding_id,
-                "reason_code": "draft_already_posted",
-            })),
-            ApprovalState::Failed => Some(json!({
-                "draft_id": draft.id,
-                "finding_id": draft.finding_id,
-                "reason_code": "draft_already_failed",
-            })),
-            ApprovalState::NotDrafted => Some(json!({
-                "draft_id": draft.id,
-                "finding_id": draft.finding_id,
-                "reason_code": "draft_state_not_materialized",
-            })),
-        })
-        .collect::<Vec<_>>();
-    if !current_draft_state_issues.is_empty() {
-        return blocked_response(
-            "rr post is blocked because the stored draft items are no longer all in an approved postable state".to_owned(),
-            vec![format!(
-                "inspect rr findings --session {} --robot to review the current outbound state",
-                session.id
-            )],
-            json!({
-                "reason_code": "stale_local_state",
-                "session_id": session.id,
-                "draft_batch_id": batch.id,
-                "draft_state_issues": current_draft_state_issues,
-            }),
-        );
-    }
-
-    if !matches!(&batch.approval_state, ApprovalState::Approved) {
-        return blocked_response(
-            "rr post requires an approved batch before GitHub mutation can run".to_owned(),
-            vec![
-                format!(
-                    "run rr approve --session {} --batch {} before posting",
-                    session.id, batch.id
-                ),
-                format!("inspect rr findings --session {} --robot", session.id),
-            ],
-            json!({
-                "reason_code": "approval_required",
-                "session_id": session.id,
-                "draft_batch_id": batch.id,
-                "approval_state": format!("{:?}", batch.approval_state),
-            }),
-        );
-    }
-
-    let approval = match store.approval_token_for_batch(&batch.id) {
-        Ok(approval) => approval,
-        Err(err) => {
-            return error_response(format!("failed to inspect outbound approval token: {err}"));
-        }
-    };
-    let Some(approval) = approval else {
-        return blocked_response(
-            "rr post requires an explicit local approval token for the selected batch".to_owned(),
-            vec![
-                format!(
-                    "run rr approve --session {} --batch {} before posting",
-                    session.id, batch.id
-                ),
-                format!("inspect rr findings --session {} --robot", session.id),
-            ],
-            json!({
-                "reason_code": "approval_required",
-                "session_id": session.id,
-                "draft_batch_id": batch.id,
-            }),
-        );
-    };
-
-    if approval.revoked_at.is_some() {
-        return blocked_response(
-            "rr post is blocked because the stored approval token was already revoked".to_owned(),
-            vec![format!(
-                "re-run rr draft --session {} --finding <finding-id> and rr approve after reviewing the revoked batch state",
-                session.id
-            )],
-            json!({
-                "reason_code": "approval_revoked",
-                "session_id": session.id,
-                "draft_batch_id": batch.id,
-                "approval_id": approval.id,
-                "revoked_at": approval.revoked_at,
-            }),
-        );
-    }
-
-    let action_id = next_id("posted-batch");
-    let reconfirmed_finding_ids = std::collections::HashSet::new();
+    // The full fail-closed posting domain rule (session preconditions, approved-
+    // batch selection/binding, target binding, prior-post guard, linkage
+    // validation, invalidation guard, all-approved draft-state guard, batch-
+    // approved guard, live approval-token guard, and the gated GitHub adapter
+    // execution + posted-action persistence) lives in the shared review-ops
+    // layer. The real GitHub CLI adapter is injected behind the same gate.
     let adapter = GhCliAdapter::new();
-    let posting_result = execute_explicit_posting_flow(
-        ExplicitPostingInput {
-            action_id: &action_id,
-            provider: "github",
-            target: &session.review_target,
-            batch: &batch,
-            drafts: &drafts,
-            approval: &approval,
-            refresh_signals: &[],
-            reconfirmed_finding_ids: &reconfirmed_finding_ids,
-        },
+    let post_outcome = match roger_review_ops::post_batch(
+        &store,
+        &session,
+        parsed.batch_id.as_deref(),
         &adapter,
-    );
+    ) {
+        Ok(outcome) => outcome,
+        Err(rejection) => return post_rejection_response(&session, rejection),
+    };
+    let review_run_id = post_outcome.review_run_id.clone();
+    let batch = post_outcome.batch;
+    let drafts = post_outcome.drafts;
+    let approval = post_outcome.approval;
+    let posting_result = post_outcome.posting_result;
 
-    if matches!(&posting_result.outcome, ExplicitPostingOutcome::Blocked) {
-        return blocked_response(
-            "rr post refused to execute because the stored approval token or batch binding no longer passes exact-payload verification".to_owned(),
-            vec![
-                format!(
-                    "inspect rr findings --session {} --robot to review the current outbound state",
-                    session.id
-                ),
-                format!(
-                    "re-run rr draft --session {} --finding <finding-id> and rr approve to materialize a fresh approved batch",
-                    session.id
-                ),
-            ],
-            json!({
-                "reason_code": posting_result.reason_code.clone(),
-                "session_id": session.id,
-                "review_run_id": run.id,
-                "draft_batch_id": batch.id,
-                "approval_id": approval.id,
-                "item_results": posting_result.item_results,
-                "retry_draft_ids": posting_result.retry_draft_ids,
-            }),
-        );
-    }
-
-    if let Some(posted_action) = posting_result.posted_action.as_ref()
-        && let Err(err) = store.store_posted_batch_action(posted_action)
-    {
-        return error_response(format!("failed to store posted batch action: {err}"));
-    }
-
-    let state_counts = match store.outbound_state_counts_for_run(&session.id, &run.id) {
+    let state_counts = match store.outbound_state_counts_for_run(&session.id, &review_run_id) {
         Ok(counts) => counts,
         Err(err) => {
             return error_response(format!(
@@ -15975,7 +15548,7 @@ fn handle_post(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         outcome,
         data: json!({
             "session_id": session.id.clone(),
-            "review_run_id": run.id.clone(),
+            "review_run_id": review_run_id.clone(),
             "target": {
                 "provider": "github",
                 "repository": session.review_target.repository.clone(),
@@ -17967,36 +17540,6 @@ fn sha256_prefixed_json<T: Serialize>(value: &T) -> Result<String, String> {
     serde_json::to_vec(value)
         .map(|bytes| format!("sha256:{}", sha256_hex(&bytes)))
         .map_err(|err| format!("failed to serialize draft payload: {err}"))
-}
-
-fn render_local_outbound_draft_body(finding: &roger_storage::MaterializedFindingRecord) -> String {
-    format!(
-        "Finding: {}\n\nSummary:\n{}\n\nSeverity: {}\nConfidence: {}\nFingerprint: {}",
-        finding.title,
-        finding.normalized_summary,
-        finding.severity,
-        finding.confidence,
-        finding.fingerprint
-    )
-}
-
-fn outbound_draft_anchor_digest(
-    finding: &roger_storage::MaterializedFindingRecord,
-) -> Result<String, String> {
-    sha256_prefixed_json(&json!({
-        "finding_id": finding.id,
-        "fingerprint": finding.fingerprint,
-        "title": finding.title,
-        "normalized_summary": finding.normalized_summary,
-    }))
-}
-
-fn outbound_draft_target_locator(target: &ReviewTarget, finding_id: &str) -> String {
-    let _ = finding_id;
-    format!(
-        "github:issue-comment:{}#{}",
-        target.repository, target.pull_request_number
-    )
 }
 
 fn bridge_contract_snapshot() -> &'static str {

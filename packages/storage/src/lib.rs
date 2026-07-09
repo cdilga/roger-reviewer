@@ -30,7 +30,7 @@ pub use semantic_embedder::{
 };
 
 /// The schema this build produces; must track the highest migration.
-pub const CURRENT_SCHEMA_VERSION: i64 = 19;
+pub const CURRENT_SCHEMA_VERSION: i64 = 20;
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_session_ledger.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_launch_binding_context.sql");
@@ -52,6 +52,7 @@ const MIGRATION_0016: &str = include_str!("../migrations/0016_posted_action_item
 const MIGRATION_0017: &str = include_str!("../migrations/0017_session_baseline_snapshots.sql");
 const MIGRATION_0018: &str = include_str!("../migrations/0018_outbound_draft_revisions.sql");
 const MIGRATION_0019: &str = include_str!("../migrations/0019_memory_review_requests.sql");
+const MIGRATION_0020: &str = include_str!("../migrations/0020_clarification_requests.sql");
 const PRIOR_REVIEW_BULK_HYDRATION_CHUNK_SIZE: usize = 64;
 /// Lexical score assigned to an exact identifier/fingerprint/normalized-key
 /// match so the direct-lookup hit ranks ahead of ordinary token matches.
@@ -1615,6 +1616,82 @@ pub struct MemoryReviewResolutionOutcome {
     /// True when acceptance inserted a brand-new memory item, false when it
     /// updated an existing same-scope/normalized-key row (dedup).
     pub materialized_new_item: bool,
+}
+
+/// Who raised a clarification request. The worker transport raises `worker`
+/// clarifications from inside a provider session; an operator (`rr clarify` or
+/// the TUI/extension composers) raises `operator` clarifications.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClarificationSource {
+    Worker,
+    Operator,
+}
+
+impl ClarificationSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+            Self::Operator => "operator",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "worker" => Some(Self::Worker),
+            "operator" => Some(Self::Operator),
+            _ => None,
+        }
+    }
+}
+
+/// Lifecycle status of a durable clarification request.
+pub const CLARIFICATION_STATUS_OPEN: &str = "open";
+pub const CLARIFICATION_STATUS_RESOLVED: &str = "resolved";
+
+/// A durable, auditable clarification/follow-up question raised against a review
+/// session (and optionally a specific run and finding). Persisted from the
+/// worker `worker.request_clarification` transport, the operator `rr clarify`
+/// path, and the TUI/extension clarification composers; resolved through the
+/// operator surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClarificationRequestRecord {
+    pub id: String,
+    pub review_session_id: String,
+    pub review_run_id: Option<String>,
+    pub finding_id: Option<String>,
+    pub source: String,
+    pub body: String,
+    pub status: String,
+    pub created_at: i64,
+    pub resolved_at: Option<i64>,
+    pub resolution_actor: Option<String>,
+    pub row_version: i64,
+}
+
+/// Inputs for persisting an open clarification request.
+#[derive(Debug, Clone)]
+pub struct CreateClarificationRequest<'a> {
+    pub review_session_id: &'a str,
+    pub review_run_id: Option<&'a str>,
+    pub finding_id: Option<&'a str>,
+    pub source: ClarificationSource,
+    pub body: &'a str,
+    /// Optional caller-supplied dedup discriminator (e.g. the worker request id)
+    /// folded into the deterministic clarification id so re-submissions of the
+    /// same worker request stay idempotent instead of creating duplicate rows.
+    pub external_ref: Option<&'a str>,
+}
+
+/// Filter for [`RogerStore::list_clarification_requests`].
+#[derive(Debug, Clone, Default)]
+pub struct ClarificationRequestQuery<'a> {
+    /// Restrict to a single review session when set.
+    pub review_session_id: Option<&'a str>,
+    /// Restrict to a single lifecycle status (`open`/`resolved`) when set.
+    pub status: Option<&'a str>,
+    /// Max rows returned; clamped to 1..=500.
+    pub limit: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -5283,6 +5360,169 @@ impl RogerStore {
             .map_err(StorageError::from)
     }
 
+    /// Persist an open clarification request. The clarification id is derived
+    /// deterministically from the session, source, body, and optional
+    /// `external_ref`, so re-submitting the same worker request is idempotent
+    /// (an existing row is returned unchanged rather than duplicated).
+    pub fn create_clarification_request(
+        &self,
+        input: CreateClarificationRequest<'_>,
+    ) -> Result<ClarificationRequestRecord> {
+        let created_at = time::now_ts();
+        let id = short_content_id(
+            "clar",
+            &[
+                input.review_session_id,
+                input.review_run_id.unwrap_or(""),
+                input.finding_id.unwrap_or(""),
+                input.source.as_str(),
+                input.body,
+                input.external_ref.unwrap_or(""),
+            ],
+        );
+        self.conn.execute(
+            "INSERT INTO clarification_requests (
+                id, review_session_id, review_run_id, finding_id, source,
+                body, status, created_at, resolved_at, resolution_actor, row_version
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5,
+                ?6, ?7, ?8, NULL, NULL, 0
+            )
+            ON CONFLICT(id) DO NOTHING",
+            params![
+                id,
+                input.review_session_id,
+                input.review_run_id,
+                input.finding_id,
+                input.source.as_str(),
+                input.body,
+                CLARIFICATION_STATUS_OPEN,
+                created_at,
+            ],
+        )?;
+        self.clarification_request(&id)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "clarification_request",
+                id,
+            })
+    }
+
+    pub fn clarification_request(&self, id: &str) -> Result<Option<ClarificationRequestRecord>> {
+        self.conn
+            .query_row(
+                "SELECT id, review_session_id, review_run_id, finding_id, source,
+                    body, status, created_at, resolved_at, resolution_actor, row_version
+                FROM clarification_requests
+                WHERE id = ?1",
+                params![id],
+                clarification_request_from_row,
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    /// List clarification requests, newest first, filtered by the optional
+    /// session and status in [`ClarificationRequestQuery`].
+    pub fn list_clarification_requests(
+        &self,
+        query: ClarificationRequestQuery<'_>,
+    ) -> Result<Vec<ClarificationRequestRecord>> {
+        let limit = query.limit.clamp(1, 500) as i64;
+        let mut sql = String::from(
+            "SELECT id, review_session_id, review_run_id, finding_id, source,
+                body, status, created_at, resolved_at, resolution_actor, row_version
+            FROM clarification_requests",
+        );
+        let mut clauses = Vec::new();
+        let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(session_id) = query.review_session_id {
+            binds.push(Box::new(session_id.to_owned()));
+            clauses.push(format!("review_session_id = ?{}", binds.len()));
+        }
+        if let Some(status) = query.status {
+            binds.push(Box::new(status.to_owned()));
+            clauses.push(format!("status = ?{}", binds.len()));
+        }
+        if !clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&clauses.join(" AND "));
+        }
+        binds.push(Box::new(limit));
+        sql.push_str(&format!(
+            " ORDER BY created_at DESC, id DESC LIMIT ?{}",
+            binds.len()
+        ));
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let bind_refs: Vec<&dyn rusqlite::ToSql> =
+            binds.iter().map(|value| value.as_ref()).collect();
+        let rows = stmt.query_map(bind_refs.as_slice(), clarification_request_from_row)?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
+    }
+
+    /// Resolve an open clarification request, stamping `resolved_at` and the
+    /// resolving actor. Resolving an already-resolved request is a conflict.
+    pub fn resolve_clarification_request(
+        &self,
+        id: &str,
+        resolution_actor: &str,
+    ) -> Result<ClarificationRequestRecord> {
+        let request = self
+            .clarification_request(id)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "clarification_request",
+                id: id.to_owned(),
+            })?;
+        if request.status != CLARIFICATION_STATUS_OPEN {
+            return Err(StorageError::Conflict {
+                entity: "clarification_request",
+                id: format!("{id}:already_resolved_as_{}", request.status),
+            });
+        }
+        let now = time::now_ts();
+        self.conn.execute(
+            "UPDATE clarification_requests
+            SET status = ?1,
+                resolved_at = ?2,
+                resolution_actor = ?3,
+                row_version = row_version + 1
+            WHERE id = ?4",
+            params![CLARIFICATION_STATUS_RESOLVED, now, resolution_actor, id],
+        )?;
+        self.clarification_request(id)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "clarification_request",
+                id: id.to_owned(),
+            })
+    }
+
+    /// Count clarification requests in a given status, optionally scoped to a
+    /// session.
+    pub fn count_clarification_requests(
+        &self,
+        review_session_id: Option<&str>,
+        status: &str,
+    ) -> Result<i64> {
+        let count = match review_session_id {
+            Some(session_id) => self.conn.query_row(
+                "SELECT COUNT(*) FROM clarification_requests
+                 WHERE status = ?1 AND review_session_id = ?2",
+                params![status, session_id],
+                |row| row.get::<_, i64>(0),
+            )?,
+            None => self.conn.query_row(
+                "SELECT COUNT(*) FROM clarification_requests WHERE status = ?1",
+                params![status],
+                |row| row.get::<_, i64>(0),
+            )?,
+        };
+        Ok(count)
+    }
+
     /// List pending memory review requests, newest first. When `scope_key` is
     /// provided the list is filtered to that scope; otherwise all pending
     /// requests are returned.
@@ -8279,6 +8519,16 @@ impl RogerStore {
                 self.conn.pragma_update(None, "user_version", 19)?;
             }
 
+            if version < 20 {
+                self.conn.execute_batch(MIGRATION_0020)?;
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at)
+                    VALUES (20, 'clarification_requests', ?1)",
+                    params![time::now_ts()],
+                )?;
+                self.conn.pragma_update(None, "user_version", 20)?;
+            }
+
             if migration_class.requires_sidecar_invalidation() {
                 self.invalidate_sidecars_for_migration()?;
             }
@@ -8562,6 +8812,24 @@ fn memory_review_request_from_row(
         resolution_actor: row.get(13)?,
         resulting_memory_item_id: row.get(14)?,
         row_version: row.get(15)?,
+    })
+}
+
+fn clarification_request_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ClarificationRequestRecord> {
+    Ok(ClarificationRequestRecord {
+        id: row.get(0)?,
+        review_session_id: row.get(1)?,
+        review_run_id: row.get(2)?,
+        finding_id: row.get(3)?,
+        source: row.get(4)?,
+        body: row.get(5)?,
+        status: row.get(6)?,
+        created_at: row.get(7)?,
+        resolved_at: row.get(8)?,
+        resolution_actor: row.get(9)?,
+        row_version: row.get(10)?,
     })
 }
 

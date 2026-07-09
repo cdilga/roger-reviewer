@@ -4,6 +4,7 @@ members = [
   "packages/config",
   "packages/app-core",
   "packages/prompt-engine",
+  "packages/review-ops",
   "packages/session-copilot",
   "packages/session-codex",
   "packages/session-gemini",
