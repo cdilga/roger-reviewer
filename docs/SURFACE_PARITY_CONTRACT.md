@@ -50,31 +50,54 @@ extension in bounded/local form, mutations visibly elevated).
 
 Legend: ✅ present · ⛔ deliberate asymmetry (numbered above) · ▲ gap to close.
 
+Matrix state audited against source 2026-07-10 (`packages/tui`, `packages/cli`,
+`packages/bridge`, `apps/extension`). Rows still marked ▲ are real, open gaps —
+do not read the v2026.07.09 changelog's "the deferred surface is closed" as
+covering them; it closed the *review-loop* legs (draft, post, clarify, evidence,
+launch/resume), not the *entry* legs (doctor, queue, start, reuse-or-fresh).
+
 | Operation | CLI | TUI | Extension |
 | --- | --- | --- | --- |
 | doctor / preflight | ✅ | ▲ (posture line only) | ⛔4 (guidance) |
 | queue (open PRs) | ✅ | ▲ | ▲ (listing rows are launch, not a queue) |
-| start review | ✅ | ▲ (deferred→hint) | ✅ |
+| start review (fresh `--pr`) | ✅ | ▲ (empty-store hint only) | ✅ |
 | reuse-or-fresh | ✅ | ▲ | ✅ |
-| resume review | ✅ | ▲ (deferred→hint) | ✅ |
-| return (dropout handoff) | ✅ | ▲ | ▲ |
+| resume review | ✅ | ✅ (`o` → suspend/run/return) | ✅ |
+| return (dropout handoff) | ✅ | ✅ (auto on child exit, reloads truth) | ▲ |
 | open cockpit | ✅ | (is itself) | ✅ (copyable cmd) |
 | view findings | ✅ | ✅ | ✅ (read-only mirror) |
-| triage finding | ✅ | ✅ | ▲ (bounded elevated) |
-| inspect evidence excerpt | ▲ (locations) | ▲ (locations, no text) | ▲ (count) |
-| create draft from findings | ✅ | ▲ | ▲ (bounded) |
-| edit draft body | ✅ | ✅ | ▲ (edit-as-revision) |
-| approve batch | ✅ | ✅ (elevated) | ⛔1 (hands off) |
-| post batch to GitHub | ✅ | ▲ (CLI-only hint) | ⛔1 (hands off) |
-| search prior reviews | ✅ | ✅ | ▲ (read-only) |
-| memory: accept/reject candidate | ▲ (no command!) | ✅ | ⛔1 (review is elevated) |
-| clarification / follow-up | ▲ (advisory echo) | ▲ (hint) | ▲ (bounded kickoff) |
+| triage finding | ✅ | ✅ | ✅ (bounded elevated) |
+| inspect evidence excerpt | ▲ (locations, no text) | ✅ (bounded excerpt) | ▲ (count) |
+| create draft from findings | ✅ | ✅ (`d`) | ▲ (bounded) |
+| edit draft body | ✅ | ✅ | ✅ (edit-as-revision) |
+| approve batch | ✅ | ✅ (elevated, word `approve`) | ⛔1 (hands off) |
+| post batch to GitHub | ✅ | ✅ (elevated, distinct word `post`) | ⛔1 (hands off) |
+| search prior reviews | ✅ | ✅ | ✅ (read-only mirror) |
+| memory: accept/reject candidate | ✅ (`rr memory review/accept/reject`) | ✅ | ⛔1 (review is elevated) |
+| clarification / follow-up | ✅ (`rr clarify`, durable) | ✅ (bounded composer) | ✅ (bounded kickoff) |
 | list / pick sessions | ✅ | ✅ | ✅ |
 | status snapshot | ✅ | ✅ | ✅ (bounded) |
-| timeline | ▲ (no command!) | ✅ | ▲ (read-only mirror) |
+| timeline | ✅ (`rr timeline`) | ✅ | ✅ (read-only mirror) |
 | semantic asset posture | ✅ | ✅ | ▲ (display) |
 
+### Still open after v2026.07.09
+
+The review loop reaches parity once a session exists. Getting *into* a session
+is still CLI-first, and the parity guard (a source-presence grep) cannot see
+this:
+
+- **TUI**: `doctor`, `queue`, `start review --pr`, `reuse-or-fresh`. The empty
+  cockpit prints `run rr review --pr <number> to start` instead of starting one.
+- **Extension**: `return`, evidence-excerpt text, a real PR queue, posture display.
+
 ## Gaps to close, by surface
+
+> **Historical work order — delivered in v2026.07.09.** Everything in this
+> section shipped: the shared `roger-review-ops` crate exists, and the TUI,
+> extension, and CLI legs listed below are wired and covered by tests. It is
+> kept as the rationale record for *why* each leg looks the way it does. For
+> what is still open, see **Still open after v2026.07.09** above — do not
+> re-implement from this list.
 
 ### Shared domain foundation (do first)
 
@@ -139,6 +162,11 @@ stays behind it), `set_triage(finding_ids, state)`,
 - A parity guard test asserts the matrix: for each operator op, the surfaces
   that should expose it do (by presence of the command/key/action), and the
   deliberate asymmetries stay asymmetric (extension has no post/approve action).
+  Note its limit: `packages/cli/tests/surface_parity_guard.rs` is a
+  **source-presence grep**, not a behavioral test. It catches a rename or a
+  deletion that breaks a parity leg; it cannot tell a wired leg from a stub, and
+  it does not assert the ▲ rows are absent. A green guard is not evidence that
+  the matrix above is complete — only that nothing it names has regressed.
 - Mutations stay visibly elevated on every surface (TUI elevation prompts;
   extension labeled buttons + confirm for heavier ops); posting is elevated and
   never implicit.
