@@ -68,17 +68,39 @@ pub enum Screen {
     Search,
 }
 
-/// Overlays/drawers per contract: help and the elevated approve confirmation
+/// Which elevated mutation an [`Overlay::Elevation`] gate confirms. Approve and
+/// post are distinct gates with distinct confirmation words so posting to
+/// GitHub can never be mistaken for a local approval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ElevationKind {
+    /// Records a local approval token (nothing leaves the machine).
+    Approve,
+    /// Posts the approved batch to GitHub through the real posting adapter.
+    Post,
+}
+
+impl ElevationKind {
+    /// The exact word the operator must type to confirm this gate.
+    pub fn confirm_word(self) -> &'static str {
+        match self {
+            Self::Approve => APPROVE_CONFIRMATION_WORD,
+            Self::Post => POST_CONFIRMATION_WORD,
+        }
+    }
+}
+
+/// Overlays/drawers per contract: help and the elevated mutation confirmations
 /// are behavior, not peer workspaces.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Overlay {
     None,
     Help,
-    /// Elevated mutation gate for in-process batch approval. The operator
-    /// must type the confirmation word and press Enter; the displayed
-    /// command is the exact CLI equivalent.
+    /// Elevated mutation gate for an in-process batch mutation (approve or
+    /// post). The operator must type the kind's confirmation word and press
+    /// Enter; the displayed command is the exact CLI equivalent.
     Elevation {
         batch_id: String,
+        kind: ElevationKind,
         command: String,
         input: String,
     },
@@ -91,6 +113,11 @@ pub enum InputMode {
     SessionFilter,
     FindingFilter,
     SearchQuery,
+    /// The bounded clarification/follow-up composer (TUI contract). Captures a
+    /// clarification body that, on submit, materializes a durable clarification
+    /// request linked to the session (and the focused finding when opened on
+    /// the findings queue).
+    Composer,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -204,13 +231,19 @@ impl CockpitEntry {
 }
 
 /// Side effect the pure reducer cannot perform itself. The runtime layer drains
-/// this after each key and performs the terminal-coupled work (currently:
-/// suspend the TUI and open `$EDITOR` on a draft body).
+/// this after each key and performs the terminal-coupled work (suspend the TUI
+/// and run an external process on the inherited tty).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModelEffect {
     /// Open `$EDITOR` on the draft body, then call
     /// [`CockpitModel::apply_draft_revision`] with the edited text.
     EditDraft { draft_id: String, body: String },
+    /// Deliberate dropout: suspend the cockpit and run the `rr` binary with the
+    /// given argv on the inherited tty (the same suspend-spawn-resume mechanism
+    /// as `$EDITOR` draft editing), then restore the cockpit and reload. Used to
+    /// launch/resume a provider review session from inside the TUI. `label` is
+    /// the human-facing dropout description shown while/after the run.
+    LaunchProvider { label: String, args: Vec<String> },
 }
 
 /// Session-level retrieval/memory posture for the status strip and Search
@@ -454,24 +487,84 @@ pub enum ApproveOutcome {
     },
 }
 
-// --- bounded hints (honest about what this slice does and does not do) ------
-
-/// Posting stays CLI-only and visually elevated.
-pub const ELEVATED_MUTATION_HINT: &str = "POSTING STAYS CLI-ONLY: rr post --batch <id>";
-
 /// Quickstart hint shown by the empty cockpit.
 pub const EMPTY_STORE_HINT: &str = "no review sessions yet — run rr review --pr <number> to start";
 
-/// Clarify-in-place and the session chat lane need a live worker transport.
-pub const CLARIFY_HINT: &str =
-    "clarification requires an active worker session — run rr review/resume";
-
-/// Provider launch from inside the TUI is deferred in this slice.
-pub const LAUNCH_DEFERRED_HINT: &str =
-    "launching providers from inside the TUI is deferred — run the shown rr command in a shell";
-
-/// Exact word the operator must type in the elevation prompt.
+/// Exact word the operator must type in the approve elevation prompt.
 pub const APPROVE_CONFIRMATION_WORD: &str = "approve";
+
+/// Exact word the operator must type in the post elevation prompt. Distinct
+/// from the approve word so posting to GitHub can never be confirmed by muscle
+/// memory for a local approval.
+pub const POST_CONFIRMATION_WORD: &str = "post";
+
+// --- typed outcomes of the parity mutations (surface-agnostic) --------------
+
+/// Result of materializing a draft batch from the findings queue selection
+/// (same shared `materialize_draft_batch` op the CLI's `rr draft` uses).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CreateDraftOutcome {
+    Created {
+        batch_id: String,
+        item_count: usize,
+        /// `"all_findings"` or `"explicit_findings"`.
+        selection_mode: String,
+    },
+    /// A fail-closed rejection carrying a stable reason code and detail.
+    Blocked { reason_code: String, detail: String },
+}
+
+/// Result of the elevated post of an approved batch (same shared `post_batch`
+/// op the CLI's `rr post` uses, through the real GitHub adapter).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PostBatchOutcome {
+    /// Every draft posted. `remote_identifier` is the batch's posted-action
+    /// remote id when the adapter returned one.
+    Posted {
+        remote_identifier: Option<String>,
+        posted_action_id: Option<String>,
+    },
+    /// Some drafts posted, some failed; `failed_draft_ids` are the ones to
+    /// retry.
+    PartiallyPosted {
+        remote_identifier: Option<String>,
+        failed_draft_ids: Vec<String>,
+    },
+    /// The posting flow ran but nothing posted; retry the listed drafts.
+    Failed {
+        reason_code: Option<String>,
+        retry_draft_ids: Vec<String>,
+    },
+    /// A fail-closed precondition blocked the post before the adapter ran.
+    Blocked { reason_code: String },
+}
+
+/// A durable clarification request materialized by the composer (same shared
+/// `create_clarification` op the worker transport and a future `rr clarify`
+/// use).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClarificationRow {
+    pub id: String,
+    pub finding_id: Option<String>,
+    pub body: String,
+}
+
+/// One numbered line of a rendered code-evidence excerpt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExcerptLine {
+    pub number: i64,
+    pub text: String,
+}
+
+/// A bounded code-evidence excerpt read from the session's repo binding for the
+/// focused finding. When the path/cwd cannot be resolved (or the file cannot be
+/// read) `lines` is empty and `unavailable` carries an honest reason.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvidenceExcerptRow {
+    pub locator: String,
+    pub lines: Vec<ExcerptLine>,
+    pub unavailable: Option<String>,
+}
 
 // --- model -------------------------------------------------------------------
 
@@ -534,6 +627,19 @@ pub struct CockpitModel {
 
     /// One-line status notice (last action result or degraded-state note).
     pub notice: Option<String>,
+
+    // --- clarification composer (bounded local composer) ------------------
+    /// Live composer text buffer (captured while `input_mode == Composer`).
+    pub composer_input: String,
+    /// Finding the composer is linked to (set when opened on the findings
+    /// queue), preserving canonical finding lineage per the composer contract.
+    pub composer_finding_id: Option<String>,
+    /// The most recent clarification materialized through the composer, shown
+    /// as a pending-clarification confirmation until the next action.
+    pub last_clarification: Option<ClarificationRow>,
+
+    /// Bounded code-evidence excerpt for the focused finding (inspector).
+    pub finding_excerpt: Option<EvidenceExcerptRow>,
 }
 
 impl CockpitModel {
@@ -594,6 +700,10 @@ impl CockpitModel {
             memory_posture: None,
             pending_effect: None,
             notice: None,
+            composer_input: String::new(),
+            composer_finding_id: None,
+            last_clarification: None,
+            finding_excerpt: None,
         };
         model.sessions = backend.list_sessions()?;
         // Best-effort posture load so the status strip is truthful from entry;
@@ -918,38 +1028,155 @@ impl CockpitModel {
                 }
                 _ => {}
             },
+            InputMode::Composer => match key {
+                CockpitKey::Char(c) => self.composer_input.push(c),
+                CockpitKey::Backspace => {
+                    self.composer_input.pop();
+                }
+                CockpitKey::Enter => self.submit_clarification(backend),
+                CockpitKey::Esc => {
+                    self.input_mode = InputMode::None;
+                    self.composer_input.clear();
+                    self.composer_finding_id = None;
+                    self.notice = Some("clarification composer cancelled".to_owned());
+                }
+                _ => {}
+            },
             InputMode::None => {}
+        }
+    }
+
+    /// Open the bounded clarification composer. When `finding_id` is set the
+    /// clarification stays linked to that finding's lineage (composer contract).
+    fn open_composer(&mut self, finding_id: Option<String>) {
+        if self.active_session.is_none() {
+            self.notice = Some("open a session before raising a clarification".to_owned());
+            return;
+        }
+        self.input_mode = InputMode::Composer;
+        self.composer_input.clear();
+        self.composer_finding_id = finding_id;
+        self.notice = None;
+    }
+
+    /// Submit the composer buffer as a durable clarification request through the
+    /// shared `create_clarification` op, then show the pending clarification.
+    fn submit_clarification(&mut self, backend: &mut dyn CockpitBackend) {
+        let Some(session_id) = self.active_session_id() else {
+            self.notice = Some("no active session for clarification".to_owned());
+            return;
+        };
+        let body = self.composer_input.trim().to_owned();
+        if body.is_empty() {
+            self.notice = Some("clarification body must be non-empty (Esc cancels)".to_owned());
+            return;
+        }
+        let finding_id = self.composer_finding_id.clone();
+        match backend.create_clarification(&session_id, finding_id.as_deref(), &body) {
+            Ok(clarification) => {
+                self.notice = Some(match &clarification.finding_id {
+                    Some(fid) => format!(
+                        "clarification {} recorded (linked to {fid})",
+                        clarification.id
+                    ),
+                    None => format!("clarification {} recorded", clarification.id),
+                });
+                self.last_clarification = Some(clarification);
+                self.composer_input.clear();
+                self.composer_finding_id = None;
+                self.input_mode = InputMode::None;
+            }
+            Err(err) => self.notice = Some(format!("clarification failed: {err}")),
         }
     }
 
     fn handle_elevation_key(&mut self, key: CockpitKey, backend: &mut dyn CockpitBackend) {
         let Overlay::Elevation {
-            batch_id, input, ..
+            batch_id,
+            kind,
+            input,
+            ..
         } = &mut self.overlay
         else {
             return;
         };
+        let kind = *kind;
         match key {
             CockpitKey::Char(c) => input.push(c),
             CockpitKey::Backspace => {
                 input.pop();
             }
             CockpitKey::Esc => {
-                self.notice = Some("elevated approval cancelled".to_owned());
+                self.notice = Some(match kind {
+                    ElevationKind::Approve => "elevated approval cancelled".to_owned(),
+                    ElevationKind::Post => "elevated GitHub post cancelled".to_owned(),
+                });
                 self.overlay = Overlay::None;
             }
             CockpitKey::Enter => {
-                if input.trim() != APPROVE_CONFIRMATION_WORD {
-                    self.notice = Some(format!(
-                        "type {APPROVE_CONFIRMATION_WORD} exactly to confirm (Esc cancels)"
-                    ));
+                let word = kind.confirm_word();
+                if input.trim() != word {
+                    self.notice = Some(format!("type {word} exactly to confirm (Esc cancels)"));
                     return;
                 }
                 let batch_id = batch_id.clone();
                 self.overlay = Overlay::None;
-                self.execute_elevated_approval(&batch_id, backend);
+                match kind {
+                    ElevationKind::Approve => self.execute_elevated_approval(&batch_id, backend),
+                    ElevationKind::Post => self.execute_elevated_post(&batch_id, backend),
+                }
             }
             _ => {}
+        }
+    }
+
+    /// Post an approved batch to GitHub through the shared, fully-gated
+    /// `post_batch` op (real posting adapter behind the backend). Renders the
+    /// posted remote id / partial / failure / blocked outcome truthfully.
+    fn execute_elevated_post(&mut self, batch_id: &str, backend: &mut dyn CockpitBackend) {
+        let Some(session_id) = self.active_session_id() else {
+            self.notice = Some("no active session for posting".to_owned());
+            return;
+        };
+        match backend.post_batch(&session_id, batch_id) {
+            Ok(PostBatchOutcome::Posted {
+                remote_identifier,
+                posted_action_id,
+            }) => {
+                let remote = remote_identifier.as_deref().unwrap_or("(no remote id)");
+                let action = posted_action_id.as_deref().unwrap_or("-");
+                self.notice = Some(format!(
+                    "posted batch {batch_id} to GitHub — remote={remote} action={action}"
+                ));
+                self.reload_batches(backend);
+            }
+            Ok(PostBatchOutcome::PartiallyPosted {
+                remote_identifier,
+                failed_draft_ids,
+            }) => {
+                let remote = remote_identifier.as_deref().unwrap_or("(no remote id)");
+                self.notice = Some(format!(
+                    "batch {batch_id} partially posted — remote={remote}, {} draft(s) to retry",
+                    failed_draft_ids.len()
+                ));
+                self.reload_batches(backend);
+            }
+            Ok(PostBatchOutcome::Failed {
+                reason_code,
+                retry_draft_ids,
+            }) => {
+                self.notice = Some(format!(
+                    "post failed for batch {batch_id}: {} ({} draft(s) to retry)",
+                    reason_code.as_deref().unwrap_or("posting_failed"),
+                    retry_draft_ids.len()
+                ));
+                self.reload_batches(backend);
+            }
+            Ok(PostBatchOutcome::Blocked { reason_code }) => {
+                self.notice = Some(format!("post blocked: {reason_code}"));
+                self.reload_batches(backend);
+            }
+            Err(err) => self.notice = Some(format!("error: {err}")),
         }
     }
 
@@ -964,10 +1191,10 @@ impl CockpitModel {
                 already_recorded,
             }) => {
                 self.notice = Some(if already_recorded {
-                    format!("approval already recorded for batch {batch_id}")
+                    format!("approval already recorded for batch {batch_id} — press p to post")
                 } else {
                     format!(
-                        "recorded local approval for batch {batch_id} ({draft_count} draft(s)); posting stays CLI-only"
+                        "recorded local approval for batch {batch_id} ({draft_count} draft(s)) — press p to post"
                     )
                 });
                 self.reload_batches(backend);
@@ -1039,6 +1266,11 @@ impl CockpitModel {
             }
             CockpitKey::Enter => self.open_session_home(backend),
             CockpitKey::Char('/') => self.input_mode = InputMode::SessionFilter,
+            CockpitKey::Char('o') => {
+                if let Some(session) = self.selected_session().cloned() {
+                    self.emit_launch_for_session(&session.session_id);
+                }
+            }
             CockpitKey::Char('r') => self.reload_sessions(backend),
             CockpitKey::Esc if !self.session_filter.is_empty() => {
                 self.session_filter.clear();
@@ -1054,12 +1286,51 @@ impl CockpitModel {
             CockpitKey::Char('d') => self.open_drafts(backend),
             CockpitKey::Char('t') => self.open_timeline(backend),
             CockpitKey::Char('s') => self.open_search(backend),
-            CockpitKey::Char('c') => self.notice = Some(CLARIFY_HINT.to_owned()),
+            CockpitKey::Char('c') => self.open_composer(None),
+            CockpitKey::Char('o') => self.launch_active_session(),
             CockpitKey::Esc => {
                 self.screen = Screen::Home;
                 self.reload_sessions(backend);
             }
             _ => {}
+        }
+    }
+
+    /// Emit the deliberate dropout effect that resumes the active session's
+    /// provider review via `rr review --resume --session <id>` on the inherited
+    /// tty (the runtime layer runs it through the suspend-spawn-resume path).
+    fn launch_active_session(&mut self) {
+        let Some(session) = self.active_session.clone() else {
+            self.notice = Some("no active session to launch".to_owned());
+            return;
+        };
+        self.emit_launch_for_session(&session.session_id);
+    }
+
+    fn emit_launch_for_session(&mut self, session_id: &str) {
+        self.pending_effect = Some(ModelEffect::LaunchProvider {
+            label: format!("resume session {session_id} in provider"),
+            args: vec![
+                "review".to_owned(),
+                "--resume".to_owned(),
+                "--session".to_owned(),
+                session_id.to_owned(),
+            ],
+        });
+        self.notice = Some(format!("dropping out to resume session {session_id}…"));
+    }
+
+    /// Reload cockpit state after returning from a dropout (launch/resume).
+    /// Called by the runtime once the suspended child process exits.
+    pub fn reload_after_return(&mut self, backend: &mut dyn CockpitBackend) {
+        self.reload_sessions(backend);
+        if self.active_session.is_none() {
+            return;
+        }
+        match self.screen {
+            Screen::Findings => self.open_findings(backend),
+            Screen::Drafts => self.reload_batches(backend),
+            _ => self.open_session_home_for_active(backend),
         }
     }
 
@@ -1092,7 +1363,11 @@ impl CockpitModel {
                 self.refresh_finding_detail(backend);
             }
             CockpitKey::Char('/') => self.input_mode = InputMode::FindingFilter,
-            CockpitKey::Char('c') => self.notice = Some(CLARIFY_HINT.to_owned()),
+            CockpitKey::Char('d') => self.create_draft_from_selection(backend),
+            CockpitKey::Char('c') => {
+                let finding_id = self.current_finding().map(|f| f.finding_id.clone());
+                self.open_composer(finding_id);
+            }
             CockpitKey::Esc => {
                 if !self.selected_findings.is_empty() {
                     self.selected_findings.clear();
@@ -1131,13 +1406,15 @@ impl CockpitModel {
                     Err(err) => self.notice = Some(format!("error: {err}")),
                 }
             }
-            CockpitKey::Char('a') => self.open_elevation_prompt(),
+            CockpitKey::Char('a') => self.open_approve_elevation(),
+            CockpitKey::Char('p') => self.open_post_elevation(),
             CockpitKey::Esc => self.open_session_home_for_active(backend),
             _ => {}
         }
     }
 
-    fn open_elevation_prompt(&mut self) {
+    /// Open the elevated **approve** gate for an `awaiting_approval` batch.
+    fn open_approve_elevation(&mut self) {
         let Some(batch) = self.batches.get(self.batch_cursor) else {
             return;
         };
@@ -1145,6 +1422,7 @@ impl CockpitModel {
             "awaiting_approval" => {
                 self.overlay = Overlay::Elevation {
                     batch_id: batch.batch_id.clone(),
+                    kind: ElevationKind::Approve,
                     command: format!("rr approve --batch {}", batch.batch_id),
                     input: String::new(),
                 };
@@ -1152,13 +1430,46 @@ impl CockpitModel {
             }
             "approved" => {
                 self.notice = Some(format!(
-                    "batch {} is already approved — posting stays CLI-only: rr post --batch {}",
-                    batch.batch_id, batch.batch_id
+                    "batch {} is already approved — press p to post it to GitHub",
+                    batch.batch_id
                 ));
             }
             other => {
                 self.notice = Some(format!(
                     "batch {} is not approvable (state={other})",
+                    batch.batch_id
+                ));
+            }
+        }
+    }
+
+    /// Open the elevated **post** gate for an `approved` batch. This is a
+    /// distinct gate from approve (distinct confirm word `post`, explicit
+    /// GitHub framing) — posting to GitHub can never be a navigation-equivalent
+    /// action.
+    fn open_post_elevation(&mut self) {
+        let Some(batch) = self.batches.get(self.batch_cursor) else {
+            return;
+        };
+        match batch.state.as_str() {
+            "approved" => {
+                self.overlay = Overlay::Elevation {
+                    batch_id: batch.batch_id.clone(),
+                    kind: ElevationKind::Post,
+                    command: format!("rr post --batch {}", batch.batch_id),
+                    input: String::new(),
+                };
+                self.notice = None;
+            }
+            "awaiting_approval" => {
+                self.notice = Some(format!(
+                    "batch {} must be approved (a) before it can be posted",
+                    batch.batch_id
+                ));
+            }
+            other => {
+                self.notice = Some(format!(
+                    "batch {} is not postable (state={other})",
                     batch.batch_id
                 ));
             }
@@ -1367,6 +1678,10 @@ impl CockpitModel {
         self.finding_filter.clear();
         self.finding_cursor = 0;
         self.finding_detail = None;
+        self.finding_excerpt = None;
+        self.composer_input.clear();
+        self.composer_finding_id = None;
+        self.last_clarification = None;
         self.search = None;
         self.search_input.clear();
         self.search_cursor = 0;
@@ -1602,6 +1917,60 @@ impl CockpitModel {
         }
     }
 
+    /// Materialize a draft batch from the findings-queue working set (the
+    /// multi-select set when present, otherwise every `accepted` finding) via
+    /// the shared `materialize_draft_batch` op, then land on Drafts and notice
+    /// the new batch id. The shared op enforces accepted-only / not-yet-drafted;
+    /// a rejection surfaces its reason code truthfully.
+    fn create_draft_from_selection(&mut self, backend: &mut dyn CockpitBackend) {
+        let Some(session_id) = self.active_session_id() else {
+            self.notice = Some("no active session for draft creation".to_owned());
+            return;
+        };
+        let targets: Vec<String> = if self.selected_findings.is_empty() {
+            self.findings
+                .iter()
+                .filter(|row| row.triage_state.eq_ignore_ascii_case("accepted"))
+                .map(|row| row.finding_id.clone())
+                .collect()
+        } else {
+            self.selected_findings.iter().cloned().collect()
+        };
+        if targets.is_empty() {
+            self.notice = Some(
+                "no accepted findings to draft — accept findings (a) or select them (space) first"
+                    .to_owned(),
+            );
+            return;
+        }
+        match backend.materialize_draft_batch(&session_id, &targets) {
+            Ok(CreateDraftOutcome::Created {
+                batch_id,
+                item_count,
+                selection_mode,
+            }) => {
+                self.open_drafts(backend);
+                if let Some(pos) = self.batches.iter().position(|row| row.batch_id == batch_id) {
+                    self.batch_cursor = pos;
+                }
+                self.notice = Some(format!(
+                    "created draft batch {batch_id} ({item_count} item(s), {selection_mode})"
+                ));
+            }
+            Ok(CreateDraftOutcome::Blocked {
+                reason_code,
+                detail,
+            }) => {
+                self.notice = Some(if detail.is_empty() {
+                    format!("create draft blocked: {reason_code}")
+                } else {
+                    format!("create draft blocked: {reason_code} — {detail}")
+                });
+            }
+            Err(err) => self.notice = Some(format!("error: {err}")),
+        }
+    }
+
     /// Keep the inspector pane truthful for the focused finding.
     fn refresh_finding_detail(&mut self, backend: &mut dyn CockpitBackend) {
         let Some(finding_id) = self
@@ -1609,6 +1978,7 @@ impl CockpitModel {
             .map(|finding| finding.finding_id.clone())
         else {
             self.finding_detail = None;
+            self.finding_excerpt = None;
             return;
         };
         if self
@@ -1625,6 +1995,10 @@ impl CockpitModel {
                 self.notice = Some(format!("error: {err}"));
             }
         }
+        // Best-effort code excerpt at the finding's evidence anchor. A failure
+        // is rendered as an honest "excerpt unavailable" in the inspector, not
+        // a blocking error.
+        self.finding_excerpt = backend.load_evidence_excerpt(&finding_id).ok();
     }
 }
 

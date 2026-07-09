@@ -11,12 +11,16 @@ use crate::tty;
 use ftui::widgets::Widget;
 use ftui::widgets::paragraph::Paragraph;
 use ftui::{Cmd, Event, Frame, KeyCode, KeyEventKind, Model, Modifiers};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) struct CockpitApp {
     model: CockpitModel,
     backend: StoreCockpitBackend,
+    /// Canonical store root, forwarded (as `RR_STORE_ROOT`) to any `rr`
+    /// subprocess launched via a dropout so the child reads the same truth.
+    store_root: PathBuf,
     /// Shared with the TTY event source: set true after an editor suspension so
     /// the next poll injects a synthetic resize and forces a full repaint.
     force_repaint: Arc<AtomicBool>,
@@ -26,11 +30,13 @@ impl CockpitApp {
     pub(crate) fn new(
         model: CockpitModel,
         backend: StoreCockpitBackend,
+        store_root: PathBuf,
         force_repaint: Arc<AtomicBool>,
     ) -> Self {
         Self {
             model,
             backend,
+            store_root,
             force_repaint,
         }
     }
@@ -61,6 +67,31 @@ impl CockpitApp {
                 }
                 // The alternate screen was clobbered by the editor; force a full
                 // repaint on the next poll.
+                self.force_repaint.store(true, Ordering::SeqCst);
+            }
+            ModelEffect::LaunchProvider { label, args } => {
+                // Deliberate dropout: suspend the cockpit, run `rr <args>` on
+                // the inherited tty (same suspend-spawn-resume path as $EDITOR),
+                // then restore and reload. The child is this same `rr` binary.
+                let program = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rr"));
+                match tty::suspend_and_run(&program, &args, &self.store_root) {
+                    Ok(status) if status.success() => {
+                        self.model.notice = Some(format!("returned from {label}"));
+                    }
+                    Ok(status) => {
+                        let code = status
+                            .code()
+                            .map(|c| c.to_string())
+                            .unwrap_or_else(|| "signal".to_owned());
+                        self.model.notice = Some(format!("returned from {label} (exit {code})"));
+                    }
+                    Err(err) => {
+                        self.model.notice = Some(format!("launch failed: {err}"));
+                    }
+                }
+                // The alternate screen was clobbered by the child process;
+                // reload cockpit truth and force a full repaint.
+                self.model.reload_after_return(&mut self.backend);
                 self.force_repaint.store(true, Ordering::SeqCst);
             }
         }

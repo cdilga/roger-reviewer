@@ -7,9 +7,8 @@
 //! unit testable.
 
 use crate::model::{
-    APPROVE_CONFIRMATION_WORD, CLARIFY_HINT, CockpitModel, ELEVATED_MUTATION_HINT,
-    EMPTY_STORE_HINT, FindingRow, InputMode, LAUNCH_DEFERRED_HINT, Overlay, Screen, SearchMode,
-    TimelineEntry,
+    CockpitModel, EMPTY_STORE_HINT, ElevationKind, FindingRow, InputMode, Overlay, Screen,
+    SearchMode, TimelineEntry,
 };
 
 /// Minimum total width before the inspector pane is rendered side-by-side.
@@ -27,6 +26,7 @@ impl CockpitModel {
         let body = match &self.overlay {
             Overlay::Help => self.help_lines(),
             Overlay::Elevation { .. } => self.elevation_lines(),
+            Overlay::None if self.input_mode == InputMode::Composer => self.composer_lines(),
             Overlay::None => self.body_lines(width, body_budget),
         };
         for line in body.into_iter().take(body_budget) {
@@ -117,8 +117,11 @@ impl CockpitModel {
     fn key_hints(&self) -> String {
         match &self.overlay {
             Overlay::Help => return "Esc/? close help".to_owned(),
-            Overlay::Elevation { .. } => {
-                return format!("type {APPROVE_CONFIRMATION_WORD} + Enter to confirm  Esc cancel");
+            Overlay::Elevation { kind, .. } => {
+                return format!(
+                    "type {} + Enter to confirm  Esc cancel",
+                    kind.confirm_word()
+                );
             }
             Overlay::None => {}
         }
@@ -129,23 +132,29 @@ impl CockpitModel {
             InputMode::SearchQuery => {
                 return "type query  Enter search  Esc leave input  Backspace delete".to_owned();
             }
+            InputMode::Composer => {
+                return "type clarification  Enter submit  Esc cancel  Backspace delete".to_owned();
+            }
             InputMode::None => {}
         }
         match self.screen {
             Screen::Picker => {
                 "j/k move  Enter open session  Esc full finder  ? help  q quit".to_owned()
             }
-            Screen::Home => "j/k move  Enter open  / filter  r reload  ? help  q quit".to_owned(),
+            Screen::Home => {
+                "j/k move  Enter open  o launch  / filter  r reload  ? help  q quit".to_owned()
+            }
             Screen::SessionHome => {
-                "f findings  d drafts  t timeline  s search  c clarify  Esc home  ? help  q quit"
+                "f findings  d drafts  t timeline  s search  c clarify  o launch  Esc home  ? help  q quit"
                     .to_owned()
             }
             Screen::Findings => {
-                "j/k move  space select  a/i/n/r triage  s sort  g group  / filter  c clarify  Esc back  ? help  q quit"
+                "j/k move  space select  a/i/n/r triage  d draft  s sort  g group  / filter  c clarify  Esc back  ? help  q quit"
                     .to_owned()
             }
             Screen::Drafts => {
-                "j/k move  Enter inspect  a approve (elevated)  Esc home  ? help  q quit".to_owned()
+                "j/k move  Enter inspect  a approve  p post (GitHub)  Esc home  ? help  q quit"
+                    .to_owned()
             }
             Screen::DraftItems => "j/k move  e edit draft  Esc drafts  ? help  q quit".to_owned(),
             Screen::Timeline => "j/k move  Esc home  ? help  q quit".to_owned(),
@@ -452,7 +461,10 @@ impl CockpitModel {
         lines.push(
             "a opens the elevated approve confirmation for an awaiting_approval batch".to_owned(),
         );
-        lines.push(ELEVATED_MUTATION_HINT.to_owned());
+        lines.push(
+            "p opens the elevated post confirmation (posts to GitHub) for an approved batch"
+                .to_owned(),
+        );
         (lines, cursor_line)
     }
 
@@ -482,7 +494,7 @@ impl CockpitModel {
             }
         }
         lines.push(String::new());
-        lines.push(ELEVATED_MUTATION_HINT.to_owned());
+        lines.push("e edit a draft body in $EDITOR  ·  Esc returns to the batch list".to_owned());
         (lines, cursor_line)
     }
 
@@ -742,7 +754,7 @@ impl CockpitModel {
                 session.repository, session.pull_request
             ),
             String::new(),
-            LAUNCH_DEFERRED_HINT.to_owned(),
+            "o launches this session's provider review here (suspends the TUI)".to_owned(),
         ]
     }
 
@@ -750,15 +762,27 @@ impl CockpitModel {
         let Some(session) = &self.active_session else {
             return vec!["no active session".to_owned()];
         };
-        vec![
+        let mut lines = vec![
             "inspector — entrypoints".to_owned(),
             String::new(),
             format!("resume:   rr resume --session {}", session.session_id),
             format!("status:   rr status --session {}", session.session_id),
             String::new(),
-            CLARIFY_HINT.to_owned(),
-            LAUNCH_DEFERRED_HINT.to_owned(),
-        ]
+            "c opens the clarification composer for this session".to_owned(),
+            "o launches this session's provider review here (suspends the TUI)".to_owned(),
+        ];
+        if let Some(clarification) = &self.last_clarification {
+            lines.push(String::new());
+            lines.push("pending clarification".to_owned());
+            lines.push(format!("  id      {}", clarification.id));
+            if let Some(finding_id) = &clarification.finding_id {
+                lines.push(format!("  finding {finding_id}"));
+            }
+            for body_line in clarification.body.lines().take(4) {
+                lines.push(format!("  {body_line}"));
+            }
+        }
+        lines
     }
 
     fn inspect_finding(&self) -> Vec<String> {
@@ -818,6 +842,23 @@ impl CockpitModel {
                 ));
             }
         }
+        // Bounded code excerpt read from the session's repo binding at the
+        // finding's evidence anchor (honest "unavailable" when unresolved).
+        if let Some(excerpt) = self
+            .finding_excerpt
+            .as_ref()
+            .filter(|_| self.finding_detail.is_some())
+        {
+            lines.push(String::new());
+            lines.push(format!("excerpt   {}", excerpt.locator));
+            if let Some(reason) = &excerpt.unavailable {
+                lines.push(format!("  {reason}"));
+            } else {
+                for line in &excerpt.lines {
+                    lines.push(format!("  {:>5}  {}", line.number, line.text));
+                }
+            }
+        }
         lines.push(String::new());
         lines.push(format!("outbound  state={}", detail.outbound.state));
         if let Some(batch_id) = &detail.outbound.draft_batch_id {
@@ -845,7 +886,12 @@ impl CockpitModel {
             }
         }
         lines.push(String::new());
-        lines.push(CLARIFY_HINT.to_owned());
+        lines.push("d drafts this finding  ·  c raises a clarification linked to it".to_owned());
+        if let Some(clarification) = self.last_clarification.as_ref().filter(|clarification| {
+            clarification.finding_id.as_deref() == Some(&finding.finding_id)
+        }) {
+            lines.push(format!("pending clarification {}", clarification.id));
+        }
         lines
     }
 
@@ -871,13 +917,12 @@ impl CockpitModel {
                 lines.push(format!("cli:      rr approve --batch {}", batch.batch_id));
             }
             "approved" => {
-                lines.push("approved — posting stays CLI-only:".to_owned());
+                lines.push("approved — p opens the elevated post confirmation:".to_owned());
+                lines.push("  posting sends this batch to GitHub (visibly elevated)".to_owned());
                 lines.push(format!("cli:      rr post --batch {}", batch.batch_id));
             }
             _ => lines.push("not approvable in its current state".to_owned()),
         }
-        lines.push(String::new());
-        lines.push(ELEVATED_MUTATION_HINT.to_owned());
         lines
     }
 
@@ -1015,6 +1060,7 @@ impl CockpitModel {
     fn elevation_lines(&self) -> Vec<String> {
         let Overlay::Elevation {
             batch_id,
+            kind,
             command,
             input,
         } = &self.overlay
@@ -1027,23 +1073,63 @@ impl CockpitModel {
             .find(|row| &row.batch_id == batch_id)
             .map(|row| row.item_count)
             .unwrap_or(0);
-        vec![
-            "╔══ ELEVATED ACTION — local batch approval ══".to_owned(),
+        let word = kind.confirm_word();
+        let (header, effect) = match kind {
+            ElevationKind::Approve => (
+                "╔══ ELEVATED ACTION — local batch approval ══".to_owned(),
+                vec![
+                    "this records a local approval token bound to the exact stored".to_owned(),
+                    "batch payload digest and target tuple — nothing is posted to GitHub"
+                        .to_owned(),
+                ],
+            ),
+            ElevationKind::Post => (
+                "╔══ ELEVATED ACTION — POST TO GITHUB ══".to_owned(),
+                vec![
+                    "this POSTS the approved batch to GitHub through the real posting".to_owned(),
+                    "adapter — this action publishes review comments to the remote PR".to_owned(),
+                ],
+            ),
+        };
+        let mut lines = vec![
+            header,
             String::new(),
             format!("batch    {batch_id}  ({item_count} draft item(s))"),
             format!("command  {command}"),
             String::new(),
-            "this records a local approval token bound to the exact stored".to_owned(),
-            "batch payload digest and target tuple — nothing is posted to GitHub".to_owned(),
+        ];
+        lines.extend(effect);
+        lines.push(String::new());
+        lines.push(format!(
+            "type {word} and press Enter to execute in-process; Esc cancels"
+        ));
+        lines.push(String::new());
+        lines.push(format!("> {input}_"));
+        lines
+    }
+
+    /// The bounded clarification composer body (rendered while
+    /// `input_mode == Composer`).
+    fn composer_lines(&self) -> Vec<String> {
+        let target = match &self.composer_finding_id {
+            Some(finding_id) => format!("linked to finding {finding_id}"),
+            None => "linked to the active session".to_owned(),
+        };
+        let mut lines = vec![
+            "── clarification / follow-up composer".to_owned(),
             String::new(),
-            format!(
-                "type {APPROVE_CONFIRMATION_WORD} and press Enter to execute in-process; Esc cancels"
-            ),
+            format!("scope     {target}"),
+            "this materializes a durable clarification request (Roger-owned).".to_owned(),
             String::new(),
-            format!("> {input}_"),
+            format!("> {}_", self.composer_input),
             String::new(),
-            ELEVATED_MUTATION_HINT.to_owned(),
-        ]
+            "Enter submits · Esc cancels".to_owned(),
+        ];
+        if let Some(clarification) = &self.last_clarification {
+            lines.push(String::new());
+            lines.push(format!("last clarification: {}", clarification.id));
+        }
+        lines
     }
 
     fn help_lines(&self) -> Vec<String> {
@@ -1052,13 +1138,18 @@ impl CockpitModel {
             String::new(),
             "global      q quit   ? help   Esc back/clear".to_owned(),
             "picker      j/k move   Enter open candidate   Esc full session finder".to_owned(),
-            "home        j/k move   Enter open session   / filter sessions   r reload".to_owned(),
-            "overview    f findings   d drafts   t timeline   s search   c clarify hint".to_owned(),
+            "home        j/k move   Enter open session   o launch/resume   / filter   r reload"
+                .to_owned(),
+            "overview    f findings   d drafts   t timeline   s search   c clarify   o launch"
+                .to_owned(),
             "findings    j/k move   space multi-select   a/i/n/r triage (batch on selection)"
+                .to_owned(),
+            "            d create draft from selection/accepted   c clarify (linked to finding)"
                 .to_owned(),
             "            s cycle sort   g cycle group   / filter   Esc clear sel/filter/back"
                 .to_owned(),
-            "drafts      Enter inspect items   a elevated approve confirmation".to_owned(),
+            "drafts      Enter inspect items   a elevated approve   p elevated post to GitHub"
+                .to_owned(),
             "draft items j/k move   e edit draft body in $EDITOR   Esc drafts".to_owned(),
             "timeline    j/k move across runs, stage results, posted actions".to_owned(),
             "search      / edit query   Enter run   j/k move hits".to_owned(),
@@ -1066,10 +1157,11 @@ impl CockpitModel {
             String::new(),
             "mutation    triage writes the same storage state as rr triage".to_owned(),
             "            approval requires typing approve in the elevated prompt".to_owned(),
-            format!("            {ELEVATED_MUTATION_HINT}"),
+            "            posting to GitHub requires typing post in a distinct elevated prompt"
+                .to_owned(),
             String::new(),
-            format!("clarify     {CLARIFY_HINT}"),
-            format!("launch      {LAUNCH_DEFERRED_HINT}"),
+            "clarify     c opens the bounded composer; submit creates a durable request".to_owned(),
+            "launch      o suspends the TUI and runs rr review --resume for the session".to_owned(),
         ]
     }
 }

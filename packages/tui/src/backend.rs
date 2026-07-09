@@ -6,15 +6,21 @@
 //! triage and approval semantics stay the storage crate's, not the TUI's.
 
 use crate::model::{
-    ApproveOutcome, DecisionEventRow, DraftBatchRow, DraftItemRow, EvidenceRow, FindingDetail,
-    FindingRow, MemoryPostureRow, MemoryReviewResolutionRow, MemoryReviewRow, OutboundLinkRow,
-    PostedActionRow, SearchHitRow, SearchView, SessionHomeView, SessionRow, StageResultRow,
-    TimelineRunRow, TimelineView, TriageAction, bump_count,
+    ApproveOutcome, ClarificationRow, CreateDraftOutcome, DecisionEventRow, DraftBatchRow,
+    DraftItemRow, EvidenceExcerptRow, EvidenceRow, ExcerptLine, FindingDetail, FindingRow,
+    MemoryPostureRow, MemoryReviewResolutionRow, MemoryReviewRow, OutboundLinkRow,
+    PostBatchOutcome, PostedActionRow, SearchHitRow, SearchView, SessionHomeView, SessionRow,
+    StageResultRow, TimelineRunRow, TimelineView, TriageAction, bump_count,
+};
+use roger_app_core::ExplicitPostingOutcome;
+use roger_github_adapter::GhCliAdapter;
+use roger_review_ops::{
+    DraftSelection, MaterializeDraftRejection, PostRejection, SessionPreconditionBlock,
 };
 use roger_storage::{
-    OutboundBatchApproval, PriorReviewLookupQuery, PriorReviewRetrievalMode, RogerStore,
-    SemanticEmbedderAdapter, SessionFinderQuery, UpdateIndexState, projected_outbound_batch_state,
-    semantic_embedder_status,
+    ClarificationSource, CreateClarificationRequest, OutboundBatchApproval, PriorReviewLookupQuery,
+    PriorReviewRetrievalMode, ReviewSessionRecord, RogerStore, SemanticEmbedderAdapter,
+    SessionFinderQuery, UpdateIndexState, projected_outbound_batch_state, semantic_embedder_status,
 };
 
 /// Maximum sessions projected into the cockpit session finder screen.
@@ -66,6 +72,33 @@ pub trait CockpitBackend {
         request_id: &str,
         accept: bool,
     ) -> Result<MemoryReviewResolutionRow, String>;
+    /// Materialize an outbound draft batch from an explicit finding selection
+    /// via the shared `materialize_draft_batch` op (accepted-only /
+    /// not-yet-drafted enforced there). A fail-closed rejection is returned as
+    /// [`CreateDraftOutcome::Blocked`] with its reason code.
+    fn materialize_draft_batch(
+        &mut self,
+        session_id: &str,
+        finding_ids: &[String],
+    ) -> Result<CreateDraftOutcome, String>;
+    /// Post an approved batch to GitHub through the shared, fully-gated
+    /// `post_batch` op and the real `GhCliAdapter`. This is the visibly-elevated
+    /// posting path; every precondition (approval, target binding, prior posted
+    /// action) is enforced by the shared op.
+    fn post_batch(&mut self, session_id: &str, batch_id: &str) -> Result<PostBatchOutcome, String>;
+    /// Create a durable clarification request linked to the session (and the
+    /// focused finding when supplied) via the shared `create_clarification` op.
+    fn create_clarification(
+        &mut self,
+        session_id: &str,
+        finding_id: Option<&str>,
+        body: &str,
+    ) -> Result<ClarificationRow, String>;
+    /// Read a bounded code excerpt at the focused finding's evidence anchor from
+    /// the session's repo binding. Fails honestly (populates
+    /// [`EvidenceExcerptRow::unavailable`]) when the path/cwd cannot be
+    /// resolved or the file cannot be read.
+    fn load_evidence_excerpt(&mut self, finding_id: &str) -> Result<EvidenceExcerptRow, String>;
 }
 
 pub struct StoreCockpitBackend {
@@ -509,6 +542,162 @@ impl CockpitBackend for StoreCockpitBackend {
             materialized_new_item: outcome.materialized_new_item,
         })
     }
+
+    fn materialize_draft_batch(
+        &mut self,
+        session_id: &str,
+        finding_ids: &[String],
+    ) -> Result<CreateDraftOutcome, String> {
+        let session = self.resolve_session(session_id)?;
+        let selection = DraftSelection::Explicit(finding_ids.to_vec());
+        match roger_review_ops::materialize_draft_batch(&self.store, &session, &selection) {
+            Ok(outcome) => Ok(CreateDraftOutcome::Created {
+                batch_id: outcome.batch.id,
+                item_count: outcome.drafts.len(),
+                selection_mode: outcome.selection_mode.to_owned(),
+            }),
+            Err(MaterializeDraftRejection::Failed(message)) => Err(message),
+            Err(rejection) => {
+                let (reason_code, detail) = materialize_rejection_reason(&rejection);
+                Ok(CreateDraftOutcome::Blocked {
+                    reason_code,
+                    detail,
+                })
+            }
+        }
+    }
+
+    fn post_batch(&mut self, session_id: &str, batch_id: &str) -> Result<PostBatchOutcome, String> {
+        let session = self.resolve_session(session_id)?;
+        let adapter = GhCliAdapter::new();
+        match roger_review_ops::post_batch(&self.store, &session, Some(batch_id), &adapter) {
+            Ok(outcome) => {
+                let remote_identifier = outcome
+                    .posting_result
+                    .posted_action
+                    .as_ref()
+                    .map(|action| action.remote_identifier.clone());
+                let posted_action_id = outcome
+                    .posting_result
+                    .posted_action
+                    .as_ref()
+                    .map(|action| action.id.clone());
+                Ok(match outcome.posting_result.outcome {
+                    ExplicitPostingOutcome::Posted => PostBatchOutcome::Posted {
+                        remote_identifier,
+                        posted_action_id,
+                    },
+                    ExplicitPostingOutcome::Partial => PostBatchOutcome::PartiallyPosted {
+                        remote_identifier,
+                        failed_draft_ids: outcome.posting_result.retry_draft_ids.clone(),
+                    },
+                    ExplicitPostingOutcome::Failed | ExplicitPostingOutcome::Blocked => {
+                        PostBatchOutcome::Failed {
+                            reason_code: outcome.posting_result.reason_code.clone(),
+                            retry_draft_ids: outcome.posting_result.retry_draft_ids.clone(),
+                        }
+                    }
+                })
+            }
+            Err(PostRejection::Failed(message)) => Err(message),
+            Err(PostRejection::PostingBlocked {
+                reason_code,
+                retry_draft_ids,
+                ..
+            }) => Ok(PostBatchOutcome::Failed {
+                reason_code,
+                retry_draft_ids,
+            }),
+            Err(rejection) => Ok(PostBatchOutcome::Blocked {
+                reason_code: post_rejection_reason(&rejection),
+            }),
+        }
+    }
+
+    fn create_clarification(
+        &mut self,
+        session_id: &str,
+        finding_id: Option<&str>,
+        body: &str,
+    ) -> Result<ClarificationRow, String> {
+        let session = self.resolve_session(session_id)?;
+        // Link the clarification to the latest run when one exists so the
+        // clarification carries run lineage like the worker transport does.
+        let review_run_id = self
+            .store
+            .latest_review_run(&session.id)
+            .map_err(|err| format!("failed to load latest run: {err}"))?
+            .map(|run| run.id);
+        let record = roger_review_ops::create_clarification(
+            &self.store,
+            CreateClarificationRequest {
+                review_session_id: &session.id,
+                review_run_id: review_run_id.as_deref(),
+                finding_id,
+                source: ClarificationSource::Operator,
+                body,
+                external_ref: None,
+            },
+        )
+        .map_err(|err| format!("{err:?}"))?;
+        Ok(ClarificationRow {
+            id: record.id,
+            finding_id: record.finding_id,
+            body: record.body,
+        })
+    }
+
+    fn load_evidence_excerpt(&mut self, finding_id: &str) -> Result<EvidenceExcerptRow, String> {
+        // Resolve the finding, its primary evidence location, and the session's
+        // local repo root, failing honestly at each step.
+        let finding = self
+            .store
+            .materialized_finding(finding_id)
+            .map_err(|err| format!("failed to load finding {finding_id}: {err}"))?
+            .ok_or_else(|| format!("finding {finding_id} no longer exists"))?;
+
+        let location = self
+            .store
+            .code_evidence_locations_for_finding(finding_id)
+            .map_err(|err| format!("failed to load code evidence for {finding_id}: {err}"))?
+            .into_iter()
+            .next();
+        let Some(location) = location else {
+            return Ok(EvidenceExcerptRow {
+                locator: "(no code evidence)".to_owned(),
+                lines: Vec::new(),
+                unavailable: Some("no code-evidence location stored for this finding".to_owned()),
+            });
+        };
+        let end_line = location.end_line.unwrap_or(location.start_line);
+        let locator = if end_line != location.start_line {
+            format!(
+                "{}:{}-{}",
+                location.repo_rel_path, location.start_line, end_line
+            )
+        } else {
+            format!("{}:{}", location.repo_rel_path, location.start_line)
+        };
+
+        let Some(repo_root) = self.session_local_repo_root(&finding.session_id)? else {
+            return Ok(EvidenceExcerptRow {
+                locator,
+                lines: Vec::new(),
+                unavailable: Some(
+                    "excerpt unavailable: no repo binding (worktree/cwd) recorded for this session"
+                        .to_owned(),
+                ),
+            });
+        };
+
+        Ok(read_bounded_excerpt(
+            &repo_root,
+            &location.repo_rel_path,
+            location.start_line,
+            end_line,
+            locator,
+        ))
+    }
 }
 
 /// Build the cockpit's semantic embedder the same way `rr search` does: a live
@@ -534,6 +723,173 @@ fn build_cockpit_semantic_embedder(store: &RogerStore) -> SemanticEmbedderAdapte
     }
 }
 
+/// Maximum lines rendered in a code-evidence excerpt (kept bounded).
+const EVIDENCE_EXCERPT_MAX_LINES: i64 = 8;
+
+/// Render a stable `(reason_code, detail)` for a `materialize_draft_batch`
+/// rejection so every surface can display the same fail-closed reason.
+fn materialize_rejection_reason(rejection: &MaterializeDraftRejection) -> (String, String) {
+    match rejection {
+        MaterializeDraftRejection::Precondition(block) => {
+            (precondition_reason(block).to_owned(), String::new())
+        }
+        MaterializeDraftRejection::MissingFindings { .. } => (
+            "missing_local_state".to_owned(),
+            "the latest run has no findings".to_owned(),
+        ),
+        MaterializeDraftRejection::FindingSelectionRequired { .. } => (
+            "finding_selection_required".to_owned(),
+            "select findings or accept them first".to_owned(),
+        ),
+        MaterializeDraftRejection::MissingFindingSelection {
+            missing_finding_ids,
+            ..
+        } => (
+            "missing_local_state".to_owned(),
+            format!("unknown finding(s): {}", missing_finding_ids.join(", ")),
+        ),
+        MaterializeDraftRejection::SelectionNotDraftable { issues, .. } => {
+            let detail = issues
+                .iter()
+                .map(|issue| match issue {
+                    roger_review_ops::DraftSelectionIssue::TriageStateNotAccepted {
+                        finding_id,
+                        triage_state,
+                    } => format!("{finding_id} not accepted (triage={triage_state})"),
+                    roger_review_ops::DraftSelectionIssue::ExistingOutboundState {
+                        finding_id,
+                        current_outbound_state,
+                        ..
+                    } => format!("{finding_id} already {current_outbound_state}"),
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            ("stale_local_state".to_owned(), detail)
+        }
+        MaterializeDraftRejection::Failed(message) => ("error".to_owned(), message.clone()),
+    }
+}
+
+/// Render a stable reason code for a fail-closed `post_batch` rejection.
+fn post_rejection_reason(rejection: &PostRejection) -> String {
+    match rejection {
+        PostRejection::Precondition(block) => precondition_reason(block).to_owned(),
+        PostRejection::BatchSelectionRequired { .. } => {
+            "approved_batch_selection_required".to_owned()
+        }
+        PostRejection::BatchNotFound { .. } => "missing_local_state".to_owned(),
+        PostRejection::SessionMismatch { .. } | PostRejection::RunMismatch { .. } => {
+            "local_state_drift".to_owned()
+        }
+        PostRejection::TargetDrift { .. } => "target_drift".to_owned(),
+        PostRejection::ExistingPostedAction {
+            posted_action_status,
+            ..
+        } => format!("existing_posted_action:{posted_action_status}"),
+        PostRejection::MissingDraftItems { .. } => "missing_local_state".to_owned(),
+        PostRejection::LinkageInvalid { reason_suffix, .. } => {
+            format!("approval_invalidated:{reason_suffix}")
+        }
+        PostRejection::BatchInvalidated {
+            invalidation_reason_code,
+            ..
+        } => format!(
+            "approval_invalidated:{}",
+            invalidation_reason_code.as_deref().unwrap_or("invalidated")
+        ),
+        PostRejection::DraftStateNotPostable { .. } => "stale_local_state".to_owned(),
+        PostRejection::ApprovalRequiredBatchState { .. }
+        | PostRejection::ApprovalRequiredNoToken { .. } => "approval_required".to_owned(),
+        PostRejection::ApprovalRevoked { .. } => "approval_revoked".to_owned(),
+        PostRejection::PostingBlocked { reason_code, .. } => reason_code
+            .clone()
+            .unwrap_or_else(|| "posting_blocked".to_owned()),
+        PostRejection::Failed(message) => message.clone(),
+    }
+}
+
+fn precondition_reason(block: &SessionPreconditionBlock) -> &'static str {
+    match block {
+        SessionPreconditionBlock::StaleLocalState => "stale_local_state",
+        SessionPreconditionBlock::MissingReviewTarget => "missing_review_target",
+        SessionPreconditionBlock::MissingLocalStateNoRun => "missing_local_state",
+    }
+}
+
+/// Read a bounded, line-numbered code excerpt from `repo_root`/`repo_rel_path`
+/// over the inclusive line range `[start, end]`. Fails honestly (populates
+/// `unavailable`) when the path escapes the root or the file cannot be read.
+fn read_bounded_excerpt(
+    repo_root: &str,
+    repo_rel_path: &str,
+    start_line: i64,
+    end_line: i64,
+    locator: String,
+) -> EvidenceExcerptRow {
+    let root = std::path::Path::new(repo_root);
+    let rel = std::path::Path::new(repo_rel_path);
+    // Refuse absolute or parent-escaping repo-relative paths.
+    if rel.is_absolute()
+        || rel
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return EvidenceExcerptRow {
+            locator,
+            lines: Vec::new(),
+            unavailable: Some(format!(
+                "excerpt unavailable: refusing to resolve path {repo_rel_path}"
+            )),
+        };
+    }
+    let full = root.join(rel);
+    let content = match std::fs::read_to_string(&full) {
+        Ok(content) => content,
+        Err(err) => {
+            return EvidenceExcerptRow {
+                locator,
+                lines: Vec::new(),
+                unavailable: Some(format!(
+                    "excerpt unavailable: cannot read {}: {err}",
+                    full.display()
+                )),
+            };
+        }
+    };
+    let start = start_line.max(1);
+    let capped_end = end_line
+        .max(start)
+        .min(start + EVIDENCE_EXCERPT_MAX_LINES - 1);
+    let mut lines = Vec::new();
+    for (idx, text) in content.lines().enumerate() {
+        let number = idx as i64 + 1;
+        if number < start {
+            continue;
+        }
+        if number > capped_end {
+            break;
+        }
+        lines.push(ExcerptLine {
+            number,
+            text: text.to_owned(),
+        });
+    }
+    if lines.is_empty() {
+        return EvidenceExcerptRow {
+            locator,
+            lines,
+            unavailable: Some(format!(
+                "excerpt unavailable: {repo_rel_path} has no lines {start}..={capped_end}"
+            )),
+        };
+    }
+    EvidenceExcerptRow {
+        locator,
+        lines,
+        unavailable: None,
+    }
+}
+
 fn retrieval_mode_label(mode: &PriorReviewRetrievalMode) -> &'static str {
     match mode {
         PriorReviewRetrievalMode::Hybrid => "hybrid",
@@ -543,6 +899,34 @@ fn retrieval_mode_label(mode: &PriorReviewRetrievalMode) -> &'static str {
 }
 
 impl StoreCockpitBackend {
+    /// Resolve a session record by id (the shared review ops need the full
+    /// [`ReviewSessionRecord`], not just its id).
+    fn resolve_session(&self, session_id: &str) -> Result<ReviewSessionRecord, String> {
+        self.store
+            .review_session(session_id)
+            .map_err(|err| format!("failed to load session {session_id}: {err}"))?
+            .ok_or_else(|| format!("session {session_id} no longer exists"))
+    }
+
+    /// The session's local repo root for reading evidence: the most recent
+    /// launch binding's `worktree_root`, falling back to its `cwd`. `None` when
+    /// the session has no binding carrying either.
+    fn session_local_repo_root(&self, session_id: &str) -> Result<Option<String>, String> {
+        let bindings = self
+            .store
+            .launch_bindings_for_session(session_id)
+            .map_err(|err| format!("failed to load launch bindings: {err}"))?;
+        // `launch_bindings_for_session` orders oldest-first; prefer the newest
+        // binding that carries a resolvable local root.
+        Ok(bindings.iter().rev().find_map(|binding| {
+            binding
+                .worktree_root
+                .clone()
+                .or_else(|| binding.cwd.clone())
+                .filter(|root| !root.trim().is_empty())
+        }))
+    }
+
     fn latest_run_findings(&mut self, session_id: &str) -> Result<Vec<FindingRow>, String> {
         let Some(run) = self
             .store

@@ -9,11 +9,11 @@
 //! requirements): a three-region workspace (status strip, primary pane,
 //! inspector pane) over the durable destinations Review Home (with the global
 //! session finder), Session Overview, Findings Queue
-//! (sort/filter/group/multi-select/batch triage), Draft Approval Queue with
-//! an explicit elevated approve confirmation (same storage path as
-//! `rr approve`; posting stays CLI-only), Timeline/History, and
-//! Search/Recall. Clarify-in-place and the session chat lane are out of this
-//! slice and surface as bounded hints.
+//! (sort/filter/group/multi-select/batch triage + create-draft), a Draft
+//! Approval Queue with distinct elevated approve and post confirmations (same
+//! shared review ops as `rr approve` / `rr post`), Timeline/History, and
+//! Search/Recall. A bounded clarification composer, evidence excerpts, and a
+//! suspend-spawn-resume launch/return dropout close TUI operator parity.
 
 #[cfg(unix)]
 mod app;
@@ -25,12 +25,13 @@ mod view;
 
 pub use backend::{CockpitBackend, StoreCockpitBackend};
 pub use model::{
-    APPROVE_CONFIRMATION_WORD, ApproveOutcome, CLARIFY_HINT, CockpitEntry, CockpitKey,
-    CockpitModel, DecisionEventRow, DraftBatchRow, DraftItemRow, ELEVATED_MUTATION_HINT,
-    EMPTY_STORE_HINT, EvidenceRow, FindingDetail, FindingRow, GroupKey, InputMode, KeyOutcome,
-    LAUNCH_DEFERRED_HINT, MemoryPostureRow, ModelEffect, OutboundLinkRow, Overlay, PickerCandidate,
-    PostedActionRow, Screen, SearchHitRow, SearchView, SessionHomeView, SessionRow, SortKey,
-    StageResultRow, TimelineEntry, TimelineRunRow, TimelineView, TriageAction,
+    APPROVE_CONFIRMATION_WORD, ApproveOutcome, ClarificationRow, CockpitEntry, CockpitKey,
+    CockpitModel, CreateDraftOutcome, DecisionEventRow, DraftBatchRow, DraftItemRow,
+    EMPTY_STORE_HINT, ElevationKind, EvidenceExcerptRow, EvidenceRow, ExcerptLine, FindingDetail,
+    FindingRow, GroupKey, InputMode, KeyOutcome, MemoryPostureRow, ModelEffect, OutboundLinkRow,
+    Overlay, POST_CONFIRMATION_WORD, PickerCandidate, PostBatchOutcome, PostedActionRow, Screen,
+    SearchHitRow, SearchView, SessionHomeView, SessionRow, SortKey, StageResultRow, TimelineEntry,
+    TimelineRunRow, TimelineView, TriageAction,
 };
 
 use roger_storage::{RogerStore, StorageError};
@@ -125,7 +126,12 @@ pub fn run_cockpit_with_entry(
         use std::sync::atomic::AtomicBool;
         let force_repaint = Arc::new(AtomicBool::new(false));
         run_ftui_program(
-            app::CockpitApp::new(model, backend, Arc::clone(&force_repaint)),
+            app::CockpitApp::new(
+                model,
+                backend,
+                config.store_root.clone(),
+                Arc::clone(&force_repaint),
+            ),
             force_repaint,
         )
         .map_err(|err| TuiError::Terminal(err.to_string()))?;

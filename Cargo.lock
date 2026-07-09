@@ -1996,6 +1996,8 @@ dependencies = [
  "ftui",
  "libc",
  "roger-app-core",
+ "roger-github-adapter",
+ "roger-review-ops",
  "roger-storage",
  "tempfile",
 ]
