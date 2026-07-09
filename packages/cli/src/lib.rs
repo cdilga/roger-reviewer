@@ -39,17 +39,19 @@ use roger_session_opencode::{
     OpenCodeAdapter, OpenCodeReturnPath, OpenCodeSessionPath, rr_return_to_roger_session,
 };
 use roger_storage::{
+    ClarificationRequestQuery, ClarificationSource, CreateClarificationRequest,
     CreateLaunchAttempt, CreateMaterializedFinding, CreateMemoryReviewRequest, CreateReviewRun,
     CreateReviewSession, CreateSessionLaunchBinding, CreateWorkerStageResult,
     FinalizeExistingSessionLaunchAttempt, FinalizeReviewLaunchAttempt, LaunchAttemptAction,
-    LaunchAttemptState, LaunchSurface, MemoryReviewRequestKind, MemoryReviewRequestRecord,
-    MemoryReviewSource, OutboundSurfaceProjection, PriorReviewLookupQuery,
-    PriorReviewRetrievalMode, ResolveSessionLaunchBinding, ResolveSessionLocalRoot,
-    ResolveSessionReentry, ReviewLaunchFinalizationError, ReviewSessionRecord, RogerStore,
-    SemanticAssetManifest, SemanticComponentState, SemanticEmbedderAdapter,
-    SessionBindingResolution, SessionFinderEntry, SessionFinderQuery, SessionLaunchBindingRecord,
-    SessionReentryResolution, StorageError, StorageLayout, UpdateLaunchAttempt,
-    derive_finding_fingerprint, normalize_memory_key, semantic_embedder_status,
+    LaunchAttemptState, LaunchSurface, MemoryReviewDecision, MemoryReviewRequestKind,
+    MemoryReviewRequestRecord, MemoryReviewSource, OutboundSurfaceProjection,
+    PriorReviewLookupQuery, PriorReviewRetrievalMode, ResolveSessionLaunchBinding,
+    ResolveSessionLocalRoot, ResolveSessionReentry, ReviewLaunchFinalizationError,
+    ReviewSessionRecord, RogerStore, SemanticAssetManifest, SemanticComponentState,
+    SemanticEmbedderAdapter, SessionBindingResolution, SessionFinderEntry, SessionFinderQuery,
+    SessionLaunchBindingRecord, SessionReentryResolution, StorageError, StorageLayout,
+    UpdateLaunchAttempt, derive_finding_fingerprint, normalize_memory_key,
+    semantic_embedder_status,
 };
 use rusqlite::{Connection as SqliteConnection, OpenFlags};
 use serde::{Serialize, de::DeserializeOwned};
@@ -144,6 +146,9 @@ enum CommandKind {
     Status,
     Tui,
     Assets,
+    Memory,
+    Timeline,
+    Clarify,
 }
 
 impl CommandKind {
@@ -173,6 +178,9 @@ impl CommandKind {
             (Self::Status, _) => "rr status",
             (Self::Tui, _) => "rr tui",
             (Self::Assets, _) => "rr assets",
+            (Self::Memory, _) => "rr memory",
+            (Self::Timeline, _) => "rr timeline",
+            (Self::Clarify, _) => "rr clarify",
         }
     }
 
@@ -205,6 +213,9 @@ impl CommandKind {
             Self::Status => "rr.robot.status.v1",
             Self::Tui => "rr.robot.tui.v1",
             Self::Assets => "rr.robot.assets.v1",
+            Self::Memory => "rr.robot.memory.v1",
+            Self::Timeline => "rr.robot.timeline.v1",
+            Self::Clarify => "rr.robot.clarify.v1",
         }
     }
 }
@@ -231,6 +242,13 @@ enum AssetsCommandKind {
     Install,
     Status,
     Verify,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MemoryCommandKind {
+    Review,
+    Accept,
+    Reject,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -265,6 +283,7 @@ struct ParsedArgs {
     bridge_command: Option<BridgeCommandKind>,
     extension_command: Option<ExtensionCommandKind>,
     assets_command: Option<AssetsCommandKind>,
+    memory_command: Option<MemoryCommandKind>,
     extension_browser: Option<SupportedBrowser>,
     extension_package_dir: Option<PathBuf>,
     bridge_extension_id: Option<String>,
@@ -319,6 +338,15 @@ struct ParsedArgs {
     // `rr sessions --all` lists every matching session instead of the grouped,
     // most-recent-per-PR default view.
     show_all: bool,
+    // `rr memory accept|reject --request <id>` names the durable
+    // MemoryReviewRequest row to resolve.
+    request_id: Option<String>,
+    // `rr clarify --body <text>` supplies an inline clarification body (the
+    // file-based alternative reuses --body-file).
+    clarify_body: Option<String>,
+    // `rr clarify --list` flips rr clarify from create to a read-only listing of
+    // open clarifications.
+    clarify_list: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -687,6 +715,9 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
         "status" => CommandKind::Status,
         "tui" | "open" => CommandKind::Tui,
         "assets" => CommandKind::Assets,
+        "memory" => CommandKind::Memory,
+        "timeline" => CommandKind::Timeline,
+        "clarify" => CommandKind::Clarify,
         "-h" | "--help" | "help" => {
             return Err("help requested".to_owned());
         }
@@ -704,6 +735,7 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
         bridge_command: None,
         extension_command: None,
         assets_command: None,
+        memory_command: None,
         extension_browser: None,
         extension_package_dir: None,
         bridge_extension_id: None,
@@ -743,6 +775,9 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
         live: false,
         fresh: false,
         show_all: false,
+        request_id: None,
+        clarify_body: None,
+        clarify_list: false,
     };
 
     let mut i = 1;
@@ -948,6 +983,28 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
                 parsed.assets_package_id = Some(value.clone());
                 i += 2;
             }
+            "--request" => {
+                let value = argv
+                    .get(i + 1)
+                    .filter(|candidate| !candidate.starts_with("--"))
+                    .ok_or_else(|| {
+                        "--request requires a memory-review request id value, not a flag (did you forget the id?)"
+                            .to_owned()
+                    })?;
+                parsed.request_id = Some(value.clone());
+                i += 2;
+            }
+            "--body" => {
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| "--body requires a value".to_owned())?;
+                parsed.clarify_body = Some(value.clone());
+                i += 2;
+            }
+            "--list" => {
+                parsed.clarify_list = true;
+                i += 1;
+            }
             "--topic" => {
                 let value = argv
                     .get(i + 1)
@@ -1112,6 +1169,17 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
                         };
                         i += 1;
                     }
+                    CommandKind::Memory if parsed.memory_command.is_none() => {
+                        parsed.memory_command = match positional {
+                            "review" => Some(MemoryCommandKind::Review),
+                            "accept" => Some(MemoryCommandKind::Accept),
+                            "reject" => Some(MemoryCommandKind::Reject),
+                            other => {
+                                return Err(format!("unknown memory subcommand: {other}"));
+                            }
+                        };
+                        i += 1;
+                    }
                     _ => {
                         return Err(format!("unexpected positional argument: {positional}"));
                     }
@@ -1226,6 +1294,10 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
         return Err("rr assets requires a subcommand: install, status, or verify".to_owned());
     }
 
+    if parsed.command == CommandKind::Memory && parsed.memory_command.is_none() {
+        return Err("rr memory requires a subcommand: review, accept, or reject".to_owned());
+    }
+
     if parsed.command != CommandKind::Assets && parsed.assets_package_id.is_some() {
         return Err("--asset is only supported by rr assets".to_owned());
     }
@@ -1263,11 +1335,18 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
         return Err("--install-root is only supported by rr bridge and rr extension".to_owned());
     }
 
-    if !matches!(parsed.command, CommandKind::Draft | CommandKind::Triage)
-        && (parsed.draft_all_findings || !parsed.draft_finding_ids.is_empty())
+    if !matches!(
+        parsed.command,
+        CommandKind::Draft | CommandKind::Triage | CommandKind::Clarify
+    ) && (parsed.draft_all_findings || !parsed.draft_finding_ids.is_empty())
     {
         return Err(
-            "--finding/--all-findings are only supported by rr draft and rr triage".to_owned(),
+            "--finding is only supported by rr draft, rr triage, and rr clarify; --all-findings only by rr draft and rr triage".to_owned(),
+        );
+    }
+    if parsed.command == CommandKind::Clarify && parsed.draft_all_findings {
+        return Err(
+            "rr clarify does not support --all-findings; pass a single --finding <id>".to_owned(),
         );
     }
 
@@ -1281,10 +1360,26 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
         return Err("--batch is only supported by rr approve and rr post".to_owned());
     }
 
-    if parsed.command != CommandKind::Edit
-        && (parsed.edit_draft_id.is_some() || parsed.edit_body_file.is_some() || parsed.edit_editor)
+    if parsed.command != CommandKind::Edit && (parsed.edit_draft_id.is_some() || parsed.edit_editor)
     {
-        return Err("--draft/--body-file/--editor are only supported by rr send edit".to_owned());
+        return Err("--draft/--editor are only supported by rr send edit".to_owned());
+    }
+    // --body-file is shared by rr send edit (replacement draft body) and rr
+    // clarify (clarification body from a file); every other command rejects it.
+    if !matches!(parsed.command, CommandKind::Edit | CommandKind::Clarify)
+        && parsed.edit_body_file.is_some()
+    {
+        return Err("--body-file is only supported by rr send edit and rr clarify".to_owned());
+    }
+    if parsed.command != CommandKind::Clarify
+        && (parsed.clarify_body.is_some() || parsed.clarify_list)
+    {
+        return Err("--body/--list are only supported by rr clarify".to_owned());
+    }
+    if parsed.command != CommandKind::Memory && parsed.request_id.is_some() {
+        return Err(
+            "--request is only supported by rr memory accept and rr memory reject".to_owned(),
+        );
     }
 
     if parsed.command != CommandKind::Extension && parsed.extension_browser.is_some() {
@@ -2180,6 +2275,163 @@ fn parse_args(raw_argv: &[String]) -> Result<ParsedArgs, String> {
         }
     }
 
+    if parsed.command == CommandKind::Memory {
+        // review lists pending rows read-only; accept/reject resolve one exact
+        // request id. --request belongs to accept/reject; it is rejected on
+        // review below. --limit caps the review listing.
+        if parsed.dry_run {
+            return Err("rr memory does not support --dry-run".to_owned());
+        }
+        if parsed.provider != "opencode"
+            || !parsed.attention_states.is_empty()
+            || parsed.query_text.is_some()
+            || parsed.query_mode.is_some()
+            || parsed.robot_docs_topic.is_some()
+            || parsed.bridge_command.is_some()
+            || parsed.extension_command.is_some()
+            || parsed.assets_command.is_some()
+            || parsed.extension_browser.is_some()
+            || parsed.extension_package_dir.is_some()
+            || parsed.assets_package_id.is_some()
+            || parsed.bridge_extension_id.is_some()
+            || parsed.bridge_binary_path.is_some()
+            || parsed.bridge_install_root.is_some()
+            || parsed.bridge_output_dir.is_some()
+            || parsed.update_channel != "stable"
+            || parsed.update_version.is_some()
+            || parsed.update_api_root.is_some()
+            || parsed.update_download_root.is_some()
+            || parsed.update_target.is_some()
+            || parsed.update_yes
+            || parsed.draft_all_findings
+            || !parsed.draft_finding_ids.is_empty()
+            || parsed.batch_id.is_some()
+            || parsed.triage_state.is_some()
+            || parsed.edit_body_file.is_some()
+            || parsed.clarify_body.is_some()
+            || parsed.clarify_list
+            || parsed.agent_operation.is_some()
+            || parsed.agent_task_file.is_some()
+            || parsed.agent_request_file.is_some()
+            || parsed.agent_context_file.is_some()
+            || parsed.agent_capability_file.is_some()
+        {
+            return Err(
+                "rr memory only supports <review|accept|reject> plus --repo, --pr, --session, --request (accept/reject), --limit (review), and --robot".to_owned(),
+            );
+        }
+        match parsed.memory_command {
+            Some(MemoryCommandKind::Review) => {
+                if parsed.request_id.is_some() {
+                    return Err(
+                        "rr memory review does not support --request; --request is for rr memory accept/reject".to_owned(),
+                    );
+                }
+            }
+            Some(MemoryCommandKind::Accept | MemoryCommandKind::Reject) => {
+                if parsed.limit.is_some() {
+                    return Err(
+                        "rr memory accept/reject does not support --limit; --limit is for rr memory review".to_owned(),
+                    );
+                }
+            }
+            None => {}
+        }
+    }
+
+    if parsed.command == CommandKind::Timeline {
+        if parsed.dry_run {
+            return Err("rr timeline does not support --dry-run".to_owned());
+        }
+        if parsed.provider != "opencode"
+            || !parsed.attention_states.is_empty()
+            || parsed.limit.is_some()
+            || parsed.query_text.is_some()
+            || parsed.query_mode.is_some()
+            || parsed.robot_docs_topic.is_some()
+            || parsed.bridge_command.is_some()
+            || parsed.extension_command.is_some()
+            || parsed.assets_command.is_some()
+            || parsed.extension_browser.is_some()
+            || parsed.extension_package_dir.is_some()
+            || parsed.assets_package_id.is_some()
+            || parsed.bridge_extension_id.is_some()
+            || parsed.bridge_binary_path.is_some()
+            || parsed.bridge_install_root.is_some()
+            || parsed.bridge_output_dir.is_some()
+            || parsed.update_channel != "stable"
+            || parsed.update_version.is_some()
+            || parsed.update_api_root.is_some()
+            || parsed.update_download_root.is_some()
+            || parsed.update_target.is_some()
+            || parsed.update_yes
+            || parsed.draft_all_findings
+            || !parsed.draft_finding_ids.is_empty()
+            || parsed.batch_id.is_some()
+            || parsed.triage_state.is_some()
+            || parsed.edit_body_file.is_some()
+            || parsed.request_id.is_some()
+            || parsed.clarify_body.is_some()
+            || parsed.clarify_list
+            || parsed.agent_operation.is_some()
+            || parsed.agent_task_file.is_some()
+            || parsed.agent_request_file.is_some()
+            || parsed.agent_context_file.is_some()
+            || parsed.agent_capability_file.is_some()
+        {
+            return Err(
+                "rr timeline only supports --repo, --pr, --session, and --robot".to_owned(),
+            );
+        }
+    }
+
+    if parsed.command == CommandKind::Clarify {
+        // create: --finding + (--body | --body-file). list: --list [--session].
+        // The create-vs-list argument validation (fail-closed blocked envelope)
+        // lives in handle_clarify so --robot callers get a JSON envelope.
+        if parsed.dry_run {
+            return Err("rr clarify does not support --dry-run".to_owned());
+        }
+        if parsed.provider != "opencode"
+            || !parsed.attention_states.is_empty()
+            || parsed.limit.is_some()
+            || parsed.query_text.is_some()
+            || parsed.query_mode.is_some()
+            || parsed.robot_docs_topic.is_some()
+            || parsed.bridge_command.is_some()
+            || parsed.extension_command.is_some()
+            || parsed.assets_command.is_some()
+            || parsed.extension_browser.is_some()
+            || parsed.extension_package_dir.is_some()
+            || parsed.assets_package_id.is_some()
+            || parsed.bridge_extension_id.is_some()
+            || parsed.bridge_binary_path.is_some()
+            || parsed.bridge_install_root.is_some()
+            || parsed.bridge_output_dir.is_some()
+            || parsed.update_channel != "stable"
+            || parsed.update_version.is_some()
+            || parsed.update_api_root.is_some()
+            || parsed.update_download_root.is_some()
+            || parsed.update_target.is_some()
+            || parsed.update_yes
+            || parsed.batch_id.is_some()
+            || parsed.triage_state.is_some()
+            || parsed.request_id.is_some()
+            || parsed.agent_operation.is_some()
+            || parsed.agent_task_file.is_some()
+            || parsed.agent_request_file.is_some()
+            || parsed.agent_context_file.is_some()
+            || parsed.agent_capability_file.is_some()
+        {
+            return Err(
+                "rr clarify only supports --repo, --pr, --session, --finding, --body, --body-file, --list, and --robot".to_owned(),
+            );
+        }
+        if parsed.clarify_body.is_some() && parsed.edit_body_file.is_some() {
+            return Err("rr clarify accepts either --body or --body-file, not both".to_owned());
+        }
+    }
+
     Ok(parsed)
 }
 
@@ -2215,6 +2467,9 @@ fn execute_command(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
         CommandKind::Status => handle_status(parsed, runtime),
         CommandKind::Tui => handle_tui(parsed, runtime),
         CommandKind::Assets => handle_assets(parsed, runtime),
+        CommandKind::Memory => handle_memory(parsed, runtime),
+        CommandKind::Timeline => handle_timeline(parsed, runtime),
+        CommandKind::Clarify => handle_clarify(parsed, runtime),
     }
 }
 
@@ -13753,6 +14008,11 @@ fn handle_robot_docs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRespon
                 json!({"command": "rr prs", "required_formats": ["json"], "optional_formats": ["compact"]}),
                 json!({"command": "rr findings", "required_formats": ["json"], "optional_formats": ["compact"]}),
                 json!({"command": "rr search", "required_formats": ["json"], "optional_formats": ["compact"]}),
+                json!({"command": "rr timeline", "required_formats": ["json"], "optional_formats": []}),
+                json!({"command": "rr memory review", "required_formats": ["json"], "optional_formats": []}),
+                json!({"command": "rr memory accept", "required_formats": ["json"], "optional_formats": []}),
+                json!({"command": "rr memory reject", "required_formats": ["json"], "optional_formats": []}),
+                json!({"command": "rr clarify", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr triage", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr draft", "required_formats": ["json"], "optional_formats": []}),
                 json!({"command": "rr approve", "required_formats": ["json"], "optional_formats": []}),
@@ -13826,6 +14086,9 @@ fn handle_robot_docs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandRespon
                 json!({"command": "rr extension", "schema_id": "rr.robot.extension.v1"}),
                 json!({"command": "rr findings", "schema_id": "rr.robot.findings.v1"}),
                 json!({"command": "rr status", "schema_id": "rr.robot.status.v1"}),
+                json!({"command": "rr memory", "schema_id": "rr.robot.memory.v1"}),
+                json!({"command": "rr timeline", "schema_id": "rr.robot.timeline.v1"}),
+                json!({"command": "rr clarify", "schema_id": "rr.robot.clarify.v1"}),
                 json!({"command": "rr robot-docs", "schema_id": "rr.robot.robot_docs.v1"}),
                 json!({"command": "rr tui", "schema_id": "rr.robot.tui.v1"}),
                 json!({"command": "rr <command> (harness)", "schema_id": "rr.robot.harness_command.v1", "surface": "inside_roger_harness"}),
@@ -16211,6 +16474,622 @@ fn handle_findings(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
     }
 }
 
+/// Resolve the session for a read/mutation command exactly the way handle_status
+/// and handle_findings do (explicit --session, else repo/PR inference against the
+/// current worktree). Returns the resolved session, or a ready-to-return
+/// CommandResponse for the picker/error cases.
+fn resolve_session_for_command(
+    parsed: &ParsedArgs,
+    runtime: &CliRuntime,
+    store: &RogerStore,
+    context_label: &str,
+) -> std::result::Result<ReviewSessionRecord, CommandResponse> {
+    let binding_context = LaunchBindingContext::for_cwd(&runtime.cwd);
+    let repository = resolve_repository(parsed.repo.clone(), &runtime.cwd);
+    let resolution = match store.resolve_session_reentry_with_context(
+        ResolveSessionReentry {
+            explicit_session_id: parsed.session_id.clone(),
+            repository,
+            pull_request_number: parsed.pr,
+            source_surface: LaunchSurface::Cli,
+            ui_target: Some(cli_config::UI_TARGET.to_owned()),
+            instance_preference: Some(cli_config::INSTANCE_PREFERENCE.to_owned()),
+        },
+        binding_context.storage_local_root(),
+    ) {
+        Ok(resolution) => resolution,
+        Err(err) => {
+            return Err(error_response(format!(
+                "failed to resolve {context_label} context: {err}"
+            )));
+        }
+    };
+    match resolution {
+        SessionReentryResolution::Resolved { session, .. } => Ok(session),
+        SessionReentryResolution::PickerRequired { reason, candidates } => {
+            Err(blocked_picker_response(reason, candidates))
+        }
+    }
+}
+
+fn handle_memory(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
+    let store = match open_store_or_response(runtime, "rr memory") {
+        Ok(store) => store,
+        Err(response) => return response,
+    };
+    match parsed.memory_command {
+        Some(MemoryCommandKind::Review) => handle_memory_review(parsed, runtime, &store),
+        Some(MemoryCommandKind::Accept) => {
+            handle_memory_resolution(parsed, &store, MemoryReviewDecision::Accept)
+        }
+        Some(MemoryCommandKind::Reject) => {
+            handle_memory_resolution(parsed, &store, MemoryReviewDecision::Reject)
+        }
+        None => error_response("rr memory reached its handler without a subcommand".to_owned()),
+    }
+}
+
+/// Render a durable memory-review request row for the listing/resolution envelope.
+fn memory_review_request_json(request: &MemoryReviewRequestRecord) -> Value {
+    json!({
+        "id": request.id,
+        "kind": request.request_kind,
+        "statement": request.statement,
+        "scope": request.scope_key,
+        "rationale": request.rationale,
+        "source": request.source,
+        "status": request.status,
+        "memory_class": request.memory_class,
+        "normalized_key": request.normalized_key,
+        "review_session_id": request.review_session_id,
+        "review_run_id": request.review_run_id,
+        "created_at": request.created_at,
+    })
+}
+
+fn handle_memory_review(
+    parsed: &ParsedArgs,
+    runtime: &CliRuntime,
+    store: &RogerStore,
+) -> CommandResponse {
+    // Read-only listing of pending MemoryReviewRequest rows. Scope by the
+    // resolved repository (repo:<repository>), matching rr status' memory
+    // posture block; an explicit --session narrows the rows further.
+    let repository = resolve_repository(parsed.repo.clone(), &runtime.cwd);
+    let scope_key = repository.as_ref().map(|repo| format!("repo:{repo}"));
+    let limit = parsed.limit.unwrap_or(200);
+    let mut pending = match store.pending_memory_review_requests(scope_key.as_deref(), limit) {
+        Ok(pending) => pending,
+        Err(err) => {
+            return error_response(format!(
+                "failed to load pending memory review requests: {err}"
+            ));
+        }
+    };
+    if let Some(session_id) = parsed.session_id.as_deref() {
+        pending.retain(|request| request.review_session_id == session_id);
+    }
+
+    let items = pending
+        .iter()
+        .map(memory_review_request_json)
+        .collect::<Vec<_>>();
+    let count = items.len();
+    CommandResponse {
+        outcome: if count == 0 {
+            OutcomeKind::Empty
+        } else {
+            OutcomeKind::Complete
+        },
+        data: json!({
+            "items": items,
+            "count": count,
+            "scope_key": scope_key,
+            "filters_applied": {
+                "repository": repository,
+                "session_id": parsed.session_id,
+            },
+            "queryable_surfaces": {
+                "accept_command": "rr memory accept --request <id> --robot",
+                "reject_command": "rr memory reject --request <id> --robot",
+            },
+        }),
+        warnings: Vec::new(),
+        repair_actions: Vec::new(),
+        message: if count == 0 {
+            "no pending memory review requests".to_owned()
+        } else {
+            format!("{count} pending memory review requests")
+        },
+    }
+}
+
+fn handle_memory_resolution(
+    parsed: &ParsedArgs,
+    store: &RogerStore,
+    decision: MemoryReviewDecision,
+) -> CommandResponse {
+    let decision_label = match decision {
+        MemoryReviewDecision::Accept => "accept",
+        MemoryReviewDecision::Reject => "reject",
+    };
+    let Some(request_id) = parsed.request_id.as_deref() else {
+        return blocked_response(
+            format!("rr memory {decision_label} requires --request <id>"),
+            vec![
+                "pass --request <id> naming a pending memory review request".to_owned(),
+                "list pending requests with rr memory review --robot".to_owned(),
+            ],
+            json!({"reason_code": "request_id_required"}),
+        );
+    };
+
+    // Fail closed on unknown or already-resolved request ids with a precise
+    // reason code before touching the shared resolution op.
+    let existing = match store.memory_review_request(request_id) {
+        Ok(existing) => existing,
+        Err(err) => {
+            return error_response(format!("failed to load memory review request: {err}"));
+        }
+    };
+    let Some(existing) = existing else {
+        return blocked_response(
+            format!("rr memory {decision_label} could not find request {request_id}"),
+            vec!["list pending requests with rr memory review --robot".to_owned()],
+            json!({
+                "reason_code": "unknown_request_id",
+                "request_id": request_id,
+            }),
+        );
+    };
+    if existing.status != roger_storage::MEMORY_REVIEW_STATUS_PENDING {
+        return blocked_response(
+            format!(
+                "rr memory {decision_label} is blocked because request {request_id} is already resolved as {}",
+                existing.status
+            ),
+            vec!["list still-pending requests with rr memory review --robot".to_owned()],
+            json!({
+                "reason_code": "already_resolved",
+                "request_id": request_id,
+                "status": existing.status,
+                "resolution_actor": existing.resolution_actor,
+                "resolved_at": existing.resolved_at,
+            }),
+        );
+    }
+
+    match roger_review_ops::resolve_memory_review(store, request_id, decision, "operator:cli") {
+        Ok(outcome) => CommandResponse {
+            outcome: OutcomeKind::Complete,
+            data: json!({
+                "decision": decision_label,
+                "request": memory_review_request_json(&outcome.request),
+                "resulting_memory_item_id": outcome.resulting_memory_item_id,
+                "materialized_new_item": outcome.materialized_new_item,
+                "mutation_guard": {
+                    "github_posture": "blocked",
+                    "local_only": true,
+                },
+            }),
+            warnings: Vec::new(),
+            repair_actions: Vec::new(),
+            message: match decision {
+                MemoryReviewDecision::Accept => format!(
+                    "accepted memory review request {request_id}{}",
+                    outcome
+                        .resulting_memory_item_id
+                        .as_deref()
+                        .map(|id| format!(" -> memory item {id}"))
+                        .unwrap_or_default()
+                ),
+                MemoryReviewDecision::Reject => {
+                    format!("rejected memory review request {request_id}")
+                }
+            },
+        },
+        Err(roger_review_ops::ReviewOpError::Invalid(message)) => blocked_response(
+            message,
+            vec!["list pending requests with rr memory review --robot".to_owned()],
+            json!({
+                "reason_code": "invalid_memory_review_resolution",
+                "request_id": request_id,
+            }),
+        ),
+        Err(roger_review_ops::ReviewOpError::Storage(message)) => error_response(format!(
+            "failed to resolve memory review request: {message}"
+        )),
+    }
+}
+
+fn handle_timeline(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
+    let store = match open_store_or_response(runtime, "rr timeline") {
+        Ok(store) => store,
+        Err(response) => return response,
+    };
+
+    // Resolve the session the same way rr status / rr findings do. A target with
+    // no session yet is an honest Empty, not a block.
+    let binding_context = LaunchBindingContext::for_cwd(&runtime.cwd);
+    let repository = resolve_repository(parsed.repo.clone(), &runtime.cwd);
+    let resolution = match store.resolve_session_reentry_with_context(
+        ResolveSessionReentry {
+            explicit_session_id: parsed.session_id.clone(),
+            repository,
+            pull_request_number: parsed.pr,
+            source_surface: LaunchSurface::Cli,
+            ui_target: Some(cli_config::UI_TARGET.to_owned()),
+            instance_preference: Some(cli_config::INSTANCE_PREFERENCE.to_owned()),
+        },
+        binding_context.storage_local_root(),
+    ) {
+        Ok(resolution) => resolution,
+        Err(err) => return error_response(format!("failed to resolve timeline context: {err}")),
+    };
+
+    let session = match resolution {
+        SessionReentryResolution::Resolved { session, .. } => session,
+        SessionReentryResolution::PickerRequired { reason, candidates } => {
+            if candidates.is_empty() {
+                return CommandResponse {
+                    outcome: OutcomeKind::Empty,
+                    data: json!({
+                        "reason": reason,
+                        "runs": [],
+                        "posted_actions": [],
+                        "run_count": 0,
+                        "posted_action_count": 0,
+                        "candidates": [],
+                    }),
+                    warnings: Vec::new(),
+                    repair_actions: vec![
+                        "run rr review --pr <number> to create a new session".to_owned(),
+                    ],
+                    message: "no timeline available: no session found for this target".to_owned(),
+                };
+            }
+            return blocked_picker_response(reason, candidates);
+        }
+    };
+
+    // review_runs_for_session returns newest-first; present the timeline
+    // oldest-first so the run -> stage -> posted-action history reads
+    // chronologically (mirrors the TUI Timeline screen's data set).
+    let mut runs = match store.review_runs_for_session(&session.id) {
+        Ok(runs) => runs,
+        Err(err) => return error_response(format!("failed to load review runs: {err}")),
+    };
+    runs.reverse();
+
+    let mut run_items = Vec::with_capacity(runs.len());
+    for run in &runs {
+        let stages = match store.worker_stage_results_for_run(&session.id, &run.id) {
+            Ok(stages) => stages,
+            Err(err) => {
+                return error_response(format!(
+                    "failed to load stage results for run {}: {err}",
+                    run.id
+                ));
+            }
+        };
+        let stage_items = stages
+            .iter()
+            .map(|stage| {
+                json!({
+                    "stage": stage.stage,
+                    "task_kind": stage.task_kind,
+                    "outcome": stage.outcome,
+                    "summary": stage.summary,
+                    "review_task_id": stage.review_task_id,
+                    "created_at": stage.created_at,
+                })
+            })
+            .collect::<Vec<_>>();
+        run_items.push(json!({
+            "run_id": run.id,
+            "run_kind": run.run_kind,
+            "continuity_quality": run.continuity_quality,
+            "created_at": run.created_at,
+            "stages": stage_items,
+        }));
+    }
+
+    let batches = match store.outbound_draft_batches_for_session(&session.id) {
+        Ok(batches) => batches,
+        Err(err) => return error_response(format!("failed to load draft batches: {err}")),
+    };
+    let mut posted_actions = Vec::new();
+    for batch in &batches {
+        let actions = match store.posted_actions_for_batch(&batch.id) {
+            Ok(actions) => actions,
+            Err(err) => {
+                return error_response(format!(
+                    "failed to load posted actions for batch {}: {err}",
+                    batch.id
+                ));
+            }
+        };
+        for action in actions {
+            posted_actions.push(action);
+        }
+    }
+    posted_actions.sort_by(|left, right| {
+        left.posted_at
+            .cmp(&right.posted_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let posted_items = posted_actions
+        .iter()
+        .map(|action| {
+            // Emit a stable lowercase status string so the robot envelope stays
+            // consistent with the rest of the outbound surface (the enum itself
+            // has no snake_case wire rename).
+            let status = match action.status {
+                roger_app_core::PostedActionStatus::Succeeded => "succeeded",
+                roger_app_core::PostedActionStatus::Failed => "failed",
+                roger_app_core::PostedActionStatus::Partial => "partial",
+            };
+            json!({
+                "action_id": action.id,
+                "batch_id": action.draft_batch_id,
+                "remote_identifier": action.remote_identifier,
+                "status": status,
+                "failure_code": action.failure_code,
+                "posted_at": action.posted_at,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let run_count = run_items.len();
+    let posted_action_count = posted_items.len();
+    CommandResponse {
+        outcome: if run_count == 0 && posted_action_count == 0 {
+            OutcomeKind::Empty
+        } else {
+            OutcomeKind::Complete
+        },
+        data: json!({
+            "session_id": session.id,
+            "runs": run_items,
+            "posted_actions": posted_items,
+            "run_count": run_count,
+            "posted_action_count": posted_action_count,
+            "filters_applied": {
+                "repository": session.review_target.repository,
+                "pull_request": session.review_target.pull_request_number,
+            },
+        }),
+        warnings: Vec::new(),
+        repair_actions: Vec::new(),
+        message: if run_count == 0 && posted_action_count == 0 {
+            "no timeline history for this session".to_owned()
+        } else {
+            format!("timeline: {run_count} runs, {posted_action_count} posted actions")
+        },
+    }
+}
+
+/// Render a durable clarification request row for the clarify envelope.
+fn clarification_request_json(request: &roger_storage::ClarificationRequestRecord) -> Value {
+    json!({
+        "id": request.id,
+        "review_session_id": request.review_session_id,
+        "review_run_id": request.review_run_id,
+        "finding_id": request.finding_id,
+        "source": request.source,
+        "body": request.body,
+        "status": request.status,
+        "created_at": request.created_at,
+        "resolved_at": request.resolved_at,
+    })
+}
+
+fn handle_clarify(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
+    let store = match open_store_or_response(runtime, "rr clarify") {
+        Ok(store) => store,
+        Err(response) => return response,
+    };
+
+    if parsed.clarify_list {
+        // Read-only listing of open clarifications, optionally scoped to an
+        // explicit --session.
+        let limit = parsed.limit.unwrap_or(200);
+        let requests = match store.list_clarification_requests(ClarificationRequestQuery {
+            review_session_id: parsed.session_id.as_deref(),
+            status: Some(roger_storage::CLARIFICATION_STATUS_OPEN),
+            limit,
+        }) {
+            Ok(requests) => requests,
+            Err(err) => {
+                return error_response(format!("failed to list clarification requests: {err}"));
+            }
+        };
+        let items = requests
+            .iter()
+            .map(clarification_request_json)
+            .collect::<Vec<_>>();
+        let count = items.len();
+        return CommandResponse {
+            outcome: if count == 0 {
+                OutcomeKind::Empty
+            } else {
+                OutcomeKind::Complete
+            },
+            data: json!({
+                "items": items,
+                "count": count,
+                "filters_applied": {
+                    "session_id": parsed.session_id,
+                    "status": "open",
+                },
+            }),
+            warnings: Vec::new(),
+            repair_actions: Vec::new(),
+            message: if count == 0 {
+                "no open clarification requests".to_owned()
+            } else {
+                format!("{count} open clarification requests")
+            },
+        };
+    }
+
+    // Create path: requires exactly one --finding <id> and a non-empty body
+    // (from --body or --body-file). Required-argument validation lives here so
+    // --robot callers get a blocked JSON envelope instead of plain text.
+    let Some(finding_id) = parsed.draft_finding_ids.first().cloned() else {
+        return blocked_response(
+            "rr clarify requires --finding <id> to create a clarification (or pass --list to list open clarifications)".to_owned(),
+            vec![
+                "pass --finding <id> naming the finding to clarify".to_owned(),
+                "or run rr clarify --list to list open clarifications".to_owned(),
+            ],
+            json!({"reason_code": "finding_required"}),
+        );
+    };
+    if parsed.draft_finding_ids.len() > 1 {
+        return blocked_response(
+            "rr clarify creates one clarification against a single --finding <id>".to_owned(),
+            vec!["pass a single --finding <id>".to_owned()],
+            json!({
+                "reason_code": "single_finding_required",
+                "finding_ids": parsed.draft_finding_ids,
+            }),
+        );
+    }
+
+    let body = match (parsed.clarify_body.as_ref(), parsed.edit_body_file.as_ref()) {
+        (Some(body), None) => body.clone(),
+        (None, Some(path)) => match fs::read_to_string(path) {
+            Ok(body) => body,
+            Err(err) => {
+                return blocked_response(
+                    format!(
+                        "rr clarify could not read --body-file {}: {err}",
+                        path.display()
+                    ),
+                    vec!["pass a readable --body-file <path> or use --body <text>".to_owned()],
+                    json!({
+                        "reason_code": "body_file_unreadable",
+                        "body_file": path.display().to_string(),
+                    }),
+                );
+            }
+        },
+        (None, None) => {
+            return blocked_response(
+                "rr clarify requires a clarification body via --body <text> or --body-file <path>"
+                    .to_owned(),
+                vec!["pass --body <text> or --body-file <path>".to_owned()],
+                json!({"reason_code": "clarification_body_required"}),
+            );
+        }
+        (Some(_), Some(_)) => {
+            // Rejected at parse time; kept fail-closed for parity.
+            return blocked_response(
+                "rr clarify accepts either --body or --body-file, not both".to_owned(),
+                vec!["pass exactly one of --body or --body-file".to_owned()],
+                json!({"reason_code": "conflicting_body_sources"}),
+            );
+        }
+    };
+    if body.trim().is_empty() {
+        return blocked_response(
+            "rr clarify requires a non-empty clarification body".to_owned(),
+            vec!["pass a non-empty --body <text> or --body-file <path>".to_owned()],
+            json!({"reason_code": "clarification_body_required"}),
+        );
+    }
+
+    let session = match resolve_session_for_command(parsed, runtime, &store, "clarify") {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+
+    // Fail closed if the finding does not exist or is not bound to the resolved
+    // session, so a clarification never links to a foreign finding.
+    let finding = match store.materialized_finding(&finding_id) {
+        Ok(finding) => finding,
+        Err(err) => return error_response(format!("failed to load finding {finding_id}: {err}")),
+    };
+    let Some(finding) = finding else {
+        return blocked_response(
+            format!("rr clarify could not find finding {finding_id}"),
+            vec![format!(
+                "inspect rr findings --session {} --robot for the current finding ids",
+                session.id
+            )],
+            json!({
+                "reason_code": "unknown_finding_id",
+                "session_id": session.id,
+                "finding_id": finding_id,
+            }),
+        );
+    };
+    if finding.session_id != session.id {
+        return blocked_response(
+            format!(
+                "rr clarify could not bind finding {finding_id} to the resolved session {}",
+                session.id
+            ),
+            vec![format!(
+                "inspect rr findings --session {} --robot for the current finding ids",
+                session.id
+            )],
+            json!({
+                "reason_code": "unknown_finding_id",
+                "session_id": session.id,
+                "finding_id": finding_id,
+                "finding_session_id": finding.session_id,
+            }),
+        );
+    }
+
+    let review_run_id = match store.latest_review_run(&session.id) {
+        Ok(run) => run.map(|run| run.id),
+        Err(err) => return error_response(format!("failed to load latest run: {err}")),
+    };
+
+    match roger_review_ops::create_clarification(
+        &store,
+        CreateClarificationRequest {
+            review_session_id: &session.id,
+            review_run_id: review_run_id.as_deref(),
+            finding_id: Some(&finding_id),
+            source: ClarificationSource::Operator,
+            body: &body,
+            external_ref: None,
+        },
+    ) {
+        Ok(request) => CommandResponse {
+            outcome: OutcomeKind::Complete,
+            data: json!({
+                "clarification": clarification_request_json(&request),
+                "mutation_guard": {
+                    "github_posture": "blocked",
+                    "local_only": true,
+                },
+                "queryable_surfaces": {
+                    "list_command": format!("rr clarify --list --session {} --robot", session.id),
+                },
+            }),
+            warnings: Vec::new(),
+            repair_actions: Vec::new(),
+            message: format!(
+                "created clarification {} against finding {finding_id}",
+                request.id
+            ),
+        },
+        Err(roger_review_ops::ReviewOpError::Invalid(message)) => blocked_response(
+            message,
+            vec!["pass a non-empty --body <text> or --body-file <path>".to_owned()],
+            json!({"reason_code": "clarification_body_required"}),
+        ),
+        Err(roger_review_ops::ReviewOpError::Storage(message)) => {
+            error_response(format!("failed to create clarification: {message}"))
+        }
+    }
+}
+
 fn render_output(parsed: &ParsedArgs, mut response: CommandResponse) -> CliRunResult {
     if parsed.command == CommandKind::Agent {
         let stdout = match serde_json::to_string_pretty(&response.data) {
@@ -16318,6 +17197,9 @@ fn render_output(parsed: &ParsedArgs, mut response: CommandResponse) -> CliRunRe
             | CommandKind::Approve
             | CommandKind::Post
             | CommandKind::RobotDocs
+            | CommandKind::Memory
+            | CommandKind::Timeline
+            | CommandKind::Clarify
     ) || response.outcome == OutcomeKind::Blocked
     {
         // Session candidates and `rr sessions` listings render as a grouped,
@@ -17811,6 +18693,9 @@ fn help_topic_for(argv: &[String]) -> Option<&'static str> {
         "search" => Some("search"),
         "sessions" => Some("sessions"),
         "status" => Some("status"),
+        "timeline" => Some("timeline"),
+        "memory" => Some("memory"),
+        "clarify" => Some("clarify"),
         "send" => Some("send"),
         "triage" => Some("triage"),
         "draft" => Some("draft"),
@@ -17863,6 +18748,15 @@ fn command_usage(topic: &str) -> String {
         }
         "status" => {
             "rr status — session attention snapshot.\n\nUsage:\n  rr status [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]"
+        }
+        "timeline" => {
+            "rr timeline — chronological run -> stage -> posted-action history for a session (the same data the TUI Timeline screen shows).\n\nUsage:\n  rr timeline [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]"
+        }
+        "memory" => {
+            "rr memory — review and resolve durable memory-review candidates.\n\nUsage:\n  rr memory review [--repo owner/repo] [--pr <number>] [--session <id>] [--limit <n>] [--robot]   list pending requests\n  rr memory accept --request <id> [--robot]   materialize an accepted memory item\n  rr memory reject --request <id> [--robot]   resolve (reject) a candidate\n\naccept/reject fail closed on unknown or already-resolved request ids."
+        }
+        "clarify" => {
+            "rr clarify — create and list durable clarification requests.\n\nUsage:\n  rr clarify --finding <id> (--body <text> | --body-file <path>) [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]   create\n  rr clarify --list [--session <id>] [--limit <n>] [--robot]                                                                    list open clarifications\n\nCreation binds the clarification to the finding's session lineage and fails closed on a missing or unknown --finding."
         }
         "send" => {
             "rr send — explicitly triage/draft/edit/approve/post outbound communication.\n\nUsage:\n  rr send triage --finding <id>... --state accepted|ignored|needs_follow_up|resolved [--session <id>] [--robot]\n  rr send draft (--finding <id>... | --all-findings) [--session <id>] [--robot]\n  rr send edit --draft <draft-id> (--body-file <path> | --editor)\n  rr send approve --batch <draft-batch-id> [--session <id>] [--robot]\n  rr send post --batch <draft-batch-id> [--session <id>] [--robot]\n\nrr send edit revises a local outbound draft body; editing an approved batch revokes its approval and forces re-approval. It is a local human action and does not support --robot.\nThe other subcommands route to the same fail-closed handler as the old rr triage/draft/approve/post name and emit the same robot schema id."
@@ -17950,6 +18844,14 @@ Inspect and search review output:
   rr findings [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]
   rr findings --query <text> [--query-mode auto|exact_lookup|recall|related_context|candidate_audit] [--repo owner/repo] [--limit <n>] [--robot]
   rr findings --sessions [--repo owner/repo] [--pr <number>] [--attention <state[,state...]>] [--limit <n>] [--robot]
+  rr timeline [--repo owner/repo] [--pr <number>] [--session <id>] [--robot]   run -> stage -> posted-action history
+
+Resolve memory candidates and clarifications:
+  rr memory review [--repo owner/repo] [--pr <number>] [--session <id>] [--limit <n>] [--robot]   list pending memory-review requests
+  rr memory accept --request <id> [--robot]                                                        materialize an accepted memory candidate
+  rr memory reject --request <id> [--robot]                                                        resolve (reject) a memory candidate
+  rr clarify --finding <id> (--body <text> | --body-file <path>) [--session <id>] [--robot]         create a durable clarification
+  rr clarify --list [--session <id>] [--robot]                                                      list open clarifications
 
 Send to GitHub, explicitly gated (rr send <sub>):
   rr send triage --finding <id>... --state accepted|ignored|needs_follow_up|resolved [--session <id>] [--robot]
@@ -18227,8 +19129,17 @@ mod tests {
         ]))
         .expect_err("--draft must be edit-only");
         assert!(
-            err.contains("--draft/--body-file/--editor are only supported by rr send edit"),
+            err.contains("--draft/--editor are only supported by rr send edit"),
             "unexpected error: {err}"
+        );
+
+        // --body-file is now shared by rr send edit and rr clarify, so it is
+        // rejected on unrelated commands with the shared message.
+        let body_err = parse_args(&argv(&["approve", "--body-file", "/tmp/body.md"]))
+            .expect_err("--body-file must be edit/clarify-only");
+        assert!(
+            body_err.contains("--body-file is only supported by rr send edit and rr clarify"),
+            "unexpected error: {body_err}"
         );
     }
 
