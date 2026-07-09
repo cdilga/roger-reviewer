@@ -212,6 +212,68 @@ impl BackendEventSource for RogerTtyEventSource {
     }
 }
 
+/// Suspend the cockpit's raw-mode alternate screen, run `program` with `args`
+/// on the inherited tty (with `RR_STORE_ROOT` pointing at `store_root` so the
+/// child reads the same canonical store), then restore raw mode and the
+/// alternate screen. This is the deliberate dropout/return path the TUI
+/// contract requires — the same suspend-spawn-resume mechanism as
+/// [`suspend_and_edit`], but running a Roger subprocess (e.g. `rr review
+/// --resume --session <id>`) instead of `$EDITOR`.
+///
+/// Returns the child's exit status. The caller must request a full repaint
+/// afterwards (the alternate screen was clobbered).
+pub(crate) fn suspend_and_run(
+    program: &std::path::Path,
+    args: &[String],
+    store_root: &std::path::Path,
+) -> io::Result<std::process::ExitStatus> {
+    // Snapshot the current (raw) termios and switch to cooked mode so the child
+    // process starts from a sane line discipline; restored afterwards.
+    // SAFETY: termios calls on the stdin fd with checked returns.
+    let saved = unsafe {
+        let mut t: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(STDIN_FD, &mut t) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        t
+    };
+    // SAFETY: re-enabling canonical/echo/signal flags on a copy of `saved`.
+    unsafe {
+        let mut cooked = saved;
+        cooked.c_lflag |= libc::ICANON | libc::ECHO | libc::ISIG | libc::IEXTEN;
+        cooked.c_iflag |= libc::ICRNL | libc::IXON;
+        cooked.c_oflag |= libc::OPOST | libc::ONLCR;
+        cooked.c_cc[libc::VMIN] = 1;
+        cooked.c_cc[libc::VTIME] = 0;
+        let _ = libc::tcsetattr(STDIN_FD, libc::TCSANOW, &cooked);
+    }
+    {
+        let mut stdout = io::stdout();
+        let _ = stdout.write_all(ALT_SCREEN_LEAVE);
+        let _ = stdout.write_all(CURSOR_SHOW);
+        let _ = stdout.flush();
+    }
+
+    let status = std::process::Command::new(program)
+        .args(args)
+        .env("RR_STORE_ROOT", store_root)
+        .status();
+
+    // Restore raw mode + alternate screen regardless of the child outcome.
+    // SAFETY: restoring the captured termios snapshot.
+    unsafe {
+        let _ = libc::tcsetattr(STDIN_FD, libc::TCSANOW, &saved);
+    }
+    {
+        let mut stdout = io::stdout();
+        let _ = stdout.write_all(ALT_SCREEN_ENTER);
+        let _ = stdout.write_all(CURSOR_HIDE);
+        let _ = stdout.flush();
+    }
+
+    status
+}
+
 fn terminal_size() -> io::Result<(u16, u16)> {
     // SAFETY: TIOCGWINSZ fills a zero-initialized winsize for a valid fd.
     unsafe {

@@ -19,6 +19,8 @@ doctest = false
 ftui = "0.4.0"
 roger-app-core = { path = "../app-core" }
 roger-storage = { path = "../storage" }
+roger-review-ops = { path = "../review-ops" }
+roger-github-adapter = { path = "../github-adapter" }
 
 # The raw-mode event source is termios-based; interactive support is
 # unix-only and rr tui fails closed on Windows.

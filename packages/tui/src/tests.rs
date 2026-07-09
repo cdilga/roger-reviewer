@@ -1,12 +1,12 @@
 use crate::backend::CockpitBackend;
 use crate::model::{
-    ApproveOutcome, CLARIFY_HINT, CockpitEntry, CockpitKey, CockpitModel, DecisionEventRow,
-    DraftBatchRow, DraftItemRow, ELEVATED_MUTATION_HINT, EMPTY_STORE_HINT, EvidenceRow,
-    FindingDetail, FindingRow, GroupKey, InputMode, KeyOutcome, MemoryPostureRow,
-    MemoryReviewResolutionRow, MemoryReviewRow, ModelEffect, OutboundLinkRow, Overlay,
-    PickerCandidate, PostedActionRow, Screen, SearchHitRow, SearchMode, SearchView,
-    SessionHomeView, SessionRow, SortKey, StageResultRow, TimelineEntry, TimelineRunRow,
-    TimelineView, TriageAction,
+    ApproveOutcome, ClarificationRow, CockpitEntry, CockpitKey, CockpitModel, CreateDraftOutcome,
+    DecisionEventRow, DraftBatchRow, DraftItemRow, EMPTY_STORE_HINT, ElevationKind,
+    EvidenceExcerptRow, EvidenceRow, ExcerptLine, FindingDetail, FindingRow, GroupKey, InputMode,
+    KeyOutcome, MemoryPostureRow, MemoryReviewResolutionRow, MemoryReviewRow, ModelEffect,
+    OutboundLinkRow, Overlay, PickerCandidate, PostBatchOutcome, PostedActionRow, Screen,
+    SearchHitRow, SearchMode, SearchView, SessionHomeView, SessionRow, SortKey, StageResultRow,
+    TimelineEntry, TimelineRunRow, TimelineView, TriageAction,
 };
 
 #[derive(Default)]
@@ -40,6 +40,20 @@ struct FakeBackend {
     /// Recorded `resolve_memory_review(request_id, accept)` calls.
     resolve_review_calls: Vec<(String, bool)>,
     fail_resolve_review: bool,
+    /// Recorded `materialize_draft_batch(session_id, finding_ids)` calls.
+    materialize_calls: Vec<(String, Vec<String>)>,
+    materialize_outcome: Option<CreateDraftOutcome>,
+    fail_materialize: bool,
+    /// Recorded `post_batch(session_id, batch_id)` calls.
+    post_calls: Vec<(String, String)>,
+    post_outcome: Option<PostBatchOutcome>,
+    fail_post: bool,
+    /// Recorded `create_clarification(session_id, finding_id, body)` calls.
+    clarification_calls: Vec<(String, Option<String>, String)>,
+    fail_clarification: bool,
+    /// Evidence excerpt returned by `load_evidence_excerpt`.
+    evidence_excerpt: Option<EvidenceExcerptRow>,
+    fail_evidence_excerpt: bool,
 }
 
 impl CockpitBackend for FakeBackend {
@@ -208,6 +222,113 @@ impl CockpitBackend for FakeBackend {
             },
             materialized_new_item: accept,
         })
+    }
+
+    fn materialize_draft_batch(
+        &mut self,
+        session_id: &str,
+        finding_ids: &[String],
+    ) -> Result<CreateDraftOutcome, String> {
+        self.materialize_calls
+            .push((session_id.to_owned(), finding_ids.to_vec()));
+        if self.fail_materialize {
+            return Err("materialize backend unavailable".to_owned());
+        }
+        let outcome = self
+            .materialize_outcome
+            .clone()
+            .unwrap_or(CreateDraftOutcome::Created {
+                batch_id: "batch-new".to_owned(),
+                item_count: finding_ids.len(),
+                selection_mode: "explicit_findings".to_owned(),
+            });
+        // Reflect a created batch into the batch list so landing on Drafts
+        // shows it, mirroring storage.
+        if let CreateDraftOutcome::Created {
+            batch_id,
+            item_count,
+            ..
+        } = &outcome
+            && !self.batches.iter().any(|row| &row.batch_id == batch_id)
+        {
+            self.batches.push(DraftBatchRow {
+                batch_id: batch_id.clone(),
+                state: "awaiting_approval".to_owned(),
+                item_count: *item_count,
+                payload_digest: "digest-new".to_owned(),
+                invalidation_reason_code: None,
+            });
+        }
+        Ok(outcome)
+    }
+
+    fn post_batch(&mut self, session_id: &str, batch_id: &str) -> Result<PostBatchOutcome, String> {
+        self.post_calls
+            .push((session_id.to_owned(), batch_id.to_owned()));
+        if self.fail_post {
+            return Err("post backend unavailable".to_owned());
+        }
+        let outcome = self
+            .post_outcome
+            .clone()
+            .unwrap_or(PostBatchOutcome::Posted {
+                remote_identifier: Some("github-comment-123".to_owned()),
+                posted_action_id: Some("posted-batch-1".to_owned()),
+            });
+        if let PostBatchOutcome::Posted { .. } = &outcome
+            && let Some(batch) = self
+                .batches
+                .iter_mut()
+                .find(|batch| batch.batch_id == batch_id)
+        {
+            batch.state = "posted".to_owned();
+        }
+        Ok(outcome)
+    }
+
+    fn create_clarification(
+        &mut self,
+        session_id: &str,
+        finding_id: Option<&str>,
+        body: &str,
+    ) -> Result<ClarificationRow, String> {
+        self.clarification_calls.push((
+            session_id.to_owned(),
+            finding_id.map(str::to_owned),
+            body.to_owned(),
+        ));
+        if self.fail_clarification {
+            return Err("clarification rejected by storage".to_owned());
+        }
+        Ok(ClarificationRow {
+            id: "clarify-1".to_owned(),
+            finding_id: finding_id.map(str::to_owned),
+            body: body.to_owned(),
+        })
+    }
+
+    fn load_evidence_excerpt(&mut self, finding_id: &str) -> Result<EvidenceExcerptRow, String> {
+        if self.fail_evidence_excerpt {
+            return Err("excerpt backend unavailable".to_owned());
+        }
+        Ok(self.evidence_excerpt.clone().unwrap_or(EvidenceExcerptRow {
+            locator: format!("src/{finding_id}.rs:10-12"),
+            lines: vec![
+                ExcerptLine {
+                    number: 10,
+                    text: "fn suspect() {".to_owned(),
+                },
+                ExcerptLine {
+                    number: 11,
+                    text: "    do_the_thing();".to_owned(),
+                },
+                ExcerptLine {
+                    number: 12,
+                    text: "}".to_owned(),
+                },
+            ],
+            unavailable: None,
+        }))
     }
 }
 
@@ -799,7 +920,11 @@ fn inspector_loads_detail_for_focused_finding() {
         inspector.contains("outbound  state=not_drafted"),
         "{inspector}"
     );
-    assert!(inspector.contains(CLARIFY_HINT), "{inspector}");
+    // The inspector points at the draft + clarify affordances for the finding.
+    assert!(
+        inspector.contains("c raises a clarification linked to it"),
+        "{inspector}"
+    );
 }
 
 #[test]
@@ -860,7 +985,11 @@ fn approve_key_opens_elevation_prompt_with_exact_cli_command() {
         rendered.contains("rr approve --batch batch-1"),
         "{rendered}"
     );
-    assert!(rendered.contains(ELEVATED_MUTATION_HINT), "{rendered}");
+    // The approve gate is explicit that nothing is posted to GitHub.
+    assert!(
+        rendered.contains("nothing is posted to GitHub"),
+        "{rendered}"
+    );
 }
 
 #[test]
@@ -983,7 +1112,7 @@ fn elevation_blocked_outcome_surfaces_reason_code() {
 }
 
 #[test]
-fn approve_key_on_already_approved_batch_points_at_cli_only_posting() {
+fn approve_key_on_already_approved_batch_points_at_post() {
     let mut backend = populated_backend();
     backend.batches[0].state = "approved".to_owned();
     let mut model = bootstrap(&mut backend);
@@ -998,7 +1127,7 @@ fn approve_key_on_already_approved_batch_points_at_cli_only_posting() {
         model
             .notice
             .as_deref()
-            .is_some_and(|notice| notice.contains("rr post --batch batch-1")),
+            .is_some_and(|notice| notice.contains("press p to post")),
         "{:?}",
         model.notice
     );
@@ -1031,7 +1160,7 @@ fn approve_key_on_invalidated_batch_is_blocked_locally() {
 // --- drafts rendering ---------------------------------------------------------
 
 #[test]
-fn drafts_view_shows_explicit_elevated_mutation_hint() {
+fn drafts_view_shows_explicit_approve_and_post_gates() {
     let mut backend = populated_backend();
     let mut model = bootstrap(&mut backend);
     keys(
@@ -1040,17 +1169,20 @@ fn drafts_view_shows_explicit_elevated_mutation_hint() {
         &[CockpitKey::Enter, CockpitKey::Char('d')],
     );
     let rendered = model.render_lines(120, 24).join("\n");
-    assert!(rendered.contains(ELEVATED_MUTATION_HINT), "{rendered}");
+    assert!(
+        rendered.contains("elevated approve confirmation"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("elevated post confirmation (posts to GitHub)"),
+        "{rendered}"
+    );
     assert!(rendered.contains("awaiting_approval"), "{rendered}");
 
     model.handle_key(CockpitKey::Enter, &mut backend);
     let items_rendered = model.render_lines(120, 24).join("\n");
     assert!(
         items_rendered.contains("read-only payload preview"),
-        "{items_rendered}"
-    );
-    assert!(
-        items_rendered.contains(ELEVATED_MUTATION_HINT),
         "{items_rendered}"
     );
 }
@@ -1236,7 +1368,12 @@ fn help_overlay_opens_renders_and_closes() {
     let rendered = model.render_lines(140, 30).join("\n");
     assert!(rendered.contains("keyboard reference"), "{rendered}");
     assert!(rendered.contains("a/i/n/r triage"), "{rendered}");
-    assert!(rendered.contains(CLARIFY_HINT), "{rendered}");
+    assert!(rendered.contains("d create draft"), "{rendered}");
+    assert!(rendered.contains("p elevated post to GitHub"), "{rendered}");
+    assert!(
+        rendered.contains("c opens the bounded composer"),
+        "{rendered}"
+    );
     model.handle_key(CockpitKey::Esc, &mut backend);
     assert_eq!(model.overlay, Overlay::None);
 }
@@ -1375,17 +1512,19 @@ fn session_overview_renders_run_state_and_counts() {
 }
 
 #[test]
-fn clarify_key_shows_bounded_hint_instead_of_fake_chat() {
+fn clarify_key_opens_bounded_composer_on_session_home() {
     let mut backend = populated_backend();
     let mut model = bootstrap(&mut backend);
     model.handle_key(CockpitKey::Enter, &mut backend);
     model.handle_key(CockpitKey::Char('c'), &mut backend);
-    assert_eq!(model.notice.as_deref(), Some(CLARIFY_HINT));
-
-    open_findings(&mut model, &mut backend);
-    model.notice = None;
-    model.handle_key(CockpitKey::Char('c'), &mut backend);
-    assert_eq!(model.notice.as_deref(), Some(CLARIFY_HINT));
+    assert_eq!(model.input_mode, InputMode::Composer);
+    // Session-scoped composer: no finding link.
+    assert_eq!(model.composer_finding_id, None);
+    let rendered = model.render_lines(120, 24).join("\n");
+    assert!(
+        rendered.contains("clarification / follow-up composer"),
+        "{rendered}"
+    );
 }
 
 // --- session picker ---------------------------------------------------------
@@ -1799,4 +1938,399 @@ fn draft_items_hint_and_help_document_edit_key() {
         help.contains("e edit draft body in $EDITOR"),
         "help overlay: {help}"
     );
+}
+
+// --- create draft from findings ('d') ---------------------------------------
+
+#[test]
+fn draft_key_materializes_batch_from_selection_and_lands_on_drafts() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    open_findings(&mut model, &mut backend);
+    // Select the first finding (space), then create a draft from the selection.
+    model.handle_key(CockpitKey::Char(' '), &mut backend);
+    model.handle_key(CockpitKey::Char('d'), &mut backend);
+    assert_eq!(
+        backend.materialize_calls,
+        vec![("session-1".to_owned(), vec!["finding-1".to_owned()])],
+        "explicit selection is passed to the shared materialize op"
+    );
+    assert_eq!(model.screen, Screen::Drafts, "create-draft lands on Drafts");
+    assert!(
+        model
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("batch-new")),
+        "{:?}",
+        model.notice
+    );
+}
+
+#[test]
+fn draft_key_without_selection_drafts_accepted_findings() {
+    let mut backend = populated_backend();
+    // Two accepted findings, one not.
+    backend.findings[0].triage_state = "accepted".to_owned();
+    backend.findings[2].triage_state = "accepted".to_owned();
+    let mut model = bootstrap(&mut backend);
+    open_findings(&mut model, &mut backend);
+    model.handle_key(CockpitKey::Char('d'), &mut backend);
+    assert_eq!(backend.materialize_calls.len(), 1);
+    let (_, ids) = &backend.materialize_calls[0];
+    assert_eq!(
+        ids,
+        &vec!["finding-1".to_owned(), "finding-3".to_owned()],
+        "no selection drafts exactly the accepted findings"
+    );
+}
+
+#[test]
+fn draft_key_with_no_accepted_findings_is_a_no_op_with_notice() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    open_findings(&mut model, &mut backend);
+    // All findings are "new" and nothing is selected.
+    model.handle_key(CockpitKey::Char('d'), &mut backend);
+    assert!(backend.materialize_calls.is_empty());
+    assert!(
+        model
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("no accepted findings")),
+        "{:?}",
+        model.notice
+    );
+}
+
+#[test]
+fn draft_key_surfaces_blocked_reason_code() {
+    let mut backend = populated_backend();
+    backend.materialize_outcome = Some(CreateDraftOutcome::Blocked {
+        reason_code: "stale_local_state".to_owned(),
+        detail: "finding-1 not accepted (triage=new)".to_owned(),
+    });
+    let mut model = bootstrap(&mut backend);
+    open_findings(&mut model, &mut backend);
+    model.handle_key(CockpitKey::Char(' '), &mut backend);
+    model.handle_key(CockpitKey::Char('d'), &mut backend);
+    assert!(
+        model
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("stale_local_state")),
+        "{:?}",
+        model.notice
+    );
+    assert_eq!(
+        model.screen,
+        Screen::Findings,
+        "blocked draft does not navigate"
+    );
+}
+
+// --- elevated post ('p') ----------------------------------------------------
+
+fn open_drafts_with_approved_batch() -> (CockpitModel, FakeBackend) {
+    let mut backend = populated_backend();
+    backend.batches[0].state = "approved".to_owned();
+    let mut model = bootstrap(&mut backend);
+    keys(
+        &mut model,
+        &mut backend,
+        &[CockpitKey::Enter, CockpitKey::Char('d')],
+    );
+    (model, backend)
+}
+
+#[test]
+fn post_key_opens_distinct_post_elevation_on_approved_batch() {
+    let (mut model, mut backend) = open_drafts_with_approved_batch();
+    model.handle_key(CockpitKey::Char('p'), &mut backend);
+    let Overlay::Elevation {
+        batch_id,
+        kind,
+        command,
+        ..
+    } = &model.overlay
+    else {
+        assert!(
+            false,
+            "expected post elevation overlay, got {:?}",
+            model.overlay
+        );
+        unreachable!()
+    };
+    assert_eq!(batch_id, "batch-1");
+    assert_eq!(*kind, ElevationKind::Post);
+    assert_eq!(command, "rr post --batch batch-1");
+    let rendered = model.render_lines(120, 30).join("\n");
+    assert!(rendered.contains("POST TO GITHUB"), "{rendered}");
+}
+
+#[test]
+fn post_elevation_requires_the_word_post_not_approve() {
+    let (mut model, mut backend) = open_drafts_with_approved_batch();
+    model.handle_key(CockpitKey::Char('p'), &mut backend);
+    // The approve word must NOT confirm a post.
+    type_chars(&mut model, &mut backend, "approve");
+    model.handle_key(CockpitKey::Enter, &mut backend);
+    assert!(backend.post_calls.is_empty(), "approve word must not post");
+    assert!(matches!(model.overlay, Overlay::Elevation { .. }));
+
+    // Clear and type the distinct post word.
+    for _ in 0.."approve".len() {
+        model.handle_key(CockpitKey::Backspace, &mut backend);
+    }
+    type_chars(&mut model, &mut backend, "post");
+    model.handle_key(CockpitKey::Enter, &mut backend);
+    assert_eq!(
+        backend.post_calls,
+        vec![("session-1".to_owned(), "batch-1".to_owned())],
+        "the post word runs the shared post op"
+    );
+    assert_eq!(model.overlay, Overlay::None);
+    assert!(
+        model
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("github-comment-123")),
+        "{:?}",
+        model.notice
+    );
+    assert_eq!(
+        model.batches[0].state, "posted",
+        "truthful re-render after post"
+    );
+}
+
+#[test]
+fn post_failure_outcome_surfaces_retry_guidance() {
+    let (mut model, mut backend) = open_drafts_with_approved_batch();
+    backend.post_outcome = Some(PostBatchOutcome::Failed {
+        reason_code: Some("adapter_gh_error".to_owned()),
+        retry_draft_ids: vec!["draft-1".to_owned()],
+    });
+    model.handle_key(CockpitKey::Char('p'), &mut backend);
+    type_chars(&mut model, &mut backend, "post");
+    model.handle_key(CockpitKey::Enter, &mut backend);
+    assert!(
+        model
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("adapter_gh_error") && notice.contains("retry")),
+        "{:?}",
+        model.notice
+    );
+}
+
+#[test]
+fn post_key_on_unapproved_batch_requires_approval_first() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    keys(
+        &mut model,
+        &mut backend,
+        &[CockpitKey::Enter, CockpitKey::Char('d')],
+    );
+    model.handle_key(CockpitKey::Char('p'), &mut backend);
+    assert_eq!(model.overlay, Overlay::None);
+    assert!(backend.post_calls.is_empty());
+    assert!(
+        model
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("must be approved")),
+        "{:?}",
+        model.notice
+    );
+}
+
+// --- clarification composer -------------------------------------------------
+
+#[test]
+fn composer_submit_creates_clarification_linked_to_focused_finding() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    open_findings(&mut model, &mut backend);
+    // Open the composer on the findings queue — it links to the focused finding.
+    model.handle_key(CockpitKey::Char('c'), &mut backend);
+    assert_eq!(model.input_mode, InputMode::Composer);
+    assert_eq!(model.composer_finding_id.as_deref(), Some("finding-1"));
+    type_chars(&mut model, &mut backend, "why is this safe?");
+    model.handle_key(CockpitKey::Enter, &mut backend);
+    assert_eq!(
+        backend.clarification_calls,
+        vec![(
+            "session-1".to_owned(),
+            Some("finding-1".to_owned()),
+            "why is this safe?".to_owned()
+        )],
+        "submit calls the shared create_clarification op with finding lineage"
+    );
+    assert_eq!(model.input_mode, InputMode::None);
+    assert_eq!(
+        model.last_clarification.as_ref().map(|c| c.id.as_str()),
+        Some("clarify-1")
+    );
+    assert!(
+        model
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("clarify-1") && notice.contains("finding-1")),
+        "{:?}",
+        model.notice
+    );
+}
+
+#[test]
+fn composer_rejects_empty_body_without_calling_backend() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    model.handle_key(CockpitKey::Enter, &mut backend);
+    model.handle_key(CockpitKey::Char('c'), &mut backend);
+    model.handle_key(CockpitKey::Enter, &mut backend);
+    assert!(backend.clarification_calls.is_empty());
+    assert_eq!(
+        model.input_mode,
+        InputMode::Composer,
+        "stays in the composer"
+    );
+    assert!(
+        model
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("non-empty")),
+        "{:?}",
+        model.notice
+    );
+}
+
+#[test]
+fn composer_escape_cancels_without_submitting() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    model.handle_key(CockpitKey::Enter, &mut backend);
+    model.handle_key(CockpitKey::Char('c'), &mut backend);
+    type_chars(&mut model, &mut backend, "draft note");
+    model.handle_key(CockpitKey::Esc, &mut backend);
+    assert!(backend.clarification_calls.is_empty());
+    assert_eq!(model.input_mode, InputMode::None);
+    assert!(model.composer_input.is_empty());
+}
+
+#[test]
+fn composer_failure_surfaces_notice() {
+    let mut backend = populated_backend();
+    backend.fail_clarification = true;
+    let mut model = bootstrap(&mut backend);
+    model.handle_key(CockpitKey::Enter, &mut backend);
+    model.handle_key(CockpitKey::Char('c'), &mut backend);
+    type_chars(&mut model, &mut backend, "please clarify");
+    model.handle_key(CockpitKey::Enter, &mut backend);
+    assert!(
+        model
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("clarification failed")),
+        "{:?}",
+        model.notice
+    );
+}
+
+// --- evidence excerpt -------------------------------------------------------
+
+#[test]
+fn inspector_renders_evidence_excerpt_at_anchor() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    open_findings(&mut model, &mut backend);
+    let inspector = model.inspector_lines().join("\n");
+    assert!(inspector.contains("excerpt"), "{inspector}");
+    assert!(inspector.contains("do_the_thing();"), "{inspector}");
+    assert!(inspector.contains("10  fn suspect() {"), "{inspector}");
+}
+
+#[test]
+fn inspector_renders_excerpt_unavailable_reason_honestly() {
+    let mut backend = populated_backend();
+    backend.evidence_excerpt = Some(EvidenceExcerptRow {
+        locator: "src/lib.rs:10-14".to_owned(),
+        lines: Vec::new(),
+        unavailable: Some(
+            "excerpt unavailable: no repo binding (worktree/cwd) recorded for this session"
+                .to_owned(),
+        ),
+    });
+    let mut model = bootstrap(&mut backend);
+    open_findings(&mut model, &mut backend);
+    let inspector = model.inspector_lines().join("\n");
+    assert!(inspector.contains("excerpt unavailable"), "{inspector}");
+    assert!(!inspector.contains("do_the_thing"), "{inspector}");
+}
+
+// --- launch / resume / return dropout ---------------------------------------
+
+#[test]
+fn launch_key_on_session_home_emits_resume_launch_effect() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    model.handle_key(CockpitKey::Enter, &mut backend);
+    assert_eq!(model.screen, Screen::SessionHome);
+    model.handle_key(CockpitKey::Char('o'), &mut backend);
+    let effect = model.take_effect().expect("launch effect emitted");
+    assert_eq!(
+        effect,
+        ModelEffect::LaunchProvider {
+            label: "resume session session-1 in provider".to_owned(),
+            args: vec![
+                "review".to_owned(),
+                "--resume".to_owned(),
+                "--session".to_owned(),
+                "session-1".to_owned(),
+            ],
+        }
+    );
+    assert!(
+        model
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("dropping out")),
+        "{:?}",
+        model.notice
+    );
+}
+
+#[test]
+fn launch_key_on_home_selected_session_emits_effect() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    assert_eq!(model.screen, Screen::Home);
+    model.handle_key(CockpitKey::Char('o'), &mut backend);
+    let effect = model
+        .take_effect()
+        .expect("launch effect emitted from home");
+    assert_eq!(
+        effect,
+        ModelEffect::LaunchProvider {
+            label: "resume session session-1 in provider".to_owned(),
+            args: vec![
+                "review".to_owned(),
+                "--resume".to_owned(),
+                "--session".to_owned(),
+                "session-1".to_owned(),
+            ],
+        }
+    );
+}
+
+#[test]
+fn reload_after_return_refreshes_active_session() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    model.handle_key(CockpitKey::Enter, &mut backend);
+    open_findings(&mut model, &mut backend);
+    // Simulate what the runtime does after the suspended child exits.
+    model.reload_after_return(&mut backend);
+    assert_eq!(model.screen, Screen::Findings);
+    assert_eq!(model.findings.len(), 3);
 }
