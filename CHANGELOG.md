@@ -4,6 +4,40 @@ Roger Reviewer ships on a CalVer release lane (`vYYYY.MM.DD`). This file groups
 the dated releases into the product milestone they belong to. Entries describe
 what actually shipped; aspirational or feature-gated work is called out as such.
 
+## Unreleased — TUI surface parity: the cockpit drives the whole review loop
+
+The cockpit was a read-and-triage surface with the launch, draft, and post
+verbs deliberately deferred to the shell. This closes those gaps so the CLI,
+robot, extension, and TUI surfaces drive the same flows equivalently — one
+command pipeline, several front doors.
+
+- **Start reviews from the cockpit** — `n` on Review Home opens a PR Review
+  Queue (the `rr queue` projection: open PRs joined with local Roger state);
+  `Enter` starts a review with the same reuse-or-new session semantics as
+  `rr review --pr`, and `f` forces a fresh session. Launch outcomes land you
+  on the new session's overview, or surface the exact blocked message and
+  repair action the CLI would print.
+- **Resume in place** — `r` on a Session Overview re-enters the session
+  through the same continuity gates as `rr resume --session`.
+- **Findings → draft handoff** — `b` on the findings queue materializes the
+  multi-selection (or cursor row) into an outbound draft batch via the same
+  fail-closed `rr send draft` path, including its stale-state and
+  missing-target reconciliation gates.
+- **Post from the cockpit, behind a second elevated gate** — `p` on an
+  approved batch opens a typed confirmation (the word `post`, mirroring the
+  `approve` gate) and posts through the same fail-closed `rr post` path with
+  the same audit trail. Posting is no longer CLI-only; it remains elevated
+  and explicit everywhere.
+- **One pipeline for every surface** — the new `CockpitOps` boundary in
+  `roger-tui` is implemented by the CLI as in-process dispatch of the same
+  parse → handler pipeline the shell, `--robot`, and browser-extension
+  surfaces use, so provider gating, session reuse, and approval binding are
+  byte-identical across surfaces. Cockpits opened without a CLI runtime
+  degrade to an honest notice.
+- Help overlay, key hints, inspectors, README, and the `roger-tui-cheatsheet`
+  skill updated to the real grammar; clarify-in-place / session chat remains
+  a bounded hint (needs a live worker transport).
+
 ## 0.3 (v2026.07.08) — In-place updates, real memory, worker transport, session sanity
 
 This release makes several surfaces that previously only *looked* real actually

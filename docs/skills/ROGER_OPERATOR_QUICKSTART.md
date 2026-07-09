@@ -82,9 +82,12 @@ rr open [--repo owner/repo] [--pr <n> | --session <id>]
 ```
 
 Opens the local TUI cockpit (compat name: `rr tui`) for browsing sessions,
-findings, drafts, and the timeline without leaving the terminal. See
-`ROGER_TUI_CHEATSHEET.md` for the exact screens and keys — it never posts to
-GitHub and it does not launch providers from inside the TUI.
+findings, drafts, and the timeline without leaving the terminal — and for
+driving the full loop from one place: `n` starts a new review from the open-PR
+queue, `r` resumes a session, `b` drafts findings into an outbound batch, and
+an approved batch posts to GitHub only behind a typed elevated confirmation
+(the word `post`). Every one of those actions dispatches the same gated `rr`
+command paths the shell uses. See `ROGER_TUI_CHEATSHEET.md` for the exact screens and keys.
 
 ## Inspect and search findings
 

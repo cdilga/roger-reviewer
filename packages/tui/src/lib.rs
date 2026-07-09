@@ -4,21 +4,26 @@
 //! small Roger-owned surface: callers (the `rr` CLI) only see
 //! [`RogerTuiConfig`], [`run_cockpit`], [`TuiExit`], and [`TuiError`].
 //!
-//! First-release cockpit scope (see
-//! `docs/TUI_WORKSPACE_AND_OPERATOR_FLOW_CONTRACT.md` and the PLAN's TUI
-//! requirements): a three-region workspace (status strip, primary pane,
-//! inspector pane) over the durable destinations Review Home (with the global
-//! session finder), Session Overview, Findings Queue
-//! (sort/filter/group/multi-select/batch triage), Draft Approval Queue with
-//! an explicit elevated approve confirmation (same storage path as
-//! `rr approve`; posting stays CLI-only), Timeline/History, and
-//! Search/Recall. Clarify-in-place and the session chat lane are out of this
-//! slice and surface as bounded hints.
+//! Cockpit scope (see `docs/TUI_WORKSPACE_AND_OPERATOR_FLOW_CONTRACT.md` and
+//! the PLAN's TUI requirements): a three-region workspace (status strip,
+//! primary pane, inspector pane) over the durable destinations Review Home
+//! (with the global session finder), PR Review Queue (start new reviews from
+//! open PRs — same reuse-or-new gates as `rr review`), Session Overview (with
+//! in-place resume), Findings Queue (sort/filter/group/multi-select/batch
+//! triage and draft handoff via the `rr send draft` path), Draft Approval
+//! Queue with explicit elevated approve *and* post confirmations (the same
+//! fail-closed paths as `rr approve` / `rr post`), Timeline/History, and
+//! Search/Recall. CLI-runtime actions (queue/launch/draft/post) flow through
+//! the [`CockpitOps`] boundary the `rr` CLI implements over its own command
+//! handlers, so every surface applies identical gates. Clarify-in-place and
+//! the session chat lane remain out of this slice and surface as bounded
+//! hints.
 
 #[cfg(unix)]
 mod app;
 mod backend;
 mod model;
+mod ops;
 #[cfg(unix)]
 mod tty;
 mod view;
@@ -27,11 +32,13 @@ pub use backend::{CockpitBackend, StoreCockpitBackend};
 pub use model::{
     APPROVE_CONFIRMATION_WORD, ApproveOutcome, CLARIFY_HINT, CockpitEntry, CockpitKey,
     CockpitModel, DecisionEventRow, DraftBatchRow, DraftItemRow, ELEVATED_MUTATION_HINT,
-    EMPTY_STORE_HINT, EvidenceRow, FindingDetail, FindingRow, GroupKey, InputMode, KeyOutcome,
-    LAUNCH_DEFERRED_HINT, MemoryPostureRow, ModelEffect, OutboundLinkRow, Overlay, PickerCandidate,
-    PostedActionRow, Screen, SearchHitRow, SearchView, SessionHomeView, SessionRow, SortKey,
-    StageResultRow, TimelineEntry, TimelineRunRow, TimelineView, TriageAction,
+    EMPTY_STORE_HINT, ElevationAction, EvidenceRow, FindingDetail, FindingRow, GroupKey, InputMode,
+    KeyOutcome, MemoryPostureRow, ModelEffect, OPS_UNAVAILABLE_HINT, OutboundLinkRow, Overlay,
+    POST_CONFIRMATION_WORD, PickerCandidate, PostedActionRow, Screen, SearchHitRow, SearchView,
+    SessionHomeView, SessionRow, SortKey, StageResultRow, TimelineEntry, TimelineRunRow,
+    TimelineView, TriageAction,
 };
+pub use ops::{CockpitOps, OpsOutcome, QueueRow, QueueView};
 
 use roger_storage::{RogerStore, StorageError};
 use std::path::PathBuf;
@@ -103,6 +110,22 @@ pub fn run_cockpit_with_entry(
     config: RogerTuiConfig,
     entry: CockpitEntry,
 ) -> Result<TuiExit, TuiError> {
+    run_cockpit_with_ops(config, entry, None)
+}
+
+/// Open the operator cockpit with a CLI-runtime operations boundary.
+///
+/// `ops` powers the actions the cockpit cannot perform over storage alone —
+/// PR queue listing, review launch/resume, draft materialization, and GitHub
+/// posting. The `rr` CLI passes an implementation that dispatches its own
+/// command handlers, so the cockpit drives the exact same gated paths as the
+/// shell/robot/extension surfaces. With `None`, those actions degrade to an
+/// honest notice ([`OPS_UNAVAILABLE_HINT`]).
+pub fn run_cockpit_with_ops(
+    config: RogerTuiConfig,
+    entry: CockpitEntry,
+    ops: Option<Box<dyn CockpitOps>>,
+) -> Result<TuiExit, TuiError> {
     let store = match RogerStore::open(&config.store_root) {
         Ok(store) => store,
         Err(StorageError::Conflict { entity, id }) if entity == "store_migration_policy" => {
@@ -125,7 +148,7 @@ pub fn run_cockpit_with_entry(
         use std::sync::atomic::AtomicBool;
         let force_repaint = Arc::new(AtomicBool::new(false));
         run_ftui_program(
-            app::CockpitApp::new(model, backend, Arc::clone(&force_repaint)),
+            app::CockpitApp::new(model, backend, ops, Arc::clone(&force_repaint)),
             force_repaint,
         )
         .map_err(|err| TuiError::Terminal(err.to_string()))?;
@@ -135,7 +158,7 @@ pub fn run_cockpit_with_entry(
     // bounded gap, not a degraded imitation. Fail closed with honest guidance.
     #[cfg(not(unix))]
     {
-        let _ = model;
+        let _ = (model, ops);
         Err(TuiError::Terminal(
             "rr tui interactive mode is not yet supported on Windows; use the rr command surface (or WSL) instead".to_owned(),
         ))

@@ -9,6 +9,7 @@
 //! values and paints the rendered lines produced by `view.rs`.
 
 use crate::backend::CockpitBackend;
+use crate::ops::{OpsOutcome, QueueView};
 use std::collections::BTreeSet;
 
 /// Operator-settable triage states. `new` and `stale` are Roger-derived and
@@ -60,6 +61,9 @@ pub enum Screen {
     /// Esc falls back to the full session finder (`Home`).
     Picker,
     Home,
+    /// Open-PR review queue for the repo scope (`rr queue` projection): the
+    /// launch lane for starting new reviews without leaving the cockpit.
+    Queue,
     SessionHome,
     Findings,
     Drafts,
@@ -68,16 +72,36 @@ pub enum Screen {
     Search,
 }
 
+/// Which elevated GitHub-adjacent mutation the elevation overlay is gating.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ElevationAction {
+    /// Record a local approval token (`rr approve` path). Local-only.
+    Approve,
+    /// Post the approved batch to GitHub (`rr post` path). Remote mutation.
+    Post,
+}
+
+impl ElevationAction {
+    /// Exact word the operator must type to confirm this action.
+    pub fn confirmation_word(self) -> &'static str {
+        match self {
+            Self::Approve => APPROVE_CONFIRMATION_WORD,
+            Self::Post => POST_CONFIRMATION_WORD,
+        }
+    }
+}
+
 /// Overlays/drawers per contract: help and the elevated approve confirmation
 /// are behavior, not peer workspaces.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Overlay {
     None,
     Help,
-    /// Elevated mutation gate for in-process batch approval. The operator
-    /// must type the confirmation word and press Enter; the displayed
-    /// command is the exact CLI equivalent.
+    /// Elevated mutation gate for in-process batch approval or posting. The
+    /// operator must type the action's confirmation word and press Enter; the
+    /// displayed command is the exact CLI equivalent.
     Elevation {
+        action: ElevationAction,
         batch_id: String,
         command: String,
         input: String,
@@ -211,6 +235,32 @@ pub enum ModelEffect {
     /// Open `$EDITOR` on the draft body, then call
     /// [`CockpitModel::apply_draft_revision`] with the edited text.
     EditDraft { draft_id: String, body: String },
+    /// Load the open-PR review queue via [`crate::ops::CockpitOps::load_queue`],
+    /// then call [`CockpitModel::apply_queue_loaded`].
+    LoadQueue,
+    /// Start (or reuse) a review via `CockpitOps::start_review`, then call
+    /// [`CockpitModel::apply_launch_outcome`].
+    StartReview {
+        repository: String,
+        pr: u64,
+        fresh: bool,
+    },
+    /// Re-enter a session via `CockpitOps::resume_session`, then call
+    /// [`CockpitModel::apply_launch_outcome`].
+    ResumeSession { session_id: String },
+    /// Materialize a draft batch via `CockpitOps::create_draft`, then call
+    /// [`CockpitModel::apply_create_draft_outcome`].
+    CreateDraft {
+        session_id: String,
+        finding_ids: Vec<String>,
+    },
+    /// Post an approved batch via `CockpitOps::post_batch` (already confirmed
+    /// through the elevation gate), then call
+    /// [`CockpitModel::apply_post_outcome`].
+    PostBatch {
+        session_id: String,
+        batch_id: String,
+    },
 }
 
 /// Session-level retrieval/memory posture for the status strip and Search
@@ -456,22 +506,29 @@ pub enum ApproveOutcome {
 
 // --- bounded hints (honest about what this slice does and does not do) ------
 
-/// Posting stays CLI-only and visually elevated.
-pub const ELEVATED_MUTATION_HINT: &str = "POSTING STAYS CLI-ONLY: rr post --batch <id>";
+/// GitHub posting is elevated: it runs only through the typed post
+/// confirmation (`p` on an approved batch) or the equivalent CLI command.
+pub const ELEVATED_MUTATION_HINT: &str =
+    "posting is elevated: p (type post) — CLI: rr post --batch <id>";
 
 /// Quickstart hint shown by the empty cockpit.
-pub const EMPTY_STORE_HINT: &str = "no review sessions yet — run rr review --pr <number> to start";
+pub const EMPTY_STORE_HINT: &str =
+    "no review sessions yet — press n to start one from the PR queue";
 
 /// Clarify-in-place and the session chat lane need a live worker transport.
 pub const CLARIFY_HINT: &str =
     "clarification requires an active worker session — run rr review/resume";
 
-/// Provider launch from inside the TUI is deferred in this slice.
-pub const LAUNCH_DEFERRED_HINT: &str =
-    "launching providers from inside the TUI is deferred — run the shown rr command in a shell";
+/// Cockpit actions that need the `rr` CLI runtime (launch, queue, draft, post)
+/// when the cockpit was embedded without one.
+pub const OPS_UNAVAILABLE_HINT: &str =
+    "this action needs the rr CLI runtime — reopen the cockpit with rr open";
 
-/// Exact word the operator must type in the elevation prompt.
+/// Exact word the operator must type in the approve elevation prompt.
 pub const APPROVE_CONFIRMATION_WORD: &str = "approve";
+
+/// Exact word the operator must type in the post elevation prompt.
+pub const POST_CONFIRMATION_WORD: &str = "post";
 
 // --- model -------------------------------------------------------------------
 
@@ -492,6 +549,10 @@ pub struct CockpitModel {
 
     pub active_session: Option<SessionRow>,
     pub home: Option<SessionHomeView>,
+
+    // PR review queue (launch lane)
+    pub queue: Option<QueueView>,
+    pub queue_cursor: usize,
 
     // Findings queue
     pub findings: Vec<FindingRow>,
@@ -571,6 +632,8 @@ impl CockpitModel {
             session_cursor: 0,
             active_session: None,
             home: None,
+            queue: None,
+            queue_cursor: 0,
             findings: Vec::new(),
             finding_cursor: 0,
             finding_filter: String::new(),
@@ -852,6 +915,7 @@ impl CockpitModel {
         match self.screen {
             Screen::Picker => self.handle_picker_key(key, backend),
             Screen::Home => self.handle_home_screen_key(key, backend),
+            Screen::Queue => self.handle_queue_key(key),
             Screen::SessionHome => self.handle_session_home_key(key, backend),
             Screen::Findings => self.handle_findings_key(key, backend),
             Screen::Drafts => self.handle_drafts_key(key, backend),
@@ -924,33 +988,56 @@ impl CockpitModel {
 
     fn handle_elevation_key(&mut self, key: CockpitKey, backend: &mut dyn CockpitBackend) {
         let Overlay::Elevation {
-            batch_id, input, ..
+            action,
+            batch_id,
+            input,
+            ..
         } = &mut self.overlay
         else {
             return;
         };
+        let action = *action;
         match key {
             CockpitKey::Char(c) => input.push(c),
             CockpitKey::Backspace => {
                 input.pop();
             }
             CockpitKey::Esc => {
-                self.notice = Some("elevated approval cancelled".to_owned());
+                self.notice = Some(match action {
+                    ElevationAction::Approve => "elevated approval cancelled".to_owned(),
+                    ElevationAction::Post => "elevated post cancelled — nothing sent".to_owned(),
+                });
                 self.overlay = Overlay::None;
             }
             CockpitKey::Enter => {
-                if input.trim() != APPROVE_CONFIRMATION_WORD {
-                    self.notice = Some(format!(
-                        "type {APPROVE_CONFIRMATION_WORD} exactly to confirm (Esc cancels)"
-                    ));
+                let word = action.confirmation_word();
+                if input.trim() != word {
+                    self.notice = Some(format!("type {word} exactly to confirm (Esc cancels)"));
                     return;
                 }
                 let batch_id = batch_id.clone();
                 self.overlay = Overlay::None;
-                self.execute_elevated_approval(&batch_id, backend);
+                match action {
+                    ElevationAction::Approve => self.execute_elevated_approval(&batch_id, backend),
+                    ElevationAction::Post => self.request_elevated_post(&batch_id),
+                }
             }
             _ => {}
         }
+    }
+
+    /// Queue the confirmed post as a runtime effect: the GitHub mutation runs
+    /// through the CLI-runtime ops boundary (`rr post` path), never in the
+    /// reducer.
+    fn request_elevated_post(&mut self, batch_id: &str) {
+        let Some(session_id) = self.active_session_id() else {
+            self.notice = Some("no active session for posting".to_owned());
+            return;
+        };
+        self.pending_effect = Some(ModelEffect::PostBatch {
+            session_id,
+            batch_id: batch_id.to_owned(),
+        });
     }
 
     fn execute_elevated_approval(&mut self, batch_id: &str, backend: &mut dyn CockpitBackend) {
@@ -967,7 +1054,7 @@ impl CockpitModel {
                     format!("approval already recorded for batch {batch_id}")
                 } else {
                     format!(
-                        "recorded local approval for batch {batch_id} ({draft_count} draft(s)); posting stays CLI-only"
+                        "recorded local approval for batch {batch_id} ({draft_count} draft(s)); p posts it (elevated)"
                     )
                 });
                 self.reload_batches(backend);
@@ -1040,6 +1127,7 @@ impl CockpitModel {
             CockpitKey::Enter => self.open_session_home(backend),
             CockpitKey::Char('/') => self.input_mode = InputMode::SessionFilter,
             CockpitKey::Char('r') => self.reload_sessions(backend),
+            CockpitKey::Char('n') => self.request_queue_load(),
             CockpitKey::Esc if !self.session_filter.is_empty() => {
                 self.session_filter.clear();
                 self.session_cursor = 0;
@@ -1048,12 +1136,63 @@ impl CockpitModel {
         }
     }
 
+    /// Queue the PR review-queue load (the launch lane for new reviews). The
+    /// runtime performs the `rr queue` lookup and calls back into
+    /// [`Self::apply_queue_loaded`].
+    fn request_queue_load(&mut self) {
+        self.pending_effect = Some(ModelEffect::LoadQueue);
+        self.notice = Some("loading open PR queue…".to_owned());
+    }
+
+    fn handle_queue_key(&mut self, key: CockpitKey) {
+        match key {
+            CockpitKey::Up | CockpitKey::Char('k') => move_cursor_up(&mut self.queue_cursor),
+            CockpitKey::Down | CockpitKey::Char('j') => {
+                let len = self.queue.as_ref().map_or(0, |queue| queue.rows.len());
+                move_cursor_down(&mut self.queue_cursor, len);
+            }
+            // Enter reuses an existing non-terminal session for this PR when one
+            // exists (same reuse-or-new semantics as `rr review`); f forces a
+            // fresh session.
+            CockpitKey::Enter => self.request_start_review(false),
+            CockpitKey::Char('f') => self.request_start_review(true),
+            CockpitKey::Char('r') => self.request_queue_load(),
+            CockpitKey::Esc => {
+                self.screen = Screen::Home;
+                self.notice = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Queue a review launch for the focused PR queue row.
+    fn request_start_review(&mut self, fresh: bool) {
+        let Some(queue) = &self.queue else {
+            self.notice = Some("PR queue not loaded".to_owned());
+            return;
+        };
+        let Some(row) = queue.rows.get(self.queue_cursor) else {
+            self.notice = Some("no PR focused".to_owned());
+            return;
+        };
+        self.pending_effect = Some(ModelEffect::StartReview {
+            repository: queue.repository.clone(),
+            pr: row.pr_number,
+            fresh,
+        });
+        self.notice = Some(format!(
+            "starting review for {} PR #{}…",
+            queue.repository, row.pr_number
+        ));
+    }
+
     fn handle_session_home_key(&mut self, key: CockpitKey, backend: &mut dyn CockpitBackend) {
         match key {
             CockpitKey::Char('f') => self.open_findings(backend),
             CockpitKey::Char('d') => self.open_drafts(backend),
             CockpitKey::Char('t') => self.open_timeline(backend),
             CockpitKey::Char('s') => self.open_search(backend),
+            CockpitKey::Char('r') => self.request_resume_active_session(),
             CockpitKey::Char('c') => self.notice = Some(CLARIFY_HINT.to_owned()),
             CockpitKey::Esc => {
                 self.screen = Screen::Home;
@@ -1061,6 +1200,19 @@ impl CockpitModel {
             }
             _ => {}
         }
+    }
+
+    /// Queue a resume of the active session through the CLI-runtime ops
+    /// boundary (same continuity gates as `rr resume`).
+    fn request_resume_active_session(&mut self) {
+        let Some(session_id) = self.active_session_id() else {
+            self.notice = Some("no active session to resume".to_owned());
+            return;
+        };
+        self.pending_effect = Some(ModelEffect::ResumeSession {
+            session_id: session_id.clone(),
+        });
+        self.notice = Some(format!("resuming session {session_id}…"));
     }
 
     fn handle_findings_key(&mut self, key: CockpitKey, backend: &mut dyn CockpitBackend) {
@@ -1092,6 +1244,7 @@ impl CockpitModel {
                 self.refresh_finding_detail(backend);
             }
             CockpitKey::Char('/') => self.input_mode = InputMode::FindingFilter,
+            CockpitKey::Char('b') => self.request_create_draft(),
             CockpitKey::Char('c') => self.notice = Some(CLARIFY_HINT.to_owned()),
             CockpitKey::Esc => {
                 if !self.selected_findings.is_empty() {
@@ -1107,6 +1260,36 @@ impl CockpitModel {
             }
             _ => {}
         }
+    }
+
+    /// Queue draft-batch materialization for the working set (multi-select when
+    /// a selection exists, otherwise the cursor row) through the CLI-runtime
+    /// ops boundary — the same fail-closed `rr send draft` path, including its
+    /// stale-state and missing-target gates.
+    fn request_create_draft(&mut self) {
+        let finding_ids: Vec<String> = if self.selected_findings.is_empty() {
+            match self.current_finding() {
+                Some(finding) => vec![finding.finding_id.clone()],
+                None => {
+                    self.notice = Some("no finding focused to draft".to_owned());
+                    return;
+                }
+            }
+        } else {
+            self.selected_findings.iter().cloned().collect()
+        };
+        let Some(session_id) = self.active_session_id() else {
+            self.notice = Some("no active session for drafting".to_owned());
+            return;
+        };
+        self.notice = Some(format!(
+            "drafting {} finding(s) into an outbound batch…",
+            finding_ids.len()
+        ));
+        self.pending_effect = Some(ModelEffect::CreateDraft {
+            session_id,
+            finding_ids,
+        });
     }
 
     fn handle_drafts_key(&mut self, key: CockpitKey, backend: &mut dyn CockpitBackend) {
@@ -1131,34 +1314,57 @@ impl CockpitModel {
                     Err(err) => self.notice = Some(format!("error: {err}")),
                 }
             }
-            CockpitKey::Char('a') => self.open_elevation_prompt(),
+            CockpitKey::Char('a') => self.open_elevation_prompt(ElevationAction::Approve),
+            CockpitKey::Char('p') => self.open_elevation_prompt(ElevationAction::Post),
             CockpitKey::Esc => self.open_session_home_for_active(backend),
             _ => {}
         }
     }
 
-    fn open_elevation_prompt(&mut self) {
+    fn open_elevation_prompt(&mut self, action: ElevationAction) {
         let Some(batch) = self.batches.get(self.batch_cursor) else {
             return;
         };
-        match batch.state.as_str() {
-            "awaiting_approval" => {
+        match (action, batch.state.as_str()) {
+            (ElevationAction::Approve, "awaiting_approval") => {
                 self.overlay = Overlay::Elevation {
+                    action,
                     batch_id: batch.batch_id.clone(),
                     command: format!("rr approve --batch {}", batch.batch_id),
                     input: String::new(),
                 };
                 self.notice = None;
             }
-            "approved" => {
+            (ElevationAction::Approve, "approved") => {
                 self.notice = Some(format!(
-                    "batch {} is already approved — posting stays CLI-only: rr post --batch {}",
-                    batch.batch_id, batch.batch_id
+                    "batch {} is already approved — p opens the elevated post confirmation",
+                    batch.batch_id
                 ));
             }
-            other => {
+            (ElevationAction::Approve, other) => {
                 self.notice = Some(format!(
                     "batch {} is not approvable (state={other})",
+                    batch.batch_id
+                ));
+            }
+            (ElevationAction::Post, "approved") => {
+                self.overlay = Overlay::Elevation {
+                    action,
+                    batch_id: batch.batch_id.clone(),
+                    command: format!("rr post --batch {}", batch.batch_id),
+                    input: String::new(),
+                };
+                self.notice = None;
+            }
+            (ElevationAction::Post, "awaiting_approval") => {
+                self.notice = Some(format!(
+                    "batch {} needs approval first — a opens the elevated approve confirmation",
+                    batch.batch_id
+                ));
+            }
+            (ElevationAction::Post, other) => {
+                self.notice = Some(format!(
+                    "batch {} is not postable (state={other})",
                     batch.batch_id
                 ));
             }
@@ -1325,6 +1531,87 @@ impl CockpitModel {
             }
             Err(err) => self.notice = Some(format!("error: {err}")),
         }
+    }
+
+    // --- ops-outcome callbacks (invoked by the runtime after CockpitOps) --------
+
+    /// Apply the loaded PR review queue (or the load failure) and land on the
+    /// Queue screen. Called by the runtime after [`ModelEffect::LoadQueue`].
+    pub fn apply_queue_loaded(&mut self, result: Result<QueueView, String>) {
+        match result {
+            Ok(queue) => {
+                self.notice = if queue.rows.is_empty() {
+                    Some(format!("no open pull requests for {}", queue.repository))
+                } else {
+                    None
+                };
+                self.queue_cursor = self.queue_cursor.min(queue.rows.len().saturating_sub(1));
+                self.queue = Some(queue);
+                self.screen = Screen::Queue;
+            }
+            Err(err) => self.notice = Some(format!("queue load failed: {err}")),
+        }
+    }
+
+    /// Apply a start-review / resume outcome: surface the response notice,
+    /// refresh the session finder, and open the touched session's overview so
+    /// the operator lands on live state. Called by the runtime after
+    /// [`ModelEffect::StartReview`] / [`ModelEffect::ResumeSession`].
+    pub fn apply_launch_outcome(&mut self, outcome: OpsOutcome, backend: &mut dyn CockpitBackend) {
+        let notice = outcome.notice();
+        self.reload_sessions(backend);
+        if outcome.ok
+            && let Some(session_id) = &outcome.session_id
+            && self
+                .sessions
+                .iter()
+                .any(|row| &row.session_id == session_id)
+        {
+            self.focus_session(session_id);
+            self.open_session_home(backend);
+        }
+        self.notice = Some(notice);
+    }
+
+    /// Apply a draft-materialization outcome: refresh findings (outbound states
+    /// change) and the inspector. Called after [`ModelEffect::CreateDraft`].
+    pub fn apply_create_draft_outcome(
+        &mut self,
+        outcome: OpsOutcome,
+        backend: &mut dyn CockpitBackend,
+    ) {
+        let notice = outcome.notice();
+        if outcome.ok {
+            self.selected_findings.clear();
+            if let Some(session_id) = self.active_session_id()
+                && let Ok(findings) = backend.load_findings(&session_id)
+            {
+                self.findings = findings;
+                let visible_len = self.visible_findings().len();
+                self.finding_cursor = self.finding_cursor.min(visible_len.saturating_sub(1));
+                self.finding_detail = None;
+                self.refresh_finding_detail(backend);
+            }
+        }
+        self.notice = Some(if outcome.ok {
+            format!("{notice} — d opens the draft approval queue")
+        } else {
+            notice
+        });
+    }
+
+    /// Apply a post outcome: refresh the batch queue so posted/failed state is
+    /// truthful. Called after [`ModelEffect::PostBatch`].
+    pub fn apply_post_outcome(&mut self, outcome: OpsOutcome, backend: &mut dyn CockpitBackend) {
+        let notice = outcome.notice();
+        self.reload_batches(backend);
+        self.notice = Some(notice);
+    }
+
+    /// Honest degradation when the cockpit runs without a CLI-runtime ops
+    /// boundary (embedded/test callers): the action is refused with guidance.
+    pub fn apply_ops_unavailable(&mut self) {
+        self.notice = Some(OPS_UNAVAILABLE_HINT.to_owned());
     }
 
     // --- navigation/loading helpers --------------------------------------------

@@ -7,6 +7,7 @@
 
 use crate::backend::StoreCockpitBackend;
 use crate::model::{CockpitKey, CockpitModel, KeyOutcome, ModelEffect};
+use crate::ops::CockpitOps;
 use crate::tty;
 use ftui::widgets::Widget;
 use ftui::widgets::paragraph::Paragraph;
@@ -17,6 +18,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub(crate) struct CockpitApp {
     model: CockpitModel,
     backend: StoreCockpitBackend,
+    /// CLI-runtime operations boundary (queue/launch/draft/post). `None` only
+    /// for embedded callers that opened the cockpit without an `rr` runtime;
+    /// ops-shaped actions then degrade to an honest notice.
+    ops: Option<Box<dyn CockpitOps>>,
     /// Shared with the TTY event source: set true after an editor suspension so
     /// the next poll injects a synthetic resize and forces a full repaint.
     force_repaint: Arc<AtomicBool>,
@@ -26,17 +31,19 @@ impl CockpitApp {
     pub(crate) fn new(
         model: CockpitModel,
         backend: StoreCockpitBackend,
+        ops: Option<Box<dyn CockpitOps>>,
         force_repaint: Arc<AtomicBool>,
     ) -> Self {
         Self {
             model,
             backend,
+            ops,
             force_repaint,
         }
     }
 
-    /// Perform any side effect the pure reducer queued (currently: suspend the
-    /// TUI and open `$EDITOR` on a draft body, then persist the revision).
+    /// Perform any side effect the pure reducer queued: an `$EDITOR`
+    /// suspension, or a CLI-runtime operation (queue/launch/draft/post).
     fn drain_effect(&mut self) {
         let Some(effect) = self.model.take_effect() else {
             return;
@@ -62,6 +69,57 @@ impl CockpitApp {
                 // The alternate screen was clobbered by the editor; force a full
                 // repaint on the next poll.
                 self.force_repaint.store(true, Ordering::SeqCst);
+            }
+            ModelEffect::LoadQueue => {
+                let Some(ops) = self.ops.as_mut() else {
+                    self.model.apply_ops_unavailable();
+                    return;
+                };
+                let result = ops.load_queue();
+                self.model.apply_queue_loaded(result);
+            }
+            ModelEffect::StartReview {
+                repository,
+                pr,
+                fresh,
+            } => {
+                let Some(ops) = self.ops.as_mut() else {
+                    self.model.apply_ops_unavailable();
+                    return;
+                };
+                let outcome = ops.start_review(&repository, pr, fresh);
+                self.model.apply_launch_outcome(outcome, &mut self.backend);
+            }
+            ModelEffect::ResumeSession { session_id } => {
+                let Some(ops) = self.ops.as_mut() else {
+                    self.model.apply_ops_unavailable();
+                    return;
+                };
+                let outcome = ops.resume_session(&session_id);
+                self.model.apply_launch_outcome(outcome, &mut self.backend);
+            }
+            ModelEffect::CreateDraft {
+                session_id,
+                finding_ids,
+            } => {
+                let Some(ops) = self.ops.as_mut() else {
+                    self.model.apply_ops_unavailable();
+                    return;
+                };
+                let outcome = ops.create_draft(&session_id, &finding_ids);
+                self.model
+                    .apply_create_draft_outcome(outcome, &mut self.backend);
+            }
+            ModelEffect::PostBatch {
+                session_id,
+                batch_id,
+            } => {
+                let Some(ops) = self.ops.as_mut() else {
+                    self.model.apply_ops_unavailable();
+                    return;
+                };
+                let outcome = ops.post_batch(&session_id, &batch_id);
+                self.model.apply_post_outcome(outcome, &mut self.backend);
             }
         }
     }

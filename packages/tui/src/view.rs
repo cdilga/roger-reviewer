@@ -7,9 +7,8 @@
 //! unit testable.
 
 use crate::model::{
-    APPROVE_CONFIRMATION_WORD, CLARIFY_HINT, CockpitModel, ELEVATED_MUTATION_HINT,
-    EMPTY_STORE_HINT, FindingRow, InputMode, LAUNCH_DEFERRED_HINT, Overlay, Screen, SearchMode,
-    TimelineEntry,
+    CLARIFY_HINT, CockpitModel, ELEVATED_MUTATION_HINT, EMPTY_STORE_HINT, ElevationAction,
+    FindingRow, InputMode, Overlay, Screen, SearchMode, TimelineEntry,
 };
 
 /// Minimum total width before the inspector pane is rendered side-by-side.
@@ -51,6 +50,7 @@ impl CockpitModel {
         let screen = match self.screen {
             Screen::Picker => "Session Picker",
             Screen::Home => "Review Home",
+            Screen::Queue => "PR Review Queue",
             Screen::SessionHome => "Session Overview",
             Screen::Findings => "Findings Queue",
             Screen::Drafts => "Draft Approval Queue",
@@ -63,6 +63,16 @@ impl CockpitModel {
                 "Roger Reviewer — {screen} — {} candidate session(s)",
                 self.picker_candidates.len()
             );
+        }
+        if self.screen == Screen::Queue {
+            return match &self.queue {
+                Some(queue) => format!(
+                    "Roger Reviewer — {screen} — {} — {} open PR(s)",
+                    queue.repository,
+                    queue.rows.len()
+                ),
+                None => format!("Roger Reviewer — {screen} — not loaded"),
+            };
         }
         let mut line = match &self.active_session {
             Some(session) if self.screen != Screen::Home => {
@@ -117,8 +127,11 @@ impl CockpitModel {
     fn key_hints(&self) -> String {
         match &self.overlay {
             Overlay::Help => return "Esc/? close help".to_owned(),
-            Overlay::Elevation { .. } => {
-                return format!("type {APPROVE_CONFIRMATION_WORD} + Enter to confirm  Esc cancel");
+            Overlay::Elevation { action, .. } => {
+                return format!(
+                    "type {} + Enter to confirm  Esc cancel",
+                    action.confirmation_word()
+                );
             }
             Overlay::None => {}
         }
@@ -135,17 +148,24 @@ impl CockpitModel {
             Screen::Picker => {
                 "j/k move  Enter open session  Esc full finder  ? help  q quit".to_owned()
             }
-            Screen::Home => "j/k move  Enter open  / filter  r reload  ? help  q quit".to_owned(),
+            Screen::Home => {
+                "j/k move  Enter open  n new review  / filter  r reload  ? help  q quit".to_owned()
+            }
+            Screen::Queue => {
+                "j/k move  Enter review (reuse)  f fresh review  r reload  Esc home  ? help  q quit"
+                    .to_owned()
+            }
             Screen::SessionHome => {
-                "f findings  d drafts  t timeline  s search  c clarify  Esc home  ? help  q quit"
+                "f findings  d drafts  t timeline  s search  r resume  c clarify  Esc home  ? help  q quit"
                     .to_owned()
             }
             Screen::Findings => {
-                "j/k move  space select  a/i/n/r triage  s sort  g group  / filter  c clarify  Esc back  ? help  q quit"
+                "j/k move  space select  a/i/n/r triage  b draft  s sort  g group  / filter  c clarify  Esc back  ? help  q quit"
                     .to_owned()
             }
             Screen::Drafts => {
-                "j/k move  Enter inspect  a approve (elevated)  Esc home  ? help  q quit".to_owned()
+                "j/k move  Enter inspect  a approve (elevated)  p post (elevated)  Esc home  ? help  q quit"
+                    .to_owned()
             }
             Screen::DraftItems => "j/k move  e edit draft  Esc drafts  ? help  q quit".to_owned(),
             Screen::Timeline => "j/k move  Esc home  ? help  q quit".to_owned(),
@@ -179,6 +199,7 @@ impl CockpitModel {
         match self.screen {
             Screen::Picker => self.render_picker_primary(),
             Screen::Home => self.render_home_primary(),
+            Screen::Queue => self.render_queue_primary(),
             Screen::SessionHome => (self.render_session_overview(), 0),
             Screen::Findings => self.render_findings_primary(),
             Screen::Drafts => self.render_drafts_primary(),
@@ -274,6 +295,53 @@ impl CockpitModel {
                 row.pull_request,
                 row.provider,
                 row.updated_at
+            ));
+        }
+        (lines, cursor_line)
+    }
+
+    // --- PR Review Queue ---------------------------------------------------------
+
+    fn render_queue_primary(&self) -> (Vec<String>, usize) {
+        let Some(queue) = &self.queue else {
+            return (
+                vec![
+                    String::new(),
+                    "PR queue not loaded — press r to load".to_owned(),
+                ],
+                0,
+            );
+        };
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "open pull requests for {} — Enter starts a review (reusing an existing session), f forces a fresh one",
+            queue.repository
+        ));
+        lines.push(String::new());
+        if queue.rows.is_empty() {
+            lines.push(format!("no open pull requests for {}", queue.repository));
+            return (lines, 0);
+        }
+        let mut cursor_line = 0;
+        for (idx, row) in queue.rows.iter().enumerate() {
+            if idx == self.queue_cursor {
+                cursor_line = lines.len();
+            }
+            let draft_marker = if row.is_draft { "  [draft PR]" } else { "" };
+            let session = row
+                .session_id
+                .as_deref()
+                .map(|id| format!("  session={id}"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "{} #{}  {}  by {}  roger={}{}{}",
+                cursor_marker(idx == self.queue_cursor),
+                row.pr_number,
+                row.title,
+                row.author,
+                row.roger_state,
+                draft_marker,
+                session
             ));
         }
         (lines, cursor_line)
@@ -452,6 +520,7 @@ impl CockpitModel {
         lines.push(
             "a opens the elevated approve confirmation for an awaiting_approval batch".to_owned(),
         );
+        lines.push("p opens the elevated post confirmation for an approved batch".to_owned());
         lines.push(ELEVATED_MUTATION_HINT.to_owned());
         (lines, cursor_line)
     }
@@ -687,6 +756,7 @@ impl CockpitModel {
         match self.screen {
             Screen::Picker => self.inspect_picker_candidate(),
             Screen::Home => self.inspect_session(),
+            Screen::Queue => self.inspect_queue_row(),
             Screen::SessionHome => self.inspect_active_session_entrypoints(),
             Screen::Findings => self.inspect_finding(),
             Screen::Drafts => self.inspect_batch(),
@@ -736,14 +806,45 @@ impl CockpitModel {
             format!("attention {}", session.attention_state),
             format!("updated   {}", session.updated_at),
             String::new(),
-            format!("resume:   rr resume --session {}", session.session_id),
+            "Enter opens the session; r on the overview resumes it".to_owned(),
+            "n opens the PR queue to start a new review".to_owned(),
+            String::new(),
+            format!("cli:      rr resume --session {}", session.session_id),
             format!(
-                "fresh:    rr review --repo {} --pr {}",
+                "cli:      rr review --repo {} --pr {}",
                 session.repository, session.pull_request
             ),
-            String::new(),
-            LAUNCH_DEFERRED_HINT.to_owned(),
         ]
+    }
+
+    fn inspect_queue_row(&self) -> Vec<String> {
+        let Some(queue) = &self.queue else {
+            return vec!["PR queue not loaded".to_owned()];
+        };
+        let Some(row) = queue.rows.get(self.queue_cursor) else {
+            return vec!["no PR focused".to_owned()];
+        };
+        let mut lines = vec![
+            "inspector — pull request".to_owned(),
+            String::new(),
+            format!("pr        #{}", row.pr_number),
+            format!("title     {}", row.title),
+            format!("author    {}", row.author),
+            format!("updated   {}", row.updated_at),
+            format!("roger     {}", row.roger_state),
+        ];
+        if let Some(session_id) = &row.session_id {
+            lines.push(format!("session   {session_id}"));
+        }
+        lines.push(String::new());
+        lines.push("Enter starts a review (reuses a covering session)".to_owned());
+        lines.push("f forces a fresh session".to_owned());
+        lines.push(String::new());
+        lines.push(format!(
+            "cli:      rr review --repo {} --pr {}",
+            queue.repository, row.pr_number
+        ));
+        lines
     }
 
     fn inspect_active_session_entrypoints(&self) -> Vec<String> {
@@ -753,11 +854,11 @@ impl CockpitModel {
         vec![
             "inspector — entrypoints".to_owned(),
             String::new(),
-            format!("resume:   rr resume --session {}", session.session_id),
+            "r resumes this session in-place (same gates as rr resume)".to_owned(),
             format!("status:   rr status --session {}", session.session_id),
+            format!("cli:      rr resume --session {}", session.session_id),
             String::new(),
             CLARIFY_HINT.to_owned(),
-            LAUNCH_DEFERRED_HINT.to_owned(),
         ]
     }
 
@@ -871,10 +972,10 @@ impl CockpitModel {
                 lines.push(format!("cli:      rr approve --batch {}", batch.batch_id));
             }
             "approved" => {
-                lines.push("approved — posting stays CLI-only:".to_owned());
+                lines.push("approved — p opens the elevated post confirmation".to_owned());
                 lines.push(format!("cli:      rr post --batch {}", batch.batch_id));
             }
-            _ => lines.push("not approvable in its current state".to_owned()),
+            _ => lines.push("not approvable or postable in its current state".to_owned()),
         }
         lines.push(String::new());
         lines.push(ELEVATED_MUTATION_HINT.to_owned());
@@ -1014,6 +1115,7 @@ impl CockpitModel {
 
     fn elevation_lines(&self) -> Vec<String> {
         let Overlay::Elevation {
+            action,
             batch_id,
             command,
             input,
@@ -1027,22 +1129,37 @@ impl CockpitModel {
             .find(|row| &row.batch_id == batch_id)
             .map(|row| row.item_count)
             .unwrap_or(0);
+        let (title, effect_lines) = match action {
+            ElevationAction::Approve => (
+                "╔══ ELEVATED ACTION — local batch approval ══",
+                [
+                    "this records a local approval token bound to the exact stored",
+                    "batch payload digest and target tuple — nothing is posted to GitHub",
+                ],
+            ),
+            ElevationAction::Post => (
+                "╔══ ELEVATED ACTION — post to GitHub ══",
+                [
+                    "this POSTS the approved batch payload to GitHub through the same",
+                    "fail-closed path as rr post — a remote mutation with an audit trail",
+                ],
+            ),
+        };
         vec![
-            "╔══ ELEVATED ACTION — local batch approval ══".to_owned(),
+            title.to_owned(),
             String::new(),
             format!("batch    {batch_id}  ({item_count} draft item(s))"),
             format!("command  {command}"),
             String::new(),
-            "this records a local approval token bound to the exact stored".to_owned(),
-            "batch payload digest and target tuple — nothing is posted to GitHub".to_owned(),
+            effect_lines[0].to_owned(),
+            effect_lines[1].to_owned(),
             String::new(),
             format!(
-                "type {APPROVE_CONFIRMATION_WORD} and press Enter to execute in-process; Esc cancels"
+                "type {} and press Enter to execute in-process; Esc cancels",
+                action.confirmation_word()
             ),
             String::new(),
             format!("> {input}_"),
-            String::new(),
-            ELEVATED_MUTATION_HINT.to_owned(),
         ]
     }
 
@@ -1052,24 +1169,32 @@ impl CockpitModel {
             String::new(),
             "global      q quit   ? help   Esc back/clear".to_owned(),
             "picker      j/k move   Enter open candidate   Esc full session finder".to_owned(),
-            "home        j/k move   Enter open session   / filter sessions   r reload".to_owned(),
-            "overview    f findings   d drafts   t timeline   s search   c clarify hint".to_owned(),
+            "home        j/k move   Enter open session   n new review (PR queue)   / filter   r reload"
+                .to_owned(),
+            "pr queue    j/k move   Enter start review (reuses a session)   f fresh   r reload"
+                .to_owned(),
+            "overview    f findings   d drafts   t timeline   s search   r resume   c clarify hint"
+                .to_owned(),
             "findings    j/k move   space multi-select   a/i/n/r triage (batch on selection)"
                 .to_owned(),
+            "            b draft selection into an outbound batch (rr send draft path)".to_owned(),
             "            s cycle sort   g cycle group   / filter   Esc clear sel/filter/back"
                 .to_owned(),
-            "drafts      Enter inspect items   a elevated approve confirmation".to_owned(),
+            "drafts      Enter inspect items   a elevated approve   p elevated post".to_owned(),
             "draft items j/k move   e edit draft body in $EDITOR   Esc drafts".to_owned(),
             "timeline    j/k move across runs, stage results, posted actions".to_owned(),
             "search      / edit query   Enter run   j/k move hits".to_owned(),
             "            posture line shows retrieval_mode + semantic asset state".to_owned(),
             String::new(),
-            "mutation    triage writes the same storage state as rr triage".to_owned(),
+            "mutation    triage/draft/launch run the same gated paths as the rr CLI".to_owned(),
             "            approval requires typing approve in the elevated prompt".to_owned(),
+            "            posting requires typing post in the elevated prompt".to_owned(),
             format!("            {ELEVATED_MUTATION_HINT}"),
             String::new(),
+            "launch      Enter/f in the PR queue and r on the overview may block".to_owned(),
+            "            briefly while the provider session starts".to_owned(),
+            String::new(),
             format!("clarify     {CLARIFY_HINT}"),
-            format!("launch      {LAUNCH_DEFERRED_HINT}"),
         ]
     }
 }

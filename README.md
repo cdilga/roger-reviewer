@@ -112,7 +112,11 @@ rr open
 
 `rr open` (compatibility alias: `rr tui`) opens the keyboard-driven review
 cockpit: sessions, findings triage, draft approval queue, timeline, and
-prior-review search in one place.
+prior-review search in one place. The cockpit drives the full review loop —
+`n` starts a new review from the open-PR queue, `r` resumes a session, `b`
+drafts findings into an outbound batch, and approved batches post to GitHub
+behind a typed elevated confirmation — through the same gated command paths
+as the CLI, robot, and extension surfaces.
 
 ### 4. Continue the same review later
 
@@ -173,7 +177,7 @@ remain fully supported compatibility aliases and route to the same handlers.
 | `rr queue` (`rr prs`) | List open pull requests as a review queue joined with local Roger state |
 | `rr review --pr 123 --provider opencode` | Start a review for a pull request |
 | `rr review --resume --pr 123` (`rr resume --pr 123`) | Re-enter the existing review for that pull request |
-| `rr open` (`rr tui`) | Open the local review cockpit (sessions, findings, drafts, timeline, search) |
+| `rr open` (`rr tui`) | Open the local review cockpit (PR queue launch, sessions, findings, drafts, approve/post, timeline, search) |
 | `rr status` | Show the current session, attention state, and next step |
 | `rr findings` | Inspect the structured findings Roger has materialized |
 | `rr findings --query "auth"` (`rr search --query "auth"`) | Search prior local review memory and evidence |

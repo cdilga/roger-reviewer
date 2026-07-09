@@ -1,13 +1,14 @@
 use crate::backend::CockpitBackend;
 use crate::model::{
     ApproveOutcome, CLARIFY_HINT, CockpitEntry, CockpitKey, CockpitModel, DecisionEventRow,
-    DraftBatchRow, DraftItemRow, ELEVATED_MUTATION_HINT, EMPTY_STORE_HINT, EvidenceRow,
-    FindingDetail, FindingRow, GroupKey, InputMode, KeyOutcome, MemoryPostureRow,
-    MemoryReviewResolutionRow, MemoryReviewRow, ModelEffect, OutboundLinkRow, Overlay,
-    PickerCandidate, PostedActionRow, Screen, SearchHitRow, SearchMode, SearchView,
+    DraftBatchRow, DraftItemRow, ELEVATED_MUTATION_HINT, EMPTY_STORE_HINT, ElevationAction,
+    EvidenceRow, FindingDetail, FindingRow, GroupKey, InputMode, KeyOutcome, MemoryPostureRow,
+    MemoryReviewResolutionRow, MemoryReviewRow, ModelEffect, OPS_UNAVAILABLE_HINT, OutboundLinkRow,
+    Overlay, PickerCandidate, PostedActionRow, Screen, SearchHitRow, SearchMode, SearchView,
     SessionHomeView, SessionRow, SortKey, StageResultRow, TimelineEntry, TimelineRunRow,
     TimelineView, TriageAction,
 };
+use crate::ops::{OpsOutcome, QueueRow, QueueView};
 
 #[derive(Default)]
 struct FakeBackend {
@@ -860,7 +861,10 @@ fn approve_key_opens_elevation_prompt_with_exact_cli_command() {
         rendered.contains("rr approve --batch batch-1"),
         "{rendered}"
     );
-    assert!(rendered.contains(ELEVATED_MUTATION_HINT), "{rendered}");
+    assert!(
+        rendered.contains("nothing is posted to GitHub"),
+        "{rendered}"
+    );
 }
 
 #[test]
@@ -983,7 +987,7 @@ fn elevation_blocked_outcome_surfaces_reason_code() {
 }
 
 #[test]
-fn approve_key_on_already_approved_batch_points_at_cli_only_posting() {
+fn approve_key_on_already_approved_batch_points_at_elevated_post() {
     let mut backend = populated_backend();
     backend.batches[0].state = "approved".to_owned();
     let mut model = bootstrap(&mut backend);
@@ -998,7 +1002,7 @@ fn approve_key_on_already_approved_batch_points_at_cli_only_posting() {
         model
             .notice
             .as_deref()
-            .is_some_and(|notice| notice.contains("rr post --batch batch-1")),
+            .is_some_and(|notice| notice.contains("p opens the elevated post confirmation")),
         "{:?}",
         model.notice
     );
@@ -1799,4 +1803,414 @@ fn draft_items_hint_and_help_document_edit_key() {
         help.contains("e edit draft body in $EDITOR"),
         "help overlay: {help}"
     );
+}
+
+// --- launch lane / CLI-runtime ops grammar ------------------------------------
+
+fn queue_view() -> QueueView {
+    QueueView {
+        repository: "owner/repo".to_owned(),
+        rows: vec![
+            QueueRow {
+                pr_number: 7,
+                title: "Fix flaky retry test".to_owned(),
+                author: "alice".to_owned(),
+                is_draft: false,
+                updated_at: "2026-07-01T10:00:00Z".to_owned(),
+                roger_state: "in_review".to_owned(),
+                session_id: Some("session-1".to_owned()),
+            },
+            QueueRow {
+                pr_number: 9,
+                title: "Add fail-closed gate".to_owned(),
+                author: "bob".to_owned(),
+                is_draft: true,
+                updated_at: "2026-07-02T10:00:00Z".to_owned(),
+                roger_state: "not_started".to_owned(),
+                session_id: None,
+            },
+        ],
+    }
+}
+
+#[test]
+fn home_n_key_requests_queue_load_and_lands_on_queue_screen() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    model.handle_key(CockpitKey::Char('n'), &mut backend);
+    assert_eq!(model.take_effect(), Some(ModelEffect::LoadQueue));
+
+    model.apply_queue_loaded(Ok(queue_view()));
+    assert_eq!(model.screen, Screen::Queue);
+    let rendered = model.render_lines(140, 30).join("\n");
+    assert!(rendered.contains("PR Review Queue"), "{rendered}");
+    assert!(rendered.contains("#9"), "{rendered}");
+    assert!(rendered.contains("roger=not_started"), "{rendered}");
+    assert!(rendered.contains("[draft PR]"), "{rendered}");
+}
+
+#[test]
+fn queue_load_failure_stays_put_with_notice() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    model.handle_key(CockpitKey::Char('n'), &mut backend);
+    let _ = model.take_effect();
+    model.apply_queue_loaded(Err("gh unavailable".to_owned()));
+    assert_eq!(model.screen, Screen::Home);
+    assert!(
+        model
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("gh unavailable")),
+        "{:?}",
+        model.notice
+    );
+}
+
+#[test]
+fn queue_enter_requests_reuse_start_and_f_forces_fresh() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    model.apply_queue_loaded(Ok(queue_view()));
+    assert_eq!(model.screen, Screen::Queue);
+
+    model.handle_key(CockpitKey::Enter, &mut backend);
+    assert_eq!(
+        model.take_effect(),
+        Some(ModelEffect::StartReview {
+            repository: "owner/repo".to_owned(),
+            pr: 7,
+            fresh: false,
+        })
+    );
+
+    model.handle_key(CockpitKey::Char('j'), &mut backend);
+    model.handle_key(CockpitKey::Char('f'), &mut backend);
+    assert_eq!(
+        model.take_effect(),
+        Some(ModelEffect::StartReview {
+            repository: "owner/repo".to_owned(),
+            pr: 9,
+            fresh: true,
+        })
+    );
+}
+
+#[test]
+fn apply_launch_outcome_opens_the_touched_session() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    model.apply_queue_loaded(Ok(queue_view()));
+    model.apply_launch_outcome(
+        OpsOutcome {
+            ok: true,
+            message: "review session launched\n  session: session-2".to_owned(),
+            repair_actions: Vec::new(),
+            session_id: Some("session-2".to_owned()),
+        },
+        &mut backend,
+    );
+    assert_eq!(model.screen, Screen::SessionHome);
+    assert_eq!(
+        model.active_session.as_ref().map(|s| s.session_id.as_str()),
+        Some("session-2")
+    );
+    assert!(
+        model
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("review session launched")),
+        "{:?}",
+        model.notice
+    );
+}
+
+#[test]
+fn apply_launch_outcome_blocked_surfaces_repair_action() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    model.apply_queue_loaded(Ok(queue_view()));
+    model.apply_launch_outcome(
+        OpsOutcome {
+            ok: false,
+            message: "provider 'opencode' cannot run".to_owned(),
+            repair_actions: vec!["verify OpenCode is installed and reachable".to_owned()],
+            session_id: None,
+        },
+        &mut backend,
+    );
+    assert_eq!(model.screen, Screen::Queue);
+    let notice = model.notice.clone().unwrap_or_default();
+    assert!(
+        notice.contains("provider 'opencode' cannot run"),
+        "{notice}"
+    );
+    assert!(notice.contains("verify OpenCode"), "{notice}");
+}
+
+#[test]
+fn session_home_r_key_requests_resume_of_active_session() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    model.handle_key(CockpitKey::Enter, &mut backend);
+    assert_eq!(model.screen, Screen::SessionHome);
+    model.handle_key(CockpitKey::Char('r'), &mut backend);
+    assert_eq!(
+        model.take_effect(),
+        Some(ModelEffect::ResumeSession {
+            session_id: "session-1".to_owned(),
+        })
+    );
+    assert!(
+        model
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("resuming session session-1")),
+        "{:?}",
+        model.notice
+    );
+}
+
+#[test]
+fn findings_b_key_drafts_cursor_row_or_multi_selection() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    open_findings(&mut model, &mut backend);
+
+    // No selection: the cursor row is the draft target.
+    model.handle_key(CockpitKey::Char('b'), &mut backend);
+    assert_eq!(
+        model.take_effect(),
+        Some(ModelEffect::CreateDraft {
+            session_id: "session-1".to_owned(),
+            finding_ids: vec!["finding-1".to_owned()],
+        })
+    );
+
+    // Multi-select: the whole selection is the draft target.
+    keys(
+        &mut model,
+        &mut backend,
+        &[
+            CockpitKey::Char(' '),
+            CockpitKey::Char('j'),
+            CockpitKey::Char(' '),
+        ],
+    );
+    model.handle_key(CockpitKey::Char('b'), &mut backend);
+    assert_eq!(
+        model.take_effect(),
+        Some(ModelEffect::CreateDraft {
+            session_id: "session-1".to_owned(),
+            finding_ids: vec!["finding-1".to_owned(), "finding-2".to_owned()],
+        })
+    );
+}
+
+#[test]
+fn apply_create_draft_outcome_clears_selection_and_points_at_drafts() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    open_findings(&mut model, &mut backend);
+    model.handle_key(CockpitKey::Char(' '), &mut backend);
+    assert!(!model.selected_findings.is_empty());
+
+    model.apply_create_draft_outcome(
+        OpsOutcome {
+            ok: true,
+            message: "materialized outbound draft batch".to_owned(),
+            repair_actions: Vec::new(),
+            session_id: None,
+        },
+        &mut backend,
+    );
+    assert!(model.selected_findings.is_empty());
+    let notice = model.notice.clone().unwrap_or_default();
+    assert!(
+        notice.contains("materialized outbound draft batch"),
+        "{notice}"
+    );
+    assert!(
+        notice.contains("d opens the draft approval queue"),
+        "{notice}"
+    );
+}
+
+#[test]
+fn apply_create_draft_blocked_outcome_keeps_selection_and_shows_repair() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    open_findings(&mut model, &mut backend);
+    model.handle_key(CockpitKey::Char(' '), &mut backend);
+
+    model.apply_create_draft_outcome(
+        OpsOutcome {
+            ok: false,
+            message: "rr draft is blocked because the persisted review state requires explicit reconciliation".to_owned(),
+            repair_actions: vec!["run rr resume --session session-1".to_owned()],
+            session_id: None,
+        },
+        &mut backend,
+    );
+    assert!(!model.selected_findings.is_empty());
+    let notice = model.notice.clone().unwrap_or_default();
+    assert!(notice.contains("blocked"), "{notice}");
+    assert!(notice.contains("rr resume --session session-1"), "{notice}");
+}
+
+#[test]
+fn post_key_gates_on_approved_state() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    keys(
+        &mut model,
+        &mut backend,
+        &[CockpitKey::Enter, CockpitKey::Char('d')],
+    );
+
+    // awaiting_approval: posting is refused toward the approve gate.
+    model.handle_key(CockpitKey::Char('p'), &mut backend);
+    assert_eq!(model.overlay, Overlay::None);
+    assert!(
+        model
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("needs approval first")),
+        "{:?}",
+        model.notice
+    );
+}
+
+#[test]
+fn post_elevation_requires_typing_post_and_emits_post_effect() {
+    let mut backend = populated_backend();
+    backend.batches[0].state = "approved".to_owned();
+    let mut model = bootstrap(&mut backend);
+    keys(
+        &mut model,
+        &mut backend,
+        &[CockpitKey::Enter, CockpitKey::Char('d')],
+    );
+    model.handle_key(CockpitKey::Char('p'), &mut backend);
+    let Overlay::Elevation {
+        action,
+        batch_id,
+        command,
+        ..
+    } = &model.overlay
+    else {
+        panic!("expected post elevation overlay, got {:?}", model.overlay);
+    };
+    assert_eq!(*action, ElevationAction::Post);
+    assert_eq!(batch_id, "batch-1");
+    assert_eq!(command, "rr post --batch batch-1");
+    let rendered = model.render_lines(120, 30).join("\n");
+    assert!(rendered.contains("post to GitHub"), "{rendered}");
+
+    // The approve word must not post.
+    type_chars(&mut model, &mut backend, "approve");
+    model.handle_key(CockpitKey::Enter, &mut backend);
+    assert!(matches!(model.overlay, Overlay::Elevation { .. }));
+    assert_eq!(model.take_effect(), None);
+    assert!(
+        model
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("type post exactly")),
+        "{:?}",
+        model.notice
+    );
+
+    for _ in 0.."approve".len() {
+        model.handle_key(CockpitKey::Backspace, &mut backend);
+    }
+    type_chars(&mut model, &mut backend, "post");
+    model.handle_key(CockpitKey::Enter, &mut backend);
+    assert_eq!(model.overlay, Overlay::None);
+    assert_eq!(
+        model.take_effect(),
+        Some(ModelEffect::PostBatch {
+            session_id: "session-1".to_owned(),
+            batch_id: "batch-1".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn post_elevation_escape_cancels_without_effect() {
+    let mut backend = populated_backend();
+    backend.batches[0].state = "approved".to_owned();
+    let mut model = bootstrap(&mut backend);
+    keys(
+        &mut model,
+        &mut backend,
+        &[CockpitKey::Enter, CockpitKey::Char('d')],
+    );
+    model.handle_key(CockpitKey::Char('p'), &mut backend);
+    type_chars(&mut model, &mut backend, "pos");
+    model.handle_key(CockpitKey::Esc, &mut backend);
+    assert_eq!(model.overlay, Overlay::None);
+    assert_eq!(model.take_effect(), None);
+    assert!(
+        model
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("nothing sent")),
+        "{:?}",
+        model.notice
+    );
+}
+
+#[test]
+fn apply_post_outcome_reloads_batches_truthfully() {
+    let mut backend = populated_backend();
+    backend.batches[0].state = "approved".to_owned();
+    let mut model = bootstrap(&mut backend);
+    keys(
+        &mut model,
+        &mut backend,
+        &[CockpitKey::Enter, CockpitKey::Char('d')],
+    );
+    backend.batches[0].state = "posted".to_owned();
+    model.apply_post_outcome(
+        OpsOutcome {
+            ok: true,
+            message: "posted approved batch batch-1 to GitHub".to_owned(),
+            repair_actions: Vec::new(),
+            session_id: None,
+        },
+        &mut backend,
+    );
+    assert_eq!(model.batches[0].state, "posted");
+    assert!(
+        model
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("posted approved batch batch-1")),
+        "{:?}",
+        model.notice
+    );
+}
+
+#[test]
+fn ops_unavailable_actions_degrade_to_honest_notice() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    model.apply_ops_unavailable();
+    assert_eq!(model.notice.as_deref(), Some(OPS_UNAVAILABLE_HINT));
+}
+
+#[test]
+fn help_and_hints_document_launch_draft_and_post_keys() {
+    let mut backend = populated_backend();
+    let mut model = bootstrap(&mut backend);
+    let home_rendered = model.render_lines(140, 24).join("\n");
+    assert!(home_rendered.contains("n new review"), "{home_rendered}");
+
+    model.handle_key(CockpitKey::Char('?'), &mut backend);
+    let help = model.render_lines(150, 44).join("\n");
+    assert!(help.contains("n new review (PR queue)"), "{help}");
+    assert!(help.contains("b draft selection"), "{help}");
+    assert!(help.contains("p elevated post"), "{help}");
+    assert!(help.contains("r resume"), "{help}");
 }

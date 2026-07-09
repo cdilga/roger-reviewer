@@ -16367,6 +16367,172 @@ fn picker_candidates_from_finder_entries(
         .collect()
 }
 
+/// CLI-runtime operations boundary for the cockpit. Every method dispatches
+/// the same parse → handler pipeline as the equivalent shell invocation
+/// (`rr queue` / `rr review` / `rr resume` / `rr send draft` / `rr send post`),
+/// so the TUI applies byte-identical gates — provider support, session reuse,
+/// stale-state reconciliation, approval binding — as the CLI, robot, and
+/// browser-extension surfaces. This is what keeps the surfaces equivalent: one
+/// command pipeline, several front doors.
+struct CliCockpitOps {
+    runtime: CliRuntime,
+    repo: Option<String>,
+}
+
+impl CliCockpitOps {
+    fn run_argv(&self, argv: Vec<String>) -> CommandResponse {
+        match parse_args(&argv) {
+            Ok(parsed) => execute_command(&parsed, &self.runtime),
+            Err(err) => error_response(format!("cockpit command failed to parse: {err}")),
+        }
+    }
+}
+
+/// Project a command response into the cockpit's operation outcome: complete /
+/// empty / degraded count as ok; blocked and error outcomes carry their repair
+/// actions so the cockpit can show the same guidance the CLI would print.
+fn cockpit_ops_outcome(response: &CommandResponse) -> roger_tui::OpsOutcome {
+    let ok = matches!(
+        response.outcome,
+        OutcomeKind::Complete | OutcomeKind::Empty | OutcomeKind::Degraded
+    );
+    let session_id = response
+        .data
+        .get("session_id")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            response
+                .data
+                .get("reused_session_id")
+                .and_then(Value::as_str)
+        })
+        .map(str::to_owned);
+    roger_tui::OpsOutcome {
+        ok,
+        message: response.message.clone(),
+        repair_actions: response.repair_actions.clone(),
+        session_id,
+    }
+}
+
+impl roger_tui::CockpitOps for CliCockpitOps {
+    fn load_queue(&mut self) -> Result<roger_tui::QueueView, String> {
+        let mut argv = vec!["prs".to_owned()];
+        if let Some(repo) = &self.repo {
+            argv.push("--repo".to_owned());
+            argv.push(repo.clone());
+        }
+        let response = self.run_argv(argv);
+        if !matches!(response.outcome, OutcomeKind::Complete | OutcomeKind::Empty) {
+            let repair = response
+                .repair_actions
+                .first()
+                .map(|action| format!(" — {action}"))
+                .unwrap_or_default();
+            return Err(format!("{}{repair}", response.message));
+        }
+        let repository = response
+            .data
+            .get("repository")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let rows = response
+            .data
+            .get("items")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| roger_tui::QueueRow {
+                        pr_number: item.get("pr_number").and_then(Value::as_u64).unwrap_or(0),
+                        title: item
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        author: item
+                            .get("author")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        is_draft: item
+                            .get("is_draft")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                        updated_at: item
+                            .get("updated_at")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        roger_state: item
+                            .get("roger_state")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        session_id: item
+                            .get("session_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(roger_tui::QueueView { repository, rows })
+    }
+
+    fn start_review(&mut self, repository: &str, pr: u64, fresh: bool) -> roger_tui::OpsOutcome {
+        let mut argv = vec![
+            "review".to_owned(),
+            "--repo".to_owned(),
+            repository.to_owned(),
+            "--pr".to_owned(),
+            pr.to_string(),
+            "--surface".to_owned(),
+            "tui".to_owned(),
+        ];
+        if fresh {
+            argv.push("--fresh".to_owned());
+        }
+        cockpit_ops_outcome(&self.run_argv(argv))
+    }
+
+    fn resume_session(&mut self, session_id: &str) -> roger_tui::OpsOutcome {
+        let argv = vec![
+            "resume".to_owned(),
+            "--session".to_owned(),
+            session_id.to_owned(),
+            "--surface".to_owned(),
+            "tui".to_owned(),
+        ];
+        cockpit_ops_outcome(&self.run_argv(argv))
+    }
+
+    fn create_draft(&mut self, session_id: &str, finding_ids: &[String]) -> roger_tui::OpsOutcome {
+        let mut argv = vec![
+            "draft".to_owned(),
+            "--session".to_owned(),
+            session_id.to_owned(),
+        ];
+        for finding_id in finding_ids {
+            argv.push("--finding".to_owned());
+            argv.push(finding_id.clone());
+        }
+        cockpit_ops_outcome(&self.run_argv(argv))
+    }
+
+    fn post_batch(&mut self, session_id: &str, batch_id: &str) -> roger_tui::OpsOutcome {
+        let argv = vec![
+            "post".to_owned(),
+            "--session".to_owned(),
+            session_id.to_owned(),
+            "--batch".to_owned(),
+            batch_id.to_owned(),
+        ];
+        cockpit_ops_outcome(&self.run_argv(argv))
+    }
+}
+
 fn handle_tui(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     // The cockpit is interactive-only by contract: robot callers fail closed
     // toward the existing machine-readable surfaces.
@@ -16416,7 +16582,15 @@ fn handle_tui(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     };
     drop(store);
 
-    match roger_tui::run_cockpit_with_entry(
+    // The ops boundary hands the cockpit the same command pipeline the shell
+    // uses, keyed to this invocation's repo scope (explicit --repo beats cwd
+    // inference, which each dispatched command re-derives when absent).
+    let ops = Box::new(CliCockpitOps {
+        runtime: runtime.clone(),
+        repo: parsed.repo.clone(),
+    });
+
+    match roger_tui::run_cockpit_with_ops(
         roger_tui::RogerTuiConfig {
             store_root: runtime.store_root.clone(),
             repo: parsed.repo.clone(),
@@ -16424,6 +16598,7 @@ fn handle_tui(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
             initial_session_id: None,
         },
         entry,
+        Some(ops),
     ) {
         Ok(roger_tui::TuiExit::Quit) => CommandResponse {
             outcome: OutcomeKind::Complete,
@@ -18535,6 +18710,75 @@ mod tests {
             cwd,
             store_root,
             opencode_bin: DEFAULT_OPENCODE_BIN.to_owned(),
+        }
+    }
+
+    #[test]
+    fn cockpit_ops_outcome_projects_response_fields() {
+        let blocked = blocked_response(
+            "rr post requires an explicit approved draft batch id".to_owned(),
+            vec!["pass --batch <id>".to_owned()],
+            json!({"reason_code": "batch_required"}),
+        );
+        let outcome = cockpit_ops_outcome(&blocked);
+        assert!(!outcome.ok);
+        assert!(outcome.message.contains("approved draft batch id"));
+        assert_eq!(outcome.repair_actions, vec!["pass --batch <id>".to_owned()]);
+        assert_eq!(outcome.session_id, None);
+
+        let launched = CommandResponse {
+            outcome: OutcomeKind::Complete,
+            data: json!({"session_id": "session-9"}),
+            warnings: Vec::new(),
+            repair_actions: Vec::new(),
+            message: "review session launched".to_owned(),
+        };
+        assert_eq!(
+            cockpit_ops_outcome(&launched).session_id.as_deref(),
+            Some("session-9")
+        );
+
+        // The reuse path names the session under reused_session_id instead.
+        let reused = CommandResponse {
+            outcome: OutcomeKind::Complete,
+            data: json!({"reused": true, "reused_session_id": "session-4"}),
+            warnings: Vec::new(),
+            repair_actions: Vec::new(),
+            message: "reusing existing session session-4".to_owned(),
+        };
+        let reused_outcome = cockpit_ops_outcome(&reused);
+        assert!(reused_outcome.ok);
+        assert_eq!(reused_outcome.session_id.as_deref(), Some("session-4"));
+    }
+
+    #[test]
+    fn cockpit_ops_dispatch_the_same_gated_command_pipeline() {
+        use roger_tui::CockpitOps as _;
+        let dir = tempdir().expect("tempdir");
+        let store_root = dir.path().join("store");
+        let mut ops = CliCockpitOps {
+            runtime: test_runtime(dir.path().to_owned(), store_root),
+            repo: Some("owner/repo".to_owned()),
+        };
+
+        // Posting an unknown batch on an empty store must fail closed with the
+        // exact same shape as `rr post --session ... --batch ...` from a shell:
+        // there is no session yet, so the send chain blocks before any GitHub
+        // mutation could run.
+        let outcome = ops.post_batch("session-missing", "batch-missing");
+        assert!(!outcome.ok, "empty store must not post: {outcome:?}");
+
+        // Draft materialization goes through the identical handler too.
+        let draft_outcome = ops.create_draft("session-missing", &["finding-1".to_owned()]);
+        assert!(
+            !draft_outcome.ok,
+            "empty store must not draft: {draft_outcome:?}"
+        );
+
+        // The queue lane surfaces the same blocked/error truth as `rr queue`
+        // when GitHub listing is unavailable rather than fabricating rows.
+        if let Ok(queue) = ops.load_queue() {
+            assert_eq!(queue.repository, "owner/repo");
         }
     }
 
