@@ -4,6 +4,56 @@ Roger Reviewer ships on a CalVer release lane (`vYYYY.MM.DD`). This file groups
 the dated releases into the product milestone they belong to. Entries describe
 what actually shipped; aspirational or feature-gated work is called out as such.
 
+## 0.3 (v2026.07.09) — Surface parity: run the whole review loop from CLI, TUI, or the browser
+
+This release makes the CLI, the TUI (`rr open`), and the GitHub browser
+extension feature-paired: the same review operation invokes the same
+fail-closed domain logic on every surface, and every operator operation is
+reachable on the surfaces that should have it — no more "that only works from
+the CLI."
+
+### One shared review core
+
+- The draft-materialization, approval, posting, triage, memory-resolution, and
+  clarification logic moved out of the CLI handlers into a shared
+  `roger-review-ops` crate. The CLI, the TUI, and the browser bridge all call
+  one path, so a surface can't drift into a weaker or subtly different rule
+  (ports-and-adapters). Posting takes an injectable GitHub adapter so the gate
+  is testable without touching GitHub.
+
+### The TUI is now a full cockpit
+
+- The deferred surface is closed. From `rr open` you can now **create a draft
+  batch from findings** (`d`), **post an approved batch** with a visibly
+  elevated, distinct confirmation (`p` — separate from approve), open a bounded
+  **clarification composer** (`c`) that records a durable request, read **code
+  evidence excerpts** in the inspector, and **launch/resume a session** (`o`)
+  via the same suspend-and-return mechanism the editor already used. The
+  "posting stays CLI-only" and "launching is deferred" placeholders are gone.
+
+### The extension reaches bounded parity
+
+- The PR panel gained per-finding **triage** buttons, **draft** viewing with
+  local **edit-as-revision**, a **clarification** composer, and read-only
+  **search** and **timeline** mirrors — all routed through the bridge to the
+  same shared operations. Approval and posting are deliberately *not* buttons:
+  they render as copyable `rr send approve`/`rr send post` handoffs, keeping
+  GitHub writes Roger-mediated and visibly elevated (a documented, guarded
+  security boundary, not a gap).
+
+### The CLI caught up on what only the TUI had
+
+- New `rr memory review` / `rr memory accept|reject`, `rr timeline`, and
+  `rr clarify` bring the CLI level with operations the TUI already exposed. A
+  durable clarification store replaces the old echo-only worker request.
+
+### Guarded against regression
+
+- A cross-surface parity guard test asserts the matrix holds and that the two
+  deliberate asymmetries stay put (the extension never approves/posts; the
+  worker transport is never an operator action). The contract is
+  `docs/SURFACE_PARITY_CONTRACT.md`.
+
 ## 0.3 (v2026.07.08) — In-place updates, real memory, worker transport, session sanity
 
 This release makes several surfaces that previously only *looked* real actually
