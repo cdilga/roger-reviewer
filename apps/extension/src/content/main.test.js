@@ -46,10 +46,28 @@ const {
   normalizeFindingsPayload,
   renderFindingsStaging,
   groupFindingsByTriage,
+  createFindingItemNode,
+  normalizeFindingsItem,
   FINDINGS_BODY_ID,
   FINDINGS_READONLY_CAPTION,
   FINDINGS_NOT_RELAYED_MESSAGE,
   FINDINGS_EMPTY_MESSAGE,
+  handleTriageFinding,
+  handleRequestClarification,
+  handleReviseDraft,
+  normalizeDraftsPayload,
+  renderDraftsStaging,
+  handleShowDrafts,
+  createDraftsSection,
+  DRAFTS_BODY_ID,
+  renderSearchResults,
+  handleSearch,
+  createSearchSection,
+  SEARCH_BODY_ID,
+  renderTimeline,
+  handleTimeline,
+  createTimelineSection,
+  TIMELINE_BODY_ID,
 } = require('./main.js');
 
 function createParent() {
@@ -3254,4 +3272,302 @@ test('status re-poll does not start while the tab is hidden', () => {
   });
   assert.equal(started, null);
   assert.equal(isStatusPolling(), false);
+});
+
+// ---------------------------------------------------------------------------
+// Bounded local-parity surfaces (bead rr-surface-parity-epic-rfa2.3):
+// triage buttons, clarification, draft edit-as-revision, search + timeline
+// mirrors, and the approve/post HANDOFF (never a button).
+// ---------------------------------------------------------------------------
+
+function makeParityEnv() {
+  const findingsBody = createTestElement('div');
+  findingsBody.id = FINDINGS_BODY_ID;
+  const draftsBody = createTestElement('div');
+  draftsBody.id = DRAFTS_BODY_ID;
+  const searchBody = createTestElement('div');
+  searchBody.id = SEARCH_BODY_ID;
+  const timelineBody = createTestElement('div');
+  timelineBody.id = TIMELINE_BODY_ID;
+  const statusNode = {
+    textContent: '',
+    hidden: true,
+    parentElement: { classList: { contains: () => false } },
+    classList: createStatusClassList(),
+  };
+  const documentStub = {
+    createElement: (tag) => createTestElement(tag),
+    getElementById(id) {
+      if (id === FINDINGS_BODY_ID) return findingsBody;
+      if (id === DRAFTS_BODY_ID) return draftsBody;
+      if (id === SEARCH_BODY_ID) return searchBody;
+      if (id === TIMELINE_BODY_ID) return timelineBody;
+      if (id === 'roger-reviewer-status') return statusNode;
+      return null;
+    },
+  };
+  return { findingsBody, draftsBody, searchBody, timelineBody, statusNode, documentStub };
+}
+
+function nodesByClass(root, cls) {
+  return findNodes(
+    root,
+    (node) => typeof node.className === 'string' && node.className.split(/\s+/).includes(cls)
+  );
+}
+
+function textsByClass(root, cls) {
+  return nodesByClass(root, cls).map((node) => node.textContent);
+}
+
+function buttonTexts(root) {
+  return findNodes(root, (node) => node.tagName === 'BUTTON').map((node) => node.textContent);
+}
+
+const DRAFTED_ITEM_RAW = {
+  finding_id: 'f2',
+  title: 'Missing auth check on delete route',
+  triage_state: 'confirmed',
+  outbound_state: 'awaiting_approval',
+  outbound_detail: { draft_id: 'draft-2', draft_batch_id: 'batch-9' },
+  summary: 'The delete route skips the auth guard.',
+  evidence_count: 1,
+};
+
+test('normalizeFindingsItem lifts outbound_detail draft_id + draft_batch_id', () => {
+  const item = normalizeFindingsItem(DRAFTED_ITEM_RAW);
+  assert.equal(item.draft_id, 'draft-2');
+  assert.equal(item.draft_batch_id, 'batch-9');
+  assert.equal(item.outbound_state, 'awaiting_approval');
+});
+
+test('createFindingItemNode renders elevated triage buttons + clarification + draft edit when context is provided', () => {
+  const { documentStub } = makeParityEnv();
+  const item = normalizeFindingsItem(DRAFTED_ITEM_RAW);
+  const node = createFindingItemNode(item, documentStub, TEST_CONTEXT);
+
+  const triageLabels = textsByClass(node, 'rr-triage-button');
+  assert.deepEqual(triageLabels, ['Accept', 'Ignore', 'Needs follow-up', 'Resolve']);
+  assert.equal(nodesByClass(node, 'rr-clarify-input').length, 1);
+  assert.equal(textsByClass(node, 'rr-clarify-button')[0], 'Request clarification');
+  assert.equal(nodesByClass(node, 'rr-draft-edit-input').length, 1);
+  assert.equal(textsByClass(node, 'rr-draft-edit-save')[0], 'Save revision');
+});
+
+test('createFindingItemNode renders the approve HANDOFF command, never an approve/post button', () => {
+  const { documentStub } = makeParityEnv();
+  const item = normalizeFindingsItem(DRAFTED_ITEM_RAW);
+  const node = createFindingItemNode(item, documentStub, TEST_CONTEXT);
+
+  const commands = textsByClass(node, 'rr-copy-command');
+  assert.ok(
+    commands.includes('rr send approve --batch batch-9'),
+    `expected copyable approve handoff, got ${JSON.stringify(commands)}`
+  );
+  // Deliberate asymmetry 1: no button may approve or post from the extension.
+  const buttons = buttonTexts(node);
+  assert.ok(
+    !buttons.some((text) => /approve|post/i.test(String(text))),
+    `no approve/post button may exist, got ${JSON.stringify(buttons)}`
+  );
+});
+
+test('createFindingItemNode omits all mutation controls in the read-only mirror (no context)', () => {
+  const { documentStub } = makeParityEnv();
+  const item = normalizeFindingsItem(DRAFTED_ITEM_RAW);
+  const node = createFindingItemNode(item, documentStub);
+  assert.equal(nodesByClass(node, 'rr-triage-button').length, 0);
+  assert.equal(nodesByClass(node, 'rr-clarify-input').length, 0);
+  assert.equal(nodesByClass(node, 'rr-draft-edit-input').length, 0);
+  assert.equal(nodesByClass(node, 'rr-copy-command').length, 0);
+});
+
+test('handleTriageFinding dispatches triage_finding then re-fetches findings', () => {
+  const { documentStub } = makeParityEnv();
+  const { stub, sent } = makeFindingsChromeStub({
+    response: { ok: true, action: 'triage_finding', message: 'triaged', findings: { count: 0, items: [] } },
+  });
+  const button = { textContent: 'Accept', disabled: false };
+  withPanelGlobals({ documentStub, chromeStub: stub }, () => {
+    handleTriageFinding(TEST_CONTEXT, 'f2', 'accepted', button);
+  });
+
+  assert.equal(sent[0].type, 'roger_bridge_launch');
+  assert.deepEqual(sent[0].intent, {
+    action: 'triage_finding',
+    owner: 'acme',
+    repo: 'widgets',
+    pr_number: 42,
+    finding_id: 'f2',
+    state: 'accepted',
+  });
+  // Success re-fetches the findings mirror through the same launch path.
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].intent.action, 'show_findings');
+  assert.equal(button.disabled, false);
+});
+
+test('handleReviseDraft dispatches revise_draft with draft_id + body and never posts', () => {
+  const { documentStub } = makeParityEnv();
+  const { stub, sent } = makeFindingsChromeStub({
+    response: { ok: true, action: 'revise_draft', message: 'rr send edit recorded revision 2' },
+  });
+  const button = { textContent: 'Save revision', disabled: false };
+  withPanelGlobals({ documentStub, chromeStub: stub }, () => {
+    handleReviseDraft(TEST_CONTEXT, 'draft-2', 'revised body text', button);
+  });
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].intent, {
+    action: 'revise_draft',
+    owner: 'acme',
+    repo: 'widgets',
+    pr_number: 42,
+    draft_id: 'draft-2',
+    body: 'revised body text',
+  });
+});
+
+test('handleReviseDraft blocks an empty body without dispatching', () => {
+  const { documentStub } = makeParityEnv();
+  const { stub, sent } = makeFindingsChromeStub({ response: { ok: true } });
+  withPanelGlobals({ documentStub, chromeStub: stub }, () => {
+    handleReviseDraft(TEST_CONTEXT, 'draft-2', '   ', null);
+  });
+  assert.equal(sent.length, 0);
+});
+
+test('handleRequestClarification dispatches request_clarification; empty body is blocked', () => {
+  const { documentStub } = makeParityEnv();
+  const { stub, sent } = makeFindingsChromeStub({
+    response: { ok: true, action: 'request_clarification', message: 'recorded', clarification_ack: { clarification_id: 'c1' } },
+  });
+  const button = { textContent: 'Request clarification', disabled: false };
+  withPanelGlobals({ documentStub, chromeStub: stub }, () => {
+    handleRequestClarification(TEST_CONTEXT, 'f2', '', button);
+  });
+  assert.equal(sent.length, 0, 'empty clarification must not dispatch');
+
+  withPanelGlobals({ documentStub, chromeStub: stub }, () => {
+    handleRequestClarification(TEST_CONTEXT, 'f2', 'why is this unsafe?', button);
+  });
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].intent, {
+    action: 'request_clarification',
+    owner: 'acme',
+    repo: 'widgets',
+    pr_number: 42,
+    finding_id: 'f2',
+    body: 'why is this unsafe?',
+  });
+});
+
+test('renderDraftsStaging renders draft cards with edit controls + approve handoff, no approve button', () => {
+  const { draftsBody, documentStub } = makeParityEnv();
+  const response = {
+    ok: true,
+    drafts: { count: 1, items: [DRAFTED_ITEM_RAW], warnings: [] },
+  };
+  const payload = renderDraftsStaging(draftsBody, response, documentStub, TEST_CONTEXT);
+  assert.equal(payload.items.length, 1);
+  assert.equal(textsByClass(draftsBody, 'rr-drafts-item-title')[0], 'Missing auth check on delete route');
+  assert.equal(nodesByClass(draftsBody, 'rr-draft-edit-input').length, 1);
+  assert.ok(textsByClass(draftsBody, 'rr-copy-command').includes('rr send approve --batch batch-9'));
+  assert.ok(!buttonTexts(draftsBody).some((text) => /approve|post/i.test(String(text))));
+});
+
+test('normalizeDraftsPayload drops findings that were never drafted', () => {
+  const payload = normalizeDraftsPayload({
+    drafts: {
+      count: 2,
+      items: [
+        DRAFTED_ITEM_RAW,
+        { finding_id: 'f1', title: 'Not drafted', outbound_state: 'not_drafted' },
+      ],
+    },
+  });
+  assert.equal(payload.items.length, 1);
+  assert.equal(payload.items[0].finding_id, 'f2');
+});
+
+test('handleShowDrafts dispatches show_drafts and renders the drafts body', () => {
+  const { documentStub } = makeParityEnv();
+  const { stub, sent } = makeFindingsChromeStub({
+    response: { ok: true, action: 'show_drafts', drafts: { count: 1, items: [DRAFTED_ITEM_RAW] } },
+  });
+  const button = { textContent: 'Show local drafts', disabled: false };
+  withPanelGlobals({ documentStub, chromeStub: stub }, () => {
+    handleShowDrafts(TEST_CONTEXT, button);
+  });
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].intent, { action: 'show_drafts', owner: 'acme', repo: 'widgets', pr_number: 42 });
+});
+
+test('renderSearchResults renders relayed prior-review matches', () => {
+  const { searchBody, documentStub } = makeParityEnv();
+  const result = renderSearchResults(
+    searchBody,
+    { ok: true, search_results: { count: 2, matches: [{ title: 'prior finding A' }, { title: 'prior finding B' }] } },
+    documentStub
+  );
+  assert.equal(result.items.length, 2);
+  assert.deepEqual(textsByClass(searchBody, 'rr-search-item-title'), ['prior finding A', 'prior finding B']);
+});
+
+test('handleSearch dispatches search with the query; empty query is blocked', () => {
+  const { documentStub } = makeParityEnv();
+  const { stub, sent } = makeFindingsChromeStub({
+    response: { ok: true, action: 'search', search_results: { count: 0, matches: [] } },
+  });
+  const button = { textContent: 'Search', disabled: false };
+  withPanelGlobals({ documentStub, chromeStub: stub }, () => {
+    handleSearch(TEST_CONTEXT, '   ', button);
+  });
+  assert.equal(sent.length, 0, 'empty query must not dispatch');
+  withPanelGlobals({ documentStub, chromeStub: stub }, () => {
+    handleSearch(TEST_CONTEXT, 'retry loop', button);
+  });
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].intent, {
+    action: 'search',
+    owner: 'acme',
+    repo: 'widgets',
+    pr_number: 42,
+    query: 'retry loop',
+  });
+});
+
+test('renderTimeline renders relayed events and handleTimeline dispatches timeline', () => {
+  const { timelineBody, documentStub } = makeParityEnv();
+  const result = renderTimeline(
+    timelineBody,
+    { ok: true, timeline: { events: [{ kind: 'run', at: '2026-07-09T00:00:00Z' }, { kind: 'draft' }] } },
+    documentStub
+  );
+  assert.equal(result.items.length, 2);
+  assert.equal(nodesByClass(timelineBody, 'rr-timeline-item').length, 2);
+
+  const { stub, sent } = makeFindingsChromeStub({
+    response: { ok: true, action: 'timeline', timeline: { events: [] } },
+  });
+  const button = { textContent: 'Show review timeline', disabled: false };
+  withPanelGlobals({ documentStub, chromeStub: stub }, () => {
+    handleTimeline(TEST_CONTEXT, button);
+  });
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].intent, { action: 'timeline', owner: 'acme', repo: 'widgets', pr_number: 42 });
+});
+
+test('createDraftsSection / createSearchSection / createTimelineSection build id-bearing sections', () => {
+  const { documentStub } = makeParityEnv();
+  const drafts = createDraftsSection(TEST_CONTEXT, documentStub);
+  assert.equal(drafts.id, 'roger-reviewer-drafts');
+  assert.ok(findNodes(drafts, (n) => n.id === DRAFTS_BODY_ID).length === 1);
+
+  const search = createSearchSection(TEST_CONTEXT, documentStub);
+  assert.equal(search.id, 'roger-reviewer-search');
+  assert.ok(findNodes(search, (n) => n.id === SEARCH_BODY_ID).length === 1);
+
+  const timeline = createTimelineSection(TEST_CONTEXT, documentStub);
+  assert.equal(timeline.id, 'roger-reviewer-timeline');
+  assert.ok(findNodes(timeline, (n) => n.id === TIMELINE_BODY_ID).length === 1);
 });

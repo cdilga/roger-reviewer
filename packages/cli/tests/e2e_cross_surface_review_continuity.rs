@@ -220,6 +220,11 @@ fn e2e_cross_surface_review_continuity_proves_bridge_resume_tui_and_recall_truth
             session_id: None,
             extension_id: Some(PACKAGED_MANIFEST_KEY_EXTENSION_ID.to_owned()),
             browser: Some("chrome".to_owned()),
+            finding_id: None,
+            state: None,
+            draft_id: None,
+            body: None,
+            query: None,
         },
         &BridgePreflight {
             roger_binary_found: true,

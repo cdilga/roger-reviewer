@@ -4,7 +4,13 @@
 export type BridgeAction =
   | 'start_review'
   | 'resume_review'
-  | 'show_findings';
+  | 'show_findings'
+  | 'triage_finding'
+  | 'show_drafts'
+  | 'revise_draft'
+  | 'request_clarification'
+  | 'search'
+  | 'timeline';
 
 export interface BridgeLaunchIntent {
   action: BridgeAction;
@@ -14,6 +20,11 @@ export interface BridgeLaunchIntent {
   head_ref?: string;
   instance?: string;
   session_id?: string;
+  finding_id?: string;
+  state?: string;
+  draft_id?: string;
+  body?: string;
+  query?: string;
 }
 
 export interface BridgeResponse {
@@ -25,4 +36,9 @@ export interface BridgeResponse {
   warnings?: string[];
   candidates?: unknown;
   auto_selected_session?: boolean;
+  findings?: unknown;
+  drafts?: unknown;
+  search_results?: unknown;
+  timeline?: unknown;
+  clarification_ack?: unknown;
 }

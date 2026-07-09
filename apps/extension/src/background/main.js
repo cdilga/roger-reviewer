@@ -4,6 +4,14 @@ const SUPPORTED_ACTIONS = new Set([
   'start_review',
   'resume_review',
   'show_findings',
+  // Bounded local-parity actions (deliberate asymmetry 1): these initiate local
+  // mutations or read-only mirrors, but never post or approve.
+  'triage_finding',
+  'show_drafts',
+  'revise_draft',
+  'request_clarification',
+  'search',
+  'timeline',
 ]);
 const CANONICAL_ATTENTION_STATES = new Set([
   'awaiting_user_input',
@@ -196,6 +204,26 @@ function dispatchNative(intent, onProgress) {
                 freshness_seconds: mirrored.freshness_seconds,
                 freshness_label: mirrored.freshness_label,
               }
+            : {}),
+          // Bounded local-parity relays: findings mirror (show_findings /
+          // triage_finding), drafts (show_drafts), search results (search),
+          // timeline (timeline), clarification ack (request_clarification). Each
+          // is additive and only populated by its action; without these the
+          // content script never sees the relayed data.
+          ...(frame.findings !== undefined && frame.findings !== null
+            ? { findings: frame.findings }
+            : {}),
+          ...(frame.drafts !== undefined && frame.drafts !== null
+            ? { drafts: frame.drafts }
+            : {}),
+          ...(frame.search_results !== undefined && frame.search_results !== null
+            ? { search_results: frame.search_results }
+            : {}),
+          ...(frame.timeline !== undefined && frame.timeline !== null
+            ? { timeline: frame.timeline }
+            : {}),
+          ...(frame.clarification_ack !== undefined && frame.clarification_ack !== null
+            ? { clarification_ack: frame.clarification_ack }
             : {}),
         });
       });
@@ -581,7 +609,8 @@ async function handleLaunchMessage(payload, sender = null, options = {}) {
       ok: false,
       mode: 'invalid_request',
       message: `Unsupported action: ${String(intent.action)}`,
-      guidance: 'Supported actions: start_review, resume_review, show_findings.',
+      guidance:
+        'Supported actions: start_review, resume_review, show_findings, triage_finding, show_drafts, revise_draft, request_clarification, search, timeline.',
     };
   }
 

@@ -196,6 +196,11 @@ fn native_host_bridge_dispatches_real_robot_review_and_status() {
         session_id: None,
         extension_id: None,
         browser: None,
+        finding_id: None,
+        state: None,
+        draft_id: None,
+        body: None,
+        query: None,
     };
     let output =
         run_rr_process_with_stdin(&runtime, &encode_native_intent(&intent), &stub_dir, &[]);
@@ -254,6 +259,11 @@ fn native_host_bridge_dispatches_when_browser_passes_extension_origin_arg() {
         session_id: None,
         extension_id: None,
         browser: Some("edge".to_owned()),
+        finding_id: None,
+        state: None,
+        draft_id: None,
+        body: None,
+        query: None,
     };
     let output = run_rr_process_with_stdin(
         &runtime,

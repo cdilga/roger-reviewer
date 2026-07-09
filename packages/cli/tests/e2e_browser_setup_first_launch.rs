@@ -194,6 +194,11 @@ fn e2e_browser_setup_first_launch_runs_deterministic_extension_loaded_path() {
             session_id: None,
             extension_id: Some(extension_id.to_owned()),
             browser: Some("chrome".to_owned()),
+            finding_id: None,
+            state: None,
+            draft_id: None,
+            body: None,
+            query: None,
         },
         &BridgePreflight {
             roger_binary_found: true,
@@ -273,6 +278,11 @@ fn e2e_browser_setup_first_launch_fails_closed_when_bridge_preflight_is_missing(
             session_id: None,
             extension_id: None,
             browser: Some("chrome".to_owned()),
+            finding_id: None,
+            state: None,
+            draft_id: None,
+            body: None,
+            query: None,
         },
         &BridgePreflight {
             roger_binary_found: false,

@@ -175,6 +175,11 @@ fn extension_setup_writes_native_host_launcher_that_normalizes_browser_argv() {
         session_id: None,
         extension_id: None,
         browser: Some("edge".to_owned()),
+        finding_id: None,
+        state: None,
+        draft_id: None,
+        body: None,
+        query: None,
     };
     let mut child = Command::new(Path::new(&manifest.path))
         .arg("chrome-extension://djbjigobohmlljboggckmhhnoeldinlp/")

@@ -25,6 +25,11 @@ fn native_messaging_end_to_end() {
         session_id: None,
         extension_id: None,
         browser: None,
+        finding_id: None,
+        state: None,
+        draft_id: None,
+        body: None,
+        query: None,
     };
 
     // Encode as Native Messaging.
@@ -109,6 +114,11 @@ fn fail_closed_when_roger_not_installed() {
         session_id: None,
         extension_id: None,
         browser: None,
+        finding_id: None,
+        state: None,
+        draft_id: None,
+        body: None,
+        query: None,
     };
     let preflight = BridgePreflight {
         roger_binary_found: false,
@@ -195,6 +205,11 @@ fn unknown_action_rejected() {
         session_id: None,
         extension_id: None,
         browser: None,
+        finding_id: None,
+        state: None,
+        draft_id: None,
+        body: None,
+        query: None,
     };
     let preflight = BridgePreflight {
         roger_binary_found: true,
@@ -218,6 +233,11 @@ fn refresh_review_action_is_rejected() {
         session_id: None,
         extension_id: None,
         browser: None,
+        finding_id: None,
+        state: None,
+        draft_id: None,
+        body: None,
+        query: None,
     };
     let preflight = BridgePreflight {
         roger_binary_found: true,
@@ -243,6 +263,11 @@ fn bridge_launch_response_returns_verified_session_and_status_snapshot() {
         session_id: None,
         extension_id: None,
         browser: None,
+        finding_id: None,
+        state: None,
+        draft_id: None,
+        body: None,
+        query: None,
     };
     let preflight = BridgePreflight {
         roger_binary_found: true,
@@ -312,6 +337,11 @@ fn bridge_launch_success_carries_repair_guidance_for_refresh_recommended_status(
         session_id: None,
         extension_id: None,
         browser: None,
+        finding_id: None,
+        state: None,
+        draft_id: None,
+        body: None,
+        query: None,
     };
     let preflight = BridgePreflight {
         roger_binary_found: true,
@@ -378,6 +408,11 @@ fn bridge_launch_failure_reports_cli_spawn_failure() {
         session_id: None,
         extension_id: None,
         browser: None,
+        finding_id: None,
+        state: None,
+        draft_id: None,
+        body: None,
+        query: None,
     };
     let preflight = BridgePreflight {
         roger_binary_found: true,
@@ -408,6 +443,11 @@ fn bridge_launch_failure_reports_robot_schema_mismatch_for_invalid_payload() {
         session_id: None,
         extension_id: None,
         browser: None,
+        finding_id: None,
+        state: None,
+        draft_id: None,
+        body: None,
+        query: None,
     };
     let preflight = BridgePreflight {
         roger_binary_found: true,
@@ -458,6 +498,11 @@ fn bridge_launch_failure_reports_missing_session_id_distinctly() {
         session_id: None,
         extension_id: None,
         browser: None,
+        finding_id: None,
+        state: None,
+        draft_id: None,
+        body: None,
+        query: None,
     };
     let preflight = BridgePreflight {
         roger_binary_found: true,
@@ -520,6 +565,11 @@ fn bridge_launch_failure_reports_blocked_cli_outcome_with_real_repair_guidance()
         session_id: None,
         extension_id: None,
         browser: None,
+        finding_id: None,
+        state: None,
+        draft_id: None,
+        body: None,
+        query: None,
     };
     let preflight = BridgePreflight {
         roger_binary_found: true,
@@ -586,6 +636,11 @@ fn bridge_launch_success_keeps_degraded_outcome_explicit() {
         session_id: None,
         extension_id: None,
         browser: None,
+        finding_id: None,
+        state: None,
+        draft_id: None,
+        body: None,
+        query: None,
     };
     let preflight = BridgePreflight {
         roger_binary_found: true,
@@ -651,6 +706,11 @@ fn bridge_launch_failure_reports_noncanonical_status_readback() {
         session_id: None,
         extension_id: None,
         browser: None,
+        finding_id: None,
+        state: None,
+        draft_id: None,
+        body: None,
+        query: None,
     };
     let preflight = BridgePreflight {
         roger_binary_found: true,
@@ -712,6 +772,11 @@ fn bridge_not_ready_guidance_is_setup_only_not_approval_or_posting_status() {
         session_id: None,
         extension_id: None,
         browser: None,
+        finding_id: None,
+        state: None,
+        draft_id: None,
+        body: None,
+        query: None,
     };
     let preflight = BridgePreflight {
         roger_binary_found: true,

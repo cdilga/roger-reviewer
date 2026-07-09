@@ -2186,6 +2186,113 @@ ${buildDarkThemeBlocks(`#${PANEL_ID}`)}
 .rr-copy-button:hover {
   background: var(--button-default-bgColor-hover, var(--bgColor-muted, #f3f4f6));
 }
+
+/* Bounded local-parity controls: elevated (mutating) triage/clarify/edit rows,
+   and the copyable approve/post handoff (never a button). */
+.rr-triage-controls,
+.rr-clarify-controls,
+.rr-draft-edit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--borderColor-muted, #d0d7de);
+}
+.rr-triage-label,
+.rr-draft-edit-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fgColor-muted, #656d76);
+  width: 100%;
+}
+.rr-triage-button,
+.rr-clarify-button,
+.rr-draft-edit-save {
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid var(--borderColor-emphasis, #8c959f);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.rr-triage-button--active {
+  background: var(--bgColor-accent-muted, #ddf4ff);
+  border-color: var(--fgColor-accent, #0969da);
+  font-weight: 700;
+}
+.rr-clarify-input,
+.rr-draft-edit-input {
+  width: 100%;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 6px;
+  border: 1px solid var(--borderColor-default, #d0d7de);
+  border-radius: 6px;
+  box-sizing: border-box;
+}
+.rr-handoff-block {
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.rr-handoff-label {
+  width: 100%;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fgColor-attention, #9a6700);
+}
+.rr-drafts-list,
+.rr-search-list,
+.rr-timeline-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.rr-drafts-item,
+.rr-search-item,
+.rr-timeline-item {
+  padding: 8px;
+  border: 1px solid var(--borderColor-muted, #d0d7de);
+  border-radius: 8px;
+}
+.rr-drafts-caption,
+.rr-search-caption,
+.rr-timeline-caption {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fgColor-muted, #656d76);
+  margin: 0 0 4px;
+}
+.rr-drafts-item-title,
+.rr-search-item-title,
+.rr-timeline-item-label {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.rr-drafts-note,
+.rr-search-note,
+.rr-timeline-note {
+  font-size: 12px;
+  color: var(--fgColor-muted, #656d76);
+  margin: 8px 0 0;
+}
+.rr-drafts-note--error,
+.rr-search-note--error,
+.rr-timeline-note--error {
+  color: var(--fgColor-danger, #cf222e);
+}
+.rr-search-input {
+  flex: 1 1 auto;
+  min-width: 120px;
+  font-size: 12px;
+  padding: 4px 6px;
+  border: 1px solid var(--borderColor-default, #d0d7de);
+  border-radius: 6px;
+}
   `.trim();
 
   const styleHost = rootDocument.head || rootDocument.documentElement || rootDocument.body;
@@ -2695,11 +2802,22 @@ function normalizeFindingsItem(raw) {
       ? Math.floor(raw.evidence_count)
       : null;
 
+  // Outbound/draft lineage from the `rr findings --robot` projection's
+  // `outbound_detail` block (packages/cli handle_findings). draft_id feeds the
+  // local edit-as-revision affordance; draft_batch_id feeds the copyable
+  // approve/post handoff command (never a button — deliberate asymmetry 1).
+  const detail =
+    raw.outbound_detail && typeof raw.outbound_detail === 'object' ? raw.outbound_detail : {};
+  const readId = (value) =>
+    typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+
   return {
     finding_id: findingId,
     title: title || findingId,
     triage_state: triageState,
     outbound_state: outboundState,
+    draft_id: readId(detail.draft_id),
+    draft_batch_id: readId(detail.draft_batch_id),
     severity,
     summary,
     file_anchor: normalizeFindingsFileAnchor(raw),
@@ -2791,7 +2909,7 @@ function makeFindingsBadge(rootDocument, kind, value, label) {
   return badge;
 }
 
-function createFindingItemNode(item, rootDocument) {
+function createFindingItemNode(item, rootDocument, context = null) {
   const li = makeEl(rootDocument, 'li', 'rr-findings-item');
   if (item.finding_id) {
     li.dataset.findingId = item.finding_id;
@@ -2834,7 +2952,183 @@ function createFindingItemNode(item, rootDocument) {
     );
   }
 
+  // Bounded local-parity controls (deliberate asymmetry 1): elevated triage
+  // buttons + a clarification affordance that MUTATE local Roger state, and a
+  // copyable approve/post command that HANDS OFF (never a button). Only when a
+  // review context is threaded (the read-only mirror stays button-free).
+  if (context && item.finding_id) {
+    appendFindingActionControls(li, item, context, rootDocument);
+  }
+
   return li;
+}
+
+// The four operator triage states the extension may set locally (mirrors
+// TRIAGE_OPERATOR_STATES in packages/cli). Each button dispatches
+// `triage_finding` → `rr triage` → the shared review-ops op; nothing posts.
+const TRIAGE_ACTION_BUTTONS = [
+  { state: 'accepted', label: 'Accept' },
+  { state: 'ignored', label: 'Ignore' },
+  { state: 'needs_follow_up', label: 'Needs follow-up' },
+  { state: 'resolved', label: 'Resolve' },
+];
+
+// Outbound states from which a batch is approvable/postable via the CLI. The
+// extension renders the exact copyable handoff command for these, never a
+// button (extension must not approve or post — AGENTS.md / asymmetry 1).
+const OUTBOUND_APPROVABLE_STATES = new Set(['awaiting_approval']);
+const OUTBOUND_POSTABLE_STATES = new Set(['approved']);
+
+function appendFindingActionControls(li, item, context, rootDocument) {
+  // Elevated (mutating) triage row — labeled and visibly distinct.
+  const triageRow = makeEl(rootDocument, 'div', 'rr-triage-controls');
+  triageRow.setAttribute('role', 'group');
+  triageRow.setAttribute('aria-label', `Triage ${item.title}`);
+  triageRow.appendChild(
+    makeEl(rootDocument, 'span', 'rr-triage-label', 'Triage (local, mutates Roger):')
+  );
+  for (const spec of TRIAGE_ACTION_BUTTONS) {
+    const button = makeEl(
+      rootDocument,
+      'button',
+      'rr-triage-button roger-panel-button roger-panel-button--secondary',
+      spec.label
+    );
+    button.type = 'button';
+    button.dataset.triageState = spec.state;
+    button.dataset.findingId = item.finding_id;
+    button.setAttribute('aria-label', `Set ${item.title} to ${spec.label}`);
+    if (item.triage_state === spec.state) {
+      button.setAttribute('aria-pressed', 'true');
+      if (button.classList && typeof button.classList.add === 'function') {
+        button.classList.add('rr-triage-button--active');
+      } else {
+        button.className = `${button.className} rr-triage-button--active`.trim();
+      }
+    }
+    if (typeof button.addEventListener === 'function') {
+      button.addEventListener('click', () =>
+        handleTriageFinding(context, item.finding_id, spec.state, button)
+      );
+    }
+    triageRow.appendChild(button);
+  }
+  li.appendChild(triageRow);
+
+  // Clarification affordance — a small local composer that mutates (creates a
+  // durable clarification), never posts.
+  const clarifyRow = makeEl(rootDocument, 'div', 'rr-clarify-controls');
+  const clarifyInput = makeEl(rootDocument, 'textarea', 'rr-clarify-input');
+  clarifyInput.setAttribute('rows', '2');
+  clarifyInput.setAttribute('placeholder', 'Ask for clarification (local, never posted)…');
+  clarifyInput.dataset.findingId = item.finding_id;
+  const clarifyButton = makeEl(
+    rootDocument,
+    'button',
+    'rr-clarify-button roger-panel-button roger-panel-button--secondary',
+    'Request clarification'
+  );
+  clarifyButton.type = 'button';
+  clarifyButton.dataset.findingId = item.finding_id;
+  if (typeof clarifyButton.addEventListener === 'function') {
+    clarifyButton.addEventListener('click', () => {
+      const body = typeof clarifyInput.value === 'string' ? clarifyInput.value : '';
+      handleRequestClarification(context, item.finding_id, body, clarifyButton);
+    });
+  }
+  clarifyRow.appendChild(clarifyInput);
+  clarifyRow.appendChild(clarifyButton);
+  li.appendChild(clarifyRow);
+
+  // Edit-as-revision (local) when a draft exists for this finding — opens an
+  // inline textarea whose save dispatches revise_draft. Never posts.
+  if (item.draft_id) {
+    li.appendChild(createDraftEditControls(item, context, rootDocument));
+  }
+
+  // Approve/post handoff: NOT a button. Render the exact copyable command so the
+  // elevated mutation stays Roger-mediated through the CLI/TUI.
+  if (item.draft_batch_id && OUTBOUND_APPROVABLE_STATES.has(item.outbound_state)) {
+    li.appendChild(
+      createHandoffCommandBlock(
+        rootDocument,
+        `rr send approve --batch ${item.draft_batch_id}`,
+        'Approve in Roger (elevated — copy & run in your terminal):'
+      )
+    );
+  } else if (item.draft_batch_id && OUTBOUND_POSTABLE_STATES.has(item.outbound_state)) {
+    li.appendChild(
+      createHandoffCommandBlock(
+        rootDocument,
+        `rr send post --batch ${item.draft_batch_id}`,
+        'Post to GitHub via Roger (elevated — copy & run in your terminal):'
+      )
+    );
+  }
+}
+
+// An inline edit-as-revision composer for one draft. Save dispatches
+// `revise_draft` → `rr send edit --draft <id> --body-file <tmp>` (a local
+// revision that revokes approval; it never posts).
+function createDraftEditControls(item, context, rootDocument) {
+  const wrap = makeEl(rootDocument, 'div', 'rr-draft-edit');
+  wrap.dataset.draftId = item.draft_id;
+  wrap.appendChild(
+    makeEl(rootDocument, 'span', 'rr-draft-edit-label', 'Edit draft body (local revision):')
+  );
+  const textarea = makeEl(rootDocument, 'textarea', 'rr-draft-edit-input');
+  textarea.setAttribute('rows', '3');
+  if (typeof item.summary === 'string' && item.summary.length > 0) {
+    textarea.value = item.summary;
+  }
+  const saveButton = makeEl(
+    rootDocument,
+    'button',
+    'rr-draft-edit-save roger-panel-button roger-panel-button--secondary',
+    'Save revision'
+  );
+  saveButton.type = 'button';
+  saveButton.dataset.draftId = item.draft_id;
+  if (typeof saveButton.addEventListener === 'function') {
+    saveButton.addEventListener('click', () => {
+      const body = typeof textarea.value === 'string' ? textarea.value : '';
+      handleReviseDraft(context, item.draft_id, body, saveButton);
+    });
+  }
+  wrap.appendChild(textarea);
+  wrap.appendChild(saveButton);
+  return wrap;
+}
+
+// A copyable command handoff block (label + code + Copy button), reusing the
+// clipboard mechanics of the session copy-block. Used for approve/post handoff
+// so the elevated mutation stays Roger-mediated (asymmetry 1).
+function createHandoffCommandBlock(rootDocument, command, label, options = {}) {
+  const block = makeEl(rootDocument, 'div', 'rr-copy-block rr-handoff-block');
+  if (label) {
+    block.appendChild(makeEl(rootDocument, 'span', 'rr-handoff-label', label));
+  }
+  const code = makeEl(rootDocument, 'code', 'rr-copy-command', command);
+  block.appendChild(code);
+
+  const button = makeEl(rootDocument, 'button', 'rr-copy-button', 'Copy');
+  button.type = 'button';
+  button.setAttribute('aria-label', `Copy ${command}`);
+  button.dataset.command = command;
+  if (typeof button.addEventListener === 'function') {
+    button.addEventListener('click', () => {
+      Promise.resolve(copyTextToClipboard(command, options)).then((copied) => {
+        button.textContent = copied ? 'Copied' : 'Copy failed';
+        if (typeof setTimeout === 'function') {
+          setTimeout(() => {
+            button.textContent = 'Copy';
+          }, typeof options.feedbackMs === 'number' ? options.feedbackMs : 1500);
+        }
+      });
+    });
+  }
+  block.appendChild(button);
+  return block;
 }
 
 function appendFindingsWarnings(bodyNode, warnings, rootDocument) {
@@ -2851,7 +3145,7 @@ function appendFindingsWarnings(bodyNode, warnings, rootDocument) {
 // read-only caption, then renders exactly one of: the honest "detail not
 // relayed" degrade, the honest empty state, or the grouped staged list. Returns
 // the normalized payload so callers can mirror a truthful status line.
-function renderFindingsStaging(bodyNode, payload, rootDocument) {
+function renderFindingsStaging(bodyNode, payload, rootDocument, context = null) {
   if (!bodyNode || !rootDocument || typeof rootDocument.createElement !== 'function') {
     return null;
   }
@@ -2917,7 +3211,7 @@ function renderFindingsStaging(bodyNode, payload, rootDocument) {
     );
     const list = makeEl(rootDocument, 'ul', 'rr-findings-list');
     for (const item of group.items) {
-      list.appendChild(createFindingItemNode(item, rootDocument));
+      list.appendChild(createFindingItemNode(item, rootDocument, context));
     }
     groupEl.appendChild(list);
     bodyNode.appendChild(groupEl);
@@ -2996,7 +3290,7 @@ function handleShowFindings(context, button, options = {}) {
 
       const payload = normalizeFindingsPayload(response);
       if (bodyNode && rootDocument) {
-        renderFindingsStaging(bodyNode, payload, rootDocument);
+        renderFindingsStaging(bodyNode, payload, rootDocument, context);
       }
 
       let statusMessage;
@@ -3196,6 +3490,549 @@ function createFindingsSection(context, rootDocument) {
   return section;
 }
 
+// ---------------------------------------------------------------------------
+// Bounded local-parity surfaces (bead rr-surface-parity-epic-rfa2.3):
+// per-finding triage + clarification (mutating, elevated), draft staging with
+// edit-as-revision (mutating, elevated), and read-only search + timeline
+// mirrors. Approve/post are DELIBERATELY absent — they hand off with a copyable
+// `rr send approve|post` command instead (AGENTS.md / deliberate asymmetry 1).
+// Every mutating control funnels through the same background dispatch path used
+// by launch/findings; there is no hidden mutation channel.
+// ---------------------------------------------------------------------------
+const DRAFTS_SECTION_ID = 'roger-reviewer-drafts';
+const DRAFTS_BODY_ID = 'roger-reviewer-drafts-body';
+const DRAFTS_BUTTON_ID = 'roger-reviewer-drafts-button';
+const DRAFTS_BUTTON_LABEL = 'Show local drafts';
+const DRAFTS_READONLY_CAPTION =
+  'Local outbound drafts (approve/post hand off to rr send — never from the browser)';
+const SEARCH_SECTION_ID = 'roger-reviewer-search';
+const SEARCH_BODY_ID = 'roger-reviewer-search-body';
+const SEARCH_INPUT_ID = 'roger-reviewer-search-input';
+const SEARCH_BUTTON_ID = 'roger-reviewer-search-button';
+const SEARCH_CAPTION = 'Search prior Roger reviews (read-only)';
+const TIMELINE_SECTION_ID = 'roger-reviewer-timeline';
+const TIMELINE_BODY_ID = 'roger-reviewer-timeline-body';
+const TIMELINE_BUTTON_ID = 'roger-reviewer-timeline-button';
+const TIMELINE_BUTTON_LABEL = 'Show review timeline';
+const TIMELINE_CAPTION = 'Review timeline (read-only mirror)';
+
+// Shared background dispatch for bounded local-parity actions. Every mutating
+// and read-only action goes through the same `roger_bridge_launch` message the
+// launch/findings surfaces use, so all mutation is visible and centrally gated.
+function dispatchBridgeAction(intent, options, callbacks) {
+  const chromeApi = options.chrome || (typeof chrome !== 'undefined' ? chrome : null);
+  const onError = callbacks.onError || (() => {});
+  const onSuccess = callbacks.onSuccess || (() => {});
+  if (!chromeApi || !chromeApi.runtime || typeof chromeApi.runtime.sendMessage !== 'function') {
+    onError('Bridge unavailable in browser context. Open Roger locally to run this action.', null);
+    return;
+  }
+  chromeApi.runtime.sendMessage({ type: 'roger_bridge_launch', intent }, (response) => {
+    if (chromeApi.runtime.lastError) {
+      onError(
+        appendGuidance(`Bridge error: ${chromeApi.runtime.lastError.message}`, BRIDGE_DISCONNECT_GUIDANCE),
+        null
+      );
+      return;
+    }
+    if (!response) {
+      onError(appendGuidance('No bridge response.', BRIDGE_DISCONNECT_GUIDANCE), null);
+      return;
+    }
+    if (!response.ok) {
+      onError(appendGuidance(response.message, response.guidance), response);
+      return;
+    }
+    onSuccess(response);
+  });
+}
+
+function withButtonPending(button, run) {
+  const previous = button ? button.textContent : '';
+  const restore = () => {
+    if (button) {
+      button.disabled = false;
+      button.textContent = previous;
+    }
+  };
+  if (button) {
+    button.disabled = true;
+    button.textContent = '…';
+  }
+  run(restore);
+}
+
+// triage_finding: elevated LOCAL mutation. Dispatches `rr triage` via the bridge
+// and re-fetches findings on success so the staged list reflects the new state.
+function handleTriageFinding(context, findingId, state, button, options = {}) {
+  const rootDocument = options.document || (typeof document !== 'undefined' ? document : null);
+  const chromeApi = options.chrome || (typeof chrome !== 'undefined' ? chrome : null);
+  setStatus(`Setting triage to ${humanizeToken(state)} (local only)…`, false, { revealInline: true });
+  withButtonPending(button, (restore) => {
+    dispatchBridgeAction(
+      {
+        action: 'triage_finding',
+        owner: context.owner,
+        repo: context.repo,
+        pr_number: context.pr_number,
+        finding_id: findingId,
+        state,
+      },
+      { chrome: chromeApi },
+      {
+        onSuccess: (response) => {
+          restore();
+          setStatus(
+            response.message || `Triaged ${findingId} → ${humanizeToken(state)} (local only, nothing posted).`,
+            false,
+            { revealInline: true }
+          );
+          // Re-render the findings list from the freshly-relayed mirror.
+          handleShowFindings(context, null, { document: rootDocument, chrome: chromeApi });
+        },
+        onError: (message) => {
+          restore();
+          setStatus(message, true, { revealInline: true });
+        },
+      }
+    );
+  });
+}
+
+// request_clarification: elevated LOCAL mutation (durable clarification row).
+// Never posts. Gated on `rr clarify` landing in the CLI — until then the bridge
+// relays the CLI's fail-closed error and this surfaces it honestly.
+function handleRequestClarification(context, findingId, body, button, options = {}) {
+  const chromeApi = options.chrome || (typeof chrome !== 'undefined' ? chrome : null);
+  if (typeof body !== 'string' || body.trim().length === 0) {
+    setStatus('Enter a clarification prompt before requesting.', true, { revealInline: true });
+    return;
+  }
+  setStatus('Recording local clarification (nothing posted)…', false, { revealInline: true });
+  withButtonPending(button, (restore) => {
+    dispatchBridgeAction(
+      {
+        action: 'request_clarification',
+        owner: context.owner,
+        repo: context.repo,
+        pr_number: context.pr_number,
+        finding_id: findingId,
+        body: body.trim(),
+      },
+      { chrome: chromeApi },
+      {
+        onSuccess: (response) => {
+          restore();
+          setStatus(
+            response.message || 'Clarification recorded locally (nothing posted).',
+            false,
+            { revealInline: true }
+          );
+        },
+        onError: (message) => {
+          restore();
+          setStatus(message, true, { revealInline: true });
+        },
+      }
+    );
+  });
+}
+
+// revise_draft: elevated LOCAL revision. Dispatches `rr send edit`; editing an
+// approved batch revokes its approval (enforced in the CLI). Never posts.
+function handleReviseDraft(context, draftId, body, button, options = {}) {
+  const chromeApi = options.chrome || (typeof chrome !== 'undefined' ? chrome : null);
+  if (typeof body !== 'string' || body.trim().length === 0) {
+    setStatus('Enter a non-empty draft body before saving a revision.', true, { revealInline: true });
+    return;
+  }
+  setStatus('Saving local draft revision (nothing posted)…', false, { revealInline: true });
+  withButtonPending(button, (restore) => {
+    dispatchBridgeAction(
+      {
+        action: 'revise_draft',
+        owner: context.owner,
+        repo: context.repo,
+        pr_number: context.pr_number,
+        draft_id: draftId,
+        body,
+      },
+      { chrome: chromeApi },
+      {
+        onSuccess: (response) => {
+          restore();
+          setStatus(
+            response.message || `Saved a local revision for draft ${draftId} (nothing posted).`,
+            false,
+            { revealInline: true }
+          );
+        },
+        onError: (message) => {
+          restore();
+          setStatus(message, true, { revealInline: true });
+        },
+      }
+    );
+  });
+}
+
+// --- Drafts staging (read + edit-as-revision) ------------------------------
+
+function normalizeDraftsPayload(response) {
+  const source =
+    response && response.drafts && typeof response.drafts === 'object' ? response.drafts : null;
+  if (!source) {
+    return { relayed: false, items: [], count: 0, warnings: [] };
+  }
+  const rawItems = Array.isArray(source.items) ? source.items : [];
+  const items = rawItems
+    .map(normalizeFindingsItem)
+    .filter(Boolean)
+    // A "draft" is a finding that has actually been drafted (has a draft id or a
+    // non-not_drafted outbound state).
+    .filter((item) => item.draft_id || (item.outbound_state && item.outbound_state !== 'not_drafted'));
+  const warnings = Array.isArray(source.warnings) ? source.warnings.filter((w) => typeof w === 'string') : [];
+  const count = Number.isFinite(source.count) ? Math.floor(source.count) : items.length;
+  return { relayed: true, items, count, warnings };
+}
+
+function renderDraftsStaging(bodyNode, response, rootDocument, context = null) {
+  if (!bodyNode || !rootDocument || typeof rootDocument.createElement !== 'function') {
+    return null;
+  }
+  const payload = normalizeDraftsPayload(response);
+  clearChildren(bodyNode);
+  bodyNode.appendChild(makeEl(rootDocument, 'p', 'rr-drafts-caption', DRAFTS_READONLY_CAPTION));
+
+  if (!payload.relayed) {
+    bodyNode.appendChild(
+      makeEl(
+        rootDocument,
+        'p',
+        'rr-drafts-note rr-drafts-note--degraded',
+        'The bridge did not relay draft state. Run `rr draft` locally, or open `rr tui`.'
+      )
+    );
+    return payload;
+  }
+  if (payload.items.length === 0) {
+    bodyNode.appendChild(
+      makeEl(
+        rootDocument,
+        'p',
+        'rr-drafts-note rr-drafts-note--empty',
+        'No local outbound drafts yet. Triage findings to accepted, then run `rr draft`.'
+      )
+    );
+    return payload;
+  }
+
+  const list = makeEl(rootDocument, 'ul', 'rr-drafts-list');
+  for (const item of payload.items) {
+    const li = makeEl(rootDocument, 'li', 'rr-drafts-item');
+    if (item.draft_id) {
+      li.dataset.draftId = item.draft_id;
+    }
+    li.appendChild(makeEl(rootDocument, 'p', 'rr-drafts-item-title', item.title));
+    if (item.outbound_state) {
+      const badges = makeEl(rootDocument, 'div', 'rr-findings-badges');
+      badges.appendChild(
+        makeFindingsBadge(rootDocument, 'outbound', item.outbound_state, `Outbound: ${humanizeToken(item.outbound_state)}`)
+      );
+      li.appendChild(badges);
+    }
+    if (context && item.draft_id) {
+      li.appendChild(createDraftEditControls(item, context, rootDocument));
+    }
+    if (item.draft_batch_id && OUTBOUND_APPROVABLE_STATES.has(item.outbound_state)) {
+      li.appendChild(
+        createHandoffCommandBlock(
+          rootDocument,
+          `rr send approve --batch ${item.draft_batch_id}`,
+          'Approve in Roger (elevated — copy & run in your terminal):'
+        )
+      );
+    } else if (item.draft_batch_id && OUTBOUND_POSTABLE_STATES.has(item.outbound_state)) {
+      li.appendChild(
+        createHandoffCommandBlock(
+          rootDocument,
+          `rr send post --batch ${item.draft_batch_id}`,
+          'Post to GitHub via Roger (elevated — copy & run in your terminal):'
+        )
+      );
+    }
+    list.appendChild(li);
+  }
+  bodyNode.appendChild(list);
+  if (payload.warnings.length > 0) {
+    bodyNode.appendChild(
+      makeEl(rootDocument, 'p', 'rr-drafts-note rr-drafts-note--warning', `Warnings: ${payload.warnings.join('; ')}`)
+    );
+  }
+  return payload;
+}
+
+function handleShowDrafts(context, button, options = {}) {
+  const rootDocument = options.document || (typeof document !== 'undefined' ? document : null);
+  const chromeApi = options.chrome || (typeof chrome !== 'undefined' ? chrome : null);
+  const bodyNode = rootDocument ? rootDocument.getElementById(DRAFTS_BODY_ID) : null;
+  setStatus('Loading local Roger drafts…', false, { revealInline: true });
+  withButtonPending(button, (restore) => {
+    dispatchBridgeAction(
+      { action: 'show_drafts', owner: context.owner, repo: context.repo, pr_number: context.pr_number },
+      { chrome: chromeApi },
+      {
+        onSuccess: (response) => {
+          restore();
+          const payload = bodyNode ? renderDraftsStaging(bodyNode, response, rootDocument, context) : null;
+          const count = payload ? payload.items.length : 0;
+          setStatus(`Loaded ${count} local draft${count === 1 ? '' : 's'}.`, false, { revealInline: true });
+        },
+        onError: (message) => {
+          restore();
+          if (bodyNode && rootDocument) {
+            clearChildren(bodyNode);
+            bodyNode.appendChild(makeEl(rootDocument, 'p', 'rr-drafts-note rr-drafts-note--error', message));
+          }
+          setStatus(message, true, { revealInline: true });
+        },
+      }
+    );
+  });
+}
+
+// --- Search (read-only) ----------------------------------------------------
+
+function renderSearchResults(bodyNode, response, rootDocument) {
+  if (!bodyNode || !rootDocument || typeof rootDocument.createElement !== 'function') {
+    return null;
+  }
+  clearChildren(bodyNode);
+  bodyNode.appendChild(makeEl(rootDocument, 'p', 'rr-search-caption', SEARCH_CAPTION));
+  const data = response && typeof response.search_results === 'object' ? response.search_results : null;
+  if (!data) {
+    bodyNode.appendChild(
+      makeEl(rootDocument, 'p', 'rr-search-note rr-search-note--degraded', 'The bridge did not relay search results.')
+    );
+    return { relayed: false, items: [] };
+  }
+  const matches = Array.isArray(data.matches)
+    ? data.matches
+    : Array.isArray(data.items)
+      ? data.items
+      : Array.isArray(data.results)
+        ? data.results
+        : [];
+  if (matches.length === 0) {
+    bodyNode.appendChild(
+      makeEl(rootDocument, 'p', 'rr-search-note rr-search-note--empty', 'No prior-review matches.')
+    );
+    return { relayed: true, items: [] };
+  }
+  const list = makeEl(rootDocument, 'ul', 'rr-search-list');
+  for (const match of matches) {
+    const li = makeEl(rootDocument, 'li', 'rr-search-item');
+    const title =
+      (match && (match.title || match.finding_title || match.summary || match.session_id)) || 'Match';
+    li.appendChild(makeEl(rootDocument, 'p', 'rr-search-item-title', String(title)));
+    const snippet = match && (match.snippet || match.excerpt || match.normalized_summary);
+    if (typeof snippet === 'string' && snippet.trim().length > 0) {
+      li.appendChild(makeEl(rootDocument, 'p', 'rr-search-item-snippet', snippet.trim()));
+    }
+    list.appendChild(li);
+  }
+  bodyNode.appendChild(list);
+  return { relayed: true, items: matches };
+}
+
+function handleSearch(context, query, button, options = {}) {
+  const rootDocument = options.document || (typeof document !== 'undefined' ? document : null);
+  const chromeApi = options.chrome || (typeof chrome !== 'undefined' ? chrome : null);
+  const bodyNode = rootDocument ? rootDocument.getElementById(SEARCH_BODY_ID) : null;
+  if (typeof query !== 'string' || query.trim().length === 0) {
+    setStatus('Enter search text before searching.', true, { revealInline: true });
+    return;
+  }
+  setStatus('Searching prior Roger reviews…', false, { revealInline: true });
+  withButtonPending(button, (restore) => {
+    dispatchBridgeAction(
+      { action: 'search', owner: context.owner, repo: context.repo, pr_number: context.pr_number, query: query.trim() },
+      { chrome: chromeApi },
+      {
+        onSuccess: (response) => {
+          restore();
+          const result = bodyNode ? renderSearchResults(bodyNode, response, rootDocument) : null;
+          const count = result && result.items ? result.items.length : 0;
+          setStatus(`Search returned ${count} prior-review match${count === 1 ? '' : 'es'}.`, false, { revealInline: true });
+        },
+        onError: (message) => {
+          restore();
+          if (bodyNode && rootDocument) {
+            clearChildren(bodyNode);
+            bodyNode.appendChild(makeEl(rootDocument, 'p', 'rr-search-note rr-search-note--error', message));
+          }
+          setStatus(message, true, { revealInline: true });
+        },
+      }
+    );
+  });
+}
+
+// --- Timeline (read-only mirror) -------------------------------------------
+
+function renderTimeline(bodyNode, response, rootDocument) {
+  if (!bodyNode || !rootDocument || typeof rootDocument.createElement !== 'function') {
+    return null;
+  }
+  clearChildren(bodyNode);
+  bodyNode.appendChild(makeEl(rootDocument, 'p', 'rr-timeline-caption', TIMELINE_CAPTION));
+  const data = response && typeof response.timeline === 'object' ? response.timeline : null;
+  const events =
+    data && Array.isArray(data.events)
+      ? data.events
+      : data && Array.isArray(data.items)
+        ? data.items
+        : [];
+  if (!data || events.length === 0) {
+    bodyNode.appendChild(
+      makeEl(
+        rootDocument,
+        'p',
+        'rr-timeline-note rr-timeline-note--empty',
+        'No timeline events relayed. Open `rr tui` for the authoritative run/stage/posted view.'
+      )
+    );
+    return { relayed: Boolean(data), items: [] };
+  }
+  const list = makeEl(rootDocument, 'ul', 'rr-timeline-list');
+  for (const event of events) {
+    const li = makeEl(rootDocument, 'li', 'rr-timeline-item');
+    const kind = (event && (event.kind || event.stage || event.type)) || 'event';
+    const at = event && (event.at || event.generated_at || event.timestamp);
+    const label = at ? `${humanizeToken(String(kind))} — ${at}` : humanizeToken(String(kind));
+    li.appendChild(makeEl(rootDocument, 'p', 'rr-timeline-item-label', label));
+    list.appendChild(li);
+  }
+  bodyNode.appendChild(list);
+  return { relayed: true, items: events };
+}
+
+function handleTimeline(context, button, options = {}) {
+  const rootDocument = options.document || (typeof document !== 'undefined' ? document : null);
+  const chromeApi = options.chrome || (typeof chrome !== 'undefined' ? chrome : null);
+  const bodyNode = rootDocument ? rootDocument.getElementById(TIMELINE_BODY_ID) : null;
+  setStatus('Loading review timeline…', false, { revealInline: true });
+  withButtonPending(button, (restore) => {
+    dispatchBridgeAction(
+      { action: 'timeline', owner: context.owner, repo: context.repo, pr_number: context.pr_number },
+      { chrome: chromeApi },
+      {
+        onSuccess: (response) => {
+          restore();
+          const result = bodyNode ? renderTimeline(bodyNode, response, rootDocument) : null;
+          const count = result && result.items ? result.items.length : 0;
+          setStatus(`Loaded ${count} timeline event${count === 1 ? '' : 's'}.`, false, { revealInline: true });
+        },
+        onError: (message) => {
+          restore();
+          if (bodyNode && rootDocument) {
+            clearChildren(bodyNode);
+            bodyNode.appendChild(makeEl(rootDocument, 'p', 'rr-timeline-caption', TIMELINE_CAPTION));
+            bodyNode.appendChild(makeEl(rootDocument, 'p', 'rr-timeline-note rr-timeline-note--error', message));
+          }
+          setStatus(message, true, { revealInline: true });
+        },
+      }
+    );
+  });
+}
+
+// Section factories for the three new surfaces, mirroring createFindingsSection.
+function createTriggerSection(config, rootDocument, onClick) {
+  const section = rootDocument.createElement('section');
+  section.id = config.sectionId;
+  section.className = config.className;
+  const header = rootDocument.createElement('div');
+  header.className = `${config.className}-header`;
+  const button = rootDocument.createElement('button');
+  button.id = config.buttonId;
+  button.type = 'button';
+  button.className = `${config.className}-button roger-panel-button roger-panel-button--tertiary`;
+  button.textContent = config.buttonLabel;
+  button.setAttribute('aria-label', config.buttonLabel);
+  if (typeof button.addEventListener === 'function') {
+    button.addEventListener('click', () => onClick(button));
+  }
+  header.appendChild(button);
+  if (typeof config.buildExtraHeader === 'function') {
+    config.buildExtraHeader(header, button);
+  }
+  section.appendChild(header);
+  const body = rootDocument.createElement('div');
+  body.id = config.bodyId;
+  body.className = `${config.className}-body`;
+  section.appendChild(body);
+  return section;
+}
+
+function createDraftsSection(context, rootDocument) {
+  return createTriggerSection(
+    {
+      sectionId: DRAFTS_SECTION_ID,
+      bodyId: DRAFTS_BODY_ID,
+      buttonId: DRAFTS_BUTTON_ID,
+      buttonLabel: DRAFTS_BUTTON_LABEL,
+      className: 'rr-drafts',
+    },
+    rootDocument,
+    (button) => handleShowDrafts(context, button)
+  );
+}
+
+function createTimelineSection(context, rootDocument) {
+  return createTriggerSection(
+    {
+      sectionId: TIMELINE_SECTION_ID,
+      bodyId: TIMELINE_BODY_ID,
+      buttonId: TIMELINE_BUTTON_ID,
+      buttonLabel: TIMELINE_BUTTON_LABEL,
+      className: 'rr-timeline',
+    },
+    rootDocument,
+    (button) => handleTimeline(context, button)
+  );
+}
+
+function createSearchSection(context, rootDocument) {
+  const section = rootDocument.createElement('section');
+  section.id = SEARCH_SECTION_ID;
+  section.className = 'rr-search';
+  const header = rootDocument.createElement('div');
+  header.className = 'rr-search-header';
+  const input = rootDocument.createElement('input');
+  input.id = SEARCH_INPUT_ID;
+  input.type = 'search';
+  input.className = 'rr-search-input';
+  input.setAttribute('placeholder', 'Search prior reviews…');
+  const button = rootDocument.createElement('button');
+  button.id = SEARCH_BUTTON_ID;
+  button.type = 'button';
+  button.className = 'rr-search-button roger-panel-button roger-panel-button--tertiary';
+  button.textContent = 'Search';
+  button.setAttribute('aria-label', 'Search prior Roger reviews');
+  if (typeof button.addEventListener === 'function') {
+    button.addEventListener('click', () => handleSearch(context, input.value || '', button));
+  }
+  header.appendChild(input);
+  header.appendChild(button);
+  section.appendChild(header);
+  const body = rootDocument.createElement('div');
+  body.id = SEARCH_BODY_ID;
+  body.className = 'rr-search-body';
+  section.appendChild(body);
+  return section;
+}
+
 function createPanel(context, rootDocument) {
   ensurePanelStyles(rootDocument);
 
@@ -3295,6 +4132,9 @@ function createPanel(context, rootDocument) {
 
   panel.appendChild(createSessionsSection(rootDocument));
   panel.appendChild(createFindingsSection(context, rootDocument));
+  panel.appendChild(createDraftsSection(context, rootDocument));
+  panel.appendChild(createSearchSection(context, rootDocument));
+  panel.appendChild(createTimelineSection(context, rootDocument));
 
   return panel;
 }
@@ -3939,6 +4779,40 @@ if (typeof module !== 'undefined' && module.exports) {
     renderFindingsStaging,
     groupFindingsByTriage,
     createFindingsSection,
+    createFindingItemNode,
+    normalizeFindingsItem,
+    // Bounded local-parity surfaces (triage/clarify/drafts/search/timeline).
+    dispatchBridgeAction,
+    handleTriageFinding,
+    handleRequestClarification,
+    handleReviseDraft,
+    appendFindingActionControls,
+    createDraftEditControls,
+    createHandoffCommandBlock,
+    TRIAGE_ACTION_BUTTONS,
+    OUTBOUND_APPROVABLE_STATES,
+    OUTBOUND_POSTABLE_STATES,
+    DRAFTS_SECTION_ID,
+    DRAFTS_BODY_ID,
+    DRAFTS_BUTTON_ID,
+    DRAFTS_READONLY_CAPTION,
+    normalizeDraftsPayload,
+    renderDraftsStaging,
+    handleShowDrafts,
+    createDraftsSection,
+    SEARCH_SECTION_ID,
+    SEARCH_BODY_ID,
+    SEARCH_INPUT_ID,
+    SEARCH_BUTTON_ID,
+    renderSearchResults,
+    handleSearch,
+    createSearchSection,
+    TIMELINE_SECTION_ID,
+    TIMELINE_BODY_ID,
+    TIMELINE_BUTTON_ID,
+    renderTimeline,
+    handleTimeline,
+    createTimelineSection,
     // Session-candidates surface.
     SESSIONS_SECTION_ID,
     SESSIONS_NOTICE_ID,

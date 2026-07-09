@@ -7,6 +7,8 @@ const {
   MAX_MIRROR_FRESHNESS_SECONDS,
   MAX_SESSION_INVENTORY_ENTRIES,
   handleStatusMessage,
+  handleLaunchMessage,
+  dispatchNative,
   launchOnlyStatusEnvelope,
   normalizeBoundedStatus,
   normalizeStatusEnvelope,
@@ -285,5 +287,86 @@ test('registerRuntimeIdentity dispatches runtime id to native bridge', async () 
     } else {
       global.chrome = previousChrome;
     }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Bounded local-parity actions (bead rr-surface-parity-epic-rfa2.3): new
+// actions pass the SUPPORTED_ACTIONS gate, and dispatchNative relays the new
+// bounded response fields to the content script.
+// ---------------------------------------------------------------------------
+
+test('handleLaunchMessage accepts the new bounded local-parity actions', async () => {
+  const actions = [
+    'triage_finding',
+    'show_drafts',
+    'revise_draft',
+    'request_clarification',
+    'search',
+    'timeline',
+  ];
+  for (const action of actions) {
+    const result = await handleLaunchMessage(
+      { intent: { action, owner: 'acme', repo: 'widgets', pr_number: 42 } },
+      null,
+      { dispatch: async () => ({ ok: true, mode: 'native_messaging', action, message: 'ok' }) }
+    );
+    assert.equal(result.ok, true, `${action} should pass the supported-action gate`);
+    assert.notEqual(result.mode, 'invalid_request');
+  }
+});
+
+test('handleLaunchMessage still rejects an unsupported action with the updated guidance', async () => {
+  const result = await handleLaunchMessage(
+    { intent: { action: 'delete_repo', owner: 'acme', repo: 'widgets', pr_number: 42 } },
+    null,
+    { dispatch: async () => ({ ok: true }) }
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.mode, 'invalid_request');
+  assert.match(result.guidance, /triage_finding/);
+});
+
+function fakeNativePort(frame) {
+  const listeners = [];
+  return {
+    onMessage: { addListener: (fn) => listeners.push(fn) },
+    onDisconnect: { addListener: () => {} },
+    postMessage() {
+      // Deliver the single final frame on the next tick, mimicking the host.
+      for (const fn of listeners) {
+        fn(frame);
+      }
+    },
+    disconnect() {},
+  };
+}
+
+test('dispatchNative relays the new bounded fields (findings/drafts/search_results/timeline/clarification_ack)', async () => {
+  const frame = {
+    ok: true,
+    action: 'show_drafts',
+    message: 'relayed',
+    findings: { items: [{ finding_id: 'f1' }] },
+    drafts: { items: [{ finding_id: 'f2', outbound_detail: { draft_id: 'd1' } }] },
+    search_results: { matches: [{ title: 'prior' }] },
+    timeline: { events: [{ kind: 'run' }] },
+    clarification_ack: { clarification_id: 'c1' },
+  };
+  const previousChrome = global.chrome;
+  global.chrome = { runtime: { connectNative: () => fakeNativePort(frame), lastError: null } };
+  try {
+    const result = await dispatchNative(
+      { action: 'show_drafts', owner: 'acme', repo: 'widgets', pr_number: 42 },
+      () => {}
+    );
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.drafts, frame.drafts);
+    assert.deepEqual(result.findings, frame.findings);
+    assert.deepEqual(result.search_results, frame.search_results);
+    assert.deepEqual(result.timeline, frame.timeline);
+    assert.deepEqual(result.clarification_ack, frame.clarification_ack);
+  } finally {
+    global.chrome = previousChrome;
   }
 });

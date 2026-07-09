@@ -17549,7 +17549,13 @@ fn bridge_contract_snapshot() -> &'static str {
 export type BridgeAction =
   | 'start_review'
   | 'resume_review'
-  | 'show_findings';
+  | 'show_findings'
+  | 'triage_finding'
+  | 'show_drafts'
+  | 'revise_draft'
+  | 'request_clarification'
+  | 'search'
+  | 'timeline';
 
 export interface BridgeLaunchIntent {
   action: BridgeAction;
@@ -17559,6 +17565,11 @@ export interface BridgeLaunchIntent {
   head_ref?: string;
   instance?: string;
   session_id?: string;
+  finding_id?: string;
+  state?: string;
+  draft_id?: string;
+  body?: string;
+  query?: string;
 }
 
 export interface BridgeResponse {
@@ -17570,6 +17581,11 @@ export interface BridgeResponse {
   warnings?: string[];
   candidates?: unknown;
   auto_selected_session?: boolean;
+  findings?: unknown;
+  drafts?: unknown;
+  search_results?: unknown;
+  timeline?: unknown;
+  clarification_ack?: unknown;
 }
 "#
 }
@@ -18878,6 +18894,11 @@ mod tests {
             session_id: None,
             extension_id: Some(extension_id.to_owned()),
             browser: Some(browser.to_owned()),
+            finding_id: None,
+            state: None,
+            draft_id: None,
+            body: None,
+            query: None,
         };
         let preflight = roger_bridge::BridgePreflight {
             roger_binary_found: false,

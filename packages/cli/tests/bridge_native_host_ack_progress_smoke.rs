@@ -191,6 +191,11 @@ fn launch_streams_ack_then_preflight_ok_then_final_when_ready() {
         session_id: None,
         extension_id: None,
         browser: None,
+        finding_id: None,
+        state: None,
+        draft_id: None,
+        body: None,
+        query: None,
     };
     let stdin = frame_bytes(&serde_json::to_value(&intent).expect("intent value"));
     let stdout = run_native_host(
@@ -250,6 +255,11 @@ fn launch_still_acks_before_failure_when_preflight_not_ready() {
         session_id: None,
         extension_id: None,
         browser: None,
+        finding_id: None,
+        state: None,
+        draft_id: None,
+        body: None,
+        query: None,
     };
     let stdin = frame_bytes(&serde_json::to_value(&intent).expect("intent value"));
     let stdout = run_native_host(&stdin, &store_root, &bin_dir, &[]);

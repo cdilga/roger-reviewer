@@ -48,7 +48,7 @@ pub type Result<T> = std::result::Result<T, BridgeError>;
 // ---------------------------------------------------------------------------
 
 /// A launch intent received from the browser extension via Native Messaging.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgeLaunchIntent {
     /// The action the user wants: "start_review", "resume_review", "show_findings".
     pub action: String,
@@ -73,6 +73,25 @@ pub struct BridgeLaunchIntent {
     /// Optional browser label for identity-registration events.
     #[serde(default)]
     pub browser: Option<String>,
+    /// Bounded-local-parity action inputs (deliberate asymmetry 1: these initiate
+    /// local mutations or read-only mirrors, never post/approve).
+    /// Target finding id for `triage_finding` / `request_clarification`.
+    #[serde(default)]
+    pub finding_id: Option<String>,
+    /// Requested triage state for `triage_finding`
+    /// (accepted|ignored|needs_follow_up|resolved).
+    #[serde(default)]
+    pub state: Option<String>,
+    /// Target outbound draft id for `revise_draft`.
+    #[serde(default)]
+    pub draft_id: Option<String>,
+    /// Free-text body for `revise_draft` (new draft body) or
+    /// `request_clarification` (clarification prompt).
+    #[serde(default)]
+    pub body: Option<String>,
+    /// Search text for the read-only `search` action.
+    #[serde(default)]
+    pub query: Option<String>,
 }
 
 /// Response sent back to the extension via Native Messaging.
@@ -147,6 +166,28 @@ pub struct BridgeResponse {
     /// Lets the extension surface a visible "choose another" notice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_selected_session: Option<bool>,
+    /// Bounded local-parity drafts mirror relayed for `show_drafts`: the
+    /// `rr findings --robot` items carrying per-finding `outbound_state` and
+    /// `outbound_detail` (draft_id, draft_batch_id) so the extension draft
+    /// staging view can render batches and offer edit-as-revision. Read-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drafts: Option<serde_json::Value>,
+    /// Read-only search mirror relayed for `search`: the `rr search --robot`
+    /// envelope's `data` (matches/count) so the extension can render bounded
+    /// prior-review search results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_results: Option<serde_json::Value>,
+    /// Read-only timeline mirror relayed for `timeline`: the `rr timeline
+    /// --robot` envelope's `data`. Gated on the `rr timeline` command landing in
+    /// the CLI (a parallel workstream); until then the dispatch fails closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<serde_json::Value>,
+    /// Clarification acknowledgement relayed for `request_clarification`: the
+    /// `rr clarify --robot` envelope's `data`. Gated on the `rr clarify` command
+    /// landing in the CLI (a parallel workstream); until then the dispatch fails
+    /// closed. Never posts to GitHub — a clarification is a local durable row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clarification_ack: Option<serde_json::Value>,
 }
 
 impl BridgeResponse {
@@ -166,6 +207,10 @@ impl BridgeResponse {
             warnings: Vec::new(),
             candidates: None,
             auto_selected_session: None,
+            drafts: None,
+            search_results: None,
+            timeline: None,
+            clarification_ack: None,
         }
     }
 
@@ -192,6 +237,10 @@ impl BridgeResponse {
             warnings: Vec::new(),
             candidates: None,
             auto_selected_session: None,
+            drafts: None,
+            search_results: None,
+            timeline: None,
+            clarification_ack: None,
         }
     }
 
@@ -220,6 +269,10 @@ impl BridgeResponse {
             warnings,
             candidates: Some(candidates),
             auto_selected_session: None,
+            drafts: None,
+            search_results: None,
+            timeline: None,
+            clarification_ack: None,
         }
     }
 
@@ -249,6 +302,10 @@ impl BridgeResponse {
             warnings: Vec::new(),
             candidates: None,
             auto_selected_session: None,
+            drafts: None,
+            search_results: None,
+            timeline: None,
+            clarification_ack: None,
         }
     }
 }
@@ -935,11 +992,18 @@ pub fn handle_bridge_intent(
         );
     }
 
+    // Bounded local-parity actions (triage/drafts/revise/clarify/search/timeline)
+    // are thin relays to their matching rr command; they don't follow the
+    // launch→status-readback flow below, so route them first.
+    if let Some(response) = handle_local_parity_action(intent, roger_binary_path) {
+        return response;
+    }
+
     let Some(dispatch) = bridge_dispatch_spec(intent) else {
         return BridgeResponse::failure(
             &intent.action,
             &format!("Unknown bridge action: {}", intent.action),
-            "Supported actions: start_review, resume_review, show_findings",
+            "Supported actions: start_review, resume_review, show_findings, triage_finding, show_drafts, revise_draft, request_clarification, search, timeline",
         );
     };
 
@@ -1161,6 +1225,412 @@ fn handle_extension_registration_intent(intent: &BridgeLaunchIntent) -> BridgeRe
     }
 }
 
+// ---------------------------------------------------------------------------
+// Bounded local-parity actions (deliberate asymmetry 1)
+//
+// These actions bring the extension to bounded local parity: they surface state
+// and initiate LOCAL mutations, but never post or approve. Each one stays a thin
+// relay that dispatches the matching `rr` command (which already calls the shared
+// review-ops fail-closed logic) and forwards its robot envelope. The bridge adds
+// no domain rules of its own.
+// ---------------------------------------------------------------------------
+
+/// Trim an optional intent field to a non-empty value, or `None`.
+fn non_empty(value: &Option<String>) -> Option<&str> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// Build a fail-closed "missing required field" response for a local-parity
+/// action.
+fn missing_field(action: &str, field: &str, hint: &str) -> BridgeResponse {
+    BridgeResponse::failure(
+        action,
+        &format!("{action} requires a '{field}' value."),
+        hint,
+    )
+}
+
+fn repo_locator(intent: &BridgeLaunchIntent) -> String {
+    format!("{}/{}", intent.owner, intent.repo)
+}
+
+/// `triage_finding`: dispatch `rr triage --repo <r> --pr <n> --finding <id>
+/// --state <state> --robot` (the canonical command; `rr send triage` is an alias
+/// of it) and relay the mutated findings mirror. Mutating-local: it never posts
+/// or approves; the shared review-ops triage op enforces the fail-closed rules.
+fn handle_triage_finding_intent(
+    intent: &BridgeLaunchIntent,
+    roger_binary_path: &Path,
+) -> BridgeResponse {
+    let action = intent.action.as_str();
+    let Some(finding_id) = non_empty(&intent.finding_id) else {
+        return missing_field(action, "finding_id", "Provide the finding id to triage.");
+    };
+    let Some(state) = non_empty(&intent.state) else {
+        return missing_field(
+            action,
+            "state",
+            "Provide a triage state: accepted, ignored, needs_follow_up, or resolved.",
+        );
+    };
+    let argv = vec![
+        "triage".to_owned(),
+        "--repo".to_owned(),
+        repo_locator(intent),
+        "--pr".to_owned(),
+        intent.pr_number.to_string(),
+        "--finding".to_owned(),
+        finding_id.to_owned(),
+        "--state".to_owned(),
+        state.to_owned(),
+        "--robot".to_owned(),
+        "--robot-format".to_owned(),
+        "json".to_owned(),
+    ];
+    let envelope = match execute_rr_robot_command(
+        action,
+        roger_binary_path,
+        "rr triage",
+        &argv,
+        &["complete"],
+        false,
+    ) {
+        Ok(envelope) => envelope,
+        Err(response) => return response,
+    };
+
+    let mut response = BridgeResponse::success(
+        action,
+        &format!(
+            "rr triage set finding {finding_id} to '{state}' for {}/{}#{} (local-only; nothing posted).",
+            intent.owner, intent.repo, intent.pr_number
+        ),
+        None,
+    );
+    response.findings = Some(serde_json::json!({
+        "items": envelope.data.get("items").cloned().unwrap_or(Value::Array(Vec::new())),
+        "count": envelope.data.get("count").cloned().unwrap_or(Value::from(0)),
+        "triage_state": envelope.data.get("triage_state").cloned().unwrap_or(Value::Null),
+        "warnings": envelope.warnings,
+    }));
+    response
+}
+
+/// `show_drafts`: read-only. Dispatch `rr findings --repo <r> --pr <n> --robot`
+/// and relay the items (each carries `outbound_state` + `outbound_detail`
+/// {draft_id, draft_batch_id}) so the extension draft-staging view can render
+/// batches, offer edit-as-revision, and show the approve/post handoff command.
+fn handle_show_drafts_intent(
+    intent: &BridgeLaunchIntent,
+    roger_binary_path: &Path,
+) -> BridgeResponse {
+    let action = intent.action.as_str();
+    let argv = vec![
+        "findings".to_owned(),
+        "--repo".to_owned(),
+        repo_locator(intent),
+        "--pr".to_owned(),
+        intent.pr_number.to_string(),
+        "--robot".to_owned(),
+        "--robot-format".to_owned(),
+        "json".to_owned(),
+    ];
+    let envelope = match execute_rr_robot_command(
+        action,
+        roger_binary_path,
+        "rr findings",
+        &argv,
+        &["complete", "empty"],
+        false,
+    ) {
+        Ok(envelope) => envelope,
+        Err(response) => return response,
+    };
+
+    let mut response = BridgeResponse::success(
+        action,
+        &format!(
+            "Relayed local outbound draft state for {}/{}#{} (read-only mirror).",
+            intent.owner, intent.repo, intent.pr_number
+        ),
+        None,
+    );
+    response.drafts = Some(serde_json::json!({
+        "items": envelope.data.get("items").cloned().unwrap_or(Value::Array(Vec::new())),
+        "count": envelope.data.get("count").cloned().unwrap_or(Value::from(0)),
+        "warnings": envelope.warnings,
+    }));
+    response
+}
+
+/// `revise_draft`: dispatch `rr send edit --draft <id> --body-file <tmp>`, a
+/// LOCAL human-only revision that never posts (editing an approved batch revokes
+/// its approval, enforced by the CLI). `rr send edit` is intentionally not a
+/// `--robot` surface, so this is an exit-code relay (not a robot envelope). The
+/// body is written to a host-side temp file the CLI reads and we delete.
+fn handle_revise_draft_intent(
+    intent: &BridgeLaunchIntent,
+    roger_binary_path: &Path,
+) -> BridgeResponse {
+    let action = intent.action.as_str();
+    let Some(draft_id) = non_empty(&intent.draft_id) else {
+        return missing_field(action, "draft_id", "Provide the outbound draft id to revise.");
+    };
+    let Some(body) = intent.body.as_deref().filter(|body| !body.trim().is_empty()) else {
+        return missing_field(
+            action,
+            "body",
+            "Provide the replacement draft body (non-empty).",
+        );
+    };
+
+    // Write the new body to a neutral host-side temp file the CLI reads.
+    let temp_path = std::env::temp_dir().join(format!(
+        "rr-bridge-revise-{}-{}.txt",
+        std::process::id(),
+        draft_id.replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+    ));
+    if let Err(err) = fs::write(&temp_path, body) {
+        return BridgeResponse::failure(
+            action,
+            "Failed to stage the revised draft body for rr send edit.",
+            &format!(
+                "Could not write a temp body file at {}: {err}. Retry, or run `rr send edit --draft {draft_id} --body-file <path>` locally.",
+                temp_path.display()
+            ),
+        );
+    }
+
+    let argv = vec![
+        "send".to_owned(),
+        "edit".to_owned(),
+        "--draft".to_owned(),
+        draft_id.to_owned(),
+        "--body-file".to_owned(),
+        temp_path.to_string_lossy().to_string(),
+    ];
+    let rerun = format!("rr send edit --draft {draft_id} --body-file <path>");
+    let output = Command::new(roger_binary_path)
+        .args(&argv)
+        .current_dir(neutral_bridge_launch_dir())
+        .output();
+    let _ = fs::remove_file(&temp_path);
+
+    let output = match output {
+        Ok(output) => output,
+        Err(err) => {
+            return BridgeResponse::failure_with_kind(
+                action,
+                "Failed to invoke rr send edit through Roger bridge.",
+                &format!(
+                    "rr send edit could not be executed via {}: {err}\nRun `rr doctor`, then retry `{rerun}`.",
+                    roger_binary_path.display()
+                ),
+                BridgeFailureKind::CliSpawnFailed,
+                None,
+            );
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() {
+        let message = {
+            let trimmed = stdout.trim();
+            if trimmed.is_empty() {
+                format!("rr send edit recorded a local revision for draft {draft_id} (nothing posted).")
+            } else {
+                trimmed.to_owned()
+            }
+        };
+        BridgeResponse::success(action, &message, None)
+    } else {
+        let mut detail = Vec::new();
+        if !stdout.trim().is_empty() {
+            detail.push(stdout.trim().to_owned());
+        }
+        if !stderr.trim().is_empty() {
+            detail.push(stderr.trim().to_owned());
+        }
+        detail.push(format!("Re-run `{rerun}` locally for authoritative detail."));
+        BridgeResponse::failure_with_kind(
+            action,
+            "rr send edit refused the local draft revision.",
+            &detail.join("\n"),
+            BridgeFailureKind::CliOutcomeNotSafe,
+            None,
+        )
+    }
+}
+
+/// `request_clarification`: dispatch `rr clarify --finding <id> --body <text>
+/// --repo <r> --pr <n> --robot`, creating a durable LOCAL clarification (never a
+/// GitHub post). GATED: `rr clarify` is being added by a parallel CLI
+/// workstream; until it lands in main the dispatch fails closed with the CLI's
+/// own error. The relay is forward-compatible — it works the moment `rr clarify`
+/// ships.
+fn handle_request_clarification_intent(
+    intent: &BridgeLaunchIntent,
+    roger_binary_path: &Path,
+) -> BridgeResponse {
+    let action = intent.action.as_str();
+    let Some(finding_id) = non_empty(&intent.finding_id) else {
+        return missing_field(
+            action,
+            "finding_id",
+            "Provide the finding id to request clarification on.",
+        );
+    };
+    let Some(body) = intent.body.as_deref().filter(|body| !body.trim().is_empty()) else {
+        return missing_field(action, "body", "Provide the clarification prompt text.");
+    };
+    let argv = vec![
+        "clarify".to_owned(),
+        "--finding".to_owned(),
+        finding_id.to_owned(),
+        "--body".to_owned(),
+        body.to_owned(),
+        "--repo".to_owned(),
+        repo_locator(intent),
+        "--pr".to_owned(),
+        intent.pr_number.to_string(),
+        "--robot".to_owned(),
+        "--robot-format".to_owned(),
+        "json".to_owned(),
+    ];
+    let envelope = match execute_rr_robot_command(
+        action,
+        roger_binary_path,
+        "rr clarify",
+        &argv,
+        &["complete"],
+        false,
+    ) {
+        Ok(envelope) => envelope,
+        Err(response) => return response,
+    };
+
+    let mut response = BridgeResponse::success(
+        action,
+        &format!(
+            "rr clarify recorded a local clarification on finding {finding_id} (nothing posted)."
+        ),
+        None,
+    );
+    response.clarification_ack = Some(envelope.data);
+    response
+}
+
+/// `search`: read-only. Dispatch `rr search --query <q> --repo <r> --robot` and
+/// relay the search data (matches/count) for the extension's bounded prior-review
+/// search surface.
+fn handle_search_intent(intent: &BridgeLaunchIntent, roger_binary_path: &Path) -> BridgeResponse {
+    let action = intent.action.as_str();
+    let Some(query) = non_empty(&intent.query) else {
+        return missing_field(action, "query", "Provide the search text.");
+    };
+    let argv = vec![
+        "search".to_owned(),
+        "--query".to_owned(),
+        query.to_owned(),
+        "--repo".to_owned(),
+        repo_locator(intent),
+        "--robot".to_owned(),
+        "--robot-format".to_owned(),
+        "json".to_owned(),
+    ];
+    let envelope = match execute_rr_robot_command(
+        action,
+        roger_binary_path,
+        "rr search",
+        &argv,
+        &["complete", "empty"],
+        false,
+    ) {
+        Ok(envelope) => envelope,
+        Err(response) => return response,
+    };
+
+    let mut response = BridgeResponse::success(
+        action,
+        &format!("rr search returned prior-review matches for \"{query}\" (read-only)."),
+        None,
+    );
+    let mut data = envelope.data;
+    if let Value::Object(ref mut map) = data {
+        map.insert("warnings".to_owned(), Value::from(envelope.warnings));
+    }
+    response.search_results = Some(data);
+    response
+}
+
+/// `timeline`: read-only. Dispatch `rr timeline --repo <r> --pr <n> --robot` and
+/// relay the timeline data. GATED: `rr timeline` is not yet in main (a parallel
+/// CLI workstream owns it); until it lands the dispatch fails closed. The relay
+/// is forward-compatible.
+fn handle_timeline_intent(intent: &BridgeLaunchIntent, roger_binary_path: &Path) -> BridgeResponse {
+    let action = intent.action.as_str();
+    let argv = vec![
+        "timeline".to_owned(),
+        "--repo".to_owned(),
+        repo_locator(intent),
+        "--pr".to_owned(),
+        intent.pr_number.to_string(),
+        "--robot".to_owned(),
+        "--robot-format".to_owned(),
+        "json".to_owned(),
+    ];
+    let envelope = match execute_rr_robot_command(
+        action,
+        roger_binary_path,
+        "rr timeline",
+        &argv,
+        &["complete", "empty"],
+        false,
+    ) {
+        Ok(envelope) => envelope,
+        Err(response) => return response,
+    };
+
+    let mut response = BridgeResponse::success(
+        action,
+        &format!(
+            "rr timeline relayed the run/stage/posted view for {}/{}#{} (read-only).",
+            intent.owner, intent.repo, intent.pr_number
+        ),
+        None,
+    );
+    let mut data = envelope.data;
+    if let Value::Object(ref mut map) = data {
+        map.insert("warnings".to_owned(), Value::from(envelope.warnings));
+    }
+    response.timeline = Some(data);
+    response
+}
+
+/// Route a bounded local-parity action to its handler, if the action is one.
+/// Returns `None` for the launch-family actions (start/resume/show_findings)
+/// handled by the existing dispatch path.
+fn handle_local_parity_action(
+    intent: &BridgeLaunchIntent,
+    roger_binary_path: &Path,
+) -> Option<BridgeResponse> {
+    match intent.action.as_str() {
+        "triage_finding" => Some(handle_triage_finding_intent(intent, roger_binary_path)),
+        "show_drafts" => Some(handle_show_drafts_intent(intent, roger_binary_path)),
+        "revise_draft" => Some(handle_revise_draft_intent(intent, roger_binary_path)),
+        "request_clarification" => {
+            Some(handle_request_clarification_intent(intent, roger_binary_path))
+        }
+        "search" => Some(handle_search_intent(intent, roger_binary_path)),
+        "timeline" => Some(handle_timeline_intent(intent, roger_binary_path)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1180,6 +1650,11 @@ mod tests {
             session_id: None,
             extension_id: None,
             browser: None,
+            finding_id: None,
+            state: None,
+            draft_id: None,
+            body: None,
+            query: None,
         }
     }
 
@@ -1833,6 +2308,11 @@ esac
             session_id: None,
             extension_id: Some("abcdefghijklmnopabcdefghijklmnop".to_owned()),
             browser: Some("chrome".to_owned()),
+            finding_id: None,
+            state: None,
+            draft_id: None,
+            body: None,
+            query: None,
         };
         let preflight = BridgePreflight {
             roger_binary_found: false,
@@ -1859,6 +2339,11 @@ esac
             session_id: None,
             extension_id: Some("INVALID-ID".to_owned()),
             browser: Some("chrome".to_owned()),
+            finding_id: None,
+            state: None,
+            draft_id: None,
+            body: None,
+            query: None,
         };
         let preflight = BridgePreflight {
             roger_binary_found: true,
@@ -1874,5 +2359,343 @@ esac
                 .as_deref()
                 .is_some_and(|guidance| guidance.contains("32-character lowercase"))
         );
+    }
+
+    // -- Bounded local-parity action tests -------------------------------------
+
+    /// Write an rr stub that records the argv it was invoked with (to a sibling
+    /// `argv.txt`) and prints `payload` for the given first-arg `command`.
+    #[cfg(unix)]
+    fn write_recording_stub(
+        command: &str,
+        payload: &str,
+        exit: i32,
+    ) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rr-stub");
+        let argv_file = dir.path().join("argv.txt");
+        // Match on a single leading token for simple commands, or the two-token
+        // "send edit" alias when command is "send".
+        let script = format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" > "{argv_path}"
+case "$1" in
+  {command})
+    cat <<'EOF'
+{payload}
+EOF
+    exit {exit}
+    ;;
+  *)
+    echo "unexpected args: $@" >&2
+    exit 64
+    ;;
+esac
+"#,
+            argv_path = argv_file.display(),
+        );
+        fs::write(&path, script).expect("write rr stub");
+        let mut perms = fs::metadata(&path).expect("rr stub metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("chmod rr stub");
+        (dir, path, argv_file)
+    }
+
+    fn ready_preflight() -> BridgePreflight {
+        BridgePreflight {
+            roger_binary_found: true,
+            roger_data_dir_exists: true,
+            gh_available: true,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn triage_finding_dispatches_rr_triage_argv_and_relays_items() {
+        let (_dir, stub, argv_file) = write_recording_stub(
+            "triage",
+            &serde_json::to_string(&serde_json::json!({
+                "schema_id": "rr.robot.triage.v1",
+                "command": "rr triage",
+                "robot_format": "json",
+                "outcome": "complete",
+                "generated_at": "2026-04-15T00:00:00Z",
+                "exit_code": 0,
+                "warnings": [],
+                "repair_actions": [],
+                "data": {
+                    "session_id": "s-1",
+                    "triage_state": "accepted",
+                    "count": 1,
+                    "items": [{"id": "finding-1", "title": "x", "triage_state": "accepted", "outbound_state": "not_drafted"}]
+                }
+            }))
+            .unwrap(),
+            0,
+        );
+        let intent = BridgeLaunchIntent {
+            action: "triage_finding".to_owned(),
+            owner: "acme".to_owned(),
+            repo: "widgets".to_owned(),
+            pr_number: 42,
+            finding_id: Some("finding-1".to_owned()),
+            state: Some("accepted".to_owned()),
+            ..Default::default()
+        };
+        let resp = handle_bridge_intent(&intent, &ready_preflight(), &stub);
+        assert!(resp.ok, "guidance: {:?}", resp.guidance);
+        let argv = fs::read_to_string(&argv_file).unwrap();
+        for expected in [
+            "triage",
+            "--repo acme/widgets",
+            "--pr 42",
+            "--finding finding-1",
+            "--state accepted",
+            "--robot",
+        ] {
+            assert!(argv.contains(expected), "argv missing {expected:?}: {argv}");
+        }
+        let findings = resp.findings.expect("triage relays findings mirror");
+        assert_eq!(findings["items"][0]["id"], "finding-1");
+        assert_eq!(findings["triage_state"], "accepted");
+    }
+
+    #[test]
+    fn triage_finding_requires_finding_and_state() {
+        let intent = BridgeLaunchIntent {
+            action: "triage_finding".to_owned(),
+            owner: "acme".to_owned(),
+            repo: "widgets".to_owned(),
+            pr_number: 42,
+            ..Default::default()
+        };
+        let resp = handle_bridge_intent(&intent, &ready_preflight(), Path::new("/usr/local/bin/rr"));
+        assert!(!resp.ok);
+        assert!(resp.guidance.unwrap().to_lowercase().contains("finding"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn show_drafts_relays_findings_items_with_draft_ids() {
+        let (_dir, stub, argv_file) = write_recording_stub(
+            "findings",
+            &serde_json::to_string(&serde_json::json!({
+                "schema_id": "rr.robot.findings.v1",
+                "command": "rr findings",
+                "robot_format": "json",
+                "outcome": "complete",
+                "generated_at": "2026-04-15T00:00:00Z",
+                "exit_code": 0,
+                "warnings": [],
+                "repair_actions": [],
+                "data": {
+                    "session_id": "s-1",
+                    "count": 1,
+                    "items": [{
+                        "finding_id": "finding-1",
+                        "title": "x",
+                        "outbound_state": "awaiting_approval",
+                        "outbound_detail": {"draft_id": "draft-1", "draft_batch_id": "batch-1"}
+                    }]
+                }
+            }))
+            .unwrap(),
+            0,
+        );
+        let intent = BridgeLaunchIntent {
+            action: "show_drafts".to_owned(),
+            owner: "acme".to_owned(),
+            repo: "widgets".to_owned(),
+            pr_number: 42,
+            ..Default::default()
+        };
+        let resp = handle_bridge_intent(&intent, &ready_preflight(), &stub);
+        assert!(resp.ok, "guidance: {:?}", resp.guidance);
+        let argv = fs::read_to_string(&argv_file).unwrap();
+        assert!(argv.contains("findings"));
+        assert!(!argv.contains("--surface"), "findings must not get --surface: {argv}");
+        let drafts = resp.drafts.expect("show_drafts relays drafts mirror");
+        assert_eq!(drafts["items"][0]["outbound_detail"]["draft_id"], "draft-1");
+        assert!(resp.findings.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn revise_draft_dispatches_send_edit_and_relays_success() {
+        let (_dir, stub, argv_file) = write_recording_stub(
+            "send",
+            "rr send edit recorded revision 2 for the outbound draft",
+            0,
+        );
+        let intent = BridgeLaunchIntent {
+            action: "revise_draft".to_owned(),
+            owner: "acme".to_owned(),
+            repo: "widgets".to_owned(),
+            pr_number: 42,
+            draft_id: Some("draft-1".to_owned()),
+            body: Some("new body text".to_owned()),
+            ..Default::default()
+        };
+        let resp = handle_bridge_intent(&intent, &ready_preflight(), &stub);
+        assert!(resp.ok, "guidance: {:?}", resp.guidance);
+        let argv = fs::read_to_string(&argv_file).unwrap();
+        assert!(argv.contains("send edit"), "argv: {argv}");
+        assert!(argv.contains("--draft draft-1"), "argv: {argv}");
+        assert!(argv.contains("--body-file"), "argv: {argv}");
+        assert!(!argv.contains("--robot"), "send edit is not a robot surface: {argv}");
+        assert!(resp.message.contains("recorded revision"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn revise_draft_relays_cli_refusal_as_failure() {
+        let (_dir, stub, _argv) = write_recording_stub(
+            "send",
+            "rr send edit refused to edit a draft whose batch was already posted to GitHub",
+            2,
+        );
+        let intent = BridgeLaunchIntent {
+            action: "revise_draft".to_owned(),
+            owner: "acme".to_owned(),
+            repo: "widgets".to_owned(),
+            pr_number: 42,
+            draft_id: Some("draft-1".to_owned()),
+            body: Some("new body".to_owned()),
+            ..Default::default()
+        };
+        let resp = handle_bridge_intent(&intent, &ready_preflight(), &stub);
+        assert!(!resp.ok);
+        assert_eq!(resp.failure_kind, Some(BridgeFailureKind::CliOutcomeNotSafe));
+        assert!(resp.guidance.unwrap().contains("already posted"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn search_dispatches_rr_search_and_relays_results() {
+        let (_dir, stub, argv_file) = write_recording_stub(
+            "search",
+            &serde_json::to_string(&serde_json::json!({
+                "schema_id": "rr.robot.search.v1",
+                "command": "rr search",
+                "robot_format": "json",
+                "outcome": "complete",
+                "generated_at": "2026-04-15T00:00:00Z",
+                "exit_code": 0,
+                "warnings": [],
+                "repair_actions": [],
+                "data": {"count": 1, "matches": [{"title": "prior finding"}]}
+            }))
+            .unwrap(),
+            0,
+        );
+        let intent = BridgeLaunchIntent {
+            action: "search".to_owned(),
+            owner: "acme".to_owned(),
+            repo: "widgets".to_owned(),
+            pr_number: 0,
+            query: Some("retry loop".to_owned()),
+            ..Default::default()
+        };
+        let resp = handle_bridge_intent(&intent, &ready_preflight(), &stub);
+        assert!(resp.ok, "guidance: {:?}", resp.guidance);
+        let argv = fs::read_to_string(&argv_file).unwrap();
+        assert!(argv.contains("--query retry loop"), "argv: {argv}");
+        assert!(argv.contains("--repo acme/widgets"), "argv: {argv}");
+        let results = resp.search_results.expect("search relays results");
+        assert_eq!(results["matches"][0]["title"], "prior finding");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn request_clarification_dispatches_rr_clarify_forward_compatibly() {
+        // rr clarify is a parallel workstream; this proves the argv mapping and
+        // relay against a stub, so the relay works the moment the command lands.
+        let (_dir, stub, argv_file) = write_recording_stub(
+            "clarify",
+            &serde_json::to_string(&serde_json::json!({
+                "schema_id": "rr.robot.clarify.v1",
+                "command": "rr clarify",
+                "robot_format": "json",
+                "outcome": "complete",
+                "generated_at": "2026-04-15T00:00:00Z",
+                "exit_code": 0,
+                "warnings": [],
+                "repair_actions": [],
+                "data": {"clarification_id": "clar-1", "finding_id": "finding-1"}
+            }))
+            .unwrap(),
+            0,
+        );
+        let intent = BridgeLaunchIntent {
+            action: "request_clarification".to_owned(),
+            owner: "acme".to_owned(),
+            repo: "widgets".to_owned(),
+            pr_number: 42,
+            finding_id: Some("finding-1".to_owned()),
+            body: Some("why is this unsafe?".to_owned()),
+            ..Default::default()
+        };
+        let resp = handle_bridge_intent(&intent, &ready_preflight(), &stub);
+        assert!(resp.ok, "guidance: {:?}", resp.guidance);
+        let argv = fs::read_to_string(&argv_file).unwrap();
+        assert!(argv.contains("clarify"), "argv: {argv}");
+        assert!(argv.contains("--finding finding-1"), "argv: {argv}");
+        assert!(argv.contains("--body why is this unsafe?"), "argv: {argv}");
+        let ack = resp.clarification_ack.expect("clarify relays ack");
+        assert_eq!(ack["clarification_id"], "clar-1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeline_dispatches_rr_timeline_forward_compatibly() {
+        let (_dir, stub, argv_file) = write_recording_stub(
+            "timeline",
+            &serde_json::to_string(&serde_json::json!({
+                "schema_id": "rr.robot.timeline.v1",
+                "command": "rr timeline",
+                "robot_format": "json",
+                "outcome": "complete",
+                "generated_at": "2026-04-15T00:00:00Z",
+                "exit_code": 0,
+                "warnings": [],
+                "repair_actions": [],
+                "data": {"events": [{"kind": "run"}]}
+            }))
+            .unwrap(),
+            0,
+        );
+        let intent = BridgeLaunchIntent {
+            action: "timeline".to_owned(),
+            owner: "acme".to_owned(),
+            repo: "widgets".to_owned(),
+            pr_number: 42,
+            ..Default::default()
+        };
+        let resp = handle_bridge_intent(&intent, &ready_preflight(), &stub);
+        assert!(resp.ok, "guidance: {:?}", resp.guidance);
+        let argv = fs::read_to_string(&argv_file).unwrap();
+        assert!(argv.contains("timeline"), "argv: {argv}");
+        let timeline = resp.timeline.expect("timeline relays data");
+        assert_eq!(timeline["events"][0]["kind"], "run");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_parity_action_fails_closed_when_command_errors() {
+        // Gated commands (clarify/timeline) that aren't in the CLI yet surface a
+        // non-canonical payload; the relay must fail closed, not fake success.
+        let (_dir, stub, _argv) = write_recording_stub("clarify", "not json", 0);
+        let intent = BridgeLaunchIntent {
+            action: "request_clarification".to_owned(),
+            owner: "acme".to_owned(),
+            repo: "widgets".to_owned(),
+            pr_number: 42,
+            finding_id: Some("finding-1".to_owned()),
+            body: Some("q".to_owned()),
+            ..Default::default()
+        };
+        let resp = handle_bridge_intent(&intent, &ready_preflight(), &stub);
+        assert!(!resp.ok);
+        assert_eq!(resp.failure_kind, Some(BridgeFailureKind::RobotSchemaMismatch));
     }
 }

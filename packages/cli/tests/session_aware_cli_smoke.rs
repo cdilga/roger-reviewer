@@ -611,6 +611,11 @@ fn register_extension_identity_via_bridge(runtime: &CliRuntime, browser: &str, e
             session_id: None,
             extension_id: Some(extension_id.to_owned()),
             browser: Some(browser.to_owned()),
+            finding_id: None,
+            state: None,
+            draft_id: None,
+            body: None,
+            query: None,
         },
         &BridgePreflight {
             roger_binary_found: false,
@@ -775,6 +780,11 @@ fn rr_binary_accepts_native_host_registration_intents_via_stdio_envelope() {
         session_id: None,
         extension_id: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()),
         browser: Some("chrome".to_owned()),
+        finding_id: None,
+        state: None,
+        draft_id: None,
+        body: None,
+        query: None,
     };
     let output = run_rr_process_with_stdin(&[], &runtime, &encode_native_intent(&intent));
 
@@ -807,6 +817,11 @@ fn rr_binary_native_host_path_returns_bridge_response_for_launch_intents() {
         session_id: None,
         extension_id: None,
         browser: None,
+        finding_id: None,
+        state: None,
+        draft_id: None,
+        body: None,
+        query: None,
     };
     let output = run_rr_process_with_stdin(&[], &runtime, &encode_native_intent(&intent));
 
@@ -928,6 +943,11 @@ fn rr_binary_native_host_path_handles_all_primary_launch_actions_without_hanging
             session_id: None,
             extension_id: None,
             browser: None,
+            finding_id: None,
+            state: None,
+            draft_id: None,
+            body: None,
+            query: None,
         };
         let output = run_rr_process_with_stdin(&[], &runtime, &encode_native_intent(&intent));
         assert!(
