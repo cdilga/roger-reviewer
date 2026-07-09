@@ -178,12 +178,12 @@ pub struct BridgeResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_results: Option<serde_json::Value>,
     /// Read-only timeline mirror relayed for `timeline`: the `rr timeline
-    /// --robot` envelope's `data`. Gated on the `rr timeline` command landing in
+    /// --robot` envelope's `data`. Relays the `rr timeline` command (landed 2026-07-09) in
     /// the CLI (a parallel workstream); until then the dispatch fails closed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeline: Option<serde_json::Value>,
     /// Clarification acknowledgement relayed for `request_clarification`: the
-    /// `rr clarify --robot` envelope's `data`. Gated on the `rr clarify` command
+    /// `rr clarify --robot` envelope's `data`. Relays the `rr clarify` command (landed 2026-07-09), the
     /// landing in the CLI (a parallel workstream); until then the dispatch fails
     /// closed. Never posts to GitHub — a clarification is a local durable row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1377,9 +1377,17 @@ fn handle_revise_draft_intent(
 ) -> BridgeResponse {
     let action = intent.action.as_str();
     let Some(draft_id) = non_empty(&intent.draft_id) else {
-        return missing_field(action, "draft_id", "Provide the outbound draft id to revise.");
+        return missing_field(
+            action,
+            "draft_id",
+            "Provide the outbound draft id to revise.",
+        );
     };
-    let Some(body) = intent.body.as_deref().filter(|body| !body.trim().is_empty()) else {
+    let Some(body) = intent
+        .body
+        .as_deref()
+        .filter(|body| !body.trim().is_empty())
+    else {
         return missing_field(
             action,
             "body",
@@ -1441,7 +1449,9 @@ fn handle_revise_draft_intent(
         let message = {
             let trimmed = stdout.trim();
             if trimmed.is_empty() {
-                format!("rr send edit recorded a local revision for draft {draft_id} (nothing posted).")
+                format!(
+                    "rr send edit recorded a local revision for draft {draft_id} (nothing posted)."
+                )
             } else {
                 trimmed.to_owned()
             }
@@ -1455,7 +1465,9 @@ fn handle_revise_draft_intent(
         if !stderr.trim().is_empty() {
             detail.push(stderr.trim().to_owned());
         }
-        detail.push(format!("Re-run `{rerun}` locally for authoritative detail."));
+        detail.push(format!(
+            "Re-run `{rerun}` locally for authoritative detail."
+        ));
         BridgeResponse::failure_with_kind(
             action,
             "rr send edit refused the local draft revision.",
@@ -1484,7 +1496,11 @@ fn handle_request_clarification_intent(
             "Provide the finding id to request clarification on.",
         );
     };
-    let Some(body) = intent.body.as_deref().filter(|body| !body.trim().is_empty()) else {
+    let Some(body) = intent
+        .body
+        .as_deref()
+        .filter(|body| !body.trim().is_empty())
+    else {
         return missing_field(action, "body", "Provide the clarification prompt text.");
     };
     let argv = vec![
@@ -1622,9 +1638,10 @@ fn handle_local_parity_action(
         "triage_finding" => Some(handle_triage_finding_intent(intent, roger_binary_path)),
         "show_drafts" => Some(handle_show_drafts_intent(intent, roger_binary_path)),
         "revise_draft" => Some(handle_revise_draft_intent(intent, roger_binary_path)),
-        "request_clarification" => {
-            Some(handle_request_clarification_intent(intent, roger_binary_path))
-        }
+        "request_clarification" => Some(handle_request_clarification_intent(
+            intent,
+            roger_binary_path,
+        )),
         "search" => Some(handle_search_intent(intent, roger_binary_path)),
         "timeline" => Some(handle_timeline_intent(intent, roger_binary_path)),
         _ => None,
@@ -2469,7 +2486,8 @@ esac
             pr_number: 42,
             ..Default::default()
         };
-        let resp = handle_bridge_intent(&intent, &ready_preflight(), Path::new("/usr/local/bin/rr"));
+        let resp =
+            handle_bridge_intent(&intent, &ready_preflight(), Path::new("/usr/local/bin/rr"));
         assert!(!resp.ok);
         assert!(resp.guidance.unwrap().to_lowercase().contains("finding"));
     }
@@ -2513,7 +2531,10 @@ esac
         assert!(resp.ok, "guidance: {:?}", resp.guidance);
         let argv = fs::read_to_string(&argv_file).unwrap();
         assert!(argv.contains("findings"));
-        assert!(!argv.contains("--surface"), "findings must not get --surface: {argv}");
+        assert!(
+            !argv.contains("--surface"),
+            "findings must not get --surface: {argv}"
+        );
         let drafts = resp.drafts.expect("show_drafts relays drafts mirror");
         assert_eq!(drafts["items"][0]["outbound_detail"]["draft_id"], "draft-1");
         assert!(resp.findings.is_none());
@@ -2542,7 +2563,10 @@ esac
         assert!(argv.contains("send edit"), "argv: {argv}");
         assert!(argv.contains("--draft draft-1"), "argv: {argv}");
         assert!(argv.contains("--body-file"), "argv: {argv}");
-        assert!(!argv.contains("--robot"), "send edit is not a robot surface: {argv}");
+        assert!(
+            !argv.contains("--robot"),
+            "send edit is not a robot surface: {argv}"
+        );
         assert!(resp.message.contains("recorded revision"));
     }
 
@@ -2565,7 +2589,10 @@ esac
         };
         let resp = handle_bridge_intent(&intent, &ready_preflight(), &stub);
         assert!(!resp.ok);
-        assert_eq!(resp.failure_kind, Some(BridgeFailureKind::CliOutcomeNotSafe));
+        assert_eq!(
+            resp.failure_kind,
+            Some(BridgeFailureKind::CliOutcomeNotSafe)
+        );
         assert!(resp.guidance.unwrap().contains("already posted"));
     }
 
@@ -2696,6 +2723,9 @@ esac
         };
         let resp = handle_bridge_intent(&intent, &ready_preflight(), &stub);
         assert!(!resp.ok);
-        assert_eq!(resp.failure_kind, Some(BridgeFailureKind::RobotSchemaMismatch));
+        assert_eq!(
+            resp.failure_kind,
+            Some(BridgeFailureKind::RobotSchemaMismatch)
+        );
     }
 }
