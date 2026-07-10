@@ -1,4 +1,4 @@
-use crate::backend::CockpitBackend;
+use crate::backend::{CockpitBackend, QueueView};
 use crate::model::{
     ApproveOutcome, ClarificationRow, CockpitEntry, CockpitKey, CockpitModel, CreateDraftOutcome,
     DecisionEventRow, DraftBatchRow, DraftItemRow, EMPTY_STORE_HINT, ElevationKind,
@@ -54,9 +54,19 @@ struct FakeBackend {
     /// Evidence excerpt returned by `load_evidence_excerpt`.
     evidence_excerpt: Option<EvidenceExcerptRow>,
     fail_evidence_excerpt: bool,
+    /// Queue projection returned by `load_queue`.
+    queue: QueueView,
+    fail_queue: bool,
 }
 
 impl CockpitBackend for FakeBackend {
+    fn load_queue(&mut self) -> Result<QueueView, String> {
+        if self.fail_queue {
+            return Err("the GitHub CLI (gh) is unavailable".to_owned());
+        }
+        Ok(self.queue.clone())
+    }
+
     fn list_sessions(&mut self) -> Result<Vec<SessionRow>, String> {
         Ok(self.sessions.clone())
     }
@@ -2333,4 +2343,152 @@ fn reload_after_return_refreshes_active_session() {
     model.reload_after_return(&mut backend);
     assert_eq!(model.screen, Screen::Findings);
     assert_eq!(model.findings.len(), 3);
+}
+
+// --- Queue screen: entry legs (queue, start review, reuse-or-fresh) ---------
+
+fn queue_row(pr: u64, state: &str, session: Option<&str>) -> roger_review_ops::QueueRow {
+    roger_review_ops::QueueRow {
+        pr_number: pr,
+        title: format!("PR {pr} title"),
+        author: "octocat".to_owned(),
+        is_draft: false,
+        head_ref: "feature".to_owned(),
+        updated_at: "2026-07-10T00:00:00Z".to_owned(),
+        url: format!("https://github.com/example/repo/pull/{pr}"),
+        roger_state: state.to_owned(),
+        session_id: session.map(str::to_owned),
+        next_command: roger_review_ops::queue_next_command(state, pr),
+    }
+}
+
+fn backend_with_queue() -> FakeBackend {
+    let mut backend = FakeBackend::default();
+    backend.queue = QueueView {
+        repository: "example/repo".to_owned(),
+        rows: vec![
+            queue_row(7, "not_started", None),
+            queue_row(9, "in_review", Some("sess-9")),
+        ],
+    };
+    backend
+}
+
+/// The argv of a pending `LaunchProvider` dropout, or an empty vec when the
+/// effect is absent or of another kind — so a mismatch fails as a readable
+/// `assert_eq!` diff rather than a panic.
+fn launch_args(effect: Option<ModelEffect>) -> Vec<String> {
+    match effect {
+        Some(ModelEffect::LaunchProvider { args, .. }) => args,
+        _ => Vec::new(),
+    }
+}
+
+#[test]
+fn home_p_opens_queue_and_renders_open_prs() {
+    let mut backend = backend_with_queue();
+    let mut model = bootstrap(&mut backend);
+    model.screen = Screen::Home;
+
+    model.handle_key(CockpitKey::Char('p'), &mut backend);
+
+    assert_eq!(model.screen, Screen::Queue);
+    let rendered = model.render_lines(140, 30).join("\n");
+    assert!(rendered.contains("example/repo"), "{rendered}");
+    assert!(rendered.contains("#7"), "{rendered}");
+    assert!(rendered.contains("not_started"), "{rendered}");
+    assert!(rendered.contains("#9"), "{rendered}");
+}
+
+#[test]
+fn queue_enter_on_pr_without_session_starts_a_fresh_review() {
+    let mut backend = backend_with_queue();
+    let mut model = bootstrap(&mut backend);
+    model.screen = Screen::Home;
+    model.handle_key(CockpitKey::Char('p'), &mut backend);
+    model.queue_cursor = 0; // PR #7, no session
+
+    model.handle_key(CockpitKey::Enter, &mut backend);
+
+    assert_eq!(
+        launch_args(model.take_effect()),
+        vec![
+            "review".to_owned(),
+            "--pr".to_owned(),
+            "7".to_owned(),
+            "--provider".to_owned(),
+            roger_review_ops::QUEUE_DEFAULT_PROVIDER.to_owned(),
+        ],
+        "a PR with no local session must start a fresh review"
+    );
+}
+
+#[test]
+fn queue_enter_on_pr_with_session_resumes_instead_of_starting_fresh() {
+    let mut backend = backend_with_queue();
+    let mut model = bootstrap(&mut backend);
+    model.screen = Screen::Home;
+    model.handle_key(CockpitKey::Char('p'), &mut backend);
+    model.queue_cursor = 1; // PR #9, has session sess-9
+
+    model.handle_key(CockpitKey::Enter, &mut backend);
+
+    assert_eq!(
+        launch_args(model.take_effect()),
+        vec!["resume".to_owned(), "--pr".to_owned(), "9".to_owned()],
+        "a PR with an existing session must resume, never start fresh"
+    );
+}
+
+#[test]
+fn queue_inspector_names_which_branch_enter_will_take() {
+    let mut backend = backend_with_queue();
+    let mut model = bootstrap(&mut backend);
+    model.screen = Screen::Home;
+    model.handle_key(CockpitKey::Char('p'), &mut backend);
+
+    model.queue_cursor = 0;
+    let fresh = model.render_lines(160, 40).join("\n");
+    assert!(fresh.contains("FRESH review"), "{fresh}");
+
+    model.queue_cursor = 1;
+    let resume = model.render_lines(160, 40).join("\n");
+    assert!(resume.contains("RESUMES the existing"), "{resume}");
+    assert!(resume.contains("sess-9"), "{resume}");
+}
+
+#[test]
+fn queue_failure_keeps_operator_on_home_with_the_reason() {
+    let mut backend = backend_with_queue();
+    backend.fail_queue = true;
+    let mut model = bootstrap(&mut backend);
+    model.screen = Screen::Home;
+
+    model.handle_key(CockpitKey::Char('p'), &mut backend);
+
+    assert_eq!(
+        model.screen,
+        Screen::Home,
+        "a failed queue load must not strand the operator on an empty Queue screen"
+    );
+    let notice = model.notice.clone().unwrap_or_default();
+    assert!(
+        notice.contains("gh"),
+        "notice should name the cause: {notice}"
+    );
+}
+
+#[test]
+fn home_bang_runs_the_real_doctor_through_the_dropout() {
+    let mut backend = backend_with_queue();
+    let mut model = bootstrap(&mut backend);
+    model.screen = Screen::Home;
+
+    model.handle_key(CockpitKey::Char('!'), &mut backend);
+
+    assert_eq!(
+        launch_args(model.take_effect()),
+        vec!["doctor".to_owned()],
+        "! must run the real rr doctor through the dropout"
+    );
 }

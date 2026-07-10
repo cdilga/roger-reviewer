@@ -9,8 +9,9 @@ use std::process::Command;
 use std::sync::Arc;
 
 use roger_app_core::{
-    OutboundDraft, OutboundDraftBatch, OutboundPostingAdapter, PostingAdapterItemResult,
-    ReviewTarget, now_ts, validate_outbound_draft_batch_linkage,
+    OpenPullRequestListError, OpenPullRequestLister, OpenPullRequestSummary, OutboundDraft,
+    OutboundDraftBatch, OutboundPostingAdapter, PostingAdapterItemResult, ReviewTarget, now_ts,
+    validate_outbound_draft_batch_linkage,
 };
 use serde::{Deserialize, Serialize};
 
@@ -880,6 +881,61 @@ impl ReadSafeGitHubAdapter for StubGitHubAdapter {
     }
 }
 
+// --- domain port impls -----------------------------------------------------
+//
+// `OpenPullRequestLister` is the app-core port the shared queue op depends on.
+// Implementing it here (rather than teaching review-ops about `gh`) keeps the
+// dependency arrow pointing from adapter to domain.
+
+impl From<&OpenPullRequest> for OpenPullRequestSummary {
+    fn from(pr: &OpenPullRequest) -> Self {
+        OpenPullRequestSummary {
+            number: pr.number,
+            title: pr.title.clone(),
+            author: pr.author.clone(),
+            is_draft: pr.is_draft,
+            head_ref: pr.head_ref.clone(),
+            updated_at: pr.updated_at.clone(),
+            url: pr.url.clone(),
+        }
+    }
+}
+
+fn map_list_error(err: GitHubAdapterError) -> OpenPullRequestListError {
+    match err {
+        GitHubAdapterError::GhNotFound => {
+            OpenPullRequestListError::GhUnavailable(GitHubAdapterError::GhNotFound.to_string())
+        }
+        other => OpenPullRequestListError::GhCommandFailed(other.to_string()),
+    }
+}
+
+impl OpenPullRequestLister for GhCliAdapter {
+    fn list_open_pull_requests(
+        &self,
+        owner: &str,
+        repo: &str,
+        limit: usize,
+    ) -> std::result::Result<Vec<OpenPullRequestSummary>, OpenPullRequestListError> {
+        ReadSafeGitHubAdapter::list_open_pull_requests(self, owner, repo, limit)
+            .map(|prs| prs.iter().map(OpenPullRequestSummary::from).collect())
+            .map_err(map_list_error)
+    }
+}
+
+impl OpenPullRequestLister for StubGitHubAdapter {
+    fn list_open_pull_requests(
+        &self,
+        owner: &str,
+        repo: &str,
+        limit: usize,
+    ) -> std::result::Result<Vec<OpenPullRequestSummary>, OpenPullRequestListError> {
+        ReadSafeGitHubAdapter::list_open_pull_requests(self, owner, repo, limit)
+            .map(|prs| prs.iter().map(OpenPullRequestSummary::from).collect())
+            .map_err(map_list_error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1008,15 +1064,14 @@ mod tests {
         stub.add_open_pr("example", "test-repo", sample_open_pr(7, "First"));
         stub.add_open_pr("example", "test-repo", sample_open_pr(9, "Second"));
 
-        let all = stub
-            .list_open_pull_requests("example", "test-repo", 10)
+        let all = ReadSafeGitHubAdapter::list_open_pull_requests(&stub, "example", "test-repo", 10)
             .unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].number, 7);
 
-        let limited = stub
-            .list_open_pull_requests("example", "test-repo", 1)
-            .unwrap();
+        let limited =
+            ReadSafeGitHubAdapter::list_open_pull_requests(&stub, "example", "test-repo", 1)
+                .unwrap();
         assert_eq!(limited.len(), 1);
         assert_eq!(limited[0].title, "First");
     }
@@ -1025,8 +1080,7 @@ mod tests {
     fn stub_list_open_pull_requests_fails_closed_when_gh_unavailable() {
         let mut stub = StubGitHubAdapter::new();
         stub.gh_available = false;
-        let err = stub
-            .list_open_pull_requests("example", "test-repo", 10)
+        let err = ReadSafeGitHubAdapter::list_open_pull_requests(&stub, "example", "test-repo", 10)
             .unwrap_err();
         assert!(matches!(err, GitHubAdapterError::GhNotFound));
     }
@@ -1054,9 +1108,9 @@ mod tests {
         )]));
         let adapter = GhCliAdapter::with_runner("gh".to_owned(), runner);
 
-        let prs = adapter
-            .list_open_pull_requests("example", "test-repo", 25)
-            .unwrap();
+        let prs =
+            ReadSafeGitHubAdapter::list_open_pull_requests(&adapter, "example", "test-repo", 25)
+                .unwrap();
         assert_eq!(prs.len(), 2);
         assert_eq!(prs[0].number, 42);
         assert_eq!(prs[0].author, "dev");
@@ -1088,9 +1142,9 @@ mod tests {
         )]));
         let adapter = GhCliAdapter::with_runner("gh".to_owned(), runner);
 
-        let err = adapter
-            .list_open_pull_requests("example", "test-repo", 25)
-            .unwrap_err();
+        let err =
+            ReadSafeGitHubAdapter::list_open_pull_requests(&adapter, "example", "test-repo", 25)
+                .unwrap_err();
         assert!(matches!(err, GitHubAdapterError::GhCommandFailed { .. }));
     }
 

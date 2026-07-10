@@ -86,6 +86,7 @@ fn tui_reaches_full_operator_parity() {
         "fn load_evidence_excerpt",
         "fn resolve_memory_review",
         "fn set_triage_state",
+        "fn load_queue", // entry leg: the open-PR queue
     ] {
         assert!(
             backend.contains(method),
@@ -113,6 +114,50 @@ fn tui_reaches_full_operator_parity() {
         model.contains("POST_CONFIRMATION_WORD"),
         "TUI parity: elevated post confirm word missing"
     );
+
+    // Entry legs (v2026.07.10): the cockpit can reach review work on its own —
+    // an open-PR queue, a fresh start, a reuse-or-fresh decision, and doctor.
+    assert!(
+        model.contains("Screen::Queue"),
+        "TUI parity: Queue screen (entry leg) missing"
+    );
+    assert!(
+        model.contains("fn emit_doctor_dropout"),
+        "TUI parity: doctor preflight dropout missing"
+    );
+    assert!(
+        model.contains("fn act_on_queue_row"),
+        "TUI parity: reuse-or-fresh queue action missing"
+    );
+    // The empty cockpit must offer the in-TUI queue, not only a shell command.
+    assert!(
+        model.contains("press p to pick an open PR"),
+        "TUI parity regression: the empty cockpit sends the operator back to the shell"
+    );
+}
+
+/// The queue is one shared op, not a CLI-only projection reimplemented by the
+/// TUI. `roger-review-ops::queue_rows` is the single path; a surface computing
+/// `roger_state` on its own would let CLI and TUI disagree about a PR.
+#[test]
+fn queue_state_is_derived_by_exactly_one_shared_op() {
+    let ops = read("packages/review-ops/src/lib.rs");
+    for symbol in ["pub fn queue_rows", "pub fn derive_queue_state"] {
+        assert!(ops.contains(symbol), "shared queue op missing {symbol}");
+    }
+    for surface in [
+        "packages/cli/src/lib.rs",
+        "packages/tui/src/backend.rs",
+        "packages/tui/src/model.rs",
+    ] {
+        let source = read(surface);
+        assert!(
+            !source.contains("fn derive_queue_state")
+                && !source.contains("fn derive_prs_queue_state"),
+            "{surface} reimplements queue-state derivation — it must call \
+             roger_review_ops::derive_queue_state"
+        );
+    }
 }
 
 /// The extension reaches bounded local parity: the local-mutation and read

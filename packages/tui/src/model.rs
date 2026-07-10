@@ -8,7 +8,7 @@
 //! adapter in `app.rs` only translates terminal events into [`CockpitKey`]
 //! values and paints the rendered lines produced by `view.rs`.
 
-use crate::backend::CockpitBackend;
+use crate::backend::{CockpitBackend, QueueView};
 use std::collections::BTreeSet;
 
 /// Operator-settable triage states. `new` and `stale` are Roger-derived and
@@ -66,6 +66,9 @@ pub enum Screen {
     DraftItems,
     Timeline,
     Search,
+    /// Open pull requests for the repository, joined to local session truth.
+    /// The cockpit's entry point when no session exists yet.
+    Queue,
 }
 
 /// Which elevated mutation an [`Overlay::Elevation`] gate confirms. Approve and
@@ -488,7 +491,8 @@ pub enum ApproveOutcome {
 }
 
 /// Quickstart hint shown by the empty cockpit.
-pub const EMPTY_STORE_HINT: &str = "no review sessions yet — run rr review --pr <number> to start";
+pub const EMPTY_STORE_HINT: &str =
+    "no review sessions yet — press p to pick an open PR, or ! to run doctor";
 
 /// Exact word the operator must type in the approve elevation prompt.
 pub const APPROVE_CONFIRMATION_WORD: &str = "approve";
@@ -610,6 +614,9 @@ pub struct CockpitModel {
     pub search_input: String,
     pub search: Option<SearchView>,
     pub search_cursor: usize,
+    /// Queue screen projection; `None` until the queue is first loaded.
+    pub queue: Option<QueueView>,
+    pub queue_cursor: usize,
 
     /// Whether the Search screen is showing prior-review hits or the pending
     /// memory-review operator surface.
@@ -694,6 +701,8 @@ impl CockpitModel {
             search_input: String::new(),
             search: None,
             search_cursor: 0,
+            queue: None,
+            queue_cursor: 0,
             search_mode: SearchMode::Hits,
             memory_reviews: Vec::new(),
             memory_review_cursor: 0,
@@ -968,6 +977,7 @@ impl CockpitModel {
             Screen::DraftItems => self.handle_items_key(key),
             Screen::Timeline => self.handle_timeline_key(key, backend),
             Screen::Search => self.handle_search_key(key, backend),
+            Screen::Queue => self.handle_queue_key(key, backend),
         }
         KeyOutcome::Continue
     }
@@ -1272,12 +1282,97 @@ impl CockpitModel {
                 }
             }
             CockpitKey::Char('r') => self.reload_sessions(backend),
+            CockpitKey::Char('p') => self.open_queue(backend),
+            CockpitKey::Char('!') => self.emit_doctor_dropout(),
             CockpitKey::Esc if !self.session_filter.is_empty() => {
                 self.session_filter.clear();
                 self.session_cursor = 0;
             }
             _ => {}
         }
+    }
+
+    /// Load the open-PR queue through the shared `queue_rows` op and show it.
+    /// A failure (no repo context, no `gh`) surfaces as a notice and keeps the
+    /// operator on Home rather than showing a misleadingly empty queue.
+    fn open_queue(&mut self, backend: &mut dyn CockpitBackend) {
+        match backend.load_queue() {
+            Ok(view) => {
+                self.queue_cursor = 0;
+                if view.rows.is_empty() {
+                    self.notice = Some(format!("no open pull requests for {}", view.repository));
+                } else {
+                    self.notice = None;
+                }
+                self.queue = Some(view);
+                self.screen = Screen::Queue;
+            }
+            Err(err) => self.notice = Some(format!("queue unavailable: {err}")),
+        }
+    }
+
+    /// Run `rr doctor` through the deliberate dropout. Doctor is a read-only
+    /// preflight owned by the CLI (asymmetry 4 covers install/update, not
+    /// diagnostics), so the cockpit runs the real command on the inherited tty
+    /// rather than reimplementing provider probing.
+    fn emit_doctor_dropout(&mut self) {
+        self.pending_effect = Some(ModelEffect::LaunchProvider {
+            label: "rr doctor preflight".to_owned(),
+            args: vec!["doctor".to_owned()],
+        });
+        self.notice = Some("dropping out to run rr doctor…".to_owned());
+    }
+
+    /// The rows currently shown on the Queue screen.
+    pub fn queue_rows(&self) -> &[roger_review_ops::QueueRow] {
+        self.queue.as_ref().map_or(&[], |view| view.rows.as_slice())
+    }
+
+    fn handle_queue_key(&mut self, key: CockpitKey, backend: &mut dyn CockpitBackend) {
+        match key {
+            CockpitKey::Up | CockpitKey::Char('k') => move_cursor_up(&mut self.queue_cursor),
+            CockpitKey::Down | CockpitKey::Char('j') => {
+                let len = self.queue_rows().len();
+                move_cursor_down(&mut self.queue_cursor, len);
+            }
+            CockpitKey::Enter => self.act_on_queue_row(),
+            CockpitKey::Char('r') => self.open_queue(backend),
+            CockpitKey::Esc => {
+                self.screen = Screen::Home;
+                self.reload_sessions(backend);
+            }
+            _ => {}
+        }
+    }
+
+    /// Reuse-or-fresh, made visible: a queue row with no local session starts a
+    /// fresh review; a row that already has one resumes it. The decision is the
+    /// row's `session_id`, so the operator sees which will happen (the row
+    /// renders `roger_state` and the exact next command) before pressing Enter.
+    fn act_on_queue_row(&mut self) {
+        let Some(row) = self.queue_rows().get(self.queue_cursor).cloned() else {
+            return;
+        };
+        let pr = row.pr_number.to_string();
+        let (label, args) = if row.is_fresh() {
+            (
+                format!("start review on PR #{pr}"),
+                vec![
+                    "review".to_owned(),
+                    "--pr".to_owned(),
+                    pr,
+                    "--provider".to_owned(),
+                    roger_review_ops::QUEUE_DEFAULT_PROVIDER.to_owned(),
+                ],
+            )
+        } else {
+            (
+                format!("resume review on PR #{pr}"),
+                vec!["resume".to_owned(), "--pr".to_owned(), pr],
+            )
+        };
+        self.notice = Some(format!("dropping out to {label}…"));
+        self.pending_effect = Some(ModelEffect::LaunchProvider { label, args });
     }
 
     fn handle_session_home_key(&mut self, key: CockpitKey, backend: &mut dyn CockpitBackend) {

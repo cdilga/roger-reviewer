@@ -4,11 +4,11 @@ Status: reusable Roger skill.
 
 Purpose:
 Exact keys and screens for Roger's local review cockpit (`rr open` /
-`rr tui`) — Home/finder, Picker, SessionHome, Findings triage and draft
-creation, Drafts approve/elevated-post/edit, the clarification composer,
-evidence excerpt, launch/resume, Timeline, Search and memory review, and the
-help overlay. No aspirational keys, only what `packages/tui` actually
-implements.
+`rr tui`) — Home/finder, the Queue of open PRs, doctor preflight, Picker,
+SessionHome, Findings triage and draft creation, Drafts
+approve/elevated-post/edit, the clarification composer, evidence excerpt,
+launch/resume, Timeline, Search and memory review, and the help overlay. No
+aspirational keys, only what `packages/tui` actually implements.
 
 Open the cockpit with `rr open` (compat name: `rr tui`). Every key mapping
 below is taken directly from `packages/tui/src/model.rs` key handlers and
@@ -31,10 +31,38 @@ Shown only when Roger hands you disambiguation candidates for reentry.
 
 - `j`/`k`: move
 - `Enter`: open the selected session (SessionHome)
+- `o`: launch/resume the selected session in its provider (suspend/return)
+- `p`: open the **Queue** — the repository's open pull requests
+- `!`: run `rr doctor` preflight through the dropout (suspends the cockpit,
+  runs the real command on the tty, returns)
 - `/`: enter the session filter (type to filter, `Enter` keeps it, `Esc`
   clears, `Backspace` deletes)
 - `r`: reload sessions
 - `Esc`: clears the session filter if one is active
+
+An empty cockpit points at `p` rather than sending you back to the shell.
+
+## Queue (open pull requests)
+
+Backed by the shared `roger_review_ops::queue_rows` op — the same one `rr queue`
+uses, so the states shown here match the CLI exactly.
+
+- `j`/`k`: move
+- `Enter`: act on the focused PR. This is **reuse-or-fresh**, decided by whether
+  the PR already has a local session:
+  - no session → starts a **fresh** review (`rr review --pr <n> --provider …`)
+  - existing session → **resumes** it (`rr resume --pr <n>`)
+  Both run through the dropout. The inspector states which branch `Enter` will
+  take, names the session when there is one, and shows the exact command before
+  you commit.
+- `r`: reload the queue
+- `Esc`: back to Home
+- Each row shows the PR number, Roger's own state for it (`not_started`,
+  `in_review`, `drafted`, `posted`, `needs_attention`), draft flag, author, and
+  title.
+- When the repository cannot be inferred, or `gh` is missing/unauthenticated,
+  the cockpit says so and keeps you on Home — it never shows an empty queue that
+  looks like "no open PRs".
 
 ## SessionHome
 

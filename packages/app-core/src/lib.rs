@@ -3151,6 +3151,80 @@ pub trait OutboundPostingAdapter {
     ) -> std::result::Result<Vec<PostingAdapterItemResult>, String>;
 }
 
+/// One open pull request as the review queue needs it. The domain-side mirror
+/// of the adapter's richer PR type, so the shared queue op can be written
+/// without depending on a concrete GitHub adapter (ports-and-adapters).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenPullRequestSummary {
+    pub number: u64,
+    pub title: String,
+    pub author: String,
+    pub is_draft: bool,
+    pub head_ref: String,
+    pub updated_at: String,
+    pub url: String,
+}
+
+/// Why the queue could not be listed. Kept coarse and adapter-agnostic: the
+/// surfaces render these, so they must not leak `gh` implementation detail
+/// beyond the fact that the GitHub CLI is the transport.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OpenPullRequestListError {
+    /// The `gh` CLI is absent or unauthenticated.
+    GhUnavailable(String),
+    /// `gh` ran but failed.
+    GhCommandFailed(String),
+}
+
+/// Read-only port for listing a repository's open pull requests. The queue op
+/// depends on this, not on `GhCliAdapter`, so the TUI/CLI can be tested against
+/// a stub without touching GitHub.
+pub trait OpenPullRequestLister {
+    fn list_open_pull_requests(
+        &self,
+        owner: &str,
+        repo: &str,
+        limit: usize,
+    ) -> std::result::Result<Vec<OpenPullRequestSummary>, OpenPullRequestListError>;
+}
+
+/// Parse an `owner/repo` slug out of a GitHub remote URL. Returns `None` for
+/// non-GitHub remotes rather than guessing.
+pub fn parse_repository_from_remote(remote: &str) -> Option<String> {
+    let without_prefix = remote
+        .strip_prefix("git@github.com:")
+        .or_else(|| remote.strip_prefix("https://github.com/"))
+        .or_else(|| remote.strip_prefix("ssh://git@github.com/"))?;
+
+    let cleaned = without_prefix.trim_end_matches(".git").trim_matches('/');
+    let mut parts = cleaned.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
+}
+
+/// Infer `owner/repo` from `remote.origin.url` at `cwd`. `None` when the
+/// directory is not a git repo, has no origin, or the origin is not GitHub —
+/// every surface must then ask for an explicit repository rather than guess.
+pub fn infer_repository_from_git(cwd: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .arg("config")
+        .arg("--get")
+        .arg("remote.origin.url")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let remote = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    parse_repository_from_remote(&remote)
+}
+
 pub struct ExplicitPostingInput<'a> {
     pub action_id: &'a str,
     pub provider: &'a str,

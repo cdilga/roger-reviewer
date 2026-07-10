@@ -51,17 +51,17 @@ extension in bounded/local form, mutations visibly elevated).
 Legend: ✅ present · ⛔ deliberate asymmetry (numbered above) · ▲ gap to close.
 
 Matrix state audited against source 2026-07-10 (`packages/tui`, `packages/cli`,
-`packages/bridge`, `apps/extension`). Rows still marked ▲ are real, open gaps —
-do not read the v2026.07.09 changelog's "the deferred surface is closed" as
-covering them; it closed the *review-loop* legs (draft, post, clarify, evidence,
-launch/resume), not the *entry* legs (doctor, queue, start, reuse-or-fresh).
+`packages/bridge`, `apps/extension`). Rows marked ▲ are real, open gaps. The
+v2026.07.09 release closed the *review-loop* legs (draft, post, clarify,
+evidence, launch/resume); v2026.07.10 closed the TUI's *entry* legs (doctor,
+queue, start, reuse-or-fresh). What remains open is listed below the matrix.
 
 | Operation | CLI | TUI | Extension |
 | --- | --- | --- | --- |
-| doctor / preflight | ✅ | ▲ (posture line only) | ⛔4 (guidance) |
-| queue (open PRs) | ✅ | ▲ | ▲ (listing rows are launch, not a queue) |
-| start review (fresh `--pr`) | ✅ | ▲ (empty-store hint only) | ✅ |
-| reuse-or-fresh | ✅ | ▲ | ✅ |
+| doctor / preflight | ✅ | ✅ (`!` → runs `rr doctor` in the dropout) | ⛔4 (guidance) |
+| queue (open PRs) | ✅ | ✅ (`p` → Queue screen) | ▲ (listing rows are launch, not a queue) |
+| start review (fresh `--pr`) | ✅ | ✅ (Enter on a queue row with no session) | ✅ |
+| reuse-or-fresh | ✅ | ✅ (row's `session_id` decides; shown before Enter) | ✅ |
 | resume review | ✅ | ✅ (`o` → suspend/run/return) | ✅ |
 | return (dropout handoff) | ✅ | ✅ (auto on child exit, reloads truth) | ▲ |
 | open cockpit | ✅ | (is itself) | ✅ (copyable cmd) |
@@ -80,15 +80,32 @@ launch/resume), not the *entry* legs (doctor, queue, start, reuse-or-fresh).
 | timeline | ✅ (`rr timeline`) | ✅ | ✅ (read-only mirror) |
 | semantic asset posture | ✅ | ✅ | ▲ (display) |
 
-### Still open after v2026.07.09
+### Still open after v2026.07.10
 
-The review loop reaches parity once a session exists. Getting *into* a session
-is still CLI-first, and the parity guard (a source-presence grep) cannot see
-this:
+- **Extension**: `return`, evidence-excerpt text, a real PR queue (today's
+  listing rows are launch affordances, not a queue), posture display.
+- **CLI**: `rr findings` reports evidence *locations* but never the code text
+  the TUI inspector shows.
 
-- **TUI**: `doctor`, `queue`, `start review --pr`, `reuse-or-fresh`. The empty
-  cockpit prints `run rr review --pr <number> to start` instead of starting one.
-- **Extension**: `return`, evidence-excerpt text, a real PR queue, posture display.
+### How the TUI reaches the entry legs
+
+The cockpit does not reimplement `doctor` or session creation. It uses the two
+mechanisms it already had:
+
+- **Queue** (`p`) is a real screen backed by the shared
+  `roger_review_ops::queue_rows` op — the same function `rr queue` calls, so the
+  two surfaces cannot disagree about a PR's `roger_state`. It fails honestly (no
+  repo context, no `gh`) with the reason, rather than rendering an empty queue.
+- **Start / resume / doctor** run through the **deliberate dropout**
+  (`ModelEffect::LaunchProvider`): suspend the cockpit, run the real `rr`
+  subcommand on the inherited tty, restore and reload cockpit truth. This is the
+  same suspend-spawn-resume path `$EDITOR` draft editing and `o` launch use.
+  Reimplementing provider probing or session creation inside the TUI would be
+  the parity violation, not the dropout.
+- **Reuse-or-fresh** is not a prompt: a queue row carries its `session_id`, so
+  `Enter` resumes when one exists and starts fresh when it does not. The
+  inspector states which branch `Enter` will take, and the exact command, before
+  the operator commits.
 
 ## Gaps to close, by surface
 

@@ -447,3 +447,99 @@ fn clarification_rejects_empty_body() {
     .expect_err("empty body");
     assert!(matches!(err, ReviewOpError::Invalid(_)));
 }
+
+// --- queue_rows -------------------------------------------------------------
+
+/// In-test lister: keeps `queue_rows` off `gh` and off the network.
+struct FakeLister {
+    prs: Vec<roger_app_core::OpenPullRequestSummary>,
+    error: Option<roger_app_core::OpenPullRequestListError>,
+}
+
+impl FakeLister {
+    fn with(prs: Vec<u64>) -> Self {
+        Self {
+            prs: prs
+                .into_iter()
+                .map(|number| roger_app_core::OpenPullRequestSummary {
+                    number,
+                    title: format!("PR {number}"),
+                    author: "octocat".to_owned(),
+                    is_draft: false,
+                    head_ref: "feature".to_owned(),
+                    updated_at: "2026-07-10T00:00:00Z".to_owned(),
+                    url: format!("https://github.com/example/repo/pull/{number}"),
+                })
+                .collect(),
+            error: None,
+        }
+    }
+}
+
+impl roger_app_core::OpenPullRequestLister for FakeLister {
+    fn list_open_pull_requests(
+        &self,
+        _owner: &str,
+        _repo: &str,
+        limit: usize,
+    ) -> std::result::Result<
+        Vec<roger_app_core::OpenPullRequestSummary>,
+        roger_app_core::OpenPullRequestListError,
+    > {
+        if let Some(err) = &self.error {
+            return Err(err.clone());
+        }
+        let mut prs = self.prs.clone();
+        prs.truncate(limit);
+        Ok(prs)
+    }
+}
+
+#[test]
+fn queue_rows_marks_pr_without_session_as_fresh_and_one_with_session_as_reuse() {
+    let (_temp, store) = open_store();
+    seed_session(&store, "sess-9", "run-9", "example/repo", 9);
+    let lister = FakeLister::with(vec![7, 9]);
+
+    let rows = queue_rows(&store, &lister, "example/repo", 25).expect("queue rows");
+
+    assert_eq!(rows.len(), 2);
+    let fresh = rows.iter().find(|r| r.pr_number == 7).expect("pr 7");
+    assert!(fresh.is_fresh(), "PR with no local session must be fresh");
+    assert_eq!(fresh.roger_state, "not_started");
+    assert!(fresh.next_command.contains("rr review --pr 7"));
+
+    let existing = rows.iter().find(|r| r.pr_number == 9).expect("pr 9");
+    assert!(
+        !existing.is_fresh(),
+        "PR with a local session must reuse it, not start fresh"
+    );
+    assert_eq!(existing.session_id.as_deref(), Some("sess-9"));
+    assert_eq!(existing.next_command, "rr resume --pr 9");
+}
+
+#[test]
+fn queue_rows_rejects_a_non_owner_repo_slug_rather_than_guessing() {
+    let (_temp, store) = open_store();
+    let lister = FakeLister::with(vec![1]);
+
+    let err = queue_rows(&store, &lister, "not-a-slug", 25).expect_err("must reject");
+
+    assert_eq!(
+        err,
+        QueueRejection::RepositorySlugInvalid("not-a-slug".to_owned())
+    );
+}
+
+#[test]
+fn queue_rows_surfaces_gh_unavailability_as_a_distinct_rejection() {
+    let (_temp, store) = open_store();
+    let mut lister = FakeLister::with(vec![1]);
+    lister.error = Some(roger_app_core::OpenPullRequestListError::GhUnavailable(
+        "gh CLI not found".to_owned(),
+    ));
+
+    let err = queue_rows(&store, &lister, "example/repo", 25).expect_err("must reject");
+
+    assert!(matches!(err, QueueRejection::GhUnavailable(_)));
+}

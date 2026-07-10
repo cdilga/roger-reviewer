@@ -4,6 +4,52 @@ Roger Reviewer ships on a CalVer release lane (`vYYYY.MM.DD`). This file groups
 the dated releases into the product milestone they belong to. Entries describe
 what actually shipped; aspirational or feature-gated work is called out as such.
 
+## 0.3 (v2026.07.10) — The cockpit can find its own work
+
+`v2026.07.09` made the review loop reachable from every surface, but only
+*after* a session existed. Creating one was still CLI-only: the empty cockpit
+told you to quit and run `rr review --pr <n>`. This release closes the entry
+legs, and corrects the previous release's overclaim that "the deferred surface
+is closed" — it had closed the review-loop legs, not these.
+
+### An open-PR queue, inside the cockpit
+
+- `p` on Home opens a **Queue** screen: the repository's open pull requests
+  joined to whatever Roger already knows about each one (`not_started`,
+  `in_review`, `drafted`, `posted`, `needs_attention`).
+- It is backed by a new shared `roger_review_ops::queue_rows` op. `rr queue`
+  was reimplementing this inside its CLI handler; both surfaces now call the one
+  function, so they cannot disagree about a PR's state. A parity guard test
+  fails if any surface grows its own copy of the derivation.
+- The queue fails honestly. No repo context, or no authenticated `gh`, produces
+  the reason on Home — never an empty queue that reads as "no open PRs".
+
+### Reuse-or-fresh, made visible instead of prompted
+
+- `Enter` on a queue row starts a **fresh** review when the PR has no local
+  session, and **resumes** the existing one when it does. The decision is the
+  row's `session_id`, not a prompt. The inspector states which branch `Enter`
+  will take, names the session, and shows the exact `rr` command first.
+
+### Doctor, without leaving
+
+- `!` on Home runs the real `rr doctor` through the same deliberate dropout that
+  `$EDITOR` editing and `o` launch already used: suspend, run on the inherited
+  tty, restore, reload. The TUI does not reimplement provider probing.
+
+### Docs that match the code
+
+- The two TUI cheatsheets (one of them a *loaded agent skill*) still described
+  posting as CLI-only, launching as deferred, and clarify as an advisory hint —
+  all shipped in `v2026.07.09`. Every claim was re-audited against
+  `packages/tui` and corrected. `docs/SURFACE_PARITY_CONTRACT.md`'s matrix was
+  re-audited row by row, and now records what is genuinely still open (extension
+  `return`, extension evidence text and PR queue, CLI evidence excerpt) instead
+  of a snapshot of work already done.
+- The parity guard's limit is now documented where it's asserted: it is a
+  source-presence grep, not a behavioral test. A green guard means nothing it
+  names has regressed — not that the matrix is complete.
+
 ## 0.3 (v2026.07.09) — Surface parity: run the whole review loop from CLI, TUI, or the browser
 
 This release makes the CLI, the TUI (`rr open`), and the GitHub browser
