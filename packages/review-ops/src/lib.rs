@@ -16,14 +16,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use roger_app_core::{
     ApprovalState, ExplicitPostingInput, ExplicitPostingOutcome, ExplicitPostingResult,
-    OutboundApprovalToken, OutboundDraft, OutboundDraftBatch, OutboundDraftBatchValidation,
-    OutboundPostingAdapter, ReviewTarget, execute_explicit_posting_flow,
-    outbound_target_tuple_json, time, validate_outbound_draft_batch_linkage,
+    OpenPullRequestListError, OpenPullRequestLister, OutboundApprovalToken, OutboundDraft,
+    OutboundDraftBatch, OutboundDraftBatchValidation, OutboundPostingAdapter, ReviewTarget,
+    execute_explicit_posting_flow, outbound_target_tuple_json, time,
+    validate_outbound_draft_batch_linkage,
 };
 use roger_storage::{
     ClarificationRequestRecord, CreateClarificationRequest, MaterializedFindingRecord,
     MemoryReviewDecision, MemoryReviewResolutionOutcome,
-    OUTBOUND_APPROVAL_REVOKED_REASON_DRAFT_REVISED, ReviewSessionRecord, RogerStore, StorageError,
+    OUTBOUND_APPROVAL_REVOKED_REASON_DRAFT_REVISED, ReviewSessionRecord, RogerStore,
+    SessionFinderQuery, StorageError,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -1430,8 +1432,158 @@ pub fn post_batch<A: OutboundPostingAdapter>(
 // 5. resolve_memory_review
 // ---------------------------------------------------------------------------
 
+// --- review queue (shared by `rr queue` and the TUI Queue screen) -----------
+
+/// Provider `rr queue` names in the fresh-review command it suggests. Kept
+/// here (not in a surface) so CLI and TUI suggest the same thing.
+pub const QUEUE_DEFAULT_PROVIDER: &str = "opencode";
+
+/// One row of the review queue: an open PR joined to whatever Roger already
+/// knows about it locally.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct QueueRow {
+    pub pr_number: u64,
+    pub title: String,
+    pub author: String,
+    pub is_draft: bool,
+    pub head_ref: String,
+    pub updated_at: String,
+    pub url: String,
+    /// Roger-side state: not_started | in_review | drafted | posted |
+    /// needs_attention | (raw attention state passthrough).
+    pub roger_state: String,
+    /// The existing session for this PR, when one exists. Its presence *is*
+    /// the reuse-or-fresh decision: `Some` -> resume it, `None` -> start fresh.
+    pub session_id: Option<String>,
+    pub next_command: String,
+}
+
+impl QueueRow {
+    /// True when this PR has no local session, so acting on it starts a fresh
+    /// review rather than resuming one.
+    pub fn is_fresh(&self) -> bool {
+        self.session_id.is_none()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QueueRejection {
+    /// The repository slug was not `owner/repo`.
+    RepositorySlugInvalid(String),
+    /// The `gh` CLI is absent or unauthenticated.
+    GhUnavailable(String),
+    /// `gh` ran but failed.
+    GhCommandFailed(String),
+    Storage(String),
+}
+
+/// Collapse a session's attention state plus its draft/posted counts into the
+/// coarse queue state the surfaces render.
+pub fn derive_queue_state(
+    attention_state: &str,
+    draft_count: i64,
+    posted_action_count: i64,
+) -> String {
+    if posted_action_count > 0 {
+        return "posted".to_owned();
+    }
+    if draft_count > 0 {
+        return "drafted".to_owned();
+    }
+    match attention_state {
+        "awaiting_user_input"
+        | "refresh_recommended"
+        | "review_failed"
+        | "outbound_approval_required" => "needs_attention".to_owned(),
+        "review_launched" | "review_resumed" | "awaiting_return" | "returned_to_roger" => {
+            "in_review".to_owned()
+        }
+        other => other.to_owned(),
+    }
+}
+
+/// The `rr` command that advances this row. Surfaces render it verbatim; the
+/// TUI also runs it through its dropout.
+pub fn queue_next_command(roger_state: &str, pr_number: u64) -> String {
+    if roger_state == "not_started" {
+        format!("rr review --pr {pr_number} --provider {QUEUE_DEFAULT_PROVIDER}")
+    } else {
+        format!("rr resume --pr {pr_number}")
+    }
+}
+
+/// Build the review queue for `repository`: list its open PRs through the
+/// read-only lister port, then join each to local session truth. This is the
+/// single path `rr queue` and the TUI Queue screen both call, so the two can
+/// never disagree about what state a PR is in.
+pub fn queue_rows<A: OpenPullRequestLister>(
+    store: &RogerStore,
+    adapter: &A,
+    repository: &str,
+    limit: usize,
+) -> std::result::Result<Vec<QueueRow>, QueueRejection> {
+    let Some((owner, repo_name)) = repository.split_once('/') else {
+        return Err(QueueRejection::RepositorySlugInvalid(repository.to_owned()));
+    };
+
+    let mut open_prs = adapter
+        .list_open_pull_requests(owner, repo_name, limit)
+        .map_err(|err| match err {
+            OpenPullRequestListError::GhUnavailable(detail) => {
+                QueueRejection::GhUnavailable(detail)
+            }
+            OpenPullRequestListError::GhCommandFailed(detail) => {
+                QueueRejection::GhCommandFailed(detail)
+            }
+        })?;
+    open_prs.truncate(limit);
+
+    let mut rows = Vec::with_capacity(open_prs.len());
+    for pr in &open_prs {
+        let sessions = store
+            .session_finder(SessionFinderQuery {
+                repository: Some(repository.to_owned()),
+                pull_request_number: Some(pr.number),
+                attention_states: Vec::new(),
+                limit: 1,
+            })
+            .map_err(|err| QueueRejection::Storage(err.to_string()))?;
+
+        let (roger_state, session_id) = match sessions.first() {
+            Some(entry) => {
+                let overview = store
+                    .session_overview(&entry.session_id)
+                    .map_err(|err| QueueRejection::Storage(err.to_string()))?;
+                (
+                    derive_queue_state(
+                        &entry.attention_state,
+                        overview.draft_count,
+                        overview.posted_action_count,
+                    ),
+                    Some(entry.session_id.clone()),
+                )
+            }
+            None => ("not_started".to_owned(), None),
+        };
+
+        rows.push(QueueRow {
+            pr_number: pr.number,
+            title: pr.title.clone(),
+            author: pr.author.clone(),
+            is_draft: pr.is_draft,
+            head_ref: pr.head_ref.clone(),
+            updated_at: pr.updated_at.clone(),
+            url: pr.url.clone(),
+            next_command: queue_next_command(&roger_state, pr.number),
+            roger_state,
+            session_id,
+        });
+    }
+    Ok(rows)
+}
+
 /// Generic internal failure for the thin storage-wrapping ops.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReviewOpError {
     /// A caller-facing validation failure (e.g. empty clarification body).
     Invalid(String),

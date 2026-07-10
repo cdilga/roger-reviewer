@@ -57,6 +57,7 @@ impl CockpitModel {
             Screen::DraftItems => "Draft Batch",
             Screen::Timeline => "Timeline/History",
             Screen::Search => "Search/Recall",
+            Screen::Queue => "Review Queue",
         };
         if self.screen == Screen::Picker {
             return format!(
@@ -142,7 +143,8 @@ impl CockpitModel {
                 "j/k move  Enter open session  Esc full finder  ? help  q quit".to_owned()
             }
             Screen::Home => {
-                "j/k move  Enter open  o launch  / filter  r reload  ? help  q quit".to_owned()
+                "j/k move  Enter open  o launch  p pr queue  ! doctor  / filter  r reload  ? help  q quit"
+                    .to_owned()
             }
             Screen::SessionHome => {
                 "f findings  d drafts  t timeline  s search  c clarify  o launch  Esc home  ? help  q quit"
@@ -158,6 +160,9 @@ impl CockpitModel {
             }
             Screen::DraftItems => "j/k move  e edit draft  Esc drafts  ? help  q quit".to_owned(),
             Screen::Timeline => "j/k move  Esc home  ? help  q quit".to_owned(),
+            Screen::Queue => {
+                "j/k move  Enter start/resume review  r reload  Esc home  ? help  q quit".to_owned()
+            }
             Screen::Search => match self.search_mode {
                 SearchMode::Hits => {
                     "j/k move  / new query  m review-requests  Esc home  ? help  q quit".to_owned()
@@ -194,6 +199,7 @@ impl CockpitModel {
             Screen::DraftItems => self.render_items_primary(),
             Screen::Timeline => self.render_timeline_primary(),
             Screen::Search => self.render_search_primary(),
+            Screen::Queue => self.render_queue_primary(),
         }
     }
 
@@ -578,6 +584,81 @@ impl CockpitModel {
 
     // --- Search ----------------------------------------------------------------------
 
+    /// Queue screen: open PRs joined to local session truth. Each row shows the
+    /// state Roger already has, so the operator can see whether Enter will
+    /// start a fresh review or resume an existing one (reuse-or-fresh).
+    fn render_queue_primary(&self) -> (Vec<String>, usize) {
+        let mut lines = Vec::new();
+        let Some(view) = &self.queue else {
+            return (vec!["queue not loaded".to_owned()], 0);
+        };
+        lines.push(format!(
+            "open pull requests — {}  ({} shown)",
+            view.repository,
+            view.rows.len()
+        ));
+        lines.push(String::new());
+        if view.rows.is_empty() {
+            lines.push("no open pull requests".to_owned());
+            return (lines, 0);
+        }
+        let header_offset = lines.len();
+        lines.push(format!(
+            "{:<7} {:<14} {:<6} {:<14} {}",
+            "PR", "STATE", "DRAFT", "AUTHOR", "TITLE"
+        ));
+        for (idx, row) in view.rows.iter().enumerate() {
+            let marker = if idx == self.queue_cursor { ">" } else { " " };
+            lines.push(format!(
+                "{marker}{:<6} {:<14} {:<6} {:<14} {}",
+                format!("#{}", row.pr_number),
+                row.roger_state,
+                if row.is_draft { "yes" } else { "no" },
+                truncate_cell(&row.author, 14),
+                row.title
+            ));
+        }
+        let cursor_line = header_offset + 1 + self.queue_cursor;
+        (lines, cursor_line)
+    }
+
+    /// Inspector for the focused queue row: the exact command Enter will run,
+    /// and why (fresh vs resume).
+    fn inspect_queue_row(&self) -> Vec<String> {
+        let Some(row) = self
+            .queue
+            .as_ref()
+            .and_then(|view| view.rows.get(self.queue_cursor))
+        else {
+            return vec!["no pull request focused".to_owned()];
+        };
+        let action = if row.is_fresh() {
+            "Enter starts a FRESH review (no local session for this PR)"
+        } else {
+            "Enter RESUMES the existing local session for this PR"
+        };
+        let mut lines = vec![
+            "inspector — pull request".to_owned(),
+            String::new(),
+            format!("pr       #{}", row.pr_number),
+            format!("title    {}", row.title),
+            format!("author   {}", row.author),
+            format!("head     {}", row.head_ref),
+            format!("updated  {}", row.updated_at),
+            format!("state    {}", row.roger_state),
+        ];
+        match &row.session_id {
+            Some(session_id) => lines.push(format!("session  {session_id}")),
+            None => lines.push("session  (none)".to_owned()),
+        }
+        lines.push(String::new());
+        lines.push(action.to_owned());
+        lines.push(format!("command  {}", row.next_command));
+        lines.push(String::new());
+        lines.push(format!("url      {}", row.url));
+        lines
+    }
+
     fn render_search_primary(&self) -> (Vec<String>, usize) {
         let mut lines = Vec::new();
         let caret = if self.input_mode == InputMode::SearchQuery {
@@ -705,6 +786,7 @@ impl CockpitModel {
             Screen::DraftItems => self.inspect_draft_item(),
             Screen::Timeline => self.inspect_timeline_entry(),
             Screen::Search => self.inspect_search_hit(),
+            Screen::Queue => self.inspect_queue_row(),
         }
     }
 
@@ -1140,6 +1222,9 @@ impl CockpitModel {
             "picker      j/k move   Enter open candidate   Esc full session finder".to_owned(),
             "home        j/k move   Enter open session   o launch/resume   / filter   r reload"
                 .to_owned(),
+            "            p open PR queue   ! run rr doctor preflight (dropout)".to_owned(),
+            "queue       j/k move   Enter start (fresh) or resume (existing session)   r reload"
+                .to_owned(),
             "overview    f findings   d drafts   t timeline   s search   c clarify   o launch"
                 .to_owned(),
             "findings    j/k move   space multi-select   a/i/n/r triage (batch on selection)"
@@ -1162,6 +1247,7 @@ impl CockpitModel {
             String::new(),
             "clarify     c opens the bounded composer; submit creates a durable request".to_owned(),
             "launch      o suspends the TUI and runs rr review --resume for the session".to_owned(),
+            "queue       Enter is reuse-or-fresh: the row's roger_state decides which".to_owned(),
         ]
     }
 }
@@ -1188,6 +1274,18 @@ fn short_id(id: &str) -> &str {
         .map(|(idx, _)| idx)
         .unwrap_or(id.len());
     &id[..end]
+}
+
+/// Clamp a table cell to `width` chars (char-wise, not byte-wise).
+fn truncate_cell(value: &str, width: usize) -> String {
+    if value.chars().count() <= width {
+        return value.to_owned();
+    }
+    value
+        .chars()
+        .take(width.saturating_sub(1))
+        .collect::<String>()
+        + "…"
 }
 
 fn truncate_line(line: &str, width: usize) -> String {

@@ -12,10 +12,11 @@ use crate::model::{
     PostBatchOutcome, PostedActionRow, SearchHitRow, SearchView, SessionHomeView, SessionRow,
     StageResultRow, TimelineRunRow, TimelineView, TriageAction, bump_count,
 };
-use roger_app_core::ExplicitPostingOutcome;
+use roger_app_core::{ExplicitPostingOutcome, infer_repository_from_git};
 use roger_github_adapter::GhCliAdapter;
 use roger_review_ops::{
-    DraftSelection, MaterializeDraftRejection, PostRejection, SessionPreconditionBlock,
+    DraftSelection, MaterializeDraftRejection, PostRejection, QueueRejection, QueueRow,
+    SessionPreconditionBlock, queue_rows,
 };
 use roger_storage::{
     ClarificationSource, CreateClarificationRequest, OutboundBatchApproval, PriorReviewLookupQuery,
@@ -28,6 +29,10 @@ const SESSION_FINDER_LIMIT: usize = 100;
 
 /// Maximum prior-review hits projected into the search screen.
 const SEARCH_LIMIT: usize = 50;
+
+/// Maximum open pull requests projected into the Queue screen. Matches the
+/// `rr queue` default so the two surfaces show the same window.
+const QUEUE_LIMIT: usize = 25;
 
 pub trait CockpitBackend {
     fn list_sessions(&mut self) -> Result<Vec<SessionRow>, String>;
@@ -99,12 +104,20 @@ pub trait CockpitBackend {
     /// [`EvidenceExcerptRow::unavailable`]) when the path/cwd cannot be
     /// resolved or the file cannot be read.
     fn load_evidence_excerpt(&mut self, finding_id: &str) -> Result<EvidenceExcerptRow, String>;
+    /// List the repository's open pull requests joined to local session truth,
+    /// via the shared `queue_rows` op. Fails honestly (with the operator-facing
+    /// reason) when the repo cannot be inferred or `gh` is unavailable — the
+    /// cockpit renders the reason rather than an empty queue.
+    fn load_queue(&mut self) -> Result<QueueView, String>;
 }
 
 pub struct StoreCockpitBackend {
     store: RogerStore,
     repo_filter: Option<String>,
     pr_filter: Option<u64>,
+    /// Directory the cockpit was opened in; the fallback source of repo
+    /// identity for the Queue screen when no `--repo` filter was passed.
+    cwd: std::path::PathBuf,
 }
 
 impl StoreCockpitBackend {
@@ -113,8 +126,29 @@ impl StoreCockpitBackend {
             store,
             repo_filter,
             pr_filter,
+            cwd: std::env::current_dir().unwrap_or_default(),
         }
     }
+
+    /// Repository identity for the queue: the explicit `--repo` filter when
+    /// given, else inferred from `remote.origin.url`. Never guessed.
+    fn queue_repository(&self) -> Result<String, String> {
+        self.repo_filter
+            .clone()
+            .or_else(|| infer_repository_from_git(&self.cwd))
+            .ok_or_else(|| {
+                "repo context inference failed — reopen with rr open --repo owner/repo, or run \
+                 inside a git repo with a GitHub remote.origin.url"
+                    .to_owned()
+            })
+    }
+}
+
+/// The Queue screen's projection: which repository was resolved, and its rows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct QueueView {
+    pub repository: String,
+    pub rows: Vec<QueueRow>,
 }
 
 impl CockpitBackend for StoreCockpitBackend {
@@ -697,6 +731,26 @@ impl CockpitBackend for StoreCockpitBackend {
             end_line,
             locator,
         ))
+    }
+
+    fn load_queue(&mut self) -> Result<QueueView, String> {
+        let repository = self.queue_repository()?;
+        let adapter = GhCliAdapter::new();
+        match queue_rows(&self.store, &adapter, &repository, QUEUE_LIMIT) {
+            Ok(rows) => Ok(QueueView { repository, rows }),
+            Err(QueueRejection::RepositorySlugInvalid(slug)) => {
+                Err(format!("repository slug is not in owner/repo form: {slug}"))
+            }
+            Err(QueueRejection::GhUnavailable(detail)) => Err(format!(
+                "the GitHub CLI (gh) is unavailable: {detail} — install gh and run gh auth login"
+            )),
+            Err(QueueRejection::GhCommandFailed(detail)) => Err(format!(
+                "gh failed listing open PRs for {repository}: {detail}"
+            )),
+            Err(QueueRejection::Storage(detail)) => {
+                Err(format!("failed to read local session state: {detail}"))
+            }
+        }
     }
 }
 

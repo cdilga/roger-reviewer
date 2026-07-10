@@ -10899,43 +10899,6 @@ fn handle_sessions(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse
     }
 }
 
-const PRS_QUEUE_DEFAULT_PROVIDER: &str = "opencode";
-
-/// Derive the truthful review-queue state for one open PR from the joined
-/// local session state. Outbound evidence (posted/drafted) wins over the
-/// persisted attention state; unrecognized attention states are surfaced
-/// as-is instead of being guessed into a bucket.
-fn derive_prs_queue_state(
-    attention_state: &str,
-    draft_count: i64,
-    posted_action_count: i64,
-) -> String {
-    if posted_action_count > 0 {
-        return "posted".to_owned();
-    }
-    if draft_count > 0 {
-        return "drafted".to_owned();
-    }
-    match attention_state {
-        "awaiting_user_input"
-        | "refresh_recommended"
-        | "review_failed"
-        | "outbound_approval_required" => "needs_attention".to_owned(),
-        "review_launched" | "review_resumed" | "awaiting_return" | "returned_to_roger" => {
-            "in_review".to_owned()
-        }
-        other => other.to_owned(),
-    }
-}
-
-fn prs_queue_next_command(roger_state: &str, pr_number: u64) -> String {
-    if roger_state == "not_started" {
-        format!("rr review --pr {pr_number} --provider {PRS_QUEUE_DEFAULT_PROVIDER}")
-    } else {
-        format!("rr resume --pr {pr_number}")
-    }
-}
-
 fn handle_prs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
     let Some(repository) = resolve_repository(parsed.repo.clone(), &runtime.cwd) else {
         return blocked_response(
@@ -10948,14 +10911,6 @@ fn handle_prs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
         );
     };
 
-    let Some((owner, repo_name)) = repository.split_once('/') else {
-        return blocked_response(
-            format!("repository slug is not in owner/repo form: {repository}"),
-            vec!["pass --repo owner/repo".to_owned()],
-            json!({"reason_code": "repo_slug_invalid", "repository": repository}),
-        );
-    };
-
     let store = match open_store_or_response(runtime, "rr prs") {
         Ok(store) => store,
         Err(response) => return response,
@@ -10963,12 +10918,19 @@ fn handle_prs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
 
     let limit = parsed.limit.unwrap_or(25).min(100);
     let adapter = GhCliAdapter::new();
-    let open_prs = match adapter.list_open_pull_requests(owner, repo_name, limit) {
-        Ok(mut open_prs) => {
-            open_prs.truncate(limit);
-            open_prs
+    // Shared queue op (docs/SURFACE_PARITY_CONTRACT.md): the TUI Queue screen
+    // calls this same function, so the two surfaces cannot disagree about a
+    // PR's roger_state or its next command.
+    let rows = match roger_review_ops::queue_rows(&store, &adapter, &repository, limit) {
+        Ok(rows) => rows,
+        Err(roger_review_ops::QueueRejection::RepositorySlugInvalid(slug)) => {
+            return blocked_response(
+                format!("repository slug is not in owner/repo form: {slug}"),
+                vec!["pass --repo owner/repo".to_owned()],
+                json!({"reason_code": "repo_slug_invalid", "repository": slug}),
+            );
         }
-        Err(GitHubAdapterError::GhNotFound) => {
+        Err(roger_review_ops::QueueRejection::GhUnavailable(detail)) => {
             return blocked_response(
                 "rr prs requires the GitHub CLI (gh), which was not found or not executable"
                     .to_owned(),
@@ -10978,87 +10940,46 @@ fn handle_prs(parsed: &ParsedArgs, runtime: &CliRuntime) -> CommandResponse {
                 ],
                 json!({
                     "reason_code": "gh_unavailable",
-                    "adapter_error": GitHubAdapterError::GhNotFound.to_string(),
+                    "adapter_error": detail,
                     "repository": repository,
                 }),
             );
         }
-        Err(err @ GitHubAdapterError::GhCommandFailed { .. }) => {
+        Err(roger_review_ops::QueueRejection::GhCommandFailed(detail)) => {
             return blocked_response(
-                format!("rr prs could not list open pull requests for {repository}: {err}"),
-                vec![
-                    "run gh auth status to verify GitHub CLI authentication".to_owned(),
-                    "run gh auth login if gh is not authenticated".to_owned(),
-                    format!("verify the repository slug {repository} is correct and reachable"),
-                ],
+                format!("failed to list open pull requests for {repository}"),
+                vec!["check gh auth status and repository access".to_owned()],
                 json!({
                     "reason_code": "gh_command_failed",
-                    "adapter_error": err.to_string(),
+                    "adapter_error": detail,
                     "repository": repository,
                 }),
             );
         }
-        Err(err) => {
+        Err(roger_review_ops::QueueRejection::Storage(detail)) => {
             return error_response(format!(
-                "failed to list open pull requests for {repository}: {err}"
+                "failed to resolve local session state for {repository}: {detail}"
             ));
         }
     };
 
-    let mut items = Vec::with_capacity(open_prs.len());
-    for pr in &open_prs {
-        let sessions = match store.session_finder(SessionFinderQuery {
-            repository: Some(repository.clone()),
-            pull_request_number: Some(pr.number),
-            attention_states: Vec::new(),
-            limit: 1,
-        }) {
-            Ok(sessions) => sessions,
-            Err(err) => {
-                return error_response(format!(
-                    "failed to resolve local session state for PR #{}: {err}",
-                    pr.number
-                ));
-            }
-        };
-
-        let (roger_state, session_id) = match sessions.first() {
-            Some(entry) => {
-                let overview = match store.session_overview(&entry.session_id) {
-                    Ok(overview) => overview,
-                    Err(err) => {
-                        return error_response(format!(
-                            "failed to load session overview for {}: {err}",
-                            entry.session_id
-                        ));
-                    }
-                };
-                (
-                    derive_prs_queue_state(
-                        &entry.attention_state,
-                        overview.draft_count,
-                        overview.posted_action_count,
-                    ),
-                    Some(entry.session_id.clone()),
-                )
-            }
-            None => ("not_started".to_owned(), None),
-        };
-
-        let next_command = prs_queue_next_command(&roger_state, pr.number);
-        items.push(json!({
-            "pr_number": pr.number,
-            "title": pr.title,
-            "author": pr.author,
-            "is_draft": pr.is_draft,
-            "head_ref": pr.head_ref,
-            "updated_at": pr.updated_at,
-            "url": pr.url,
-            "roger_state": roger_state,
-            "session_id": session_id,
-            "next_command": next_command,
-        }));
-    }
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "pr_number": row.pr_number,
+                "title": row.title,
+                "author": row.author,
+                "is_draft": row.is_draft,
+                "head_ref": row.head_ref,
+                "updated_at": row.updated_at,
+                "url": row.url,
+                "roger_state": row.roger_state,
+                "session_id": row.session_id,
+                "next_command": row.next_command,
+            })
+        })
+        .collect();
 
     let count = items.len();
     let outcome = if count == 0 {
@@ -19384,7 +19305,11 @@ mod tests {
 
         for (attention_state, draft_count, posted_action_count, expected) in cases {
             assert_eq!(
-                derive_prs_queue_state(attention_state, *draft_count, *posted_action_count),
+                roger_review_ops::derive_queue_state(
+                    attention_state,
+                    *draft_count,
+                    *posted_action_count
+                ),
                 *expected,
                 "attention_state={attention_state} draft_count={draft_count} posted_action_count={posted_action_count}"
             );
@@ -19394,7 +19319,7 @@ mod tests {
     #[test]
     fn prs_queue_next_command_routes_by_state() {
         assert_eq!(
-            prs_queue_next_command("not_started", 42),
+            roger_review_ops::queue_next_command("not_started", 42),
             "rr review --pr 42 --provider opencode"
         );
         for state in [
@@ -19404,7 +19329,10 @@ mod tests {
             "posted",
             "some_future_state",
         ] {
-            assert_eq!(prs_queue_next_command(state, 7), "rr resume --pr 7");
+            assert_eq!(
+                roger_review_ops::queue_next_command(state, 7),
+                "rr resume --pr 7"
+            );
         }
     }
 
